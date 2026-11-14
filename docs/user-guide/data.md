@@ -8,7 +8,7 @@ Formats](data-formats.md).
 | Format | Read | Write |
 | --- | --- | --- |
 | GeoJSON (`.geojson`, `.json`) | Yes | Yes |
-| Delimited text (`.csv`, `.tsv`, `.txt`) with x/y columns in a supported coordinate system, or WKT geometry | Yes | Yes |
+| Delimited text (`.csv`, `.tsv`, `.txt`, recognised `.dat`; also UTF-8 gzip-compressed text) with x/y columns in a supported coordinate system, or WKT geometry | Yes | CSV |
 | Shapefile (`.shp` + `.dbf`, or zipped in a `.zip`) | Yes (the web app also accepts sidecar files picked or dropped together) | Yes (`share.exportLayer`) |
 | GeoPackage (`.gpkg`, feature tables) | Yes | Yes (desktop) |
 | GeoParquet (`.parquet`, `.geoparquet`, WKB geometry) | Yes | Yes |
@@ -61,7 +61,7 @@ feature table explicitly adds only that table.
 On the desktop, **Home › Add › Add Data › Add Folder…** connects a folder to the Browser; the web
 app does not offer folder connections.
 On the desktop, a file Add Data reads whole (a GeoTIFF or another raster, one GDAL converts, a
-GeoJSON of up to 32 MB, delimited text or a spreadsheet) is read in the background, so the map
+GeoJSON of up to 32 MB, delimited text, a ZIP archive or a spreadsheet) is read in the background, so the map
 and the rest of the window stay in use: the status bar shows **Add Data**, how many files wait
 after it, and **Cancel**. Files dropped or added together are read one at a time and added in
 that order; one that asks which layers to add joins them once you choose. Cancel drops the file
@@ -71,6 +71,26 @@ service or a database adds as before, and scripts read the file where the comman
 **Delimited Text…**: it reads the file with the columns picked as you press **Add**, so a read
 that fails (a column that isn't in the file, a coordinate system it doesn't know) keeps the
 dialog open for another try.
+
+Published pipe-delimited `.dat` files open as tables when their header and rows reveal a
+separator; otherwise give `"delimiter":"|"` to `layer.addData`, or rename a text file to `.txt`.
+Gzip-compressed UTF-8 `.csv.gz`, `.tsv.gz`, `.txt.gz` and `.dat.gz` open directly, including by
+URL or upload. Decompression streams records, checks the gzip checksum and stops at 256 MiB of
+expanded text. Table rows are still kept in memory for type inference; CSV imports also refuse
+a retained-table estimate above a quarter of physical memory, between 256 MiB (the browser
+budget) and 4 GiB. This estimate includes cell objects and the dataset built alongside the rows. Delimited members
+in one ZIP share this allowance, including gzip-compressed members.
+For another encoding, decompress the file and add the `.txt` file, whose reader detects the encoding. Delimited text
+is exported as `.csv`; gzip is an input format.
+
+A GTFS zip adds its delimited `.txt` members as standalone tables; `stop_lon` and `stop_lat`
+place stops as points. This imports the tables, not a transit routing network. The archive's
+usual 32-layer/table limit applies, and skipped readable members are named in a notice. Text
+members that do not resemble tables, including single-column `README.txt` documentation, are
+skipped with a notice. Give `"crs"` when the archive's text tables use projected coordinates.
+A zipped File Geodatabase must be unzipped first: on the desktop, add the
+`.gdb` folder. The archive reader says this when it finds one, including beside readable files.
+
 **Home › Add › Add Data › Delimited Text…** asks for a CSV or a spreadsheet first, then lists its columns to pick the x and y (or WKT)
 ones from, with the coordinate system (such as `EPSG:2263`) and the separator (changing it reads
 the columns again); `info.fileColumns` lists them for scripts. Add Data finds them itself
@@ -99,10 +119,14 @@ FlatGeobuf, FileGDB, workbook date cells and GPX timestamps. Ordinary spreadshee
 looks like a date stays text. A workbook column mixing date cells with ordinary text is read
 entirely as text; clean that column in the workbook before using date operations.
 Invalid dates become empty values with a notice naming the fields
-and counting the values; dates cover years 1–9999. Fractional seconds are kept to microseconds.
-Floating-point serial dates in workbooks and FileGDB are rounded to the nearest microsecond,
-with a notice when rounding is needed. Parquet timestamps with finer nonzero precision are
-read as empty with a notice. Times without a day stay text; Parquet clocks retain `Z` when declared UTC.
+and counting the values; dates cover years 1–9999. Fractional seconds are kept to microseconds:
+digits past the sixth (nanosecond timestamps in Parquet, text read from a GeoPackage or FlatGeobuf, or
+converted by Convert Field) are rounded to the nearest microsecond, and a read says how many values it
+rounded and in which fields. Text typed in, kept in a project, read from GPX or compared in a
+where clause isn't rounded: with more digits than that it isn't a date. Floating-point serial dates in workbooks and FileGDB are rounded
+the same way, with a notice when rounding is needed. A workbook's 1900-02-29 (serial 60, a day
+that never existed) is read as empty and counted, in a column of dates or any other.
+Times without a day stay text; Parquet clocks retain `Z` when declared UTC.
 
 GeoParquet exports use native dates and microsecond timestamps. Zoned date-times are written
 as UTC instants, with a notice when their displayed offsets change; unzoned times stay unzoned.
@@ -115,7 +139,8 @@ again to use its current schema; the saved fields are kept unchanged. Saved GeoP
 again. Their saved fields, filters and styles are kept unchanged rather than partially migrated. An old integer field that
 now reads as time-only text is refused in the same way.
 FlatGeobuf exports use its native DateTime column type for both dates and date-times. Local
-files are scanned to distinguish date-only columns, date-times and time-only text. Reopening
+files are scanned to distinguish date-only columns, date-times and time-only text. With no value
+to scan, a date field comes back as a date-time field, and the export says which fields. Reopening
 a saved desktop layer runs that scan off the window thread, with progress and Cancel in the
 status bar. Remote
 FlatGeobuf date/time columns stay ISO text with a notice so opening them can keep reading by
@@ -193,22 +218,15 @@ instead). The map's Winkel Tripel is at Winkel's own, acos(2/π) (about 50.46°)
 definition and WKT say so. A parameter that isn't a finite number, or a scale factor other than
 1, is refused rather than left out. Esri's orthographic is a spherical projection:
 on an ellipsoid it is refused, with a notice, rather than computed as EPSG's ellipsoidal one.
-The equidistant cylindrical projection (EPSG:4087, World Equidistant Cylindrical) uses a sphere of its datum's
-semi-major axis, matching legacy PROJ/GDAL coordinates (verified with PROJ 9.7.1), both for data
-and for a map drawn in it (including the
-Equirectangular preset). This also applies to planetary Equirectangular systems and definitions
-that name EPSG method 1028. Shapefile and ASCII-grid `.prj` files and GeoPackage WKT definitions
-whose method is interpreted as EPSG 1028 on an ellipsoid report the formula difference,
-without assuming how the producer computed its coordinates. Effectively spherical definitions
-need no warning. Code-only CRS identifiers use the same compatibility formula without a method
-warning, since no explicit WKT method is being read. Typed WKT inputs also report the method
-difference: Add Data overrides, Define Projection, CSV imports, measured layout grids, Zarr
-inputs, vector exports, XY Table To Point and Kernel Density. ASCII-grid sidecars retain
-datum warnings as well as the projection warning. RustGIS applies the same compatibility formula to GeoTIFF CT 17;
-this key identifies a GeoTIFF transformation, rather than explicitly declaring EPSG method 1028.
-[PROJ 9.9](https://proj.org/en/stable/operations/projections/eqc.html) supports the ellipsoidal
-formula instead. RustGIS preserves coordinates for files created with the legacy spherical formula. Files created with an ellipsoidal EQC formula, including PROJ 9.9 output, can be misplaced by kilometres; check which formula the producer used.
-The datum's ellipsoid is retained for datum transformations and
+The equidistant cylindrical projection (EPSG:4087, World Equidistant Cylindrical) is computed on its
+datum's ellipsoid (EPSG method 1028), as [PROJ 9.8](https://proj.org/en/stable/operations/projections/eqc.html)
+computes it, both for data and for a map drawn in it (including the Equirectangular preset); on
+a sphere it is the spherical formula. PROJ 9.7 and earlier, and so files they wrote, used a
+sphere of the semi-major axis on an ellipsoid too: such coordinates are placed up to tens of
+kilometres away from where that software put them (about 25 km at 55°N). Shapefile and ASCII-grid
+`.prj` files and GeoPackage WKT definitions that name EPSG method 1028 on an ellipsoid say so;
+code-only identifiers and GeoTIFF's coordinate transformation 17 don't name the method and say
+nothing. The datum's ellipsoid is retained for datum transformations and
 exported coordinate system definitions.
 
 Shapefile text uses a supported `.cpg` encoding, otherwise the `.dbf` code page, with UTF-8 as
@@ -285,8 +303,8 @@ WHERE bbox.xmin BETWEEN -83.95 AND -83.89 AND bbox.ymin BETWEEN 35.94 AND 35.98
 
 The first geometry column becomes the layer's geometry; other columns become its attributes (types
 RustGIS doesn't read, such as lists, as text). `DATE` columns become dates, `TIMESTAMP` columns
-date-times without a zone and `TIMESTAMPTZ` columns instants in UTC; a `TIMESTAMP_NS` stays text,
-which keeps its nanoseconds. A geometry that says its coordinate system
+date-times without a zone and `TIMESTAMPTZ` columns instants in UTC; a `TIMESTAMP_NS` is a
+date-time too, rounded to the microsecond, with a notice. A geometry that says its coordinate system
 is converted to longitude/latitude; give `"crs"` (such as `EPSG:2263`) for one that doesn't. A
 result mixing geometry types becomes a layer per type (points on top, polygons at the bottom), and
 rows without a geometry are left out.
@@ -437,8 +455,9 @@ trigger failure also rolls everything back; pending edits remain in the layer. N
 get source-assigned keys that cannot alias loaded rows, and unrelated columns and tables remain
 intact. The saved rows are read back within the transaction, so the layer keeps values assigned
 by defaults and triggers before it starts tracking its next edits. Dates are saved as a
-GeoPackage export writes them: a date-time with another offset than UTC's is saved in UTC, and a
-notice says so. A stored date that isn't one loads as empty, with a notice, and is left as it is
+GeoPackage export writes them: a date-time with another offset than UTC's is saved in UTC, and one
+with digits past the millisecond (a GeoPackage DATETIME holds milliseconds, `YYYY-MM-DDTHH:MM:SS.SSSZ`)
+is rounded to the nearest millisecond, and a notice says each. A stored date that isn't one loads as empty, with a notice, and is left as it is
 unless that value is edited. If a DELETE trigger recreates
 a target row, that stored row reappears in the layer and is not counted as deleted. If triggers
 change or remove other rows already loaded in the layer, those rows are refreshed or removed
@@ -1339,11 +1358,23 @@ to the sun; the more a slope turns toward the fill, the more it gains, up to 0.1
 with a fill of 1. Nothing shadows it, and it is drawn at once (nothing to work out). 0, the
 default, draws the relief as before, and it is saved with the project only when it isn't 0.
 
+**Rock on steep slopes**, on a Shaded Relief layer (`raster.symbology`
+`"rock": {"from": 25, "to": 40, "color": "#B2ACA4"}`), tints steep ground toward a rock colour,
+so cliffs and scarps stand out from the gentle slopes of the same height. Below **From** degrees
+of slope the ramp's colour is kept, above **To** the rock colour is used, and between them the two
+are blended on a smooth step. The lights (hillshade, cast shadows, sky visibility and fill light)
+then shade that colour as they shade the ramp. The slope is the ground's own, worked out from the
+same 3 × 3 window as the hillshade but without the Z factor, so 35° means 35° whatever the
+exaggeration (metres at the cell's latitude for a geographic raster). A 30 m DEM averages a cliff
+with its foot, so its walls come out gentler than they are: 25° to 40° suits it, and a finer DEM
+can start higher. Missing keys keep the current rock's (or those defaults), and `"rock": false`
+removes it; it is off by default and saved with the project only when set.
+
 With **Resampling** set to bilinear, a Shaded Relief layer's light (its hillshade, cast shadows,
-sky visibility and fill light) is blended between the cells' centres, as its values are, so a cell
-drawn over many pixels shades smoothly instead of in squares; nearest keeps one light per cell, as
-before. A cell with no data, or masked, is left out of the blend, so it doesn't darken the relief
-next to it.
+sky visibility and fill light) and its rock tint are blended between the cells' centres, as its
+values are, so a cell drawn over many pixels shades smoothly instead of in squares; nearest keeps
+one light per cell, as before. A cell with no data, or masked, is left out of the blend, so it
+doesn't darken the relief next to it.
 
 **Masking**, at the foot of the Symbology pane (`raster.mask`), hides pixel values from view without
 changing the data: values to draw as no data (a background of 0 or −9999 the file doesn't flag, QA
@@ -1395,7 +1426,7 @@ a few at a time, in the background.
 Stores are read in pure Rust, in the web app as well as on the desktop: Zarr 2 with consolidated
 metadata (`.zmetadata`, as xarray writes) and Zarr 3 (`zarr.json`, sharded arrays too), chunks
 compressed with blosc (LZ4, zlib or zstd, byte- or bit-shuffled), zlib, gzip, zstd or LZ4, of
-integer or float values, in C or Fortran order. A sharded array's shards are fetched whole.
+integer or float values, in C or Fortran order. A sharded array's shards are fetched whole, except in a window (below).
 `_FillValue`, `missing_value` and a Zarr 2 array's fill value are no data; a Zarr 3 array's fill
 value isn't: chunks never written are left empty, but chunks missing from inside a shard show the
 fill value. `scale_factor` and `add_offset` are applied. The coordinates must be evenly spaced (a curvilinear grid isn't read);
@@ -1412,7 +1443,9 @@ rustgis-cli run --cmd 'layer.addZarr={"url":"https://storage.googleapis.com/gcp-
 **A window** of the map (`layer.addZarr` with `"cells": [first column, first row, end column, end
 row]`, the ends not included, or `"bbox": [west, south, east, north]` in the grid's coordinates,
 degrees for a longitude/latitude grid) reads only the chunks it touches, and only its part of the
-coordinates (by byte range when they are stored uncompressed). A box is placed by the variable's
+coordinates (by byte range when they are stored uncompressed). In a sharded array it reads each
+shard's index by range, then only the shard's chunks the window needs, one range each; a window
+over more than 4,096 of the shards' chunks reads its shards whole instead. A box is placed by the variable's
 coordinates, read whole, so it takes grids of up to 4,000,000 cells a side; a longer one takes
 `"cells"`. A box reaching past the grid is read within it, and says so; one over a longitude grid's
 edge (0°/360°, or ±180°) is refused: give a box on each side (one round the whole globe is the

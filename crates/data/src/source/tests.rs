@@ -5,6 +5,57 @@ use rustgis_geom::{Coord, lonlat_to_merc};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Builds a minimal synthetic X.509 v3 CA certificate in DER and PEM for offline CA-loader tests.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn synthetic_ca_cert() -> (Vec<u8>, String) {
+    use base64::Engine;
+    fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        if body.len() < 128 {
+            out.push(body.len() as u8);
+        } else {
+            out.push(0x81);
+            out.push(body.len() as u8);
+        }
+        out.extend_from_slice(body);
+        out
+    }
+    let alg = tlv(0x30, &[0x06, 0x03, 0x2b, 0x65, 0x70]); // Ed25519 OID 1.3.101.112
+    let cn = tlv(0x30, &[0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x02, b'c', b'a']);
+    let name = tlv(0x30, &tlv(0x31, &cn));
+    let mut times = Vec::new();
+    times.extend(tlv(0x17, b"250101000000Z"));
+    times.extend(tlv(0x17, b"350101000000Z"));
+    let validity = tlv(0x30, &times);
+    let mut pk_bits = vec![0x00];
+    pk_bits.extend_from_slice(&[0x11; 32]);
+    let mut spki_body = alg.clone();
+    spki_body.extend(tlv(0x03, &pk_bits));
+    let spki = tlv(0x30, &spki_body);
+    // BasicConstraints CA=TRUE (OID 2.5.29.19)
+    let bc_val = tlv(0x04, &tlv(0x30, &[0x01, 0x01, 0xff]));
+    let mut bc_ext = vec![0x06, 0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff];
+    bc_ext.extend(bc_val);
+    let exts = tlv(0xa3, &tlv(0x30, &tlv(0x30, &bc_ext)));
+    let mut tbs_body = vec![0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01];
+    tbs_body.extend(&alg);
+    tbs_body.extend(&name);
+    tbs_body.extend(&validity);
+    tbs_body.extend(&name);
+    tbs_body.extend(&spki);
+    tbs_body.extend(&exts);
+    let tbs = tlv(0x30, &tbs_body);
+    let mut sig_bits = vec![0x00];
+    sig_bits.extend_from_slice(&[0x22; 64]);
+    let mut cert_body = tbs;
+    cert_body.extend(&alg);
+    cert_body.extend(tlv(0x03, &sig_bits));
+    let der = tlv(0x30, &cert_body);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+    let pem = format!("-----BEGIN CERTIFICATE-----\n{b64}\n-----END CERTIFICATE-----\n");
+    (der, pem)
+}
+
 #[test]
 fn explicit_method_1028_warns_for_known_geopackage_authorities() {
     let wkt = r#"PROJCRS["World EQC",BASEGEOGCRS["WGS 84",DATUM["WGS_1984",ELLIPSOID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0]],CONVERSION["EQC",METHOD["Equidistant Cylindrical",ID["EPSG",1028]]],CS[Cartesian,2],AXIS["Easting",east],AXIS["Northing",north],LENGTHUNIT["metre",1]]"#;
@@ -19,11 +70,11 @@ fn explicit_method_1028_warns_for_known_geopackage_authorities() {
         if warned {
             assert!(
                 notes[0].contains("srs_id 100001")
-                    && notes[0].contains("PROJ/GDAL")
+                    && notes[0].contains("PROJ 9.8")
                     && notes[0].contains("using EPSG:4087 parameters in preference to the WKT definition"),
                 "{notes:?}"
             );
-            let point = Geometry::Point(Coord::new(0.0, 5_009_377.085_697_311));
+            let point = Geometry::Point(Coord::new(0.0, 4_984_944.377_977_743));
             let Geometry::Point(at) = read.geometry(point).unwrap() else { panic!("not a point") };
             assert!(at.x.abs() < 1e-9 && (at.y - 45.0).abs() < 1e-9, "{at:?}");
         }
@@ -3393,6 +3444,21 @@ fn gpkg_tables(path: &Path) -> Vec<String> {
     st.query_map([], |r| r.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap()
 }
 
+/// Text in a date-time field with digits past the microsecond is written as a read takes it: as
+/// that date-time, to the millisecond and counted, not kept as text a read would call no date.
+#[test]
+fn geopackage_writes_fine_date_time_text_as_a_date_time() {
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("fine.gpkg");
+    let mut ds = Dataset::new("fine", GeometryType::Point, vec![Field::new("seen", FieldType::DateTime)]);
+    ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Text("2026-03-05T14:30:00.1234567Z".into())]);
+    assert_eq!(crate::io::fine_dates(ds.features.iter(), &ds.fields), [1]);
+    assert_eq!(crate::io::text_in_dates(ds.features.iter(), &ds.fields), [0], "a read takes it as a date-time");
+    crate::io::write_path(&ds, &path).unwrap();
+    let stored: String = rusqlite::Connection::open(&path).unwrap().query_row("SELECT seen FROM fine", [], |r| r.get(0)).unwrap();
+    assert_eq!(stored, "2026-03-05T14:30:00.123Z");
+}
+
 /// A GeoPackage export writes DATE and DATETIME columns, as GeoPackage gives them: a date-time with
 /// a zone in UTC with `Z` (its other offset said), one without a zone without, milliseconds always.
 /// The desktop and browser readers read them back as dates; a value that isn't one, as null, said
@@ -3406,7 +3472,7 @@ fn geopackage_dates_are_written_and_read_as_dates() {
     let (day, at) = (|d| Value::parse(d, FieldType::Date), |t| Value::parse(t, FieldType::DateTime));
     let rows = [
         [day("2026-03-05"), at("2026-03-05T14:30:00+02:00")],
-        [day("1999-12-31"), at("2026-03-05T14:30:00.000250")],
+        [day("1999-12-31"), at("2026-03-05T14:30:00.250")],
         [Value::Null, Value::Null],
         // What another program may leave: text that isn't a date, a number, and empty text (no loss).
         [Value::Text("2026-02-30".into()), Value::Int(1_772_700_000)],
@@ -3423,6 +3489,27 @@ fn geopackage_dates_are_written_and_read_as_dates() {
             .as_deref(),
         Some("permits.gpkg: 1 date-time was written in UTC, as GeoPackage stores them, without their own offsets, in 'seen'")
     );
+    // Milliseconds are all a DATETIME holds: finer digits are rounded, and said; none lost, none said.
+    assert_eq!(crate::io::fine_dates(permits.features.iter(), &permits.fields), [0, 0]);
+    let mut fine = Dataset::new("fine", GeometryType::Point, permits.fields.clone());
+    for t in ["2026-03-05T14:30:00.000750+02:00", "2026-03-05T14:30:00.000400", "9999-12-31T23:59:59.999999Z", "2026-03-05T14:30:00.5"] {
+        fine.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Null, at(t)]);
+    }
+    assert_eq!(
+        crate::io::fine_dates_note(&fine.fields, &crate::io::fine_dates(fine.features.iter(), &fine.fields), "fine.gpkg").as_deref(),
+        Some("fine.gpkg: 3 date-times were rounded to the millisecond, as GeoPackage stores them, in 'seen'")
+    );
+    let rounded = workspace.path().join("fine.gpkg");
+    crate::io::write_path(&fine, &rounded).unwrap();
+    let stored: Vec<String> = rusqlite::Connection::open(&rounded)
+        .unwrap()
+        .prepare("SELECT seen FROM fine ORDER BY fid")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(stored, ["2026-03-05T12:30:00.001Z", "2026-03-05T14:30:00.000", "9999-12-31T23:59:59.999Z", "2026-03-05T14:30:00.500"]);
     let c = rusqlite::Connection::open(&path).unwrap();
     let declared: Vec<String> = c
         .prepare("SELECT type FROM pragma_table_info('permits') WHERE name IN ('issued', 'seen') ORDER BY cid")
@@ -3442,7 +3529,7 @@ fn geopackage_dates_are_written_and_read_as_dates() {
     let text = |s: &str| Some(s.to_string());
     assert_eq!(
         stored,
-        [(text("2026-03-05"), text("2026-03-05T12:30:00.000Z")), (text("1999-12-31"), text("2026-03-05T14:30:00.000250")), (None, None)]
+        [(text("2026-03-05"), text("2026-03-05T12:30:00.000Z")), (text("1999-12-31"), text("2026-03-05T14:30:00.250")), (None, None)]
     );
     drop(c);
     let desktop = open_path(&path, None).unwrap();
@@ -3882,6 +3969,82 @@ fn flatgeobuf_classifies_local_dates_and_preserves_remote_text() {
     assert!(remote_batch.features.iter().any(|f| f.attrs[0] == Value::Text("2026-02-30".into())));
 }
 
+/// A FlatGeobuf column with a date and a date-time with digits past the microsecond is a
+/// date-time column: classification reads the date-time as the read does, rounded and counted.
+#[test]
+fn flatgeobuf_classifies_fine_date_times_as_date_times() {
+    use flatgeobuf::geozero::{ColumnValue, PropertyProcessor, wkb::Wkb};
+    use flatgeobuf::{ColumnType, FgbWriter, FgbWriterOptions, GeometryType as G};
+    let mut writer = FgbWriter::create_with_options("fine", G::Point, FgbWriterOptions::default()).unwrap();
+    writer.add_column("at", ColumnType::DateTime, |_, c| c.nullable = true);
+    for (i, s) in ["2026-03-05", "2026-03-05T14:30:00.123456789Z"].iter().enumerate() {
+        writer
+            .add_feature_geom(Wkb(wkb::encode(&Geometry::Point(Coord::new(i as f64, 0.0)))), |out| {
+                out.property(0, "at", &ColumnValue::DateTime(s)).unwrap();
+            })
+            .unwrap();
+    }
+    let mut bytes = Vec::new();
+    writer.write(&mut bytes).unwrap();
+    let src = open_bytes("fine.fgb", bytes, None).unwrap();
+    assert_eq!(src.info().fields[0].ty, FieldType::DateTime);
+    let batch = src.read(&Request::all()).unwrap();
+    // FlatGeobuf keeps features in its spatial index's order.
+    let mut shown: Vec<String> = batch.features.iter().map(|f| f.attrs[0].to_string()).collect();
+    shown.sort();
+    assert_eq!(shown, ["2026-03-05T00:00:00", "2026-03-05T14:30:00.123457Z"]);
+    assert!(batch.unread_dates.is_empty());
+    assert_eq!(batch.rounded_dates, [1]);
+}
+
+/// Date-time text a read takes (digits past the microsecond) is exported to FlatGeobuf as it is,
+/// not refused as an invalid date; reading it back rounds it and says so.
+#[test]
+fn flatgeobuf_exports_fine_date_time_text_as_it_is() {
+    let mut ds = Dataset::new("fine", GeometryType::Point, vec![Field::new("at", FieldType::DateTime)]);
+    ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Text("2026-03-05T14:30:00.1234567Z".into())]);
+    let bytes = fgb::write(&ds).unwrap();
+    let batch = open_bytes("fine.fgb", bytes, None).unwrap().read(&Request::all()).unwrap();
+    assert_eq!(batch.features[0].attrs[0].to_string(), "2026-03-05T14:30:00.123457Z");
+    assert_eq!(batch.rounded_dates, [1]);
+}
+
+/// A date field's text that is a midnight is exported to FlatGeobuf as its day, so the column
+/// still reads back as dates.
+#[test]
+fn flatgeobuf_exports_a_midnight_in_a_date_field_as_its_day() {
+    let mut ds = Dataset::new("days", GeometryType::Point, vec![Field::new("day", FieldType::Date)]);
+    ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Text("2026-03-05T00:00:00".into())]);
+    ds.push(Some(Geometry::Point(Coord::new(2.0, 2.0))), vec![Value::parse("2026-03-06", FieldType::Date)]);
+    // A date-time value that is a midnight too.
+    ds.push(Some(Geometry::Point(Coord::new(3.0, 2.0))), vec![Value::parse("2026-03-07T00:00:00", FieldType::DateTime)]);
+    let src = open_bytes("days.fgb", fgb::write(&ds).unwrap(), None).unwrap();
+    assert_eq!(src.info().fields[0].ty, FieldType::Date);
+    let mut days: Vec<String> = src.read(&Request::all()).unwrap().features.iter().map(|f| f.attrs[0].to_string()).collect();
+    days.sort();
+    assert_eq!(days, ["2026-03-05", "2026-03-06", "2026-03-07"]);
+}
+
+/// A moment in a GeoPackage date field isn't rounded into a midnight: it reads back as null, as
+/// the export counted it.
+#[test]
+fn geopackage_keeps_a_moment_in_a_date_field_from_becoming_a_day() {
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("days.gpkg");
+    let mut ds = Dataset::new("days", GeometryType::Point, vec![Field::new("day", FieldType::Date)]);
+    ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::parse("2026-03-05T00:00:00.000400", FieldType::DateTime)]);
+    assert_eq!(crate::io::text_in_dates(ds.features.iter(), &ds.fields), [1]);
+    // Said once, as a value that reads as null: it isn't rounded to the millisecond.
+    assert_eq!(crate::io::fine_dates(ds.features.iter(), &ds.fields), [0]);
+    // In a text field, the same date-time is written to the millisecond, and counted.
+    let mut text = Dataset::new("days", GeometryType::Point, vec![Field::new("day", FieldType::Text)]);
+    text.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), ds.features[0].attrs.clone());
+    assert_eq!(crate::io::fine_dates(text.features.iter(), &text.fields), [1]);
+    crate::io::write_path(&ds, &path).unwrap();
+    let (back, _) = crate::io::read_path(&path).unwrap();
+    assert!(back.value(0, 0).is_null(), "{:?}", back.value(0, 0));
+}
+
 /// A readable size prefix can contain invalid UTF-8 properties. Classification ignores
 /// that row just as whole and streamed reads do, and the read reports the skipped feature.
 #[test]
@@ -3904,7 +4067,7 @@ fn flatgeobuf_dates_skip_malformed_properties() {
 }
 
 /// Independently authored Arrow columns exercise units, UTC flags, pre-epoch values, nulls,
-/// out-of-range dates and sub-microsecond values in both whole and streamed reads.
+/// out-of-range dates and nanosecond values in both whole and streamed reads.
 #[test]
 fn parquet_date_units_invalid_values_and_nulls() {
     use arrow_array::{
@@ -3932,12 +4095,16 @@ fn parquet_date_units_invalid_values_and_nulls() {
     w.close().unwrap();
     let source = open_bytes("units.parquet", bytes, None).unwrap();
     let batch = source.read(&Request::all()).unwrap();
-    assert_eq!(batch.unread_dates, [1, 1, 1, 1]);
+    // Three out-of-range values are read as empty; 1001 ns is rounded to a microsecond, and counted.
+    assert_eq!(batch.unread_dates, [1, 1, 1]);
+    assert_eq!(batch.rounded_dates, [0, 0, 0, 1]);
     assert_eq!(
         batch.features[0].attrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
         ["1969-12-31", "1969-12-31T23:59:59.999Z", "1969-12-31T23:59:59.999999", "1969-12-31T23:59:59.999999"]
     );
-    assert!(batch.features[1..].iter().all(|f| f.attrs.iter().all(Value::is_null)));
+    assert!(batch.features[1].attrs[..3].iter().all(Value::is_null));
+    assert_eq!(batch.features[1].attrs[3].to_string(), "1970-01-01T00:00:00.000001");
+    assert!(batch.features[2].attrs.iter().all(Value::is_null));
     let extent = Extent::new(-0.1, -0.1, 0.1, 0.1);
     let filtered = source.read(&Request { extent: Some(extent), limit: usize::MAX }).unwrap();
     assert_eq!(filtered.features.len(), 1);
@@ -3956,7 +4123,7 @@ fn parquet_date_units_invalid_values_and_nulls() {
 }
 
 /// INT96 stores Julian days and nanoseconds of day with no UTC flag. Negative epochs must use
-/// the day plus its positive time, and finer-than-microsecond input is reported rather than cut.
+/// the day plus its positive time, and finer-than-microsecond input is rounded and counted.
 #[test]
 fn parquet_int96_is_unzoned_and_checks_submicroseconds() {
     use ::parquet::basic::{LogicalType, Repetition, TimeUnit, Type as Physical};
@@ -4000,8 +4167,10 @@ fn parquet_int96_is_unzoned_and_checks_submicroseconds() {
     let src = open_bytes("legacy.parquet", bytes, None).unwrap();
     let batch = src.read(&Request::all()).unwrap();
     assert_eq!(batch.features[0].attrs[0].to_string(), "1969-12-31T23:59:59.999999");
-    assert!(batch.features[1].attrs[0].is_null());
-    assert_eq!(batch.unread_dates, [1]);
+    // One nanosecond is rounded to the microsecond, and counted.
+    assert_eq!(batch.features[1].attrs[0].to_string(), "1970-01-01T00:00:00");
+    assert!(batch.unread_dates.is_empty());
+    assert_eq!(batch.rounded_dates, [1]);
     assert_eq!(batch.features[0].attrs[1].to_string(), "00:00:00");
     assert_eq!(batch.features[1].attrs[1].to_string(), "00:00:00.000001");
     assert_eq!(batch.features[0].attrs[2].to_string(), "00:00:00.000000Z");
@@ -4090,6 +4259,9 @@ fn database_date_text_reads_as_dates_and_counts_the_rest() {
         assert_eq!(server_date(Some(text), FieldType::DateTime, &mut unread, 1).to_string(), "<Null>", "{text}");
     }
     assert_eq!(unread, [0, 7]);
+    // A server gives at most microseconds: more digits aren't rounded, so it isn't a date.
+    assert_eq!(server_date(Some("2026-03-05 14:30:00.1234567"), FieldType::DateTime, &mut unread, 1).to_string(), "<Null>");
+    assert_eq!(unread, [0, 8]);
 }
 
 /// A read of a view whose box the layer's system can't bound (#1925) still matches the view: a

@@ -20,6 +20,8 @@ const DATA_EXTS: &[&str] = &[
     "csv",
     "tsv",
     "txt",
+    "dat",
+    "gz",
     "xlsx",
     "xlsm",
     "xlsb",
@@ -497,6 +499,49 @@ async fn read_together(files: Vec<web_sys::File>, mark: &str, inbox: &Inbox, not
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+}
+
+/// Where plugins keep what they remember (`host.settings`, `host.setSettings`): one localStorage
+/// entry per plugin, `rustgis.plugin-settings.<id>`; embedded, memory for the visit (as the
+/// preferences are: the page that embeds the app must not read what the user saved on the site).
+/// A failure is reported to the plugin as a fixed text: what the browser's exception holds could
+/// include what was being saved.
+fn plugin_settings_storage(embedded: bool) -> rustgis_ui_egui::rustgis_engine::plugins::settings::BrowserStorage {
+    use rustgis_ui_egui::rustgis_engine::plugins::settings::BrowserStorage;
+    if embedded {
+        let kept = Rc::new(RefCell::new(HashMap::<String, String>::new()));
+        let (read, write, remove) = (kept.clone(), kept.clone(), kept);
+        return BrowserStorage {
+            read: Box::new(move |id: &str| -> Result<Option<String>, String> { Ok(read.borrow().get(id).cloned()) }),
+            write: Box::new(move |id: &str, text: &str| -> Result<(), String> {
+                write.borrow_mut().insert(id.to_string(), text.to_string());
+                Ok(())
+            }),
+            remove: Box::new(move |id: &str| -> Result<(), String> {
+                remove.borrow_mut().remove(id);
+                Ok(())
+            }),
+        };
+    }
+    fn local_storage() -> Result<web_sys::Storage, String> {
+        storage().ok_or_else(|| "the browser's storage isn't available".to_string())
+    }
+    fn key(id: &str) -> String {
+        format!("rustgis.plugin-settings.{id}")
+    }
+    BrowserStorage {
+        read: Box::new(|id: &str| -> Result<Option<String>, String> {
+            local_storage()?.get_item(&key(id)).map_err(|_| "the browser refused the read".to_string())
+        }),
+        write: Box::new(|id: &str, text: &str| -> Result<(), String> {
+            local_storage()?
+                .set_item(&key(id), text)
+                .map_err(|_| "the browser refused the write (its storage may be full or blocked)".to_string())
+        }),
+        remove: Box::new(|id: &str| -> Result<(), String> {
+            local_storage()?.remove_item(&key(id)).map_err(|_| "the browser refused the removal".to_string())
+        }),
+    }
 }
 
 /// Decodes a PNG, JPEG or WebP picture with the browser's decoder (`createImageBitmap`, off the
@@ -1120,6 +1165,8 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
             }),
         )
     };
+    // Plugins' settings, bound before `with_services` restores the plugins that were installed.
+    rustgis_ui_egui::rustgis_engine::plugins::settings::set_browser_storage(plugin_settings_storage(embedded));
     let arcgis_ctx = ctx.clone();
     let clipboard_ctx = ctx.clone();
     Services {
@@ -1225,8 +1272,10 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
             } else if purpose == "plugin" {
                 rfd::AsyncFileDialog::new().add_filter("RustGIS plugin", &["rgplugin"])
             } else if purpose == "text" {
-                rfd::AsyncFileDialog::new()
-                    .add_filter("Delimited text and spreadsheets", &["csv", "tsv", "txt", "xlsx", "xlsm", "xlsb", "xls", "ods"])
+                rfd::AsyncFileDialog::new().add_filter(
+                    "Delimited text and spreadsheets",
+                    &["csv", "tsv", "txt", "dat", "gz", "xlsx", "xlsm", "xlsb", "xls", "ods"],
+                )
             } else if dxf.is_some() {
                 rfd::AsyncFileDialog::new().add_filter(rustgis_ui_egui::tl!("DXF drawing"), &["dxf"])
             } else if purpose == "picture" {

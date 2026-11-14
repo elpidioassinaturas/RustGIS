@@ -40,6 +40,7 @@ mod editpanes;
 mod embeddingsui;
 #[cfg(not(target_arch = "wasm32"))]
 mod exportjob;
+mod exprcomplete;
 mod extensionsui;
 mod failureui;
 mod fieldlists;
@@ -86,6 +87,7 @@ pub enum Landed {
     Ran(Result<Value, String>),
     NotRun(String),
 }
+mod boxedit;
 #[cfg(not(target_arch = "wasm32"))]
 mod relayshot;
 #[cfg(not(target_arch = "wasm32"))]
@@ -423,7 +425,7 @@ fn print_dir() -> Result<std::path::PathBuf, String> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let dir = tmp.join(format!("{prefix}{nanos}"));
     // Only Unix sets a mode on it.
-    #[allow(unused_mut)]
+    #[cfg_attr(not(unix), expect(unused_mut, reason = "only Unix sets a mode on the builder"))]
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
@@ -1153,6 +1155,7 @@ impl RustGisApp {
 
 pub struct RustGisApp {
     pub session: Session,
+    pub(crate) boxes: boxedit::State,
     pub ui: UiState,
     pub map: mapview::MapView,
     pub dialogs: dialogs::Dialogs,
@@ -1448,6 +1451,7 @@ impl RustGisApp {
         };
         RustGisApp {
             session: s,
+            boxes: boxedit::State::default(),
             ui,
             map: mapview::MapView::default(),
             dialogs: dialogs::Dialogs::default(),
@@ -1961,6 +1965,10 @@ impl RustGisApp {
             }
             return r;
         }
+        // A field package's basemaps are files beside its project, which a page has no folder for.
+        if lower.ends_with(".rgisfield") {
+            return Err(tl!("A field package opens on a computer or a phone, which have a folder for its basemaps: open it there. Bring Back (Data › Offline) takes its edits into the project here.").to_string());
+        }
         if lower.ends_with(".rgispkg") {
             let text = rustgis_engine::cmd::items::package_text(bytes)?;
             let r = self.run("project.openText", json!({"text": text, "package": true}));
@@ -1994,14 +2002,17 @@ impl RustGisApp {
             || rustgis_engine::data::source::is_source_name(name)
             || rustgis_engine::data::io::is_multi_layer_name(name)
             || rustgis_engine::data::sheets::is_sheet_name(name)
+            || lower.ends_with(".gz")
+            || (lower.ends_with(".dat") && std::str::from_utf8(bytes).is_err())
         {
             use base64::Engine;
             let data = base64::engine::general_purpose::STANDARD.encode(bytes);
             let mut p = json!({"fileName": name, "data": data});
-            // A picked spreadsheet, Shapefile ZIP or DXF takes its import options.
+            // Picked vector files and delimited tables retain their import options.
             let takes_options = rustgis_engine::data::sheets::is_sheet_name(name)
                 || lower.ends_with(".zip")
-                || rustgis_engine::data::dxf::is_dxf_name(name);
+                || rustgis_engine::data::dxf::is_dxf_name(name)
+                || rustgis_engine::data::io::is_delimited_name(name);
             if let Some(Value::Object(opts)) = opts.filter(|_| takes_options) {
                 for (k, v) in opts {
                     p[k] = v;
@@ -2023,7 +2034,7 @@ impl RustGisApp {
             r
         } else {
             let mut p = json!({"fileName": name, "text": text});
-            if let Some(Value::Object(opts)) = opts.filter(|_| [".csv", ".tsv", ".txt"].iter().any(|e| lower.ends_with(e))) {
+            if let Some(Value::Object(opts)) = opts.filter(|_| rustgis_engine::data::io::is_delimited_name(name)) {
                 for (k, v) in opts {
                     p[k] = v;
                 }
@@ -2714,6 +2725,7 @@ impl RustGisApp {
         // Nested commands (including scripts) can replace rows too; never retarget a chosen
         // vertex or held gesture to the replacement feature at the same row.
         crate::vertexedit::cancel_stale_drag(self);
+        crate::boxedit::cancel_stale(self);
         if let Err(e) = &r {
             self.command_failed(id, e, notice_mark);
         }
@@ -3677,13 +3689,18 @@ impl RustGisApp {
                     // `null`: the dialog, for the file picked.
                     self.ui.pending_csv = Some(opts.unwrap_or(Value::Null));
                     open("text");
-                } else if let Some(path) =
-                    dialogs::pick_open(&["csv", "tsv", "txt", "xlsx", "xlsm", "xlsb", "xls", "ods"], tl!("Delimited text and spreadsheets"))
-                {
+                } else if let Some(path) = dialogs::pick_open(
+                    &["csv", "tsv", "txt", "dat", "gz", "xlsx", "xlsm", "xlsb", "xls", "ods"],
+                    tl!("Delimited text and spreadsheets"),
+                ) {
                     return match opts {
                         Some(mut q) => {
                             q["path"] = json!(path);
-                            self.run("layer.addData", q)
+                            #[cfg(not(target_arch = "wasm32"))]
+                            let added = readjob::run(self, "layer.addData", q);
+                            #[cfg(target_arch = "wasm32")]
+                            let added = self.run("layer.addData", q);
+                            added
                         }
                         None => dialogs::open_csv(self, &path.clone(), dialogs::CsvSource::Path(path)),
                     };
@@ -3883,6 +3900,9 @@ impl RustGisApp {
                             "json",
                             "csv",
                             "tsv",
+                            "txt",
+                            "dat",
+                            "gz",
                             "xlsx",
                             "xlsm",
                             "xlsb",
@@ -3943,7 +3963,7 @@ impl RustGisApp {
                     open("project");
                     self.ui.backstage = false;
                 } else if let Some(path) = dialogs::pick_open(
-                    &["rgis", "rgisx", "rgispkg", "qgs", "qgz", "geolibre", "json"],
+                    &["rgis", "rgisx", "rgispkg", "rgisfield", "qgs", "qgz", "geolibre", "json"],
                     tl!("Projects and JSON data (RustGIS, QGIS, GeoLibre)"),
                 ) {
                     // A QGIS project opens as a new map of this one.
@@ -4094,20 +4114,40 @@ impl RustGisApp {
             // Project items: save (a file dialog, or a download on the web) and open.
             "ui.saveItem" => {
                 let kind = p.get("kind").and_then(Value::as_str).ok_or("kind is required")?;
+                // A field package makes an offline area first: one not saved after all goes again.
+                let areas = self.session.project.offline_areas.len();
                 let session = &mut self.session;
                 let (name, bytes) =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::items::item_bytes(session, kind, p)))
                         .unwrap_or_else(|_| Err("saving failed unexpectedly".into()))
-                        .inspect_err(|e| self.session.notify(e.clone(), true))?;
+                        .inspect_err(|e| {
+                            // An area a field package made before it failed goes too.
+                            rustgis_engine::cmd::field::forget_new_areas(&mut self.session, areas);
+                            self.session.notify(e.clone(), true);
+                        })?;
                 if self.services.download.is_some() {
-                    self.download(&name, bytes);
+                    // Not handed over (the failure is said): the area made for it goes too.
+                    if !self.download(&name, bytes) {
+                        rustgis_engine::cmd::field::forget_new_areas(&mut self.session, areas);
+                    }
                 } else {
                     let (ext, label) =
                         rustgis_engine::cmd::items::ITEMS.iter().find(|i| i.0 == kind).map_or(("json", "File"), |i| (i.1, i.2));
-                    if let Some(path) = dialogs::pick_save(&name, &[ext], tl!(label)) {
-                        rustgis_engine::data::io::write_atomic(std::path::Path::new(&path), &bytes).map_err(|e| e.to_string())?;
-                        self.session.notify(i18n::fmt("Saved {name}", &[("name", &path)]), false);
+                    match dialogs::pick_save(&name, &[ext], tl!(label)) {
+                        Some(path) => {
+                            if let Err(e) = rustgis_engine::data::io::write_atomic(std::path::Path::new(&path), &bytes) {
+                                rustgis_engine::cmd::field::forget_new_areas(&mut self.session, areas);
+                                return Err(e.to_string());
+                            }
+                            self.session.notify(i18n::fmt("Saved {name}", &[("name", &path)]), false);
+                        }
+                        None => rustgis_engine::cmd::field::forget_new_areas(&mut self.session, areas),
                     }
+                }
+                // An offline area made for the package is a change to the project, to be saved:
+                // Bring Back needs it. (Saving here runs no command, so nothing else marks it.)
+                if self.session.project.offline_areas.len() > areas {
+                    self.session.mark_unsaved();
                 }
             }
             "ui.openItem" => {
@@ -4128,6 +4168,8 @@ impl RustGisApp {
                     "presentation" => ("presentation.import", &["rgispres"], "RustGIS presentation"),
                     "notebook" => ("notebook.open", &["rgisnb", "ipynb"], "RustGIS or Jupyter notebook"),
                     "dlPackage" => ("dl.import", &["rgisdlpk"], "RustGIS deep learning package"),
+                    // A field package sent back from a phone: its edits, to the area it came from.
+                    "fieldPackage" => ("offline.bringBack", &["rgisfield"], "RustGIS field package"),
                     k => return Err(format!("unknown item '{k}'")),
                 };
                 if let Some(open) = &self.services.open_async {
@@ -4475,6 +4517,30 @@ impl RustGisApp {
                     return self.run("animation.export", json!({"path": path}));
                 }
             }
+            // Export Orbit's dialog, its parameters in `p`: the file picked, then the frames drawn
+            // on a thread of their own, with progress and Cancel in the status bar.
+            // The browser has no file to write to (its stub picker answers none): said, not left
+            // as a click that does nothing.
+            #[cfg(target_arch = "wasm32")]
+            "ui.exportOrbit" => return Err("exporting an orbit needs the desktop app".into()),
+            #[cfg(not(target_arch = "wasm32"))]
+            "ui.exportOrbit" => {
+                // Refused before the file is picked: parameters that aren't an object, a number
+                // out of its range, or another export still running.
+                let mut args = match p {
+                    Value::Null => json!({}),
+                    Value::Object(_) => p.clone(),
+                    _ => return Err("Export Orbit takes an object of parameters".into()),
+                };
+                rustgis_engine::cmd::view::check_orbit_params(&args)?;
+                exportjob::idle(self)?;
+                let name = format!("{} orbit.gif", self.session.map().name);
+                // No file picked answers null, and the dialog stays open.
+                if let Some(path) = dialogs::pick_save(&name, &["gif", "zip"], tl!("Animated GIF or PNG frames (zip)")) {
+                    args["path"] = json!(path);
+                    return exportjob::start(self, "map.exportOrbit", args);
+                }
+            }
             "ui.magnifier" => self.map.magnifier = p.get("on").and_then(Value::as_bool).unwrap_or(!self.map.magnifier),
             "ui.layoutSelect" => self.layout.selected = p.get("element").and_then(Value::as_u64).map(|v| v as u32),
             "ui.layoutTool" => {
@@ -4549,7 +4615,7 @@ impl RustGisApp {
                 if lost.rows > 0 {
                     dbf_notes.push(format!("{name}: {} rows couldn't be read and were left out", lost.rows));
                 }
-                dbf_notes.extend(lost.dates.iter().map(|n| format!("{name}: {}: {n}, so they're empty in the export", l.name)));
+                dbf_notes.extend(rustgis_engine::cmd::share::read_date_notes(&name, &l.name, &lost));
                 // CSV holds a point a row, GPX a name for each feature and no areas.
                 dbf_notes.extend(io::export_losses_notes(ds, &ext, io::name_field(ds), &name));
                 if let Some(note) = io::left_out_note(&name, &ext, left_out) {
@@ -4891,6 +4957,9 @@ impl RustGisApp {
             let result = self.run("project.importGeolibre", json!({"text":text}));
             self.map.invalidate();
             return result;
+        }
+        if file.is_some_and(|f| f.to_ascii_lowercase().ends_with(".rgisfield")) {
+            return Err(tl!("A field package opens on a computer or a phone, which have a folder for its basemaps: open it there. Bring Back (Data › Offline) takes its edits into the project here.").to_string());
         }
         let package = file.is_some_and(|f| f.to_ascii_lowercase().ends_with(".rgispkg"));
         let text = if package {
@@ -6285,7 +6354,6 @@ pub(crate) mod fetching {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
 mod start_with_tests {
     use super::StartWith;
     use serde_json::json;
@@ -6384,7 +6452,6 @@ const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
 ];
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod record_tests {
     use super::{DEFAULTS_TO_ACTIVE_LAYER, RustGisApp};
     use serde_json::json;
@@ -7149,7 +7216,6 @@ mod record_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod vertex_undo_tests {
     use super::RustGisApp;
     use rustgis_engine::data::VertexId;
@@ -7852,7 +7918,6 @@ mod peer_output_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod look_tests {
     use super::RustGisApp;
     use crate::theme;

@@ -171,6 +171,7 @@ impl Dialogs {
             "zarr" => "zarr",
             "exportLayer" => "exportLayer",
             "saveProject" => "saveProject",
+            "exportOrbit" => "exportOrbit",
             other => return Err(format!("unknown dialog '{other}'")),
         };
         if matches!(name, "addField" | "calculateField" | "renameLayer" | "exportLayer" | "defineProjection") && active.is_none() {
@@ -184,6 +185,9 @@ impl Dialogs {
         }
         if matches!(name, "gpkgSave" | "gpkgDiscard") && !s.map().layers.iter().any(|l| l.gpkg.is_some()) {
             return Err(tl!("the map has no GeoPackage layer loaded for editing (Home › Add Data › Edit GeoPackage Table…)").into());
+        }
+        if name == "exportOrbit" && cfg!(target_arch = "wasm32") {
+            return Err("exporting an orbit needs the desktop app".into());
         }
         if name == "selectByAttributes" && s.map().layers.is_empty() {
             return Err("the map has no layers".into());
@@ -224,6 +228,8 @@ impl Dialogs {
                 self.c = format!("{:.0}", s.scale());
             }
             "addField" => self.b = "Double".into(),
+            // The command's defaults: 60 frames once round, 640 × 400 points, 50 ms a frame.
+            "exportOrbit" => [self.a, self.b, self.c, self.d, self.e] = ["60", "360", "640", "400", "50"].map(String::from),
             "calculateField" => {
                 self.a = active.and_then(|l| calculation_fields(&l.dataset).last()).map(|f| f.name.clone()).unwrap_or_default()
             }
@@ -345,6 +351,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "zarr" => "Add Zarr Variable",
         "exportLayer" => "Export Features",
         "saveProject" => "Save Project As",
+        "exportOrbit" => "Export Orbit",
         "renameMap" => "Rename Map",
         "renameLayout" => "Rename Layout",
         "renameServiceGroup" => "Rename Service Group",
@@ -513,6 +520,41 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     app.run("map.camera", json!({"lon": lon, "lat": lat, "scale": scale})).map(|_| ())
                 });
             }
+            "exportOrbit" => {
+                ui.label(tl!("Turns the view about its centre, keeping its scale and pitch, and writes a frame a step: a .gif loops, a .zip holds the frames as PNGs."));
+                egui::Grid::new("orbit").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+                    let d = &mut app.dialogs;
+                    for (label, v) in [
+                        ("Frames", &mut d.a),
+                        ("Turn (degrees)", &mut d.b),
+                        ("Width (points)", &mut d.c),
+                        ("Height (points)", &mut d.d),
+                        ("Frame time (ms, GIF)", &mut d.e),
+                    ] {
+                        let input_label = ui.label(tl!(label));
+                        ui.add(egui::TextEdit::singleline(v).desired_width(120.0)).labelled_by(input_label.id);
+                        ui.end_row();
+                    }
+                });
+                // A file picker cancelled keeps the dialog open, the values typed still in it:
+                // `ui.exportOrbit` answers null when no file was picked.
+                let mut picked = true;
+                close = buttons(app, ui, "Export…", |app| {
+                    // Empty keeps the command's default; anything else must be a number, which
+                    // the command checks against its range.
+                    let mut p = json!({});
+                    let d = &app.dialogs;
+                    for (key, label, v) in [("frames", "Frames", &d.a), ("turn", "Turn", &d.b), ("width", "Width", &d.c), ("height", "Height", &d.d), ("speed", "Frame time", &d.e)] {
+                        let v = v.trim();
+                        if !v.is_empty() {
+                            let n = v.parse::<f64>().ok().filter(|n| n.is_finite());
+                            p[key] = json!(n.ok_or_else(|| crate::i18n::fmt("{what} must be a number", &[("what", tl_raw!(label))]))?);
+                        }
+                    }
+                    picked = !app.run("ui.exportOrbit", p)?.is_null();
+                    Ok(())
+                }) && picked;
+            }
             "bookmark" => {
                 let input_label = ui.label(tl!("Name"));
                 ui.add(egui::TextEdit::singleline(&mut app.dialogs.text).desired_width(f32::INFINITY)).labelled_by(input_label.id);
@@ -549,9 +591,17 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             "calculateField" => {
                 /// The data Calculate Field reads: the table's it was opened on, else the active layer's.
                 fn data(app: &crate::RustGisApp) -> Option<&rustgis_engine::data::Dataset> {
-                    match app.dialogs.table {
-                        Some((opened, id)) => app.session.project.table(id).filter(|_| opened == app.session.opened).map(|t| &t.dataset),
-                        None => app.session.active_layer.and_then(|id| app.session.map().layer(id)).map(|l| &l.dataset),
+                    data_of(app.dialogs.table, &app.session)
+                }
+                /// The same, from the dialog's table and the session apart, so the box can be
+                /// written while it's read.
+                fn data_of(
+                    table: Option<(u64, u32)>,
+                    session: &rustgis_engine::Session,
+                ) -> Option<&rustgis_engine::data::Dataset> {
+                    match table {
+                        Some((opened, id)) => session.project.table(id).filter(|_| opened == session.opened).map(|t| &t.dataset),
+                        None => session.active_layer.and_then(|id| session.map().layer(id)).map(|l| &l.dataset),
                     }
                 }
                 let fields: Vec<String> = data(app).map(|d| calculation_fields(d).map(|f| f.name.clone()).collect()).unwrap_or_default();
@@ -564,12 +614,16 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                     }).response.labelled_by(input_label.id);
                 });
                 let input_label = ui.label(format!("{} =", app.dialogs.a));
-                let edit = egui::TextEdit::singleline(&mut app.dialogs.text)
-                    .hint_text(tl!("e.g.  pop_est / 1000000   or   upper(name) || ' ' || round(area, 1)"))
-                    .char_limit(rustgis_engine::data::query::MAX_LEN)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(f32::INFINITY);
-                ui.add(edit).labelled_by(input_label.id);
+                // Suggestions as it's typed: the fields, functions, variables and keywords (#1240).
+                let ds = data_of(app.dialogs.table, &app.session);
+                fn style(edit: egui::TextEdit<'_>) -> egui::TextEdit<'_> {
+                    edit.hint_text(tl!("e.g.  pop_est / 1000000   or   upper(name) || ' ' || round(area, 1)"))
+                        .char_limit(rustgis_engine::data::query::MAX_LEN)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                }
+                crate::exprcomplete::expr_edit(ui, egui::Id::unique("cf_expression"), &mut app.dialogs.text, ds, style)
+                    .labelled_by(input_label.id);
                 let text = app.dialogs.text.trim();
                 let reads = data(app).filter(|_| !text.is_empty()).map(|d| rustgis_engine::cmd::edit::check_calculation(text, d));
                 if let Some(Err(e)) = reads {
@@ -2336,7 +2390,7 @@ pub fn pick_open(_: &[&str], _: &str) -> Option<String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "the browser has no folder picker; kept beside the desktop one")]
 pub fn pick_folder() -> Option<String> {
     None
 }
@@ -2345,9 +2399,6 @@ pub fn pick_folder() -> Option<String> {
 pub fn pick_save(_: &str, _: &[&str], _: &str) -> Option<String> {
     None
 }
-
-#[allow(dead_code)]
-fn unused(_: Value) {}
 
 /// The map's coordinate system: Web Mercator, the globe, a preset, or any projected EPSG code. The
 /// list is on the left; the right shows what the selection is, where it can be used, its PROJ
@@ -2659,6 +2710,39 @@ mod tests {
         let ds = &h.state().session.project.tables[0].dataset;
         assert_eq!(ds.value(0, 0), &rustgis_engine::data::Value::Text("changed".into()));
         assert_eq!(ds.value(0, 1), &rustgis_engine::data::Value::Text("second".into()));
+    }
+
+    /// Calculate Field suggests as the expression is typed (#1240): Enter takes the highlighted
+    /// field, quoted as the expression needs, and doesn't calculate; Escape closes the list and
+    /// leaves the dialog and the text as they are.
+    #[test]
+    fn calculate_field_suggests_the_fields_as_its_expression_is_typed() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::new(Session::new(rustgis_engine::Project::default()));
+        app.run("layer.addDataText", json!({"fileName": "pops.csv", "text": "Pop Est,name\n1,a\n"})).unwrap();
+        app.run("edit.enable", json!({"on": true})).unwrap();
+        let id = app.session.project.tables[0].id;
+        app.run("ui.dialog", json!({"name": "calculateField", "table": id})).unwrap();
+        let mut h = app_harness(app);
+        h.run_steps(3);
+        h.ctx.memory_mut(|m| m.request_focus(egui::Id::unique("cf_expression")));
+        h.run();
+        h.event(egui::Event::Text("po".into()));
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Button, "\"Pop Est\"").is_some(), "the field offered, as written");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().dialogs.text, "\"Pop Est\"");
+        assert_eq!(h.state().dialogs.open, Some("calculateField"), "Enter took the field, not Calculate");
+        h.event(egui::Event::Text(" * ro".into()));
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Button, "round()").is_some(), "the function offered");
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.query_by_role_and_label(Role::Button, "round()").is_none(), "the list closed");
+        assert_eq!(h.state().dialogs.text, "\"Pop Est\" * ro");
+        assert_eq!(h.state().dialogs.open, Some("calculateField"));
     }
 
     /// The app in a harness, its fonts installed on the first pass (the dialog draws on the next).

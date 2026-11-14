@@ -16,6 +16,7 @@ pub mod effects;
 pub mod embeddings;
 pub mod exports;
 pub mod extensions;
+pub mod field;
 pub mod geocode;
 pub mod geolibre;
 pub mod gp;
@@ -142,6 +143,27 @@ pub(crate) fn parse_crs(s: &mut Session, text: &str) -> Result<rustgis_data::ras
     Ok(crs)
 }
 
+/// `text`, given as a command's `key`, when it has at most `limit` characters; else an error
+/// saying how long it is and what `of` takes. A name or a text a command is given is refused rather
+/// than cut without a word (#1888), as `layer.rename` refuses a long name (#1817). Characters are
+/// counted, not bytes.
+pub(crate) fn within(key: &str, of: &str, text: &str, limit: usize) -> Result<String, String> {
+    let n = text.chars().count();
+    if n > limit {
+        return Err(format!("{key} is {n} characters: {of} takes at most {limit}"));
+    }
+    Ok(text.to_string())
+}
+
+/// `items`, given as a command's `key`, when there are at most `limit`; else an error saying how
+/// many there are and how many `of` takes, rather than the rest dropped without a word (#1888).
+pub(crate) fn at_most<T>(key: &str, of: &str, items: &[T], limit: usize) -> Result<(), String> {
+    if items.len() > limit {
+        return Err(format!("{key} has {} entries: {of} takes at most {limit}", items.len()));
+    }
+    Ok(())
+}
+
 /// Report a CRS already validated by a pure options parser, after its options were applied.
 pub(crate) fn say_crs_note(s: &mut Session, text: &str) {
     if let Ok(crs) = rustgis_data::raster::Crs::parse(text)
@@ -149,6 +171,13 @@ pub(crate) fn say_crs_note(s: &mut Session, text: &str) {
     {
         s.warn(format!("crs: {note}"));
     }
+}
+
+/// What a save to a database table calls itself in a notice: the layer and the table, or the one
+/// name when they are the same (`wells: 1 date-time…`, not `wells: wells: 1 date-time…`).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn saved_target(layer: &str, table: &str) -> String {
+    if layer == table { layer.to_string() } else { format!("{layer}: {table}") }
 }
 
 pub(crate) fn ps<'a>(p: &'a Value, k: &str) -> Option<&'a str> {

@@ -1077,8 +1077,7 @@ fn map_inputs<'a>(s: &'a Session, spec: Option<&rustgis_analysis::ToolSpec>, par
 /// whole, and the rows of each layer it runs on. It reads, so a background run does this on its
 /// thread.
 fn inputs_of<'a>(snap: Snapshot<'a>, spec: Option<&rustgis_analysis::ToolSpec>, params: &Value) -> Result<MapInputs<'a>, String> {
-    let full = streamed_inputs(&snap.map, spec, params)?;
-    let mut messages = Vec::new();
+    let (full, mut messages) = streamed_inputs(&snap.map, spec, params)?;
     #[cfg(not(target_arch = "wasm32"))]
     let mut full = full;
     #[cfg(not(target_arch = "wasm32"))]
@@ -1202,23 +1201,28 @@ fn reads_whole(tool: &str, param: &str) -> bool {
 }
 
 /// Complete streamed inputs without selections, plus selected PMTiles inputs: that exporter
-/// requires the complete source. Their selected window rows are remapped in `map_inputs`.
+/// requires the complete source. Their selected window rows are remapped in `map_inputs`. With
+/// them, what each read couldn't read as it is (rows left out, dates read as null or rounded), for
+/// the tool's messages.
 fn streamed_inputs(
     map: &rustgis_map::Map,
     spec: Option<&rustgis_analysis::ToolSpec>,
     params: &Value,
-) -> Result<std::collections::HashMap<String, Dataset>, String> {
+) -> Result<(std::collections::HashMap<String, Dataset>, Vec<String>), String> {
     let mut full = std::collections::HashMap::new();
+    let mut said = Vec::new();
     for n in layer_names(spec, params) {
         let key = n.to_ascii_lowercase();
         if full.contains_key(&key) {
             continue;
         }
         if let Some(l) = map.layer_by_name(n).filter(|l| reads_full_source(l, spec)) {
-            full.insert(key, l.load_all().map_err(|e| format!("{}: {e}", l.name))?);
+            let (ds, unread) = l.load_all_counted().map_err(|e| format!("{}: {e}", l.name))?;
+            said.extend(super::whole::Unread::of(l.name.clone(), unread).lines());
+            full.insert(key, ds);
         }
     }
-    Ok(full)
+    Ok((full, said))
 }
 
 /// The executor's source-read choice, shared with pure permission planning.
@@ -1720,7 +1724,7 @@ pub fn run_batch_with(s: &mut Session, p: &Value, control: &std::sync::Arc<rustg
     let mut seen_outputs = std::collections::HashSet::new();
     let mut collisions = 0;
     let mut first_collision = None;
-    #[allow(unused_mut)]
+    #[cfg_attr(target_arch = "wasm32", expect(unused_mut, reason = "batch inputs are read from files on the desktop only"))]
     let mut reader_warnings: Vec<(String, String)> = Vec::new();
     let mut items_reporting_messages = 0;
     let mut distinct_tool_messages: Vec<(String, usize)> = Vec::new();
@@ -2774,7 +2778,6 @@ fn apply_with(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod file_tests {
     use super::*;
 
@@ -3647,7 +3650,6 @@ mod file_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 mod file_permission_tests {
     use super::*;
 
@@ -3696,7 +3698,6 @@ mod file_permission_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod batch_tests {
     use super::*;
 

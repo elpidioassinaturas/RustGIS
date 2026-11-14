@@ -99,7 +99,7 @@ pub(crate) fn name_recent(app: &mut RustGisApp, before: u64, origin: Option<&str
     }
     let Some(mut added) = app.session.sources.recent.first().cloned() else { return };
     added.name = origin.to_string();
-    app.session.sources.note(added);
+    app.session.note_source(added);
 }
 
 pub enum Entry {
@@ -643,7 +643,6 @@ fn dataset(app: &mut RustGisApp, ui: &mut Ui, c: &Connection, listing: &Listing,
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;

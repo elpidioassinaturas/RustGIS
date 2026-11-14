@@ -177,14 +177,24 @@ pub fn commands() -> Vec<C> {
             crate::model::check_file(&v)?;
             let name = v["name"].as_str().unwrap_or("Tool").chars().take(200).collect::<String>();
             // A model file (`*.model.json`) holds a graph; a web tool its steps.
+            let mark = s.notice_mark();
             let imported = if let Some(graph) = v.get("graph") {
                 s.run("model.new", &json!({"name": name, "graph": graph, "imported": true}))?
             } else {
                 let steps = v.get("steps").cloned().ok_or("not a RustGIS model or web tool (no graph or steps)")?;
                 s.run("model.new", &json!({"name": name, "steps": steps, "imported": true}))?
             };
-            if v.get("name").map_or(Some("Tool"), Value::as_str) != imported.get("model").and_then(Value::as_str) {
-                s.notify("1 model name was trimmed, shortened, replaced or made unique during import.", false);
+            // A name `model.new` cut to tell it apart is said once, by it (#1923), unless this cut
+            // it first: `model.new` saw only the first 200 characters, so that cut is said here.
+            let said = s.notices_since(mark).iter().any(|n| n.text.starts_with("ModelBuilder: a model has that name already"));
+            let cut_here = v["name"].as_str().is_some_and(|n| n.chars().count() > 200);
+            if (cut_here || !said) && v.get("name").map_or(Some("Tool"), Value::as_str) != imported.get("model").and_then(Value::as_str) {
+                // A cut to the 200 says how much it cut.
+                let text = match v["name"].as_str() {
+                    Some(n) if cut_here => format!("1 model name was cut from {} to 200 characters, a model name's limit, during import.", n.chars().count()),
+                    _ => "1 model name was trimmed, shortened, replaced or made unique during import.".to_string(),
+                };
+                s.notify(text, false);
             }
             Ok(imported)
         }).roles(&[crate::ParamRole { key: "text", role: crate::Role::Document(crate::Document::Model) }]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Reserved).with(crate::policy::Effect::Files))
@@ -207,13 +217,13 @@ fn share_bytes_inner(s: &mut Session, kind: &str, p: &Value) -> Result<(String, 
     match kind {
         "webMap" => {
             let mut m = map_of(s, p)?;
-            m.layers.iter_mut().filter(|l| shared_layer("webMap", l)).try_for_each(load_whole)?;
+            m.layers.iter_mut().filter(|l| shared_layer("webMap", l)).try_for_each(|l| load_whole(s, l))?;
             let html = web_map_html(&m, &m.name)?;
             Ok((m.name.clone(), html.into_bytes(), m.name))
         }
         "webLayer" => {
             let mut l = layer_of(s, p)?;
-            load_whole(&mut l)?;
+            load_whole(s, &mut l)?;
             Ok((l.name.clone(), web_layer_zip(s, &l)?, l.name.clone()))
         }
         "webStyle" => {
@@ -230,7 +240,7 @@ fn share_bytes_inner(s: &mut Session, kind: &str, p: &Value) -> Result<(String, 
         }
         "geodataService" => {
             let mut m = map_of(s, p)?;
-            m.layers.iter_mut().filter(|l| shared_layer("geodataService", l)).try_for_each(load_whole)?;
+            m.layers.iter_mut().filter(|l| shared_layer("geodataService", l)).try_for_each(|l| load_whole(s, l))?;
             let mut layers: Vec<&Dataset> = m.layers.iter().filter(|l| shared_layer("geodataService", l)).map(|l| &l.dataset).collect();
             layers.extend(s.project.tables.iter().map(|t| &t.dataset));
             Ok((m.name.clone(), ogc_zip(&m.name, &layers, &[])?, m.name.clone()))
@@ -260,7 +270,7 @@ fn share_bytes_inner(s: &mut Session, kind: &str, p: &Value) -> Result<(String, 
         }
         "webScene" => {
             let mut m = map_of(s, p)?;
-            m.layers.iter_mut().filter(|l| shared_layer("webScene", l)).try_for_each(load_whole)?;
+            m.layers.iter_mut().filter(|l| shared_layer("webScene", l)).try_for_each(|l| load_whole(s, l))?;
             let scene = gltf(&m, s.view_size)?;
             for note in scene.notes() {
                 s.notify(note, false);
@@ -297,10 +307,13 @@ fn map_of(s: &Session, p: &Value) -> Result<Map, String> {
     Ok(m)
 }
 
-/// A streamed layer shares its whole source, not the features read for the current view.
-fn load_whole(l: &mut Layer) -> Result<(), String> {
+/// A streamed layer shares its whole source, not the features read for the current view; what
+/// that read couldn't read as it is (rows left out, dates read as null or rounded) is said.
+fn load_whole(s: &mut Session, l: &mut Layer) -> Result<(), String> {
     if l.is_streamed() {
-        l.dataset = l.load_all()?;
+        let (ds, unread) = l.load_all_counted()?;
+        l.dataset = ds;
+        super::whole::Unread::of(l.name.clone(), unread).say(s);
     }
     Ok(())
 }

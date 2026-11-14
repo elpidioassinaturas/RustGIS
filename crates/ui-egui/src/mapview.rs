@@ -49,6 +49,7 @@ enum DragKind {
     SelectRadius,
     /// Moving or inserting a vertex with the Edit Vertices tool.
     Vertex,
+    BoxEdit,
     /// Moving the selected text graphic, grabbed by its text (#516): its layer id and row, and
     /// where the press was. Held by the drag itself, so it ends with it, however it ends.
     Text {
@@ -481,6 +482,12 @@ impl Default for MapView {
 }
 
 impl MapView {
+    pub(crate) fn cancel_rotated_box_drag(&mut self) {
+        if matches!(self.drag, Some((_, DragKind::BoxEdit))) {
+            self.drag = None;
+        }
+    }
+
     /// Retire old drawings before any of them can report errors for a replacement project.
     fn follow_project(&mut self, opened: u64) {
         if self.project.is_some_and(|p| p != opened) {
@@ -664,7 +671,7 @@ pub(crate) fn handle_gpu_errors_once(app: &mut RustGisApp, ctx: &egui::Context) 
 ///
 /// A frame is asked of `ctx` for each error, so the map leaves the card even when nothing else
 /// would draw again (an error in the last frame before the window goes idle).
-#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+#[cfg_attr(target_arch = "wasm32", expect(unused_variables, reason = "only native builds catch uncaptured GPU errors"))]
 pub(crate) fn handle_gpu_errors(device: &egui_wgpu::wgpu::Device, errors: std::sync::Arc<GpuErrors>, ctx: egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
     device.on_uncaptured_error(std::sync::Arc::new(move |e: egui_wgpu::wgpu::Error| {
@@ -690,7 +697,7 @@ const MAX_GPU_ERRORS_LOGGED: u32 = 20;
 
 impl GpuErrors {
     /// Notes `e`, and logs it while few have been: whether it was logged.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "only native builds catch uncaptured GPU errors"))]
     fn note(&self, e: &egui_wgpu::wgpu::Error) -> bool {
         use std::sync::atomic::Ordering;
         let oom = matches!(e, egui_wgpu::wgpu::Error::OutOfMemory { .. });
@@ -1764,7 +1771,6 @@ fn show_gpu_frame(
 
 /// Shows a frame the CPU drew for `view` (of a `w × h` map view) as the map's texture, with its
 /// labels, credits and tile errors.
-#[allow(clippy::too_many_arguments)]
 fn show_frame(
     app: &mut RustGisApp,
     ctx: &egui::Context,
@@ -2077,6 +2083,11 @@ fn draw_label(p: &egui::Painter, l: &PlacedLabel, at: Pos2) {
 /// Draws a label (not a curved one) at `at`: its halo when `halo`, its text when `text`.
 fn draw_label_ink(p: &egui::Painter, l: &PlacedLabel, at: Pos2, halo: bool, text: bool) {
     let family = crate::labelfonts::family(p.ctx(), l.font, l.bold, l.italic);
+    // Bold with no heavier face to draw it in: drawn again a little to its right, as exports do.
+    // (In the interface fonts: those of a named family not loaded yet too.)
+    use rustgis_engine::render::fonts;
+    let thick = if family.is_none() && l.bold && fonts::bold_is_synthetic() { fonts::bold_thickening(l.size * 1.33) } else { 0.0 };
+    let strikes = std::iter::once(egui::Vec2::ZERO).chain((thick > 0.0).then_some(vec2(thick, 0.0)));
     let galley = p.layout_job(label_job(&l.text, l.size, l.bold, l.italic, l.spacing, l.line_align, family));
     // Text set beside an icon is lined up by its edge, with egui's own measure of its width.
     let anchor = if l.align < -0.25 {
@@ -2100,11 +2111,15 @@ fn draw_label_ink(p: &egui::Painter, l: &PlacedLabel, at: Pos2, halo: bool, text
         if let Some(h) = l.halo.filter(|h| halo && h.a() > 0) {
             let (offsets, hc) = halo_coats(l, h);
             for offset in offsets {
-                p.add(shape(offset, hc));
+                for s in strikes.clone() {
+                    p.add(shape(offset + s, hc));
+                }
             }
         }
         if text {
-            p.add(shape(egui::Vec2::ZERO, c32(l.color)));
+            for s in strikes {
+                p.add(shape(s, c32(l.color)));
+            }
         }
         return;
     }
@@ -2120,11 +2135,15 @@ fn draw_label_ink(p: &egui::Painter, l: &PlacedLabel, at: Pos2, halo: bool, text
     if let Some(h) = l.halo.filter(|h| halo && h.a() > 0) {
         let (offsets, hc) = halo_coats(l, h);
         for offset in offsets {
-            p.galley_with_override_text_color(pos + offset, galley.clone(), hc);
+            for s in strikes.clone() {
+                p.galley_with_override_text_color(pos + offset + s, galley.clone(), hc);
+            }
         }
     }
     if text {
-        p.galley_with_override_text_color(pos, galley, c32(l.color));
+        for s in strikes {
+            p.galley_with_override_text_color(pos + s, galley.clone(), c32(l.color));
+        }
     }
 }
 
@@ -2723,6 +2742,16 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
         app.map.kept_lonlat = Some((c, app.session.map().instance_id(), app.session.opened));
     }
     let tool = app.session.tool;
+    crate::boxedit::cancel_stale(app);
+    if tool == Tool::RotatedBox {
+        if resp.secondary_clicked() {
+            if let Some(c) = resp.interact_pointer_pos().and_then(|p| screen_to_lonlat(app, rect, p)) {
+                crate::boxedit::click(app, c, false, false);
+            }
+            app.map.popup = None;
+        }
+        resp.context_menu(|ui| crate::boxedit::context_menu(app, ui));
+    }
     cancel_changed_selection(app, rect);
 
     // A map tool aims with a crosshair, only over the map: the ribbon and panes keep their cursor.
@@ -2839,7 +2868,7 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
     }
 
     let shift = ui.input(|i| i.modifiers.shift);
-    let middle = ui.input(|i| i.pointer.middle_down());
+    let middle = ui.input(|i| i.pointer.middle_down() || (tool == Tool::RotatedBox && i.key_down(egui::Key::Space)));
     let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
     // Dragging with the right button turns the map or the globe (to the right turns it
     // clockwise) and tilts it (up tilts it further), as in MapLibre.
@@ -2882,7 +2911,10 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
             app.map.moving_label = Some(MovingLabel { label: l, layer, feature, class, project, map });
             DragKind::Label { origin }
         } else if middle {
+            crate::boxedit::cancel(app);
             DragKind::Pan
+        } else if tool == Tool::RotatedBox && crate::boxedit::drag_start(app, rect, origin, ctrl) {
+            DragKind::BoxEdit
         } else if tool == Tool::EditVertices && crate::vertexedit::drag_start(app, rect, origin) {
             DragKind::Vertex
         } else {
@@ -2991,6 +3023,17 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             ui.ctx().request_repaint();
         }
+    }
+    if let (Some((_, DragKind::BoxEdit)), Some(p)) = (app.map.drag, resp.interact_pointer_pos()) {
+        crate::boxedit::drag_to(app, rect, p, shift);
+        ui.ctx().request_repaint();
+    }
+    if resp.drag_stopped()
+        && let Some((_, DragKind::BoxEdit)) = app.map.drag
+    {
+        app.map.drag = None;
+        crate::boxedit::drag_stop(app);
+        return;
     }
     if let (Some((_, DragKind::Vertex)), Some(p)) = (app.map.drag, resp.interact_pointer_pos()) {
         crate::vertexedit::drag_to(app, rect, p);
@@ -3105,7 +3148,7 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
     if resp.double_clicked() {
         if matches!(tool, Tool::Measure | Tool::MeasureArea) || tool.draws_edit() || vertex_shape(tool) {
             finish_sketch(app);
-        } else if tool == Tool::EditVertices {
+        } else if matches!(tool, Tool::EditVertices | Tool::RotatedBox) {
             // Its two clicks chose a vertex or a feature; zooming would lose the place.
         } else if let Some(p) = resp.interact_pointer_pos() {
             // A double-click on a text graphic edits it in the Format pane; elsewhere it zooms in.
@@ -3233,6 +3276,11 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
                 app.map.camera_moved = true;
             }
             Tool::EditVertices => crate::vertexedit::click(app, rect, p, c, shift),
+            Tool::RotatedBox => {
+                if !middle {
+                    crate::boxedit::click(app, c, shift, ui.input(|i| i.modifiers.alt));
+                }
+            }
             Tool::CreatePoint => {
                 let _ = app.run("edit.addFeature", with_template(app, json!({"geometry": {"type": "Point", "coordinates": [c.x, c.y]}})));
             }
@@ -3269,12 +3317,19 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
     {
         ui.ctx().set_cursor_icon(icon);
     }
-    if resp.secondary_clicked() {
+    if tool == Tool::RotatedBox
+        && let Some(icon) = hover.and_then(|p| crate::boxedit::cursor(app, rect, p))
+    {
+        ui.ctx().set_cursor_icon(icon);
+    }
+    if resp.secondary_clicked() && tool != Tool::RotatedBox {
         app.map.menu_lonlat = app.map.pointer_lonlat;
         app.map.menu_text = resp.interact_pointer_pos().and_then(|p| text_graphic_at(app, ui.ctx(), rect, p));
     }
     // No menu off the Earth (a globe's corners): there is no place for it to act on.
-    if let Some(c) = app.map.menu_lonlat {
+    if tool != Tool::RotatedBox
+        && let Some(c) = app.map.menu_lonlat
+    {
         resp.context_menu(|ui| crate::mapmenu::show(app, ui, c));
     }
     if hover.is_some() && (matches!(tool, Tool::Measure | Tool::MeasureArea) || tool.draws_edit()) && !app.map.sketch.is_empty() {
@@ -3431,7 +3486,7 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
     let editing = &app.session.map().editing;
     if editing.settings.enabled
         && editing.settings.show_vertices
-        && app.session.tool != Tool::EditVertices
+        && !matches!(app.session.tool, Tool::EditVertices | Tool::RotatedBox)
         && (app.session.tool.creates() || app.session.tool.draws_edit() || app.ui.right == Some(crate::RightPane::Editing))
     {
         let mut verts: Vec<Coord> = Vec::new();
@@ -3457,6 +3512,9 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
     // The Edit Vertices tool's handles.
     if app.session.tool == Tool::EditVertices {
         crate::vertexedit::draw(app, p, rect, accent);
+    }
+    if app.session.tool == Tool::RotatedBox {
+        crate::boxedit::draw(app, p, rect, accent);
     }
     // The navigator: a compass, zoom buttons and a pan pad in the top-left corner.
     if app.session.map().view.navigator {
@@ -3695,6 +3753,7 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
             Some("Drag a vertex to move it · click an edge to add one · Delete removes the chosen vertex")
         }
         Tool::EditVertices => Some("Click a feature, then drag its vertices · click an edge to add one"),
+        Tool::RotatedBox => Some("Drag a box · paddle rotates · Shift snaps · Space or middle-drag pans · Alt-click cycles overlaps"),
         Tool::ZoomIn => Some("Drag a box or click to zoom in"),
         Tool::MoveLabel => Some("Drag a label to where it should be · drag the map to pan · Esc to stop"),
         Tool::Graphic("point") => Some("Click the map to place a point"),
@@ -5128,6 +5187,7 @@ mod tests {
             shadow,
             sky: 0.0,
             fill: 0.0,
+            rock: None,
         };
         let set = |map: &mut Map, shadow: f64, visible: bool| {
             let l = map.layer_mut(id).unwrap();

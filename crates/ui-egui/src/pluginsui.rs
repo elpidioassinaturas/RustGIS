@@ -40,6 +40,9 @@ struct Saved {
     data: Option<String>,
     #[serde(default = "yes")]
     enabled: bool,
+    /// Fields a newer RustGIS added, written back as they were.
+    #[serde(flatten)]
+    other: serde_json::Map<String, Value>,
 }
 
 fn yes() -> bool {
@@ -94,6 +97,8 @@ pub struct PluginsState {
     /// Ids of plugins that failed to load at start, not yet told (one notice for all, once every
     /// start download is done).
     start_failures: Vec<String>,
+    /// Whether this session was told that changes to the installed plugins aren't remembered.
+    unsaved_told: bool,
 }
 
 /// A plugin's Python environment being made on a background thread.
@@ -282,23 +287,65 @@ fn keeps_prefs() -> bool {
     cfg!(target_arch = "wasm32")
 }
 
-fn saved(app: &RustGisApp) -> Vec<Saved> {
-    app.services.load_pref.as_ref().and_then(|l| l("plugins_web")).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
-}
-
-fn save(app: &RustGisApp, list: &[Saved]) {
-    if let (Some(s), Ok(text)) = (&app.services.save_pref, serde_json::to_string(list)) {
-        s("plugins_web", &text);
+/// The installed plugins the web app keeps (`plugins_web`): those it can read, and the entries it
+/// can't (from a newer RustGIS, or damaged), kept to be written back as they were. `None` when
+/// the preference isn't a JSON list: it is then never written over. None kept is an empty list.
+fn read_saved(text: Option<&str>) -> Option<(Vec<Saved>, Vec<Value>)> {
+    let Some(text) = text.filter(|t| !t.trim().is_empty()) else { return Some((Vec::new(), Vec::new())) };
+    let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(text) else { return None };
+    let (mut list, mut kept) = (Vec::new(), Vec::new());
+    for row in rows {
+        match serde_json::from_value::<Saved>(row.clone()) {
+            Ok(s) => list.push(s),
+            Err(_) => kept.push(row),
+        }
     }
+    Some((list, kept))
 }
 
-fn update_saved(app: &RustGisApp, f: impl FnOnce(&mut Vec<Saved>)) {
+/// The `plugins_web` preference as [`read_saved`] reads it.
+fn saved(app: &RustGisApp) -> Option<(Vec<Saved>, Vec<Value>)> {
+    read_saved(app.services.load_pref.as_ref().and_then(|l| l("plugins_web")).as_deref())
+}
+
+/// The `plugins_web` preference for `list`, with the entries [`read_saved`] couldn't read after it.
+fn saved_text(list: &[Saved], kept: &[Value]) -> String {
+    let mut rows: Vec<Value> = list.iter().filter_map(|s| serde_json::to_value(s).ok()).collect();
+    rows.extend(kept.iter().cloned());
+    Value::Array(rows).to_string()
+}
+
+/// Changes the installed plugins the web app keeps with `f`, writing back the entries it couldn't
+/// read as they were; nothing on the desktop, or when the preference couldn't be read.
+fn update_saved(app: &mut RustGisApp, f: impl FnOnce(&mut Vec<Saved>)) {
     if !keeps_prefs() {
         return;
     }
-    let mut list = saved(app);
+    // One that can't be read was said at start, and isn't written over.
+    let Some((mut list, kept)) = saved(app) else {
+        if !std::mem::replace(&mut app.plugins.unsaved_told, true) {
+            app.session.warn(tl!(
+                "The plugins installed in this browser can't be read, so this change isn't remembered: fix or remove \"plugins_web\" in the browser's saved preferences."
+            ));
+        }
+        return;
+    };
     f(&mut list);
-    save(app, &list);
+    if let Some(s) = &app.services.save_pref {
+        s("plugins_web", &saved_text(&list, &kept));
+    }
+}
+
+/// Puts `entry` in `list` in place of the one with its id, which hands it the fields this version
+/// doesn't know; `keep` false only removes the old one.
+fn put_saved(list: &mut Vec<Saved>, mut entry: Saved, keep: bool) {
+    if let Some(old) = list.iter().find(|s| s.id == entry.id) {
+        entry.other = old.other.clone();
+    }
+    list.retain(|s| s.id != entry.id);
+    if keep {
+        list.push(entry);
+    }
 }
 
 /// Loads the plugins the web app installed in earlier visits.
@@ -309,7 +356,22 @@ pub fn restore(app: &mut RustGisApp) {
     if let Some(u) = app.services.load_pref.as_ref().and_then(|l| l("plugin_registry")) {
         app.plugins.url = u;
     }
-    restore_list(app, saved(app));
+    let (list, kept) = match saved(app) {
+        Some(read) => read,
+        None => {
+            app.session.warn(tl!(
+                "The plugins installed in this browser couldn't be read (they aren't a JSON list): none is loaded, and plugins installed or removed now aren't remembered."
+            ));
+            (Vec::new(), Vec::new())
+        }
+    };
+    if !kept.is_empty() {
+        app.session.warn(crate::i18n::fmt(
+            "{n} installed plugins couldn't be read (from a newer RustGIS, or damaged): they aren't loaded, and are kept as they were.",
+            &[("n", &kept.len().to_string())],
+        ));
+    }
+    restore_list(app, list);
     // The blocklist, so a pulled plugin isn't loaded again.
     let registry = app.plugins.registry_url();
     let slot = fetch(app, &rp::registry::blocklist_url(&registry), 4 << 20, None);
@@ -483,14 +545,10 @@ fn install_confirmed(app: &mut RustGisApp) {
                     base64::engine::general_purpose::STANDARD.encode(&c.bytes)
                 }),
                 enabled: true,
+                other: serde_json::Map::new(),
             };
             let kept = entry.url.is_some() || entry.data.is_some();
-            update_saved(app, |list| {
-                list.retain(|s| s.id != entry.id);
-                if kept {
-                    list.push(entry);
-                }
-            });
+            update_saved(app, |list| put_saved(list, entry, kept));
             let mut text = crate::i18n::fmt(
                 "Installed {name} {version}. Find it on the Plugins tab; its tools are also in the Tools pane.",
                 &[("name", &p.manifest.name), ("version", &p.manifest.version)],
@@ -531,8 +589,13 @@ fn retry(app: &mut RustGisApp, id: &str, ctx: &egui::Context) {
     start_restore(app, saved, Some(ctx.clone()), true);
 }
 
-/// Forgets an unloaded plugin: the app stops trying to load it at start.
+/// Forgets an unloaded plugin: the app stops trying to load it at start, and what it kept
+/// (its settings) is erased. If that fails the plugin stays listed, so Remove can be tried again.
 fn remove_unloaded(app: &mut RustGisApp, id: &str) {
+    if let Err(e) = rp::settings::remove(id) {
+        app.plugins.message = Some((false, crate::i18n::fmt("{id} wasn't removed: {error}", &[("id", id), ("error", &e)])));
+        return;
+    }
     app.plugins.unloaded.retain(|u| u.saved.id != id);
     update_saved(app, |list| list.retain(|s| s.id != id));
     app.plugins.message = Some((true, crate::i18n::fmt("Removed {id}.", &[("id", id)])));
@@ -1263,7 +1326,18 @@ mod tests {
             url: Some(format!("https://example.invalid/{id}.rgplugin")),
             data: None,
             enabled: true,
+            other: serde_json::Map::new(),
         }
+    }
+
+    /// A plugins folder of the test's own, one test at a time (the folder is global, and plugin
+    /// settings are kept in it: removing a plugin erases them).
+    fn isolated_settings() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let held = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        rp::store::set_dir(Some(dir.path().to_path_buf()));
+        (held, dir)
     }
 
     /// An app whose downloads all end the way `answer` says, at once.
@@ -1285,9 +1359,39 @@ mod tests {
         app.session.notices_since(mark).iter().map(|n| (n.text.clone(), n.error)).collect()
     }
 
+    /// What a newer RustGIS wrote to `plugins_web` survives a change here: entries this version
+    /// can't read and fields it doesn't know are written back as they were; a preference that
+    /// isn't a list isn't read at all.
+    #[test]
+    fn saved_web_plugins_keep_what_this_version_cannot_read() {
+        let text = json!([
+            {"id": "a", "sha256": "0", "url": "https://example.invalid/a.rgplugin", "enabled": true, "channel": "beta"},
+            {"id": "b", "sha256": {"v2": "0"}}
+        ])
+        .to_string();
+        let (mut list, kept) = read_saved(Some(&text)).unwrap();
+        assert_eq!((list.len(), kept.len()), (1, 1));
+        list[0].enabled = false;
+        list.push(record("c", "1"));
+        let again: Value = serde_json::from_str(&saved_text(&list, &kept)).unwrap();
+        assert_eq!(again[0]["channel"], "beta");
+        assert_eq!(again[0]["enabled"], false);
+        assert_eq!(again[1]["id"], "c");
+        assert_eq!(again[2], json!({"id": "b", "sha256": {"v2": "0"}}));
+        // Installing it again (an update) keeps the fields this version doesn't know.
+        put_saved(&mut list, record("a", "2"), true);
+        assert_eq!(
+            (list.len(), list.last().map(|s| s.sha256.as_str()), list.last().and_then(|s| s.other.get("channel"))),
+            (2, Some("2"), Some(&json!("beta")))
+        );
+        assert!(read_saved(Some("{\"plugins\": []}")).is_none());
+        assert_eq!(read_saved(None).map(|(l, k)| (l.len(), k.len())), Some((0, 0)));
+    }
+
     /// Plugins the web app couldn't load at start are listed, kept, and told once (#1352).
     #[test]
     fn plugins_that_fail_at_start_are_listed_and_told_once() {
+        let _settings = isolated_settings();
         // Two that can't be downloaded: one notice naming both, a count, and where to go.
         let mut app = app_fetching(|_| Err("unreachable".into()));
         let told = start(&mut app, vec![record("demo", "0"), record("gone", "0")]);
@@ -1320,7 +1424,7 @@ mod tests {
         assert!(told[0].0.starts_with("The plugin damaged wasn't loaded (open Plugins") && told[0].0.contains("damaged:"), "{told:?}");
 
         // Loaded: nothing to tell, nothing listed.
-        struct Cleanup(#[allow(dead_code)] tempfile::TempDir);
+        struct Cleanup(#[expect(dead_code, reason = "held for the test, never read")] tempfile::TempDir);
         impl Drop for Cleanup {
             fn drop(&mut self) {
                 let _ = rustgis_plugins::store::uninstall("restore-ok");
@@ -1365,6 +1469,7 @@ mod tests {
     /// A plugin that wasn't loaded is listed on the Installed tab, with Retry and Remove (#1352).
     #[test]
     fn unloaded_plugins_offer_retry_and_remove() {
+        let _settings = isolated_settings();
         use egui_kittest::kittest::Queryable;
         let mut app = app_fetching(|_| Err("still unreachable".into()));
         app.plugins.unloaded.push(Unloaded { saved: record("demo", "0"), reason: "unreachable".into() });
@@ -1419,5 +1524,34 @@ mod tests {
         h.run();
         assert!(h.query_by_label("Remove").is_some());
         assert!(h.query_by_label("Retry").is_none());
+    }
+
+    /// Removing an unloaded plugin erases what it kept, and when that fails it stays listed (#1261).
+    #[test]
+    fn plugin_settings_are_erased_when_an_unloaded_plugin_is_removed() {
+        let (_turn, dir) = isolated_settings();
+        let mut app = app_fetching(|_| Err("unreachable".into()));
+        app.plugins.unloaded.push(Unloaded { saved: record("demo", "0"), reason: "unreachable".into() });
+        let kept = || rp::settings::patch("demo", &json!({"values": {"favourites": ["l:1"]}})).unwrap();
+        kept();
+        let file = dir.path().join("settings").join("demo.json");
+        assert!(file.is_file());
+
+        // Erasing fails: the plugin stays listed, with the reason on the tab, to try again.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        remove_unloaded(&mut app, "demo");
+        assert_eq!(app.plugins.unloaded.len(), 1);
+        let Some((false, why)) = app.plugins.message.clone() else { panic!("{:?}", app.plugins.message) };
+        assert!(why.starts_with("demo wasn't removed: ") && why.contains("couldn't erase the saved settings of 'demo'"), "{why}");
+
+        // Then it is removed, with what it kept.
+        std::fs::remove_dir(&file).unwrap();
+        kept();
+        remove_unloaded(&mut app, "demo");
+        assert!(app.plugins.unloaded.is_empty());
+        assert_eq!(app.plugins.message, Some((true, "Removed demo.".to_string())));
+        assert!(!file.exists());
+        assert_eq!(rp::settings::read("demo").unwrap(), json!({}));
     }
 }

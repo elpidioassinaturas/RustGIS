@@ -8,6 +8,8 @@ use super::{need_layer_or_table, ps};
 use crate::{CmdResult, CommandSpec as C, Session};
 
 pub fn commands() -> Vec<C> {
+    let box_roles: &[crate::ParamRole] =
+        &[crate::ParamRole { key: "box", role: crate::Role::Opaque }, crate::ParamRole { key: "attributes", role: crate::Role::Opaque }];
     vec![
         C::new("edit.calculateGeometry", "Calculate Geometry", "Attribute Table", crate::geometry_calc::run).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(super::design::need_editable)
@@ -31,6 +33,14 @@ pub fn commands() -> Vec<C> {
         C::new("edit.calculateField", "Calculate Field", "Attribute Table", calculate_field).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(super::design::need_editable_or_table)
             .params(r#"{"layer"?, "table"?: name|id (a standalone table, instead of a layer: every row), "field": string, "expression": "an expression: fields, 'text', numbers, + - * / % ^ ||, functions (see the Expressions page)"}"#),
+        C::new("edit.addBox", "Add Rotated Box", "Edit › Features", crate::box_edit::add).inputs(crate::box_edit::new_box_inputs).roles(box_roles).effects(crate::policy::Effects::NONE)
+            .when(crate::cmd::design::need_editable).params(r#"{"layer"?: name|id, "box": {"center":[x,y],"width":number,"height":number,"angle":clockwise degrees,"frame"?:{"epsg":number,"width":pixels,"height":pixels,"affine":[x0,xc,xr,y0,yc,yr]}},"attributes"?:{field:value},"template"?:string}"#),
+        C::new("edit.updateBox", "Update Rotated Box", "Edit › Features", crate::box_edit::update).roles(&[crate::ParamRole { key: "box", role: crate::Role::Opaque }]).effects(crate::policy::Effects::NONE)
+            .when(crate::cmd::design::need_editable).params(r#"{"layer"?:name|id,"row":number,"featureId"?:number,"box":as edit.addBox}"#),
+        C::new("edit.deleteBox", "Delete Box", "Edit › Features", crate::box_edit::delete_box).roles(&[]).effects(crate::policy::Effects::NONE)
+            .when(crate::cmd::design::need_editable).params(r#"{"layer"?:name|id,"row":number,"featureId"?:number}"#),
+        C::new("edit.boxInfo", "Box Construction", "Edit › Features", crate::box_edit::info).roles(&[]).effects(crate::policy::Effects::NONE).view()
+            .params(r#"{"layer"?:name|id,"row":number}"#),
     ]
 }
 
@@ -113,6 +123,11 @@ pub(crate) fn add_feature(s: &mut Session, p: &Json) -> CmdResult {
         Target::Layer(id) => id,
     };
     let g = geometry_param(p)?;
+    add_geometry(s, id, p, g)
+}
+
+/// Inserts an already validated construction through the same attributes, templates and rules.
+pub(crate) fn add_geometry(s: &mut Session, id: u32, p: &Json, g: Geometry) -> CmdResult {
     let l = s.map_mut().layer_mut(id).ok_or("no layer")?;
     let want = l.geometry_type();
     let ok = want == g.kind() || want == GeometryType::None;
@@ -629,7 +644,8 @@ fn add_field(s: &mut Session, p: &Json) -> CmdResult {
 /// `edit.convertField`: makes a text field a date or date-time field, reading each value as ISO
 /// 8601 (`2026-03-05`; `2026-03-05T14:30:00+02:00`, or with a space for the `T`). A date field
 /// also takes a date-time at midnight without a zone. Values that aren't dates become null, said
-/// with their count and the first few, and undo brings them back. Refused while a data design
+/// with their count and the first few, and undo brings them back; digits past the microsecond are
+/// rounded off, and said. A field with text and none of it a date is refused and stays text. Refused while a data design
 /// (domain, subtype, contingent values) names the field or a definition query or display filter
 /// would stop reading with it. It runs on the UI thread: it is one parse of the text of a layer
 /// held in memory (a layer read in place is refused, as every `edit.*` command is), measured at
@@ -647,7 +663,7 @@ fn convert_field(s: &mut Session, p: &Json) -> CmdResult {
         "datetime" | "date-time" | "timestamp" => FieldType::DateTime,
         other => return Err(format!("'{other}' isn't a type a field converts to: date or datetime")),
     };
-    let (name, (converted, nulled, examples)) = match t {
+    let (name, Dates { converted, nulled, rounded, examples }) = match t {
         Target::Table(_) => {
             let ds = data_mut(s, t)?;
             let field = ds.fields.get(fi).ok_or("no such field")?;
@@ -667,12 +683,16 @@ fn convert_field(s: &mut Session, p: &Json) -> CmdResult {
             false,
         );
     }
+    if rounded > 0 {
+        let values = if rounded == 1 { "1 value was".to_string() } else { format!("{rounded} values were") };
+        s.notify(format!("Convert Field: {values} rounded to the microsecond in '{name}', as more digits than that aren't kept"), false);
+    }
     Ok(json!({"converted": converted, "null": nulled}))
 }
 
 /// Field `fi` of layer `id` as dates ([`to_dates`]) and its name, unless something that reads it
 /// would stop reading it (see [`convert_field`]).
-fn convert_layer_field(s: &mut Session, id: u32, fi: usize, ty: FieldType) -> Result<(String, (usize, usize, Vec<String>)), String> {
+fn convert_layer_field(s: &mut Session, id: u32, fi: usize, ty: FieldType) -> Result<(String, Dates), String> {
     let l = s.map_mut().layer_mut(id).ok_or("no layer")?;
     let field = l.dataset.fields.get(fi).ok_or("no such field")?;
     let name = field.name.clone();
@@ -733,34 +753,65 @@ fn convert_layer_field(s: &mut Session, id: u32, fi: usize, ty: FieldType) -> Re
     Ok((name, to_dates(&mut l.dataset, fi, ty)?))
 }
 
+/// What turning a text field into dates did ([`to_dates`]).
+struct Dates {
+    /// Values that became dates.
+    converted: usize,
+    /// Values whose text wasn't a date, now null.
+    nulled: usize,
+    /// Date-times whose digits past the microsecond were rounded off.
+    rounded: usize,
+    /// The first few texts that weren't dates.
+    examples: Vec<String>,
+}
+
 /// Makes text field `fi` of `ds` a `ty` (date or date-time) field: how many values became dates,
-/// how many became null, and the first few of those.
-fn to_dates(ds: &mut Dataset, fi: usize, ty: FieldType) -> Result<(usize, usize, Vec<String>), String> {
-    let (mut converted, mut nulled, mut examples) = (0usize, 0usize, Vec::new());
+/// how many became null, how many were rounded to the microsecond, and the first few nulled.
+/// A field with text and none of it a date is refused and left as it is.
+fn to_dates(ds: &mut Dataset, fi: usize, ty: FieldType) -> Result<Dates, String> {
+    let name = ds.fields.get(fi).map(|f| f.name.clone()).unwrap_or_default();
+    let mut out = Dates { converted: 0, nulled: 0, rounded: 0, examples: Vec::new() };
+    let mut dates = Vec::with_capacity(ds.features.len());
     rustgis_data::progress::begin(ds.features.len());
-    for f in &mut ds.features {
+    for f in &ds.features {
         rustgis_data::progress::step(1).map_err(|e| e.to_string())?;
-        let Some(v) = f.attrs.get_mut(fi) else { continue };
-        let date = match &*v {
-            v if v.asks_null() => Value::Null,
-            Value::Text(t) => Value::parse_stored(t, ty),
-            other => Value::parse(&other.to_string(), ty),
+        let Some(v) = f.attrs.get(fi) else {
+            dates.push(None);
+            continue;
+        };
+        let (date, cut) = match v {
+            v if v.asks_null() => (Value::Null, false),
+            Value::Text(t) => Value::parse_stored_counted(t, ty),
+            other => (Value::parse(&other.to_string(), ty), false),
         };
         if date.is_null() && !v.asks_null() {
-            nulled += 1;
-            if examples.len() < 3 {
+            out.nulled += 1;
+            if out.examples.len() < 3 {
                 let text: String = v.to_string().chars().map(rustgis_data::io::dbf_notice_char).collect();
                 let short: String = text.chars().take(40).collect();
-                examples.push(if short.len() < text.len() { format!("'{short}…'") } else { format!("'{short}'") });
+                out.examples.push(if short.len() < text.len() { format!("'{short}…'") } else { format!("'{short}'") });
             }
         }
-        converted += usize::from(!date.is_null());
-        *v = date;
+        out.converted += usize::from(!date.is_null());
+        out.rounded += usize::from(cut);
+        dates.push(Some(date));
+    }
+    if out.converted == 0 && out.nulled > 0 {
+        let one = if ty == FieldType::Date { "a date" } else { "a date-time" };
+        return Err(format!(
+            "'{name}' stays text: none of its values is {one} (ISO 8601, like 2026-03-05), first {}",
+            out.examples.first().map_or("", String::as_str)
+        ));
+    }
+    for (f, date) in ds.features.iter_mut().zip(dates) {
+        if let (Some(v), Some(date)) = (f.attrs.get_mut(fi), date) {
+            *v = date;
+        }
     }
     if let Some(f) = ds.fields.get_mut(fi) {
         f.ty = ty;
     }
-    Ok((converted, nulled, examples))
+    Ok(out)
 }
 
 /// `edit.deleteField`: removes a field and every reference to it (symbology, labels, the data
