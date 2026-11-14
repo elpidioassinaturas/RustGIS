@@ -1329,8 +1329,8 @@ opposite side (the sun's azimuth plus 180°), 55° up, adds `fill × max(0, L �
 colour to each cell, where `L` is how squarely the cell faces that light (the same slopes as the
 hillshade). Flat ground gets exactly `sin 55°` of it and so gains nothing, nor does a slope turned
 to the sun; the more a slope turns toward the fill, the more it gains, up to 0.18 of its colour
-with a fill of 1. Nothing shadows it, and it is drawn at once (nothing to work out). 0, the default, draws the relief
-as before, and it is saved with the project only when it isn't 0.
+with a fill of 1. Nothing shadows it, and it is drawn at once (nothing to work out). 0, the
+default, draws the relief as before, and it is saved with the project only when it isn't 0.
 
 With **Resampling** set to bilinear, a Shaded Relief layer's light (its hillshade, cast shadows,
 sky visibility and fill light) is blended between the cells' centres, as its values are, so a cell
