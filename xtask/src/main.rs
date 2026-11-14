@@ -150,7 +150,8 @@ fn web_pwa(dir: Option<String>) -> Result<(), String> {
 fn schema(check: bool) -> Result<(), String> {
     let mut args = vec!["run", "-q", "-p", "rustgis-engine", "--features", "schema", "--example", "project_schema"];
     if check {
-        args.extend(["--", "--check"]);
+        // A Cargo.lock out of date with the manifests fails here too.
+        args.extend(["--locked", "--", "--check"]);
     }
     cargo(&args)
 }

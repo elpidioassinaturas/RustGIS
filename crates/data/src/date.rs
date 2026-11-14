@@ -274,11 +274,11 @@ impl schemars::JsonSchema for DateTime {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         // The day as for `Date`, then maybe a clock after `T`, `t` or a space (HH:MM, seconds and
         // up to six fraction digits optional, zeros past them), then maybe `Z` or an offset
-        // (+02, +0200, +02:00).
+        // (+02, +0200, +02:00) of at most 18 hours, as `MAX_OFFSET_MIN`.
         schemars::json_schema!({
             "type": "string",
             "description": "A date and time as ISO 8601 text, years 1 to 9999, with its offset (Z, +02:00) when it has one, without one when it has none, maybe with spaces around it. The pattern can't tell a day that doesn't exist (2026-02-30) or an instant past year 9999 once its offset is applied; the reader refuses them.",
-            "pattern": "^\\s*([1-9][0-9]{3}|0[1-9][0-9]{2}|00[1-9][0-9]|000[1-9])-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])([Tt ]([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\\.[0-9]{1,6}0*)?)?([Zz]|[+-][0-9]{2}(:?[0-5][0-9])?)?)?\\s*$"
+            "pattern": "^\\s*([1-9][0-9]{3}|0[1-9][0-9]{2}|00[1-9][0-9]|000[1-9])-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])([Tt ]([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\\.[0-9]{1,6}0*)?)?([Zz]|[+-]((0[0-9]|1[0-7])(:?[0-5][0-9])?|18(:?00)?))?)?\\s*$"
         })
     }
 }
