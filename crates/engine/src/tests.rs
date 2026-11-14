@@ -11351,6 +11351,18 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
     let mark = s.notice_mark();
     s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "water": {"layer": "represas"}})).unwrap();
     assert!(s.notices_since(mark).iter().all(|n| !n.text.starts_with("Water")), "{:?}", s.notices_since(mark));
+    // A shore too long to read every half cell is said over tiles too (from its shape: no tile is
+    // asked for): 30° a side, read at zoom 15's 4.8 m pixels, is past the budget.
+    let sea = json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry":
+        {"type": "Polygon", "coordinates": [[[0.0, 0.0], [30.0, 0.0], [30.0, 30.0], [0.0, 30.0], [0.0, 0.0]]]}}]});
+    let sea = base64::engine::general_purpose::STANDARD.encode(sea.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "mar.geojson", "data": sea})).unwrap();
+    let mar = s.map().layers.iter().filter(|l| !l.is_raster()).max_by_key(|l| l.id).map(|l| l.name.clone()).unwrap();
+    s.map_mut().camera.res = 1.0;
+    let mark = s.notice_mark();
+    s.run("map.terrain", &json!({"water": {"layer": mar}})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains(&format!("the shore of 1 polygon of '{mar}' was read at wider steps"))), "{said:?}");
     // False takes it off; the terrain stays.
     let v = s.run("map.terrain", &json!({"water": false})).unwrap();
     assert_eq!(v["water"], Value::Null);

@@ -456,15 +456,16 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         TerrainSource::Layer(n) => Some(n.clone()),
         TerrainSource::Tiles { .. } => None,
     };
-    // Over elevation tiles, a shore whose tiles haven't come yet isn't off the ground: not said.
-    let water_layer = t.water.as_ref().filter(|_| water.is_some() && heights_from.is_some()).map(|w| w.layer.clone());
+    let water_layer = t.water.as_ref().filter(|_| water.is_some()).map(|w| w.layer.clone());
     m.view.terrain = Some(t);
-    // Water polygons with no height along their shore (off the DEM) and no level stay on the
-    // ground: said, with how many, when the water is set over a DEM layer.
-    if let Some(name) = water_layer
-        && let Some(ground) = rustgis_render::terrain::Ground::of(s.map(), &s.map().camera)
-    {
-        let unlevelled = match ground.water_unlevelled() {
+    // When the water is set, what its levels left out is said, with how many.
+    if let Some(name) = water_layer {
+        use rustgis_render::terrain::Ground;
+        // Water polygons with no height along their shore (off the DEM) and no level stay on the
+        // ground. Over elevation tiles a shore whose tiles haven't come yet isn't off the
+        // ground: not said there, nor are tiles asked for here.
+        let over_dem = || Ground::of(s.map(), &s.map().camera).map_or(0, |g| g.water_unlevelled());
+        let unlevelled = match if heights_from.is_some() { over_dem() } else { 0 } {
             0 => None,
             1 => Some(format!(
                 "Water: 1 polygon of '{name}' has no height along its shore (off the DEM) and no level, so stays on the ground"
@@ -474,14 +475,15 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
             )),
         };
         // Shores too long to read every half cell are read at wider steps: their lowest point
-        // may be missed, leaving the water a little high.
-        let coarse = match ground.water_coarse() {
+        // may be missed, leaving the water a little high. Said over a DEM and over tiles alike
+        // (the steps follow the shores' length, not the heights read).
+        let coarse = match Ground::water_coarse_unread(s.map(), &s.map().camera) {
             0 => None,
             1 => Some(format!(
-                "Water: the shore of 1 polygon of '{name}' was read at wider steps than half a DEM cell (shores too long to read whole), so its level may lie a little above its lowest shore"
+                "Water: the shore of 1 polygon of '{name}' was read at wider steps than half a cell of the heights (shores too long to read whole), so its level may lie a little above its lowest shore"
             )),
             n => Some(format!(
-                "Water: the shores of {n} polygons of '{name}' were read at wider steps than half a DEM cell (shores too long to read whole), so their levels may lie a little above their lowest shore"
+                "Water: the shores of {n} polygons of '{name}' were read at wider steps than half a cell of the heights (shores too long to read whole), so their levels may lie a little above their lowest shore"
             )),
         };
         for said in [unlevelled, coarse].into_iter().flatten() {

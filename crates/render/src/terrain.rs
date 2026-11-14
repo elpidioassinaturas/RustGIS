@@ -86,6 +86,20 @@ impl Ground {
     /// isn't drawn in Web Mercator, which the heights are looked up in), or its DEM layer isn't
     /// there.
     pub fn of(map: &Map, camera: &Camera) -> Option<Ground> {
+        let mut ground = Ground::heights_of(map, camera)?;
+        ground.water = water::of(map, &ground);
+        Some(ground)
+    }
+
+    /// How many polygons of `map`'s water layer have their shore read at wider steps than half a
+    /// cell of the heights a view of `camera` reads (#1915; see [`Ground::water_coarse`]), from
+    /// their shapes alone: nothing is read, no elevation tile asked for. 0 without water.
+    pub fn water_coarse_unread(map: &Map, camera: &Camera) -> usize {
+        Ground::heights_of(map, camera).map_or(0, |g| water::coarse_shores(map, &g))
+    }
+
+    /// [`Ground::of`] without its water.
+    fn heights_of(map: &Map, camera: &Camera) -> Option<Ground> {
         let t = map.view.terrain.as_ref()?;
         if map.projection != rustgis_map::Projection::WebMercator {
             return None;
@@ -112,9 +126,7 @@ impl Ground {
                 }
             }
         };
-        let mut ground = Ground { heights, exaggeration, body: map.body().ratio(), water: None };
-        ground.water = water::of(map, &ground);
-        Some(ground)
+        Some(Ground { heights, exaggeration, body: map.body().ratio(), water: None })
     }
 
     /// The ground's height (metres, exaggerated) at a Web Mercator point: a water body's level
