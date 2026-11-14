@@ -216,26 +216,25 @@ impl Ground {
 
     /// How many of the ground's own cells lie along each side of a band with these `corners`
     /// (Web Mercator; top left, top right, bottom left, bottom right), across and down (#2037):
-    /// the box of [`Ground::cells_across`] measured along the band's sides as they lie on the
-    /// grid, so a band turned a quarter on it takes its rows across and its columns down, and
-    /// one turned an eighth (√2 of each side's cells, at most, on a square box). Where a corner
-    /// is off the grid's plane, both sides take the box's longer side.
+    /// the box of [`Ground::cells_across`] measured along each side as it lies on the grid (its
+    /// top and bottom edges across, its left and right edges down, each on its own: a grid of
+    /// cells longer than wide doesn't keep a band's sides square), so a band turned a quarter on
+    /// it takes its rows across and its columns down. That is the grid's spacing along the side,
+    /// the finest detail it holds there, not the cells a diagonal side passes through. A side
+    /// whose direction is unknown (a corner off the grid's plane, edges that cancel out) takes
+    /// the box's longer side.
     pub fn cells_along(&self, corners: &[Coord; 4]) -> Option<(f64, f64)> {
         let (cols, rows) = self.cells_across(corners)?;
-        let p = corners.map(|m| self.grid_point(m).filter(|(x, y)| x.is_finite() && y.is_finite()));
-        // The band's top and bottom edges, summed: its direction across on the grid.
-        let across = match p {
-            [Some(a), Some(b), Some(c), Some(d)] => Some((b.0 - a.0 + d.0 - c.0, b.1 - a.1 + d.1 - c.1)),
-            _ => None,
+        let longer = cols.max(rows);
+        let [a, b, c, d] = corners.map(|m| self.grid_point(m).filter(|(x, y)| x.is_finite() && y.is_finite()));
+        // Two edges' sum, the side's direction on the grid; the box's extent along it.
+        let along = |p: Option<(f64, f64)>, q: Option<(f64, f64)>, r: Option<(f64, f64)>, t: Option<(f64, f64)>| {
+            let ((p, q), (r, t)) = (p.zip(q)?, r.zip(t)?);
+            let (x, y) = (q.0 - p.0 + t.0 - r.0, q.1 - p.1 + t.1 - r.1);
+            let len = x.hypot(y);
+            (len > 0.0 && len.is_finite()).then(|| cols * (x / len).abs() + rows * (y / len).abs())
         };
-        let len = across.map_or(0.0, |(x, y)| x.hypot(y));
-        Some(match across {
-            Some((x, y)) if len > 0.0 && len.is_finite() => {
-                let (c, s) = ((x / len).abs(), (y / len).abs());
-                (cols * c + rows * s, cols * s + rows * c)
-            }
-            _ => (cols.max(rows), cols.max(rows)),
-        })
+        Some((along(a, b, c, d).unwrap_or(longer), along(a, c, b, d).unwrap_or(longer)))
     }
 
     /// Whether elevation tiles are still on their way (drawing again later shows more).
@@ -491,6 +490,27 @@ mod tests {
         assert_eq!(ground.cells_along(&band(0.0).map(|m| Coord::new(m.x + 1e6, m.y + 1e6))), Some((0.0, 0.0)));
         let half_on = ground.cells_along(&band(0.0).map(|m| Coord::new(m.x + 200_000.0, m.y))).unwrap();
         assert!(close(half_on, (20.0, 10.0)), "{half_on:?}");
+        // Top and bottom edges running opposite ways: no direction across, the box's longer side.
+        let crossed = [band(0.0)[0], band(0.0)[1], band(0.0)[3], band(0.0)[2]];
+        assert!(close(ground.cells_along(&crossed).unwrap(), (40.0, 10.0)), "{:?}", ground.cells_along(&crossed));
+        // Cells ten times taller than wide (1 km × 10 km): a band 10 km down by 40 km across, its
+        // long side turned to point 45° up on the map, lies 28.3 columns and 2.83 rows along it,
+        // and 7.07 columns and 0.71 rows down. Each side measured along its own direction.
+        let gt = GeoTransform { origin_x: -200_000.0, origin_y: 2_000_000.0, pixel_width: 1000.0, pixel_height: -10_000.0 };
+        let raster = Arc::new(
+            Raster::new("heights", 400, 400, vec![vec![0.0; 160_000]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap(),
+        );
+        let tall = Ground { heights: Heights::Raster { raster, wrap_width: None }, exaggeration: 1.0, body: 1.0 };
+        let (cols, rows) = tall.cells_across(&band(45.0)).unwrap();
+        let (x, y) = tall.cells_along(&band(45.0)).unwrap();
+        // Across: direction (28.3, -2.83) on the grid; down: (7.07, 0.71), each normalised.
+        let unit = |x: f64, y: f64| (x / x.hypot(y), y / x.hypot(y));
+        let (ax, ay) = unit(1.0, 0.1);
+        let (dx, dy) = unit(1.0, -0.1);
+        assert!((x - (cols * ax + rows * ay)).abs() < 1e-6, "{x} from {cols} × {rows}");
+        assert!((y - (cols * dx + rows * dy.abs())).abs() < 1e-6, "{y} from {cols} × {rows}");
+        // Both sides about as many as the box's columns: neither is cut to its rows.
+        assert!(x > 0.9 * cols && y > 0.9 * cols, "{x}, {y} from {cols} × {rows}");
     }
 
     #[test]
