@@ -140,20 +140,31 @@ impl Ground {
 
     /// How many of the ground's own cells span the stretch of ground with these `corners` (Web
     /// Mercator), along the longer side of their box in the ground's grid: a DEM's cells, the
-    /// box clipped to the DEM; elevation tiles' pixels at the zoom read. A turned stretch's box
+    /// box clipped to the DEM (a whole turn's columns, as [`raster_height`] reads them, wrap
+    /// round instead); elevation tiles' pixels at the zoom read. A turned stretch's box
     /// is up to √2 longer than its side. `None` when no corner lands on the grid's plane.
     pub fn cells_across(&self, corners: &[Coord]) -> Option<f64> {
-        let (pixels, (w, h)): (Vec<(f64, f64)>, _) = match &self.heights {
-            Heights::Raster { raster, .. } => {
+        let (pixels, (w, h), full_turn): (Vec<(f64, f64)>, _, _) = match &self.heights {
+            Heights::Raster { raster, wrap_width } => {
                 let t = raster.transformer();
-                let pixels = corners.iter().filter_map(|m| t.from_merc(*m)).map(|n| raster.transform.to_pixel(n)).collect();
-                (pixels, (f64::from(raster.width), f64::from(raster.height)))
+                let mut pixels: Vec<(f64, f64)> =
+                    corners.iter().filter_map(|m| t.from_merc(*m)).map(|n| raster.transform.to_pixel(n)).collect();
+                // As `raster_height` reads them: moved round by the whole turns that bring the
+                // stretch's middle onto the grid (a 0–360° grid, a view a turn away), all by the
+                // same turns, so a stretch across the seam keeps its width.
+                let xs: Vec<f64> = pixels.iter().map(|p| p.0).filter(|x| x.is_finite()).collect();
+                if !xs.is_empty() {
+                    let mid = xs.iter().sum::<f64>() / xs.len() as f64;
+                    let shift = raster.wrap_col(mid) - mid;
+                    pixels.iter_mut().for_each(|p| p.0 += shift);
+                }
+                (pixels, (f64::from(raster.width), f64::from(raster.height)), wrap_width.is_some())
             }
             Heights::Tiles { zoom, .. } => {
                 let half = std::f64::consts::PI * MERCATOR_R;
                 let n = 256.0 * f64::from(1u32 << (*zoom).min(30));
                 let pixels = corners.iter().map(|m| ((m.x + half) / (2.0 * half) * n, (half - m.y) / (2.0 * half) * n)).collect();
-                (pixels, (n, n))
+                (pixels, (n, n), false)
             }
         };
         let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
@@ -164,7 +175,9 @@ impl Ground {
             return None;
         }
         let across = |a: f64, b: f64, size: f64| (b.min(size) - a.max(0.0)).max(0.0);
-        Some(across(x0, x1, w).max(across(y0, y1, h)))
+        // A whole turn's columns go on past either edge: no edge to clip at, one turn at most.
+        let x = if full_turn { (x1 - x0).clamp(0.0, w) } else { across(x0, x1, w) };
+        Some(x.max(across(y0, y1, h)))
     }
 
     /// Whether elevation tiles are still on their way (drawing again later shows more).
@@ -376,6 +389,12 @@ mod tests {
         let all = ground.cells_across(&[Coord::new(-1e8, 1e8), Coord::new(1e8, -1e8)]).unwrap();
         assert!(all <= 4.0 + 1e-9, "{all}");
         assert_eq!(ground.cells_across(&[]), None);
+        // Across the seam, the whole stretch: 135° to 225° (-135°) spans one cell, not the half
+        // cell short of the grid's edge; the same stretch a turn away likewise.
+        let seam = ground.cells_across(&[at(135.0, 30.0), at(225.0, 30.0)]).unwrap();
+        assert!((seam - 1.0).abs() < 1e-6, "{seam}");
+        let away = ground.cells_across(&[at(495.0, 30.0), at(585.0, 30.0)]).unwrap();
+        assert!((away - 1.0).abs() < 1e-6, "{away}");
         // Elevation tiles: their pixels at the zoom read; the whole world at zoom 2 is 1024.
         let tiles = Ground {
             heights: Heights::Tiles {
