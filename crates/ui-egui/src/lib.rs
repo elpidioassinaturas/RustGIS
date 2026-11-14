@@ -22,6 +22,7 @@ mod bookmarkpane;
 mod catalogsui;
 mod chrome;
 mod comets;
+mod completion;
 mod connectiontree;
 mod connectionui;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1138,6 +1139,12 @@ pub struct RustGisApp {
     /// bar (the touch interface, `rustgis-ui-touch`). `None` is the desktop interface. Dialogs
     /// and the Project menu's page are drawn either way.
     pub chrome: Option<Chrome>,
+    /// Whether the user wants the device's position shown: a shell that can report one (a
+    /// phone's) starts and stops its positioning by this, and fills in [`RustGisApp::position`].
+    pub locate: bool,
+    /// Where the device is, as the shell last reported it; `None` until it has, and again once
+    /// positioning is off. An interface draws it on the map and can capture at it.
+    pub position: Option<rustgis_engine::platform::Fix>,
     /// Watches linked local files for changes made outside RustGIS and offers Reload Data
     /// (the desktop app; see [`diskwatch`]). Off for tests, unless one turns it on (as `ui_shot`'s
     /// `watchFiles` does).
@@ -1405,6 +1412,8 @@ impl RustGisApp {
             reads: readjob::Reads::default(),
             reads_off_frame: false,
             chrome: None,
+            locate: false,
+            position: None,
             #[cfg(not(target_arch = "wasm32"))]
             watch_files: false,
             #[cfg(not(target_arch = "wasm32"))]
@@ -2498,6 +2507,11 @@ impl RustGisApp {
             if let Some(command) = archive {
                 return readjob::run(self, command, params);
             }
+            if params.get("table").is_some_and(|t| !t.is_null())
+                && let Some((command, _)) = rustgis_engine::cmd::edit::table_edit_in_background(id)
+            {
+                return readjob::run(self, command, params);
+            }
             // The topology check's work grows with the layers: on a thread of its own (#1291).
             if id == "topology.validate" {
                 let params = if params.is_null() { json!({}) } else { params };
@@ -2507,6 +2521,15 @@ impl RustGisApp {
             // it found said once it lands (Command Search shows no answer).
             if id == "source.syncState" {
                 return readjob::run_then(self, "source.syncState", params, Some(sync_state_said));
+            }
+            // Publishing hashes, reads and writes the whole file: on a thread of its own, with
+            // progress and Cancel, as an export is.
+            if id == "source.publish" {
+                let params = if params.is_null() { json!({}) } else { params };
+                // Refused before it starts (another export running, no record): said, as Command
+                // Search shows no answer.
+                let mark = self.session.notice_mark();
+                return exportjob::start(self, "source.publish", params).inspect_err(|e| self.command_failed(id, e, mark));
             }
             // Converting the labels of a layer read in place reads all of its source first, on a
             // thread of its own, whoever asks (a click, the assistant).
@@ -2750,6 +2773,11 @@ impl RustGisApp {
         if id == "stac.search"
             && !params.get("intersects").and_then(Value::as_str).is_some_and(|v| v.trim().eq_ignore_ascii_case("selection"))
         {
+            return None;
+        }
+        // An edit of a standalone table acts on the table, not the active layer: a step naming
+        // both would be refused when it runs again.
+        if id.starts_with("edit.") && params.get("table").is_some_and(|t| !t.is_null()) {
             return None;
         }
         let spec = self.session.registry.get(id).filter(|c| c.mutates && params.get("layer").is_none_or(Value::is_null)).copied()?;
@@ -4650,6 +4678,13 @@ impl RustGisApp {
                     {
                         embeddingsui::pick(self, d)?;
                     }
+                    return Ok(Value::Null);
+                }
+                // Add Field and Calculate Field from a standalone table's view act on that table.
+                if p.get("table").is_some_and(|t| !t.is_null()) {
+                    let i = self.session.table_index(p)?;
+                    let id = self.session.project.tables.get(i).map(|t| t.id).ok_or("no such table")?;
+                    self.dialogs.open_on_table(which, &self.session, id)?;
                     return Ok(Value::Null);
                 }
                 self.dialogs.open(which, &self.session)?;
