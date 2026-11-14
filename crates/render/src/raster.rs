@@ -693,7 +693,6 @@ struct Pass1<'a> {
 impl Pass1<'_> {
     /// Fills the band values (and hillshade, alpha, ambient and fill light and share of rock, when
     /// kept) of the screen rows from `py0` on, as many as `vals` holds.
-    #[allow(clippy::too_many_arguments)]
     fn rows(
         &self,
         py0: usize,
@@ -1262,8 +1261,17 @@ mod tests {
             let r = Raster::new("relief", 3, 3, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
             let mut style = RasterStyle::default_for(&r);
             let (azimuth, altitude) = (270.0, 45.0);
-            style.renderer =
-                RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth, altitude, z_factor: 1.0, shadow: 0.0, sky: 0.0, fill, rock: None };
+            style.renderer = RasterRenderer::ShadedRelief {
+                band: 0,
+                ramp: None,
+                azimuth,
+                altitude,
+                z_factor: 1.0,
+                shadow: 0.0,
+                sky: 0.0,
+                fill,
+                rock: None,
+            };
             style.resampling = Resampling::Nearest;
             let view = View {
                 width: 1.0,
@@ -1595,7 +1603,8 @@ mod tests {
         let data = [0.0, 0.0, 20.0, 60.0, 120.0, 200.0].repeat(3);
         let r = Raster::new("relief", 6, 3, vec![data], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
         let mut style = RasterStyle::default_for(&r);
-        style.renderer = RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth, altitude: 45.0, z_factor, shadow: 0.0, sky: 0.0, fill, rock };
+        style.renderer =
+            RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth, altitude: 45.0, z_factor, shadow: 0.0, sky: 0.0, fill, rock };
         style.resampling = resampling;
         let view = View {
             width: 600.0,

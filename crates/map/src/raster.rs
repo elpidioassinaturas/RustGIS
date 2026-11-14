@@ -1962,10 +1962,17 @@ impl<'a> Colorizer<'a> {
     }
 
     /// [`Colorizer::color`], with Shaded Relief's ambient light scaled by `ambient` (0–255, the
-    /// share of it the sky a cell sees leaves, see [`RasterRenderer::ShadedRelief`]'s `sky`), and
-    /// `fill` (0–255, a share of the colour) added for its fill light (its `fill`), and its colour moved
-    /// `rock` (0–255) of the way to its rock colour (its `rock`, see [`Rock::share`]).
-    pub fn color_lit(&self, vals: &[f32], hillshade: Option<u8>, ambient: Option<u8>, fill: Option<u8>, rock: Option<u8>) -> Option<[u8; 4]> {
+    /// share of it the sky a cell sees leaves, see [`RasterRenderer::ShadedRelief`]'s `sky`),
+    /// `fill` (0–255, a share of the colour) added for its fill light (its `fill`), and its colour
+    /// moved `rock` (0–255) of the way to its rock colour (its `rock`, see [`Rock::share`]).
+    pub fn color_lit(
+        &self,
+        vals: &[f32],
+        hillshade: Option<u8>,
+        ambient: Option<u8>,
+        fill: Option<u8>,
+        rock: Option<u8>,
+    ) -> Option<[u8; 4]> {
         // The renderer masks values as it samples them (they arrive as NaN); this is for other callers.
         let mask = &self.style.mask;
         if mask.is_empty() || !vals.iter().any(|v| mask.hides(*v)) {
@@ -2046,11 +2053,11 @@ fn horn(z: &[f64; 9], cell_x: f64, cell_y: f64) -> (f64, f64) {
 /// Hillshade (0–255) from a 3×3 window of elevations (row by row), Horn's method.
 pub fn hillshade(z: &[f64; 9], cell_x: f64, cell_y: f64, azimuth: f64, altitude: f64, z_factor: f64) -> u8 {
     let (dzdx, dzdy) = horn(z, cell_x, cell_y);
-    let slope = (z_factor * (dzdx * dzdx + dzdy * dzdy).sqrt()).atan();
+    let tilt = (z_factor * (dzdx * dzdx + dzdy * dzdy).sqrt()).atan();
     let aspect = if dzdx != 0.0 || dzdy != 0.0 { dzdy.atan2(-dzdx) } else { 0.0 };
     let zenith = (90.0 - altitude.clamp(0.0, 90.0)).to_radians();
     let az = (360.0 - azimuth + 90.0).rem_euclid(360.0).to_radians();
-    let v = zenith.cos() * slope.cos() + zenith.sin() * slope.sin() * (az - aspect).cos();
+    let v = zenith.cos() * tilt.cos() + zenith.sin() * tilt.sin() * (az - aspect).cos();
     (v.max(0.0) * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
