@@ -11351,6 +11351,18 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
     let mark = s.notice_mark();
     s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "water": {"layer": "represas"}})).unwrap();
     assert!(s.notices_since(mark).iter().all(|n| !n.text.starts_with("Water")), "{:?}", s.notices_since(mark));
+    // Deleting the level field takes the levels with it, said: the lakes go back to their shores.
+    s.run("map.terrain", &json!({"water": {"layer": "represas", "level": "nivel"}})).unwrap();
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": id, "field": "nivel"})).unwrap();
+    assert_eq!(s.map().view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.level.clone()), Some(None));
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("levels came from the deleted field nivel")), "{said:?}");
+    // Deleting another field leaves them, and says nothing of the water.
+    s.run("map.terrain", &json!({"water": {"layer": "represas"}})).unwrap();
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": id, "field": "nome"})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.starts_with("Water")), "{:?}", s.notices_since(mark));
     // A shore too long to read every half cell is said over tiles too (from its shape: no tile is
     // asked for): 30° a side, read at zoom 15's 4.8 m pixels, is past the budget.
     let sea = json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry":

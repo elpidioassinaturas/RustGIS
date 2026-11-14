@@ -14,8 +14,9 @@ use rustgis_tiles::cache;
 
 use super::{Ground, Heights};
 
-/// The most heights read along all the shores of a water layer for their levels: a longer shore
-/// is read at wider steps (a national coastline at 30 m would take millions).
+/// The most heights read along all the shores of a water layer for their levels, besides one at
+/// the start of each ring: a longer shore is read at wider steps (a national coastline at 30 m
+/// would take millions).
 const MAX_SHORE_SAMPLES: usize = 1 << 22;
 
 /// The most cells along each side of the grid that finds the lakes near a point.
@@ -137,16 +138,16 @@ impl Water {
     }
 
     /// The water of `polygons` (Web Mercator rings, and each one's level when given) over
-    /// `ground`, reading at most `budget` heights along the shores of those without a level.
+    /// `ground`, reading at most `budget` heights along the shores of those without a level, plus
+    /// one a ring.
     fn build(polygons: Vec<(Vec<Vec<Coord>>, Option<f64>)>, ground: &Ground, budget: usize) -> Water {
-        let perimeter: f64 =
-            polygons.iter().filter(|(_, given)| given.is_none()).flat_map(|(rings, _)| rings).map(|r| ring_length(r)).sum();
+        let (perimeter, unread) = shores(&polygons);
         let mut lakes = Vec::new();
-        let (mut unlevelled, mut coarse, mut missing) = (0, 0, false);
+        let (mut unlevelled, mut missing) = (0, false);
         let mut extent = Extent::EMPTY;
         // Half the ground's cell, or the shortest step that keeps every shore within the budget.
-        let least_step = perimeter / budget.max(1) as f64;
-        let half_cell = cell_size(ground).map(|c| c / 2.0);
+        let (step, wider) = shore_step(cell_size(ground).map(|c| c / 2.0), perimeter / budget.max(1) as f64);
+        let coarse = if wider { unread } else { 0 };
         for (rings, given) in polygons {
             let mut e = Extent::EMPTY;
             rings.iter().flatten().for_each(|c| e.expand(*c));
@@ -156,8 +157,7 @@ impl Water {
             let level = match given {
                 Some(level) => Some(level),
                 None => {
-                    let shore = shore_level(&rings, ground, half_cell, least_step);
-                    coarse += usize::from(shore.coarse);
+                    let shore = shore_level(&rings, ground, step);
                     missing |= shore.missing;
                     shore.low
                 }
@@ -215,52 +215,64 @@ fn cell_size(ground: &Ground) -> Option<f64> {
 }
 
 /// What a polygon's shore read: its lowest height (metres, before exaggeration; `None` when no
-/// height along it is known: off the DEM, tiles not read yet), and whether it was read at wider
-/// steps than half a cell (or with the cell unknown, two steps an edge), and whether a height along
-/// it was missing over elevation tiles (a tile on its way, or failed).
+/// height along it is known: off the DEM, tiles not read yet), whether a height along it was
+/// missing over elevation tiles (a tile on its way, or failed), and how many heights it read.
 struct Shore {
     low: Option<f64>,
-    coarse: bool,
     missing: bool,
+    #[cfg(test)]
+    read: usize,
 }
 
-/// The shore of a polygon's rings, read every `half_cell` (two steps an edge when the ground's
-/// cell isn't known), or every `least_step` when that is longer.
-fn shore_level(rings: &[Vec<Coord>], ground: &Ground, half_cell: Option<f64>, least_step: f64) -> Shore {
-    // Without the ground's cell, two steps an edge: said as a coarse read.
+/// The step shores are read at: half the ground's cell, or `least_step` (a water layer's whole
+/// shore over [`MAX_SHORE_SAMPLES`]) when that is longer or the cell isn't known; and whether
+/// that is wider than half a cell, so a shore's lowest point may lie between two steps.
+fn shore_step(half_cell: Option<f64>, least_step: f64) -> (f64, bool) {
+    match half_cell {
+        Some(h) if h >= least_step => (h, false),
+        _ => (least_step, true),
+    }
+}
+
+/// The shore of a polygon's rings, each walked every `step` from its first vertex, the step
+/// carried across its vertices: a ring reads its length over `step` heights, plus one, however
+/// many edges it has (one height alone when `step` isn't a positive length).
+fn shore_level(rings: &[Vec<Coord>], ground: &Ground, step: f64) -> Shore {
     let tiles = matches!(ground.heights, Heights::Tiles { .. });
-    let (mut low, mut coarse, mut missing) = (f64::INFINITY, half_cell.is_none(), false);
+    let step = if step.is_finite() && step > 0.0 { step } else { f64::INFINITY };
+    let (mut low, mut missing) = (f64::INFINITY, false);
+    #[cfg(test)]
+    let mut read = 0;
     for r in rings {
+        // How far along the next edge its first height lies.
+        let mut next = 0.0;
         for (a, b) in r.iter().zip(r.iter().cycle().skip(1)).take(r.len()) {
             let len = (b.x - a.x).hypot(b.y - a.y);
             if !len.is_finite() {
                 continue;
             }
-            let (n, wider) = edge_steps(len, half_cell, least_step);
-            coarse |= wider;
-            for k in 0..n as usize {
-                let t = k as f64 / n;
+            let mut d = next;
+            while d < len {
+                let t = d / len;
+                #[cfg(test)]
+                {
+                    read += 1;
+                }
                 match ground.raw_height(Coord::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)) {
                     Some(h) => low = low.min(h),
                     None => missing |= tiles,
                 }
+                d += step;
             }
+            next = d - len;
         }
     }
-    Shore { low: low.is_finite().then_some(low), coarse, missing }
-}
-
-/// The most heights read along one edge of a shore.
-const MAX_EDGE_SAMPLES: f64 = 1e6;
-
-/// The heights read along a shore's edge len long: one every half_cell (two when the ground's
-/// cell isn't known), or every least_step when that is longer; and whether that is fewer than
-/// half a cell asks.
-fn edge_steps(len: f64, half_cell: Option<f64>, least_step: f64) -> (f64, bool) {
-    let wanted = half_cell.map_or(2.0, |h| (len / h).ceil()).max(1.0);
-    let allowed = if least_step > 0.0 { (len / least_step).floor().max(1.0) } else { wanted };
-    let n = wanted.min(allowed).min(MAX_EDGE_SAMPLES);
-    (n, n < wanted)
+    Shore {
+        low: low.is_finite().then_some(low),
+        missing,
+        #[cfg(test)]
+        read,
+    }
 }
 
 fn ring_length(r: &[Coord]) -> f64 {
@@ -304,8 +316,14 @@ static LAST: Mutex<Vec<(Key, Arc<Water>, web_time::Instant)>> = Mutex::new(Vec::
 /// How many waters [`LAST`] keeps (maps drawn side by side, a layout's frames).
 const KEPT: usize = 4;
 
+/// Whether a water read at `read_at` is still used: always when nothing was missing, else until
+/// its `retry` has passed.
+fn still_good(water: &Water, read_at: web_time::Instant) -> bool {
+    water.retry.is_none_or(|r| read_at.elapsed() < r)
+}
+
 /// A water layer's polygons in Web Mercator, each part of a multipolygon on its own, with the
-/// level its row gives in the level field, when it does.
+/// level its row gives in the `level` field, when it does.
 fn polygons(layer: &rustgis_map::Layer, level: Option<&str>) -> Vec<(Vec<Vec<Coord>>, Option<f64>)> {
     let field = level.and_then(|f| layer.dataset.field_index(f));
     let mut polygons = Vec::new();
@@ -320,30 +338,28 @@ fn polygons(layer: &rustgis_map::Layer, level: Option<&str>) -> Vec<(Vec<Vec<Coo
     polygons
 }
 
-/// The water layer named by map's terrain, when it is a polygon layer there.
+/// The water layer named by `map`'s terrain, when it is a polygon layer there.
 fn water_layer(map: &Map) -> Option<(&rustgis_map::Layer, Option<&str>)> {
     let w = map.view.terrain.as_ref()?.water.as_ref()?;
     let layer = map.layer_by_name(&w.layer).filter(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon)?;
     Some((layer, w.level.as_deref()))
 }
 
-/// How many polygons of map's water layer [`Water::build`] would read at wider steps than half
-/// ground's cell, worked out from their shapes alone: no height is read (nor a tile asked for).
+/// How many polygons of `map`'s water layer [`Water::build`] reads at wider steps than half
+/// `ground`'s cell, worked out from their shapes alone: no height is read (nor a tile asked for).
 pub(super) fn coarse_shores(map: &Map, ground: &Ground) -> usize {
     let Some((layer, level)) = water_layer(map) else { return 0 };
     let polygons = polygons(layer, level);
-    let unread = || polygons.iter().filter(|(_, given)| given.is_none());
-    let perimeter: f64 = unread().flat_map(|(rings, _)| rings).map(|r| ring_length(r)).sum();
-    let least_step = perimeter / MAX_SHORE_SAMPLES as f64;
-    let half_cell = cell_size(ground).map(|c| c / 2.0);
-    let edges = |r: &Vec<Coord>| {
-        r.iter().zip(r.iter().cycle().skip(1)).take(r.len()).map(|(a, b)| (b.x - a.x).hypot(b.y - a.y)).collect::<Vec<_>>()
-    };
-    unread()
-        .filter(|(rings, _)| {
-            half_cell.is_none() || rings.iter().flat_map(edges).filter(|l| l.is_finite()).any(|l| edge_steps(l, half_cell, least_step).1)
-        })
-        .count()
+    let (perimeter, unread) = shores(&polygons);
+    let (_, wider) = shore_step(cell_size(ground).map(|c| c / 2.0), perimeter / MAX_SHORE_SAMPLES as f64);
+    if wider { unread } else { 0 }
+}
+
+/// The length of the shores read for levels (those of polygons with no level given), and how
+/// many polygons they are.
+fn shores(polygons: &[(Vec<Vec<Coord>>, Option<f64>)]) -> (f64, usize) {
+    let unread = polygons.iter().filter(|(_, given)| given.is_none());
+    (unread.clone().flat_map(|(rings, _)| rings).map(|r| ring_length(r)).sum(), unread.count())
 }
 
 /// The water of `map`'s terrain over `ground` (its heights, before the water is set), when it
@@ -360,7 +376,7 @@ pub(super) fn of(map: &Map, ground: &Ground) -> Option<Arc<Water>> {
         },
     };
     if let Ok(last) = LAST.lock()
-        && let Some((_, water, _)) = last.iter().find(|(k, w, at)| k.same(&key) && w.retry.is_none_or(|r| at.elapsed() < r))
+        && let Some((_, water, _)) = last.iter().find(|(k, w, at)| k.same(&key) && still_good(w, *at))
     {
         return Some(water.clone());
     }
@@ -454,15 +470,85 @@ mod tests {
         // A budget too small for half a cell along it: read at wider steps, and counted.
         let w = Water::build(vec![(band, None)], &g, 1000);
         assert_eq!(w.coarse, 1);
-        // Without the ground's cell, two steps an edge: counted as a coarse read too.
-        let lake = vec![square(at(0.2, -0.2).x, at(0.2, -0.2).y, 30_000.0)];
-        assert!(shore_level(&lake, &g, None, 0.0).coarse);
-        assert!(!shore_level(&lake, &g, cell_size(&g).map(|c| c / 2.0), 0.0).coarse);
+        // Without the ground's cell, the budget's step: counted as a coarse read too.
+        assert!(shore_step(None, 1.0).1);
+        assert!(!shore_step(cell_size(&g).map(|c| c / 2.0), 0.0).1);
         // Over a DEM no tile is missing: the read is kept.
         assert_eq!(w.retry, None);
         // A level given reads no shore at all.
         let w = Water::build(vec![(vec![square(0.0, 0.0, 1.0)], Some(5.0))], &g, 1);
         assert_eq!((w.coarse, w.unlevelled), (0, 0));
+    }
+
+    #[test]
+    fn the_shore_budget_holds_however_many_edges_a_shore_has() {
+        let at = |lon, lat| lonlat_to_merc(Coord::new(lon, lat));
+        let (m, camera) = hill_with_water(None);
+        let g = Ground::of(&m, &camera).unwrap();
+        // A lake on the hill with 20,000 edges (a zigzag shore), read with a budget of 1000.
+        let mut ring: Vec<Coord> =
+            (0..20_000).map(|i| at(0.2 + 0.3 * f64::from(i) / 20_000.0, if i % 2 == 0 { 0.0 } else { 0.001 })).collect();
+        ring.push(at(0.5, -0.2));
+        ring.push(at(0.2, -0.2));
+        let rings = vec![ring];
+        let perimeter: f64 = rings.iter().map(|r| ring_length(r)).sum();
+        let (step, wider) = shore_step(cell_size(&g).map(|c| c / 2.0), perimeter / 1000.0);
+        assert!(wider);
+        let shore = shore_level(&rings, &g, step);
+        assert!(shore.read <= 1000 + 1, "{} heights for a budget of 1000", shore.read);
+        assert!(shore.low.is_some());
+        // Within the budget, half a cell: about the shore's length over it.
+        let half = cell_size(&g).unwrap() / 2.0;
+        let lake = vec![square(at(0.2, -0.2).x, at(0.2, -0.2).y, 30_000.0)];
+        let read = shore_level(&lake, &g, half).read as f64;
+        assert!((read - 120_000.0 / half).abs() <= 2.0, "{read}");
+    }
+
+    #[test]
+    fn a_failed_shore_tile_is_asked_again_after_the_tile_caches_wait_not_each_frame() {
+        // Elevation tiles at zoom 0 whose one tile failed: every height along the shores is
+        // missing, and nothing is on its way.
+        let (mut m, _) = hill_with_water(None);
+        m.view.terrain.as_mut().unwrap().source = rustgis_map::view::TerrainSource::Tiles {
+            url: "https://tiles.invalid/{z}/{x}/{y}.png".into(),
+            encoding: TerrainEncoding::Terrarium,
+        };
+        let read = std::collections::HashMap::from([(rustgis_tiles::template::TileId { z: 0, x: 0, y: 0 }, None)]);
+        let ground = Ground {
+            heights: Heights::Tiles {
+                url: "https://tiles.invalid/{z}/{x}/{y}.png".into(),
+                encoding: TerrainEncoding::Terrarium,
+                zoom: 0,
+                read: std::cell::RefCell::new(read),
+                pending: std::cell::RefCell::new(false),
+                waiting: std::cell::RefCell::new(std::collections::HashSet::new()),
+            },
+            exaggeration: 1.0,
+            body: 1.0,
+            water: None,
+        };
+        let water = of(&m, &ground).unwrap();
+        assert!(!ground.pending());
+        assert_eq!(water.retry, Some(cache::RETRY), "a failed tile: asked again after the cache's wait");
+        // Frames drawn within that wait take this read (no shore is read again); one after it
+        // reads again, once the tile cache may ask for the tile again.
+        let now = web_time::Instant::now();
+        assert!(still_good(&water, now));
+        assert!(still_good(&water, now.checked_sub(cache::RETRY / 2).unwrap_or(now)));
+        if let Some(long_ago) = now.checked_sub(cache::RETRY + web_time::Duration::from_secs(1)) {
+            assert!(!still_good(&water, long_ago));
+        }
+        // A tile still on its way: read again soon.
+        *ground_pending(&ground).unwrap().borrow_mut() = true;
+        let soon = Water::build(polygons(water_layer(&m).unwrap().0, None), &ground, MAX_SHORE_SAMPLES);
+        assert_eq!(soon.retry, Some(RETRY_MISSING));
+    }
+
+    fn ground_pending(g: &Ground) -> Option<&std::cell::RefCell<bool>> {
+        match &g.heights {
+            Heights::Tiles { pending, .. } => Some(pending),
+            Heights::Raster { .. } => None,
+        }
     }
 
     #[test]
