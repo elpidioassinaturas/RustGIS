@@ -63,7 +63,6 @@ tiff = "0.11"
 weezl = "0.2"
 # The tests' Zstandard-compressed GeoTIFFs (the version the tiff crate decodes with).
 zstd = { version = "0.14", default-features = false }
-proj4rs = { version = "0.3", default-features = false }
 crs-definitions = { version = "0.6", default-features = false, features = ["proj4"] }
 # Coordinate systems and transformations: EPSG, ESRI and IAU tables, datum shifts and grids, in pure
 # Rust (opengeos/RustGIS#2032). From opengeos/terrio until a release after terrio-crs 0.2.3 carries
