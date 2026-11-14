@@ -1176,7 +1176,7 @@ impl Rock {
     }
 }
 
-fn is_no_shadow(v: &f64) -> bool {
+fn is_no_light(v: &f64) -> bool {
     *v == 0.0
 }
 
@@ -1382,18 +1382,22 @@ pub enum RasterRenderer {
     /// Hillshade, optionally tinted by elevation. `shadow` (0 to 1) is how dark the shadows the
     /// terrain casts are drawn (see [`crate::shadow`]); 0, the default, casts none. `sky` (0 to 1)
     /// is how much the share of the sky each cell sees scales its ambient light
-    /// ([`crate::shadow::sky`]); 0, the default, leaves it whole. `rock` tints steep slopes toward
-    /// a rock colour before the light shades them (see [`Rock`]); none, the default, keeps the ramp.
+    /// ([`crate::shadow::sky`]); 0, the default, leaves it whole. `fill` (0 to 1) is a fill light
+    /// from the side opposite the sun, 55° up, that lightens only the slopes turned toward it; 0,
+    /// the default, has none. `rock` tints steep slopes toward a rock colour before the lights
+    /// shade them (see [`Rock`]); none, the default, keeps the ramp.
     ShadedRelief {
         band: usize,
         ramp: Option<Ramp>,
         azimuth: f64,
         altitude: f64,
         z_factor: f64,
-        #[serde(default, skip_serializing_if = "is_no_shadow")]
+        #[serde(default, skip_serializing_if = "is_no_light")]
         shadow: f64,
-        #[serde(default, skip_serializing_if = "is_no_shadow")]
+        #[serde(default, skip_serializing_if = "is_no_light")]
         sky: f64,
+        #[serde(default, skip_serializing_if = "is_no_light")]
+        fill: f64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rock: Option<Rock>,
     },
@@ -1954,17 +1958,18 @@ impl<'a> Colorizer<'a> {
     /// The colour of a pixel from its renderer band values (`NaN` = no data), or `None` for
     /// transparent. `hillshade` (0–255) is used by Shaded Relief.
     pub fn color(&self, vals: &[f32], hillshade: Option<u8>) -> Option<[u8; 4]> {
-        self.color_lit(vals, hillshade, None, None)
+        self.color_lit(vals, hillshade, None, None, None)
     }
 
     /// [`Colorizer::color`], with Shaded Relief's ambient light scaled by `ambient` (0–255, the
     /// share of it the sky a cell sees leaves, see [`RasterRenderer::ShadedRelief`]'s `sky`), and
-    /// its colour moved `rock` (0–255) of the way to its rock colour (its `rock`, see [`Rock::share`]).
-    pub fn color_lit(&self, vals: &[f32], hillshade: Option<u8>, ambient: Option<u8>, rock: Option<u8>) -> Option<[u8; 4]> {
+    /// `fill` (0–255, a share of the colour) added for its fill light (its `fill`), and its colour moved
+    /// `rock` (0–255) of the way to its rock colour (its `rock`, see [`Rock::share`]).
+    pub fn color_lit(&self, vals: &[f32], hillshade: Option<u8>, ambient: Option<u8>, fill: Option<u8>, rock: Option<u8>) -> Option<[u8; 4]> {
         // The renderer masks values as it samples them (they arrive as NaN); this is for other callers.
         let mask = &self.style.mask;
         if mask.is_empty() || !vals.iter().any(|v| mask.hides(*v)) {
-            return self.paint(vals, hillshade, ambient, rock);
+            return self.paint(vals, hillshade, ambient, fill, rock);
         }
         // Masked values are no data. The renderer bands are at most three.
         let mut kept = [f32::NAN; 3];
@@ -1973,10 +1978,10 @@ impl<'a> Colorizer<'a> {
                 *k = *v;
             }
         }
-        self.paint(kept.get(..vals.len().min(3)).unwrap_or(&kept), hillshade, ambient, rock)
+        self.paint(kept.get(..vals.len().min(3)).unwrap_or(&kept), hillshade, ambient, fill, rock)
     }
 
-    fn paint(&self, vals: &[f32], hillshade: Option<u8>, ambient: Option<u8>, rock: Option<u8>) -> Option<[u8; 4]> {
+    fn paint(&self, vals: &[f32], hillshade: Option<u8>, ambient: Option<u8>, fill: Option<u8>, rock: Option<u8>) -> Option<[u8; 4]> {
         let v0 = *vals.first()?;
         let c = match &self.style.renderer {
             RasterRenderer::Rgb { .. } => {
@@ -2012,9 +2017,10 @@ impl<'a> Colorizer<'a> {
                     _ => base,
                 };
                 // Multiply the tint by the hillshade, keeping some ambient light (less of it where
-                // the terrain hides part of the sky).
+                // the terrain hides part of the sky), and adding the fill light on its own.
                 let a = 0.25 * ambient.map_or(1.0, |a| f64::from(a) / 255.0);
-                let m = |c: u8| (c as f64 * (a + 0.75 * h)).round().clamp(0.0, 255.0) as u8;
+                let f = fill.map_or(0.0, |f| f64::from(f) / 255.0);
+                let m = |c: u8| (c as f64 * (a + 0.75 * h + f)).round().clamp(0.0, 255.0) as u8;
                 [m(base[0]), m(base[1]), m(base[2]), 255]
             }
         };
@@ -2345,7 +2351,7 @@ mod tests {
 
     /// A Shaded Relief without a ramp or rock, lit from `azimuth` and `altitude`.
     fn grey_relief(azimuth: f64, altitude: f64, z_factor: f64, shadow: f64, sky: f64) -> RasterRenderer {
-        RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth, altitude, z_factor, shadow, sky, rock: None }
+        RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth, altitude, z_factor, shadow, sky, fill: 0.0, rock: None }
     }
 
     /// The legend names a class as the file does (#889), and gives the value of one it doesn't.
@@ -2861,26 +2867,33 @@ mod tests {
             z_factor: 1.0,
             shadow: 0.0,
             sky: 0.0,
+            fill: 0.0,
             rock,
         };
         let (mut rocky, mut plain) = (RasterStyle::default_for(&r), RasterStyle::default_for(&r));
         (rocky.renderer, plain.renderer) = (relief(Some(rock)), relief(None));
         let (with, without) = (Colorizer::new(&rocky, &r, None), Colorizer::new(&plain, &r, None));
         for (v, h) in [(10.0, 0), (50.0, 128), (90.0, 255)] {
-            let plain = without.color_lit(&[v], Some(h), None, None);
-            assert_eq!(with.color_lit(&[v], Some(h), None, None), plain, "no share of rock: the ramp");
-            assert_eq!(with.color_lit(&[v], Some(h), None, Some(0)), plain, "flat ground: the ramp");
-            assert_eq!(without.color_lit(&[v], Some(h), None, Some(255)), plain, "no rock set: the ramp");
+            let plain = without.color_lit(&[v], Some(h), None, None, None);
+            assert_eq!(with.color_lit(&[v], Some(h), None, None, None), plain, "no share of rock: the ramp");
+            assert_eq!(with.color_lit(&[v], Some(h), None, None, Some(0)), plain, "flat ground: the ramp");
+            assert_eq!(without.color_lit(&[v], Some(h), None, None, Some(255)), plain, "no rock set: the ramp");
             // All rock: the rock colour, lit as the ramp is (a quarter ambient, the rest the sun).
             let lit = |c: u8| (f64::from(c) * (0.25 + 0.75 * f64::from(h) / 255.0)).round() as u8;
-            assert_eq!(with.color_lit(&[v], Some(h), None, Some(255)), Some([lit(200), lit(100), lit(50), 255]));
+            assert_eq!(with.color_lit(&[v], Some(h), None, None, Some(255)), Some([lit(200), lit(100), lit(50), 255]));
             // Half way: half way between the two colours.
-            let half = with.color_lit(&[v], Some(255), None, Some(128)).unwrap();
-            let ramp = without.color_lit(&[v], Some(255), None, None).unwrap();
+            let half = with.color_lit(&[v], Some(255), None, None, Some(128)).unwrap();
+            let ramp = without.color_lit(&[v], Some(255), None, None, None).unwrap();
             for (k, end) in [200u8, 100, 50].into_iter().enumerate() {
                 let mid = (f64::from(ramp[k]) + f64::from(end)) / 2.0;
                 assert!((f64::from(half[k]) - mid).abs() <= 1.5, "{v}: channel {k} {} not near {mid}", half[k]);
             }
+            // With the sky and the fill light (#1912) too: the rock colour first, then every light
+            // shades it, as they shade the ramp.
+            let all = |c: u8| (f64::from(c) * (0.25 * 128.0 / 255.0 + 0.75 * f64::from(h) / 255.0 + 40.0 / 255.0)).round() as u8;
+            assert_eq!(with.color_lit(&[v], Some(h), Some(128), Some(40), Some(255)), Some([all(200), all(100), all(50), 255]));
+            let filled = without.color_lit(&[v], Some(h), Some(128), Some(40), None);
+            assert_eq!(with.color_lit(&[v], Some(h), Some(128), Some(40), Some(0)), filled, "flat ground: the filled ramp");
         }
 
         // Saved only when set, and read back as it was.

@@ -28,6 +28,9 @@ mod remembered_database_packets;
 #[path = "tests/service_logins.rs"]
 mod service_logins;
 
+#[path = "tests/scopes_and_redaction.rs"]
+mod scopes_and_redaction;
+
 /// Keeps tests away from the user's installed plugins.
 fn isolate_plugins() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -4323,6 +4326,39 @@ fn shaded_relief_keeps_its_sky_visibility() {
     s.notices.clear();
     assert!(crate::cmd::share::map_png(&mut s, Some(300.0), Some(200.0), None).unwrap().len() > 1000);
     assert!(s.notices.iter().all(|n| !n.text.contains("sky")), "{:?}", s.notices);
+}
+
+/// Shaded Relief's fill light is set, clamped, kept when left out, saved with the project only
+/// when there is some, and back when the project is opened again.
+#[test]
+fn shaded_relief_keeps_its_fill_light() {
+    let mut s = with_raster();
+    let fill = |s: &Session| match s.map().layers.iter().find_map(|l| l.raster.as_ref()).map(|r| &r.style.renderer) {
+        Some(rustgis_map::RasterRenderer::ShadedRelief { fill, .. }) => *fill,
+        other => panic!("{other:?}"),
+    };
+    let fills_saved = |s: &mut Session| s.project.saved_text(None).unwrap().0.matches("\"fill\"").count();
+    let before = fills_saved(&mut s);
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!((fill(&s), fills_saved(&mut s)), (0.0, before), "none, and not saved");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "fill": 0.3})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 200})).unwrap();
+    assert_eq!(fill(&s), 0.3, "left out, kept");
+    assert_eq!(fills_saved(&mut s), before + 1);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "fill": -2})).unwrap();
+    assert_eq!(fill(&s), 0.0);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "fill": 7})).unwrap();
+    assert_eq!(fill(&s), 1.0);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "fill": 0.45})).unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("rustgis-fill-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("fill.rgis");
+    s.run("project.saveAs", &json!({"path": path.display().to_string()})).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path": path.display().to_string()})).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(fill(&t), 0.45, "back when opened");
 }
 
 /// Shaded Relief's rock on steep slopes (#1913): an object turns it on, its missing keys from the
@@ -28388,6 +28424,15 @@ fn dxf_drawings_by_path_and_upload() {
     assert_eq!(names, ["site lines", "site points"], "{r}");
     let e = s.map().layer_by_name("site lines").unwrap().extent();
     assert!((e.min_x - 15.0).abs() < 1e-6 && (e.min_y - 42.0).abs() < 0.01, "{e:?}");
+    // The desktop read-ahead consumes the same options and lands the parsed layers.
+    let mut ahead_session = Session::new(Project::default());
+    let params = json!({"path": path, "crs": "EPSG:32633", "layer": "roads", "blocks": false});
+    let ahead = crate::cmd::reads::read_ahead(&mut ahead_session, "layer.addData", &params).unwrap();
+    assert!(ahead.reads());
+    let read = ahead.run(&rustgis_analysis::control::Control::new()).unwrap();
+    crate::cmd::reads::read_land(&mut ahead_session, read).unwrap();
+    assert_eq!(ahead_session.map().layers.len(), 1);
+    assert_eq!(ahead_session.map().layers[0].extent(), e);
     // One DXF layer, by its name.
     let mut t = Session::new(Project::default());
     t.run("layer.addData", &json!({"path": path, "layer": "wells", "crs": "EPSG:32633"})).unwrap();
@@ -28402,6 +28447,20 @@ fn dxf_drawings_by_path_and_upload() {
     assert_eq!(u.map().layers.len(), 2);
     assert!(u.notices.iter().any(|n| n.text.contains("doesn't say its coordinate system")), "{:?}", u.notices);
     assert!(u.run("layer.addDataBytes", &json!({"fileName": "bad.dxf", "data": "AAAA"})).is_err());
+    // Blocks (图块) are drawn unless "blocks" says not to: what is left out is counted.
+    let blocked = "  0\nSECTION\n  2\nBLOCKS\n  0\nBLOCK\n  2\nB\n  0\nPOINT\n 10\n1\n 20\n1\n  0\nENDBLK\n  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n  0\nINSERT\n  2\nB\n 10\n5\n 20\n5\n  0\nLINE\n  8\nRoads\n 10\n0\n 20\n0\n 11\n1\n 21\n0\n  0\nENDSEC\n  0\nEOF\n";
+    let mut v = Session::new(Project::default());
+    v.run("layer.addDataText", &json!({"fileName": "blocks.dxf", "text": blocked})).unwrap();
+    assert_eq!(v.map().layers.len(), 2, "the block's point and the line");
+    let mut w = Session::new(Project::default());
+    w.run("layer.addDataText", &json!({"fileName": "blocks.dxf", "text": blocked, "blocks": false})).unwrap();
+    let names: Vec<String> = w.map().layers.iter().map(|l| l.name.clone()).collect();
+    assert_eq!(names, ["blocks lines"], "the line only");
+    assert!(w.notices.iter().any(|n| n.text.contains("1 inserted blocks")), "{:?}", w.notices);
+    // The text adapter must reject oversized drawings before parsing their records.
+    let oversized = " ".repeat(rustgis_data::io::MAX_BYTES as usize + 1);
+    let error = s.run("layer.addDataText", &json!({"fileName": "large.dxf", "text": oversized})).unwrap_err();
+    assert!(error.contains("too large"), "{error}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -45885,12 +45944,19 @@ fn a_layer_publishes_its_edits_to_its_shapefile() {
     let e = s.run("source.publish", &json!({"layer": id})).unwrap_err();
     assert!(e.contains("towns.dbf changed since the layer was read") && e.contains("nothing was written"), "{e}");
     assert_eq!(dbf(), theirs);
-    // GeoJSON isn't published yet.
+    // The same command and sync record work for a GeoJSON source.
     let geojson = dir.path().join("towns.geojson");
     s.run("share.exportLayer", &json!({"layer": "Cities", "path": geojson})).unwrap();
     s.run("layer.addData", &json!({"path": geojson, "name": "towns.geojson"})).unwrap();
-    let e = s.run("source.publish", &json!({"layer": "towns.geojson"})).unwrap_err();
-    assert!(e.contains("only a layer read from a Shapefile"), "{e}");
+    s.run("edit.setValue", &json!({"layer": "towns.geojson", "row": 0, "field": "name", "value": "Published"})).unwrap();
+    let out = s.run("source.publish", &json!({"layer": "towns.geojson"})).unwrap();
+    assert_eq!(out["published"], true);
+    let (read, _) = rustgis_data::io::read_path(&geojson).unwrap();
+    let name = read.fields.iter().position(|f| f.name == "name").unwrap();
+    assert_eq!(read.features.first().unwrap().attrs[name], rustgis_data::Value::Text("Published".into()));
+    assert_eq!(s.run("source.syncState", &json!({"layer": "towns.geojson"})).unwrap()["state"], "inSync");
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.run("source.syncState", &json!({"layer": "towns.geojson"})).unwrap()["state"], "edited");
 }
 
 /// A layer read whole from a Shapefile or GeoJSON file remembers the files and its rows as read

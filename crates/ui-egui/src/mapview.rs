@@ -5127,6 +5127,7 @@ mod tests {
             z_factor: 1.0,
             shadow,
             sky: 0.0,
+            fill: 0.0,
             rock: None,
         };
         let set = |map: &mut Map, shadow: f64, visible: bool| {

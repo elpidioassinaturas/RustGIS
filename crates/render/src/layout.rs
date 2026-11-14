@@ -3681,6 +3681,7 @@ mod tests {
             z_factor: 1.0,
             shadow,
             sky: 0.0,
+            fill: 0.0,
             rock: None,
         };
         for shadow in [0.0, 1.0] {
@@ -3731,6 +3732,7 @@ mod tests {
                 z_factor: 1.0,
                 shadow: 1.0,
                 sky: 0.0,
+                fill: 0.0,
                 rock: None,
             };
             let mut m = Map::new(name.clone());

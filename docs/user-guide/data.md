@@ -44,6 +44,10 @@ double-clicked in the Browser: **Choose Layers** lists them, all ticked, with **
 **Select None** and a filter for a long list. Turn **Ask Which Layers to Add** off in the Add Data
 menu to add every layer, as before. Scripts pick one with `layer.addData`'s `"layer"`;
 `info.fileLayers` lists them.
+A DXF drawing opens **Import DXF** when it is picked, dropped or double-clicked: it asks for the
+coordinate system the drawing's coordinates are in (the map's, to start with; blank keeps them as
+they are) and whether its blocks (图块) are drawn. Drawings dropped together ask one after the
+other, so each keeps its own answers.
 A KML, KMZ, GPX, OpenStreetMap, DXF, LandXML or GeoRSS file, a zip of Shapefiles or a File
 Geodatabase that RustGIS reads itself, with layers of several geometry types, adds its polygons
 first and its points last, so its points are drawn on top, and a KML's ground overlays go under
@@ -1252,7 +1256,9 @@ Exported to a file, a cloud-optimised one is written tile by tile, never held wh
 browser builds it in memory to download it).
 GeoTIFFs may be regular or cloud-optimised: grey, RGB(A), palette (coloured by the file's colour
 table, as land cover such as the NLCD is) or multiband, of any pixel type, tiled or striped, and
-compressed with Deflate, LZW, PackBits, JPEG or Zstandard. JPEG-compressed YCbCr images are shown
+compressed with Deflate, LZW, PackBits, JPEG, Zstandard or LERC (alone, or wrapped in Deflate or
+Zstandard, as GDAL writes it; samples LERC marks invalid are no-data, and an alpha GDAL kept as
+LERC's mask is put back). JPEG-compressed YCbCr images are shown
 as RGB; other YCbCr and CMYK images aren't read. A rotated or skewed image is resampled to a
 north-up grid as it is read. The coordinate system is an EPSG code,
 or the file's own projection described in its GeoKeys (Albers, Lambert conformal conic, transverse
@@ -1324,22 +1330,32 @@ exports, and said when it can't be drawn (in the browser over 500,000 cells, or 
 GeoTIFF read in place) as cast shadows are. Terrain outside the raster, or farther than 100 cells,
 hides none of its sky.
 
+**Fill light**, on a Shaded Relief layer (`raster.symbology` `"fill"`, 0 to 1), opens the slopes
+turned away from the sun without lifting the rest of the map: a second, weaker light from the
+opposite side (the sun's azimuth plus 180°), 55° up, adds `fill × max(0, L − sin 55°)` of the
+colour to each cell, where `L` is how squarely the cell faces that light (the same slopes as the
+hillshade). Flat ground gets exactly `sin 55°` of it and so gains nothing, nor does a slope turned
+to the sun; the more a slope turns toward the fill, the more it gains, up to 0.18 of its colour
+with a fill of 1. Nothing shadows it, and it is drawn at once (nothing to work out). 0, the
+default, draws the relief as before, and it is saved with the project only when it isn't 0.
+
 **Rock on steep slopes**, on a Shaded Relief layer (`raster.symbology`
 `"rock": {"from": 25, "to": 40, "color": "#B2ACA4"}`), tints steep ground toward a rock colour,
 so cliffs and scarps stand out from the gentle slopes of the same height. Below **From** degrees
 of slope the ramp's colour is kept, above **To** the rock colour is used, and between them the two
-are blended on a smooth step. The light (hillshade, cast shadows and sky visibility) then shades
-that colour as it shades the ramp. The slope is the ground's own, worked out from the same 3 × 3
-window as the hillshade but without the Z factor, so 35° means 35° whatever the exaggeration
-(metres at the cell's latitude for a geographic raster). A 30 m DEM averages a cliff with its
-foot, so its walls come out gentler than they are: 25° to 40° suits it, and a finer DEM can start
-higher. Missing keys keep the current rock's (or those defaults), and `"rock": false` removes it;
-it is off by default and saved with the project only when set.
+are blended on a smooth step. The lights (hillshade, cast shadows, sky visibility and fill light)
+then shade that colour as they shade the ramp. The slope is the ground's own, worked out from the
+same 3 × 3 window as the hillshade but without the Z factor, so 35° means 35° whatever the
+exaggeration (metres at the cell's latitude for a geographic raster). A 30 m DEM averages a cliff
+with its foot, so its walls come out gentler than they are: 25° to 40° suits it, and a finer DEM
+can start higher. Missing keys keep the current rock's (or those defaults), and `"rock": false`
+removes it; it is off by default and saved with the project only when set.
 
-With **Resampling** set to bilinear, a Shaded Relief layer's light (its hillshade, cast shadows and
-sky visibility) and its rock tint are blended between the cells' centres, as its values are, so a cell drawn over many
-pixels shades smoothly instead of in squares; nearest keeps one light per cell, as before. A cell
-with no data, or masked, is left out of the blend, so it doesn't darken the relief next to it.
+With **Resampling** set to bilinear, a Shaded Relief layer's light (its hillshade, cast shadows,
+sky visibility and fill light) and its rock tint are blended between the cells' centres, as its
+values are, so a cell drawn over many pixels shades smoothly instead of in squares; nearest keeps
+one light per cell, as before. A cell with no data, or masked, is left out of the blend, so it
+doesn't darken the relief next to it.
 
 **Masking**, at the foot of the Symbology pane (`raster.mask`), hides pixel values from view without
 changing the data: values to draw as no data (a background of 0 or −9999 the file doesn't flag, QA

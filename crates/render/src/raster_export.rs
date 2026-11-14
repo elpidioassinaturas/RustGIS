@@ -198,6 +198,7 @@ mod tests {
             z_factor: 1.0,
             shadow: 1.0,
             sky: 0.0,
+            fill: 0.0,
             rock: None,
         };
         let e = export(&layer, 2, 2, 1.0).err().unwrap_or_else(|| panic!("an archive without its shadows"));
@@ -230,6 +231,7 @@ mod tests {
             z_factor: 1.0,
             shadow: 1.0,
             sky: 0.0,
+            fill: 0.0,
             rock: None,
         };
         let _cancelled = rustgis_data::progress::install(Some(std::sync::Arc::new(Cancelled)));
