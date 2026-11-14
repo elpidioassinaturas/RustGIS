@@ -92,7 +92,7 @@ pub(crate) fn edges(poly: &[Clipped], screen: &[(f64, f64)], depth: f64, out: &m
         if common == 0 {
             continue;
         }
-        let side = common.isolate_lowest_one();
+        let side = 1u8 << common.trailing_zeros();
         let forward = match side {
             SOUTH => q.1.x > a.1.x,
             EAST => q.1.y > a.1.y,
