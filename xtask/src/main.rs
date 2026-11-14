@@ -1,4 +1,4 @@
-//! `cargo xtask ci | layers | notices [--check] | web-pwa <dir>`
+//! `cargo xtask ci | layers | notices [--check] | schema [--check] | web-pwa <dir>`
 //!
 //! - `layers`: enforces the crate layering (nothing below L6 may depend on egui/eframe/rfd).
 //! - `ci`: fmt check, clippy -D warnings, tests and the layer check.
@@ -145,6 +145,16 @@ fn web_pwa(dir: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Writes the project file's JSON Schema from the types it is saved from (`schema/`), or with
+/// `check` fails when the committed one is out of date or a fixture project doesn't open.
+fn schema(check: bool) -> Result<(), String> {
+    let mut args = vec!["run", "-q", "-p", "rustgis-engine", "--features", "schema", "--example", "project_schema"];
+    if check {
+        args.extend(["--", "--check"]);
+    }
+    cargo(&args)
+}
+
 fn main() -> ExitCode {
     let task = std::env::args().nth(1).unwrap_or_default();
     let r = match task.as_str() {
@@ -152,7 +162,8 @@ fn main() -> ExitCode {
         "ci" => cargo(&["fmt", "--all", "--check"])
             .and_then(|_| cargo(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))
             .and_then(|_| cargo(&["test", "--workspace", "-q"]))
-            .and_then(|_| layers()),
+            .and_then(|_| layers())
+            .and_then(|_| schema(true)),
         "notices" => {
             let check = match std::env::args().nth(2).as_deref() {
                 None => false,
@@ -170,8 +181,13 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "schema" => match std::env::args().nth(2).as_deref() {
+            None => schema(false),
+            Some("--check") => schema(true),
+            Some(other) => Err(format!("unknown argument {other}: usage: cargo xtask schema [--check]")),
+        },
         "web-pwa" => web_pwa(std::env::args().nth(2)),
-        _ => Err("usage: cargo xtask ci | layers | notices [--check] | web-pwa <dir>".into()),
+        _ => Err("usage: cargo xtask ci | layers | notices [--check] | schema [--check] | web-pwa <dir>".into()),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,

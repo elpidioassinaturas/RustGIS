@@ -233,6 +233,35 @@ impl<'de> Deserialize<'de> for Date {
     }
 }
 
+/// A date is saved as its ISO 8601 text (`2026-03-05`), from year 1 to 9999.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for Date {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Date".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A calendar day as ISO 8601 text (YYYY-MM-DD), years 1 to 9999.",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        })
+    }
+}
+
+/// A date-time is saved as its ISO 8601 text, with its offset when it has one.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for DateTime {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DateTime".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A date and time as ISO 8601 text, years 1 to 9999, with its offset (Z, +02:00) when it has one, without one when it has none."
+        })
+    }
+}
+
 impl Serialize for DateTime {
     /// As its ISO 8601 text, with its offset when it has one (`2026-03-05T14:30:00+02:00`).
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
