@@ -214,7 +214,7 @@ mod tests {
     use super::*;
 
     fn unit_block() -> Block {
-        Block { x0: 0.0, y0: 0.0, x1: 10.0, y1: 10.0, base: -100.0, walls: Rgba::rgb(200, 184, 154) }
+        Block { x0: 0.0, y0: 0.0, x1: 10.0, y1: 10.0, base: -100.0, settled: true, walls: Rgba::rgb(200, 184, 154) }
     }
 
     #[test]

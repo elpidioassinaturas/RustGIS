@@ -93,12 +93,13 @@ around it, and the box's sides facing the eye as walls from the ground's profile
 base. `"extent": [xmin, ymin, xmax, ymax]` gives another box, in the map's units (Web Mercator
 metres, at least 10 a side; needed over elevation tiles, which have no extent of their own; a box
 in degrees, off the world or off the DEM is refused, and the result gives the box cut to as
-numbers); `"depth"` puts the base
+numbers, or `"layer"` while the DEM's data isn't read); `"depth"` puts the base
 that many metres below the lowest ground in the box (ground with no height, drawn at 0, counts as 0; default half the box's relief, at least
 100 m; both are stretched by the exaggeration), and `"walls": "#RRGGBB"` colours the walls
 (default `#C8B89A`, a sandy brown). The walls are lit by the way they face the light, as extruded
 walls are, darker toward their foot, and outlined. Left out, the block stays as it was;
-`"block": false` takes it off. It shows in the settled view and in exported maps; while the map
+`"block": false` takes it off. It shows in the settled view and in exported maps (over elevation tiles, the walls once the
+box's tiles are read); while the map
 moves the ground is drawn whole, and labels, markers and extruded features outside the box still
 draw (hide those layers, or clip them to the box). The walls are schematic: say so in the
 figure's caption.

@@ -2735,7 +2735,9 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
             }
         }
     }
-    if let Some(b) = &block {
+    // Walls once the base is settled: over elevation tiles still on their way it would move with
+    // each tile (the frame is drawn again when they arrive, `Ground::pending`).
+    if let Some(b) = block.as_ref().filter(|b| b.settled) {
         block::draw_walls(pm, view, ground, b, &edges, fog, far);
     }
     true

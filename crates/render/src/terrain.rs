@@ -79,6 +79,10 @@ pub struct Block {
     pub y1: f64,
     /// The base's height: metres, exaggerated as [`Ground::height`]'s are.
     pub base: f64,
+    /// Whether the base is worked out from every height there will be: false while elevation
+    /// tiles are still on their way ([`Ground::pending`]), when the base would move with each one
+    /// that arrives, so the walls wait (the ground is cut all the same).
+    pub settled: bool,
     pub walls: Rgba,
 }
 
@@ -201,7 +205,8 @@ impl Ground {
     /// The block diagram `map`'s terrain is cut to, when it has one: its box (the DEM's extent
     /// when none is given; none over elevation tiles then), and its base `depth` metres below the
     /// lowest ground read in it (on a grid of [`BLOCK_SAMPLES`] cells a side; where a DEM has no
-    /// height, 0, as the ground is drawn there; elevation tiles not read yet are left out), or
+    /// height, 0, as the ground is drawn there; while elevation tiles are on their way, not
+    /// [`Block::settled`]), or
     /// half its relief, at least `BLOCK_MIN_DEPTH`, both exaggerated as the heights are.
     ///
     /// Elevation tiles are read for it at a zoom the box spans at most two tiles of, so the grid
@@ -225,15 +230,19 @@ impl Ground {
             }
         };
         let n = BLOCK_SAMPLES as f64;
-        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut lo, mut hi, mut missing) = (f64::INFINITY, f64::NEG_INFINITY, false);
         for (i, j) in (0..=BLOCK_SAMPLES).flat_map(|j| (0..=BLOCK_SAMPLES).map(move |i| (i as f64, j as f64))) {
             match sample(Coord::new(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * j / n)) {
                 Some(h) => (lo, hi) = (lo.min(h), hi.max(h)),
-                // A DEM's nodata is drawn at 0 (`up_px`): the base goes below it too. A tile not
-                // read yet is skipped, or the walls would drop while tiles load, then jump back.
-                None if matches!(self.heights, Heights::Raster { .. }) => lo = lo.min(0.0),
-                None => {}
+                None => missing = true,
             }
+        }
+        // Elevation tiles still on their way: the base would move with each one that arrives.
+        let settled = !self.pending();
+        // Ground with no height (a DEM's nodata or ground off it, a tile that failed) is drawn at
+        // 0 (`up_px`): once settled, the base goes below it too.
+        if missing && settled {
+            lo = lo.min(0.0);
         }
         if lo > hi {
             hi = lo.min(0.0);
@@ -243,7 +252,7 @@ impl Ground {
             Some(d) => d * self.exaggeration,
             None => (0.5 * (hi - lo)).max(rustgis_map::view::BLOCK_MIN_DEPTH * self.exaggeration),
         };
-        Some(Block { x0, y0, x1, y1, base: lo - depth, walls: b.walls })
+        Some(Block { x0, y0, x1, y1, base: lo - depth, settled, walls: b.walls })
     }
 
     /// Whether elevation tiles are still on their way (drawing again later shows more).
@@ -431,6 +440,50 @@ mod tests {
         let camera = Camera { center: Coord::new(100.0, 50.0), res: 1.0, bearing: 0.0, pitch: 60.0 };
         let b = Ground::of(&m, &camera).and_then(|g| g.block(&m)).expect("a block");
         assert!((b.base + 1000.0).abs() < 1e-6, "{}", b.base);
+    }
+
+    #[test]
+    fn a_blocks_walls_wait_for_elevation_tiles_on_their_way() {
+        // #1914: over elevation tiles, the base isn't settled while tiles are on their way (it
+        // would move with each); once none is, a tile that failed counts as 0, as it's drawn.
+        let mut read = HashMap::new();
+        for z in 0..=2u8 {
+            for x in 0..(1u32 << z) {
+                for y in 0..(1u32 << z) {
+                    read.insert(TileId { z, x, y }, None);
+                }
+            }
+        }
+        let ground = |pending: bool| Ground {
+            heights: Heights::Tiles {
+                url: "https://example.invalid/{z}/{x}/{y}.png".into(),
+                encoding: TerrainEncoding::Terrarium,
+                zoom: 2,
+                read: RefCell::new(read.clone()),
+                pending: RefCell::new(pending),
+                waiting: RefCell::new(std::collections::HashSet::new()),
+            },
+            exaggeration: 1.0,
+            body: 1.0,
+        };
+        let mut m = Map::new("Map");
+        let block = rustgis_map::view::TerrainBlock {
+            extent: Some([0.0, 0.0, 5000.0, 5000.0]),
+            depth: Some(300.0),
+            walls: rustgis_map::view::BLOCK_WALLS,
+        };
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Tiles {
+                url: "https://example.invalid/{z}/{x}/{y}.png".into(),
+                encoding: TerrainEncoding::Terrarium,
+            },
+            exaggeration: 1.0,
+            block: Some(block),
+        });
+        let waiting = ground(true).block(&m).expect("a block");
+        assert!(!waiting.settled);
+        let done = ground(false).block(&m).expect("a block");
+        assert!(done.settled && (done.base + 300.0).abs() < 1e-6, "{done:?}");
     }
 
     #[test]
