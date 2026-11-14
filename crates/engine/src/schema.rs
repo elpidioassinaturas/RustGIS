@@ -32,7 +32,10 @@ impl JsonSchema for Open {
 /// The schema as [`PATH`] holds it: JSON Schema 2020-12, with the formats it covers (the one this
 /// RustGIS writes and the newest it reads) and the capabilities it knows, so changing any of them
 /// changes the file too.
-pub fn project() -> serde_json::Value {
+///
+/// An error when the generated schema has no `properties.format` to bound, so a change to how
+/// the project is saved can't drop the constraints below without notice.
+pub fn project() -> Result<serde_json::Value, String> {
     let mut schema = schemars::generate::SchemaSettings::draft2020_12().into_generator().into_root_schema_for::<Project>();
     schema.insert("$id".into(), format!("https://raw.githubusercontent.com/opengeos/RustGIS/main/{PATH}").into());
     schema.insert("title".into(), "RustGIS project (.rgis)".into());
@@ -47,25 +50,29 @@ pub fn project() -> serde_json::Value {
     schema.insert("x-rustgis-reads-format".into(), READ_FORMAT.into());
     schema.insert("x-rustgis-capabilities".into(), CAPABILITIES.into());
     let mut value = schema.to_value();
-    if let Some(properties) = value.get_mut("properties").and_then(serde_json::Value::as_object_mut) {
-        // A newer format is refused (`check_format`), and so is a `requires` naming a capability
-        // this RustGIS doesn't know, listing more than MAX_REQUIRES or holding anything but names
-        // (null is nothing required).
-        if let Some(format) = properties.get_mut("format").and_then(serde_json::Value::as_object_mut) {
-            format.insert("maximum".into(), READ_FORMAT.into());
-        }
-        properties.insert(
-            "requires".into(),
-            serde_json::json!({
-                "description": "The capabilities this file needs past its format, each one this RustGIS knows.",
-                "type": ["array", "null"],
-                "maxItems": MAX_REQUIRES,
-                "items": { "type": "string", "enum": CAPABILITIES }
-            }),
-        );
-    }
+    let properties = value
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("the project schema has no `properties`: the project is no longer saved as an object")?;
+    // A newer format is refused (`check_format`), and so is a `requires` naming a capability this
+    // RustGIS doesn't know, listing more than MAX_REQUIRES or holding anything but names (null is
+    // nothing required).
+    properties
+        .get_mut("format")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("the project schema has no `format` property to bound by READ_FORMAT")?
+        .insert("maximum".into(), READ_FORMAT.into());
+    properties.insert(
+        "requires".into(),
+        serde_json::json!({
+            "description": "The capabilities this file needs past its format, each one this RustGIS knows.",
+            "type": ["array", "null"],
+            "maxItems": MAX_REQUIRES,
+            "items": { "type": "string", "enum": CAPABILITIES }
+        }),
+    );
     bound_integers(&mut value);
-    value
+    Ok(value)
 }
 
 /// Gives every fixed-width integer its range, which the reader holds it to: schemars gives
@@ -94,7 +101,7 @@ fn bound_integers(value: &mut serde_json::Value) {
 
 /// [`project`] as the file holds it: pretty-printed, with a final newline.
 pub fn project_text() -> Result<String, String> {
-    let mut text = serde_json::to_string_pretty(&project()).map_err(|e| format!("the project schema: {e}"))?;
+    let mut text = serde_json::to_string_pretty(&project()?).map_err(|e| format!("the project schema: {e}"))?;
     text.push('\n');
     Ok(text)
 }

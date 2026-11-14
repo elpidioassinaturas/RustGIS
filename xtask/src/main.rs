@@ -161,10 +161,29 @@ fn web_pwa(dir: Option<String>) -> Result<(), String> {
 }
 
 /// Writes the project file's JSON Schema from the types it is saved from (`schema/`), or with
-/// `check` fails when the committed one is out of date or a fixture project doesn't open.
+/// `check` fails when the committed one is out of date or a fixture project doesn't open, after
+/// linting the code behind the `schema` feature, which the workspace's clippy run leaves out.
+/// (CI's "Project schema" job also validates the fixtures against the schema with
+/// `check-jsonschema`.)
 fn schema(check: bool) -> Result<(), String> {
     let mut args = vec!["run", "-q", "-p", "rustgis-engine", "--features", "schema", "--example", "project_schema"];
     if check {
+        cargo(&[
+            "clippy",
+            "--locked",
+            "-p",
+            "rustgis-geom",
+            "-p",
+            "rustgis-data",
+            "-p",
+            "rustgis-engine",
+            "--features",
+            "rustgis-engine/schema",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ])?;
         // A Cargo.lock out of date with the manifests fails here too.
         args.extend(["--locked", "--", "--check"]);
     }
