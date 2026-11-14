@@ -316,6 +316,10 @@ fn terrain_water(s: &Session, w: &serde_json::Map<String, Value>) -> Result<rust
     if l.geometry_type() != rustgis_data::GeometryType::Polygon {
         return Err(format!("'{name}' isn't a polygon layer (water bodies)"));
     }
+    // A layer read in chunks holds only the view's: its lakes would come and go with the view.
+    if l.is_streamed() {
+        return Err(format!("'{name}' is read a view at a time: water needs a layer that holds all its polygons"));
+    }
     if s.map().layers.iter().filter(|o| o.name.eq_ignore_ascii_case(name)).count() > 1 {
         return Err(format!("more than one layer is called '{name}': give the water a name of its own, then try again"));
     }
@@ -435,6 +439,19 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         }
         return Err(e);
     }
+    // So does its water (kept through other changes, a rename can give its name to another).
+    if let Some(w) = &t.water
+        && m.layers.iter().filter(|l| l.name.eq_ignore_ascii_case(&w.layer)).count() > 1
+    {
+        let e = format!(
+            "more than one layer is called '{}': give the water a name of its own, then try again (Terrain stays as it was)",
+            w.layer
+        );
+        if let Some(old) = old_terrain {
+            m.view.terrain = Some(old);
+        }
+        return Err(e);
+    }
     let heights_from = match &t.source {
         TerrainSource::Layer(n) => Some(n.clone()),
         TerrainSource::Tiles { .. } => None,
@@ -447,7 +464,7 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     if let Some(name) = water_layer
         && let Some(ground) = rustgis_render::terrain::Ground::of(s.map(), &s.map().camera)
     {
-        let said = match ground.water_unlevelled() {
+        let unlevelled = match ground.water_unlevelled() {
             0 => None,
             1 => Some(format!(
                 "Water: 1 polygon of '{name}' has no height along its shore (off the DEM) and no level, so stays on the ground"
@@ -456,7 +473,18 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
                 "Water: {n} polygons of '{name}' have no height along their shore (off the DEM) and no level, so stay on the ground"
             )),
         };
-        if let Some(said) = said {
+        // Shores too long to read every half cell are read at wider steps: their lowest point
+        // may be missed, leaving the water a little high.
+        let coarse = match ground.water_coarse() {
+            0 => None,
+            1 => Some(format!(
+                "Water: the shore of 1 polygon of '{name}' was read at wider steps than half a DEM cell (shores too long to read whole), so its level may lie a little above its lowest shore"
+            )),
+            n => Some(format!(
+                "Water: the shores of {n} polygons of '{name}' were read at wider steps than half a DEM cell (shores too long to read whole), so their levels may lie a little above their lowest shore"
+            )),
+        };
+        for said in [unlevelled, coarse].into_iter().flatten() {
             s.notify(said, false);
         }
     }

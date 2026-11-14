@@ -11305,7 +11305,7 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
         {"type": "Feature", "properties": {"nivel": null, "nome": "b"}, "geometry": {"type": "Polygon", "coordinates": square(20.0, 20.0)}},
     ]});
     let data = base64::engine::general_purpose::STANDARD.encode(lakes.to_string().as_bytes());
-    s.run("layer.addDataBytes", &json!({"fileName": "lagos.geojson", "data": data})).unwrap();
+    s.run("layer.addDataBytes", &json!({"fileName": "lagos.geojson", "data": data.clone()})).unwrap();
     let lagos = s.map().layers.iter().find(|l| !l.is_raster()).map(|l| l.name.clone()).unwrap();
     for (water, said) in [
         (json!({"layer": "Nowhere"}), "no layer"),
@@ -11338,6 +11338,15 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
     let id = s.map().layer_by_name(&lagos).map(|l| l.id).unwrap();
     s.run("layer.rename", &json!({"layer": id, "name": "represas"})).unwrap();
     assert_eq!(s.map().view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.layer.as_str()), Some("represas"));
+    // Another layer renamed onto the water's name: a change that keeps the water is refused,
+    // and the terrain stays as it was.
+    s.run("layer.addDataBytes", &json!({"fileName": "outros.geojson", "data": data})).unwrap();
+    let other = s.map().layers.iter().filter(|l| !l.is_raster()).map(|l| l.id).max().unwrap();
+    s.run("layer.rename", &json!({"layer": other, "name": "represas"})).unwrap();
+    let e = s.run("map.terrain", &json!({"exaggeration": 3})).unwrap_err();
+    assert!(e.contains("give the water a name of its own"), "{e}");
+    assert_eq!(s.map().view.terrain.as_ref().map(|t| t.exaggeration), Some(2.0));
+    s.run("layer.rename", &json!({"layer": other, "name": "outros"})).unwrap();
     // Over elevation tiles not read yet, nothing is said to be off the ground.
     let mark = s.notice_mark();
     s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "water": {"layer": "represas"}})).unwrap();

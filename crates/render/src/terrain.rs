@@ -140,6 +140,13 @@ impl Ground {
         self.water.as_ref().map_or(0, |w| w.unlevelled)
     }
 
+    /// How many polygons of the terrain's water layer had their shore read at wider steps than
+    /// half the ground's cell, to keep a long shore's reading bounded: their level may lie a
+    /// little above their lowest shore (#1915). 0 without water.
+    pub fn water_coarse(&self) -> usize {
+        self.water.as_ref().map_or(0, |w| w.coarse)
+    }
+
     /// How high the ground stands at `m` in a view of `cam`, in logical pixels at the centre's
     /// scale (what `Camera::project_raised` takes): its height over the metres a map unit spans
     /// there (Web Mercator stretches the ground toward the poles). 0 where nothing is known.
