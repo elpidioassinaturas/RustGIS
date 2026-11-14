@@ -2106,7 +2106,7 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 ui,
                 app,
                 "maneuver_roundabout",
-                "Export Orbit",
+                "Export Orbit…",
                 "Write a turn of the view about its centre as an animated GIF or PNG frames.",
                 "ui.dialog",
                 json!({"name": "exportOrbit"}),

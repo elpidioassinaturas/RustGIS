@@ -4366,9 +4366,17 @@ impl RustGisApp {
             // Export Orbit's dialog, its parameters in `p`: the file picked, then the frames drawn
             // on a thread of their own, with progress and Cancel in the status bar.
             "ui.exportOrbit" => {
+                // Refused before the file is picked: parameters that aren't an object, or another
+                // export still running.
+                let mut args = match p {
+                    Value::Null => json!({}),
+                    Value::Object(_) => p.clone(),
+                    _ => return Err("Export Orbit takes an object of parameters".into()),
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                exportjob::idle(self)?;
                 let name = format!("{} orbit.gif", self.session.map().name);
                 if let Some(path) = dialogs::pick_save(&name, &["gif", "zip"], tl!("Animated GIF or PNG frames (zip)")) {
-                    let mut args = p.clone();
                     args["path"] = json!(path);
                     #[cfg(not(target_arch = "wasm32"))]
                     return exportjob::start(self, "map.exportOrbit", args);

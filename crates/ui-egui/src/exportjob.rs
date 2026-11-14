@@ -196,8 +196,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("orbit.zip");
         crate::dialogs::PICKED.with(|c| *c.borrow_mut() = Some(path.display().to_string()));
+        // Parameters that aren't an object are refused before the file is picked.
+        for junk in [json!([]), json!(3), json!("orbit")] {
+            assert!(app.run("ui.exportOrbit", junk).unwrap_err().contains("object"));
+        }
         let asked = json!({"frames": 3, "turn": 90, "width": 96, "height": 64});
         assert_eq!(app.run("ui.exportOrbit", asked).unwrap()["started"], "Export Orbit");
+        // A second one is refused while it runs, before its file is picked.
+        assert!(app.run("ui.exportOrbit", Value::Null).unwrap_err().contains("still running"));
         let end = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while land(&mut app) {
             assert!(std::time::Instant::now() < end, "Export Orbit never landed");

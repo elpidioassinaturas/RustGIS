@@ -194,7 +194,9 @@ fn orbit_inputs(input: &super::InputContext<'_>, _: &Value) -> Result<super::Inp
 /// animated GIF or a zip of PNGs (the writer `time.export` uses). The frames are drawn from a
 /// copy of the map, so the view never moves: the app draws them on a thread of its own, with a
 /// frame a step of progress and Cancel between frames (`exports::IN_BACKGROUND`), and a script
-/// where it is called (`exports::write_here`).
+/// where it is called (`exports::write_here`). As with Export Map's copy, what a raster read on
+/// the copy left out is said by the session's own landing check (`notice_landed_rasters`, after
+/// each command and on each frame of the app), not frame by frame here.
 pub(crate) fn orbit_work(s: &Session, p: &Value) -> Result<super::exports::Work, String> {
     use super::time::{MAX_FRAMES, MAX_PIXELS};
     // Files are written by the desktop app; the browser's go through its services.
