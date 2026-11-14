@@ -21013,6 +21013,71 @@ fn repair_source_checks_the_extrusion_base_field() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// Extrusion Base sets what an extrusion stands on, a numeric field or a constant, and changes
+/// nothing else: the height, its field and the factor stay, as does whatever is left out. Null or
+/// an empty name clears the field; a field that isn't numeric, or a base that is no number or is
+/// outside 0 to 1e7 metres, is refused, not changed (#1269).
+#[test]
+fn extrusion_base_sets_the_base_and_nothing_else() {
+    let mut s = world();
+    let x = |s: &Session| s.map().layer_by_name("Countries").and_then(|l| l.extrusion.clone());
+    for p in [json!({"layer": "Countries", "base": 5}), json!({"layer": "Countries", "field": "name"})] {
+        let e = s.run("layer.extrusionBase", &p).unwrap_err();
+        assert!(e.contains("turn extrusion on first"), "{p}: {e}");
+    }
+    s.run("layer.extrusion", &json!({"layer": "Countries", "type": "height", "height": 30, "factor": 2})).unwrap();
+    s.run("layer.extrusionBase", &json!({"layer": "Countries", "field": "pop_est", "base": 12})).unwrap();
+    let got = x(&s).unwrap();
+    assert_eq!((got.base_field.as_deref(), got.base), (Some("pop_est"), 12.0));
+    assert_eq!((got.field, got.height, got.factor), (None, 30.0, 2.0), "the height and factor stay");
+    // Each left out stays.
+    s.run("layer.extrusionBase", &json!({"layer": "Countries", "base": 20})).unwrap();
+    assert_eq!(x(&s).unwrap().base_field.as_deref(), Some("pop_est"));
+    s.run("layer.extrusionBase", &json!({"layer": "Countries", "field": "pop_est"})).unwrap();
+    assert_eq!(x(&s).unwrap().base, 20.0);
+    // A field that isn't numeric, or isn't there (a blank name too), a field that isn't a name,
+    // and a base that is no number or is outside 0 to 1e7 metres are refused, and change nothing.
+    let bad = [
+        json!({"field": "name"}),
+        json!({"field": "nowhere"}),
+        json!({"field": " "}),
+        json!({"field": 7}),
+        json!({"base": "ten"}),
+        json!({"base": null}),
+        json!({"base": -5}),
+        json!({"base": 1e12}),
+    ];
+    for bad in bad {
+        let mut p = bad.clone();
+        p["layer"] = json!("Countries");
+        assert!(s.run("layer.extrusionBase", &p).is_err(), "{bad}");
+    }
+    let e = s.run("layer.extrusionBase", &json!({"layer": "Countries", "field": "name"})).unwrap_err();
+    assert!(e.contains("no numeric field 'name'"), "{e}");
+    let e = s.run("layer.extrusionBase", &json!({"layer": "Countries", "base": -5})).unwrap_err();
+    assert!(e.contains("between 0 and 10,000,000 metres"), "{e}");
+    assert_eq!((x(&s).unwrap().base_field.as_deref(), x(&s).unwrap().base), (Some("pop_est"), 20.0));
+    // Null or an empty name clears the field; the constant stays.
+    s.run("layer.extrusionBase", &json!({"layer": "Countries", "field": null})).unwrap();
+    assert_eq!((x(&s).unwrap().base_field, x(&s).unwrap().base), (None, 20.0));
+    s.run("layer.extrusionBase", &json!({"layer": "Countries", "field": "pop_est"})).unwrap();
+    s.run("layer.extrusionBase", &json!({"layer": "Countries", "field": ""})).unwrap();
+    assert_eq!(x(&s).unwrap().base_field, None);
+    // Both ends of the constant's range are taken.
+    s.run("layer.extrusionBase", &json!({"layer": "Countries", "base": 0})).unwrap();
+    assert_eq!(x(&s).unwrap().base, 0.0);
+    s.run("layer.extrusionBase", &json!({"layer": "Countries", "base": 1e7})).unwrap();
+    assert_eq!(x(&s).unwrap().base, 1e7);
+    // Changing the height keeps the base; each change undoes on its own.
+    s.run("layer.extrusion", &json!({"layer": "Countries", "type": "field", "field": "pop_est"})).unwrap();
+    assert_eq!(x(&s).unwrap().base, 1e7);
+    s.undo();
+    s.undo();
+    assert_eq!(x(&s).unwrap().base, 0.0);
+    let got = x(&s).unwrap();
+    assert_eq!((got.field, got.height, got.factor), (None, 30.0, 2.0), "nothing else changed on the way");
+}
+
 #[test]
 fn area_review_attribute_edits_keep_retained_display_expressions() {
     let (mut session, id) = area_review_fixture();
