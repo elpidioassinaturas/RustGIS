@@ -13,7 +13,8 @@ use crate::project::{CAPABILITIES, FORMAT, Project, READ_FORMAT};
 /// Where the schema is kept, from the repository's root.
 pub const PATH: &str = "schema/project.schema.json";
 
-/// A part of the project file this schema doesn't describe yet: any JSON object.
+/// A part of the project file this schema doesn't describe: any JSON object (described in later
+/// pull requests of #1853 piece 2, crate by crate).
 pub struct Open;
 
 impl JsonSchema for Open {
@@ -23,7 +24,7 @@ impl JsonSchema for Open {
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
             "type": "object",
-            "description": "Not described by this schema yet: any object (#1853 piece 2)."
+            "description": "Any object: this schema doesn't describe its fields."
         })
     }
 }

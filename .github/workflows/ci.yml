@@ -104,9 +104,13 @@ jobs:
           # Only main saves the cache (see test-rust.yml).
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The committed schema matches the types the project is saved from, and the fixture projects
-      # open (fixtures are validated against it by pre-commit, in the lint job).
+      # open.
       - name: Check the project file's schema
         run: cargo xtask schema --check
+      # Every fixture, not only those the pull request changes (as pre-commit does), so a change
+      # to the schema alone is checked against them too.
+      - name: Validate the fixture projects against the schema
+        run: pipx run check-jsonschema==0.39.0 --schemafile schema/project.schema.json --default-filetype json schema/fixtures/*.rgis
 
   plan:
     name: Platforms

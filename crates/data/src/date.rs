@@ -242,8 +242,8 @@ impl schemars::JsonSchema for Date {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "A calendar day as ISO 8601 text (YYYY-MM-DD), years 1 to 9999.",
-            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            "description": "A calendar day as ISO 8601 text (YYYY-MM-DD), years 1 to 9999, maybe with spaces around it. The pattern can't tell a day that doesn't exist (2026-02-30); the reader refuses it.",
+            "pattern": "^\\s*([1-9][0-9]{3}|0[1-9][0-9]{2}|00[1-9][0-9]|000[1-9])-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\\s*$"
         })
     }
 }
