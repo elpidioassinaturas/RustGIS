@@ -397,6 +397,9 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     let t = match (source, m.view.terrain.take()) {
         (Some(source), old) => {
             let (old_exaggeration, old_block) = old.map_or((None, None), |t| (Some(t.exaggeration), t.block));
+            // A block cut to the old DEM's extent doesn't carry over to elevation tiles, which
+            // have none (the result shows it gone); one with its own box does.
+            let old_block = old_block.filter(|b| b.extent.is_some() || matches!(source, TerrainSource::Layer(_)));
             Terrain { source, exaggeration: exaggeration.or(old_exaggeration).unwrap_or(1.0), block: block.clone().unwrap_or(old_block) }
         }
         // Only a new exaggeration or block: the terrain keeps its source.

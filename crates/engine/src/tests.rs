@@ -7546,6 +7546,13 @@ fn terrain_block_is_checked_kept_and_taken_off() {
     assert!(e.contains("needs an extent box"), "{e}");
     assert!(matches!(&s.map().view.terrain, Some(t) if matches!(t.source, rustgis_map::view::TerrainSource::Layer(_))));
     s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {"extent": [0, 0, 1, 1]}})).unwrap();
+    // A block on the DEM's extent left behind on a switch to tiles; one with a box kept.
+    s.run("map.terrain", &json!({"layer": dem, "block": {}})).unwrap();
+    let v = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png"})).unwrap();
+    assert!(v["block"].is_null(), "{v}");
+    s.run("map.terrain", &json!({"layer": dem, "block": {"extent": [0, 0, 1, 1]}})).unwrap();
+    let v = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png"})).unwrap();
+    assert_eq!(v["block"]["extent"], json!([0.0, 0.0, 1.0, 1.0]));
 }
 
 #[test]
