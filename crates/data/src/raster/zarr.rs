@@ -1159,16 +1159,27 @@ pub fn plan(store: &Store, sel: &Selection) -> Result<Plan> {
             }
         }
     }
-    // A window of a sharded variable reads the shards' chunks it needs, by range; otherwise it reads
-    // whole chunk files.
+    // The units of `unit` the window covers along y and x, and how many they are.
+    let cover = |unit: &[u64]| {
+        let size = |d: usize| unit.get(d).copied().unwrap_or(1).max(1);
+        let (ry, rx) = (window.y0 / size(y)..window.y1.div_ceil(size(y)), window.x0 / size(x)..window.x1.div_ceil(size(x)));
+        let n = (ry.end - ry.start).saturating_mul(rx.end - rx.start);
+        (ry, rx, n)
+    };
+    // A window of a sharded variable reads the shards' chunks it needs, by range, while they are at
+    // most MAX_CHUNKS. Past that, and outside a window, it reads whole chunk files (whole shards),
+    // as before, so the limit still counts what is fetched.
     let sharding = match a.codecs.first() {
-        Some(Codec::Sharding { inner, index, .. }) if sel.window.is_some() => Some((inner, index)),
+        Some(Codec::Sharding { inner, index, .. }) if sel.window.is_some() && cover(inner).2 <= MAX_CHUNKS as u64 => Some((inner, index)),
         _ => None,
     };
     let unit = sharding.map_or(&a.chunks, |(inner, _)| inner);
     let size = |d: usize| unit.get(d).copied().unwrap_or(1).max(1);
-    let (ry, rx) = (window.y0 / size(y)..window.y1.div_ceil(size(y)), window.x0 / size(x)..window.x1.div_ceil(size(x)));
-    let n = (ry.end - ry.start).saturating_mul(rx.end - rx.start);
+    let (ry, rx, n) = cover(unit);
+    // A shard's chunks along each dimension, the same for every shard.
+    let per: Vec<u64> = sharding.map_or_else(Vec::new, |(inner, _)| a.chunks.iter().zip(inner).map(|(s, i)| s / i.max(&1)).collect());
+    // Each shard read, by key: its place in `shards`.
+    let mut shard_at: HashMap<String, usize> = HashMap::new();
     if n > MAX_CHUNKS as u64 {
         let what = if sel.window.is_some() { "the window" } else { "one slice" };
         return Err(bad(format!("{} needs {n} chunks for {what}, more than {MAX_CHUNKS}: take a smaller window", a.path)));
@@ -1183,18 +1194,18 @@ pub fn plan(store: &Store, sel: &Selection) -> Result<Plan> {
                     d => fixed.get(d).copied().unwrap_or(0) / size(d),
                 })
                 .collect();
-            let Some((inner, index)) = sharding else {
+            let Some((_, index)) = sharding else {
                 keys.push(a.chunk_key(&idx));
                 continue;
             };
             // The shard holding this chunk, and the chunk's place in the shard's row-major order.
-            let per: Vec<u64> = a.chunks.iter().zip(inner).map(|(s, i)| s / i.max(&1)).collect();
             let shard: Vec<u64> = idx.iter().zip(&per).map(|(u, p)| u / p.max(&1)).collect();
             let c = idx.iter().zip(&per).fold(0u64, |c, (u, p)| c * p + u % p.max(&1));
             let key = a.chunk_key(&shard);
-            match shards.iter_mut().find(|s| s.key == key) {
+            match shard_at.get(&key).and_then(|&i| shards.get_mut(i)) {
                 Some(s) => s.chunks.push(c as usize),
                 None => {
+                    shard_at.insert(key.clone(), shards.len());
                     let count = per.iter().product::<u64>() as usize;
                     let len = index_len(count, index).ok_or_else(|| bad("a shard too large"))? as u64;
                     let span = if matches!(a.codecs.first(), Some(Codec::Sharding { index_at_end: false, .. })) {
@@ -2267,7 +2278,12 @@ pub fn read_dir_in(store: &Store, dir: &std::path::Path, selection: &str, crs: O
     let mut total = 0u64;
     for k in &p.keys {
         let path = dir.join(k);
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) => meta,
+            // Never written: only a file that isn't there. Any other failure is said.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
         total = total.saturating_add(meta.len());
         if !meta.is_file() || meta.len() > MAX_CHUNK_FILE || total > MAX_READ {
             return Err(bad(format!("{}: the slice's chunks are too large to read", dir.display())));
@@ -2278,7 +2294,12 @@ pub fn read_dir_in(store: &Store, dir: &std::path::Path, selection: &str, crs: O
     let mut read = |parts: &[Part], chunks: &mut HashMap<String, Vec<u8>>| -> Result<()> {
         use std::io::{Read, Seek, SeekFrom};
         for part in parts {
-            let Ok(mut f) = std::fs::File::open(dir.join(&part.key)) else { continue };
+            let mut f = match std::fs::File::open(dir.join(&part.key)) {
+                Ok(f) => f,
+                // Never written: only a file that isn't there. Any other failure is said.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
             let len = f.metadata()?.len();
             let (first, n) = match part.span {
                 Span::Bytes(a, b) => (a, b - a + 1),
@@ -3255,7 +3276,29 @@ mod tests {
         }
         let from_dir = read_dir(&dir, &sel(0, w0).label(), None).unwrap();
         assert_eq!(format!("{:?}", from_dir.bands[0].data), format!("{:?}", r.bands[0].data));
+        // A shard that is there but can't be read (a folder in its place) is an error, not cells
+        // left empty as if it were never written.
+        let shard = dir.join("v/c/0/0/0");
+        std::fs::remove_file(&shard).unwrap();
+        std::fs::create_dir(&shard).unwrap();
+        assert!(read_dir(&dir, &sel(0, w0).label(), None).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+        // A window over more than MAX_CHUNKS of the shards' chunks reads its shards whole, as a
+        // window did before, rather than being refused: 260 × 260 cells of 2 × 2 chunks in shards
+        // of 130 × 130.
+        let big = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+            "v": {"zarr_format": 3, "node_type": "array", "shape": [1, 260, 260], "data_type": "int16",
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 130, 130]}},
+                "codecs": [{"name": "sharding_indexed", "configuration": {"chunk_shape": [1, 2, 2], "codecs": [{"name": "bytes"}],
+                    "index_codecs": [{"name": "bytes"}], "index_location": "end"}}],
+                "fill_value": 0, "dimension_names": ["time", "y", "x"]}}}});
+        let big = parse_store(&[("zarr.json".to_string(), big.to_string().into_bytes())]).unwrap();
+        let p = plan(&big, &sel(0, Window { x0: 0, y0: 0, x1: 260, y1: 260 })).unwrap();
+        assert!(p.shards.is_empty() && p.parts.is_empty(), "{:?}", p.parts);
+        assert_eq!(p.keys, ["v/c/0/0/0", "v/c/0/0/1", "v/c/0/1/0", "v/c/0/1/1"]);
+        // A small window of it still reads only its chunks.
+        let p = plan(&big, &sel(0, Window { x0: 0, y0: 0, x1: 4, y1: 4 })).unwrap();
+        assert_eq!((p.shards.len(), p.shards[0].chunks.len()), (1, 4));
         // An index cut short, or one placing a chunk past what a read takes.
         let p = plan(&store, &sel(1, Window { x0: 2, y0: 1, x1: 5, y1: 4 })).unwrap();
         let mut cut = HashMap::new();

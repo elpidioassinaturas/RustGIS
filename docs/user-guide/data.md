@@ -1396,7 +1396,8 @@ rustgis-cli run --cmd 'layer.addZarr={"url":"https://storage.googleapis.com/gcp-
 row]`, the ends not included, or `"bbox": [west, south, east, north]` in the grid's coordinates,
 degrees for a longitude/latitude grid) reads only the chunks it touches, and only its part of the
 coordinates (by byte range when they are stored uncompressed). In a sharded array it reads each
-shard's index by range, then only the shard's chunks the window needs. A box is placed by the variable's
+shard's index by range, then only the shard's chunks the window needs, one range each; a window
+over more than 4,096 of the shards' chunks reads its shards whole instead. A box is placed by the variable's
 coordinates, read whole, so it takes grids of up to 4,000,000 cells a side; a longer one takes
 `"cells"`. A box reaching past the grid is read within it, and says so; one over a longitude grid's
 edge (0°/360°, or ±180°) is refused: give a box on each side (one round the whole globe is the
