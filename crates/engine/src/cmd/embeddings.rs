@@ -521,6 +521,10 @@ fn add_zones(s: &mut Session, p: &Value, d: &emb::EmbeddingDataset, name: Option
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
+                // A plugin's command in the app runs on the frame, where nothing may wait for the read.
+                if s.leave_downloads {
+                    return Err(format!("{}: read off the frame here: add it from Home › Add › Web Data › Satellite Embeddings", z.name));
+                }
                 let (r, cut) = tessera::read_blocking(z, area, year, b)?;
                 if cut {
                     s.notify(format!("{}: the view is larger than one read; its centre was read (zoom in for the rest)", z.name), false);
@@ -1208,6 +1212,10 @@ mod tests {
         s.leave_downloads = true;
         let e = s.run("embeddings.change", &json!({"dataset": "alphaearth", "bbox": area})).unwrap_err();
         assert!(e.contains("plugin"), "{e}");
+        for d in ["tessera", "olmoearth"] {
+            let e = s.run("embeddings.add", &json!({"dataset": d, "bbox": area})).unwrap_err();
+            assert!(e.contains("off the frame"), "{e}");
+        }
     }
 
     #[test]

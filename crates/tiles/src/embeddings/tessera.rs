@@ -256,17 +256,11 @@ pub(super) fn read_chunks(
     }
     // A stored chunk is at most its bytes and a little (zstd keeps what it can't shrink as is).
     let most = (bytes as u64).saturating_mul(2).max(4 << 20);
-    let entry = |g: u64, r: u64, c: u64| -> Option<(u64, u64)> {
-        let at = usize::try_from(((g * per_side + r) * per_side + c) * 16).ok()?;
-        let b = index.get(at..at + 16)?;
-        let off = u64::from_le_bytes(b.get(..8)?.try_into().ok()?);
-        let len = u64::from_le_bytes(b.get(8..)?.try_into().ok()?);
-        (off != u64::MAX && len > 0 && len <= most).then_some((off, len))
-    };
+    let entry = |g: u64, r: u64, c: u64| index_entry(plan.store, index, ((g * per_side + r) * per_side + c) * 16, most);
     let wanted = || of.iter().flat_map(|&g| plan.chunks.iter().map(move |&(r, c)| (g, r, c)));
     let mut held = true;
     for (g, r, c) in wanted() {
-        if let Some((off, len)) = entry(g, r, c) {
+        if let Some((off, len)) = entry(g, r, c)? {
             held &= file.want(off, len);
         }
     }
@@ -274,7 +268,7 @@ pub(super) fn read_chunks(
         return Err(remote::need());
     }
     wanted()
-        .map(|(g, r, c)| match entry(g, r, c) {
+        .map(|(g, r, c)| match entry(g, r, c)? {
             Some((off, len)) => {
                 let b = file.bytes(off, len).ok_or_else(remote::need)?;
                 decode(&b, bytes).map(Some)
@@ -282,6 +276,22 @@ pub(super) fn read_chunks(
             None => Ok(None),
         })
         .collect()
+}
+
+/// A shard index's entry at byte `at`: the chunk's offset and length, `None` for a chunk the
+/// shard leaves out (both all ones), an error for a length of 0 or past `most` (a damaged store).
+fn index_entry(store: &Store, index: &[u8], at: u64, most: u64) -> rustgis_data::Result<Option<(u64, u64)>> {
+    let bad = || rustgis_data::DataError::Format(format!("{}: a shard's index is damaged", store.name));
+    let b = usize::try_from(at).ok().and_then(|at| index.get(at..at.checked_add(16)?)).ok_or_else(bad)?;
+    let word = |r: std::ops::Range<usize>| b.get(r).and_then(|w| w.try_into().ok()).map(u64::from_le_bytes).ok_or_else(bad);
+    let (off, len) = (word(0..8)?, word(8..16)?);
+    if off == u64::MAX && len == u64::MAX {
+        return Ok(None);
+    }
+    if len == 0 || len > most {
+        return Err(bad());
+    }
+    Ok(Some((off, len)))
 }
 
 /// The window's three bands (each embedding × its pixel's scale; NaN where nothing was
@@ -478,5 +488,17 @@ mod tests {
         assert!(blank.bands.iter().all(|b| b.stats.count == 0));
         let short: Vec<Option<Vec<u8>>> = p.chunks.iter().map(|_| Some(vec![1, 2, 3])).collect();
         let _ = assemble(&p, [0, 1, 2], &short, &short);
+    }
+
+    #[test]
+    fn index_entries() {
+        let e = |off: u64, len: u64| [off.to_le_bytes(), len.to_le_bytes()].concat();
+        let index = [e(100, 50), e(u64::MAX, u64::MAX), e(7, 0), e(7, 5000)].concat();
+        assert_eq!(index_entry(&TESSERA, &index, 0, 4096).unwrap(), Some((100, 50)));
+        // A chunk the shard leaves out, then damaged entries: an error, not a blank.
+        assert_eq!(index_entry(&TESSERA, &index, 16, 4096).unwrap(), None);
+        assert!(index_entry(&TESSERA, &index, 32, 4096).is_err());
+        assert!(index_entry(&TESSERA, &index, 48, 4096).is_err());
+        assert!(index_entry(&TESSERA, &index, 60, 4096).is_err());
     }
 }
