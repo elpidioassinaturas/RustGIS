@@ -489,11 +489,21 @@ pub fn parse_store(docs: &[(String, Vec<u8>)]) -> Result<Store> {
     Ok(Store { arrays })
 }
 
+/// `docs` parsed as JSON, those over [`MAX_METADATA`] left out (as [`parse_store`] refuses them),
+/// by key from the store's root.
+fn small_json(docs: &[(String, Vec<u8>)]) -> Vec<(&str, Value)> {
+    docs.iter()
+        .filter(|(_, b)| b.len() <= MAX_METADATA)
+        .filter_map(|(k, b)| serde_json::from_slice::<Value>(b).ok().map(|v| (k.trim_start_matches('/'), v)))
+        .collect()
+}
+
 /// Whether `docs` (a store's root files, [`METADATA_KEYS`]) are a group's that lists no arrays:
 /// a Zarr 3 root group whose `consolidated_metadata` isn't an object, or a Zarr 2 `.zgroup` with
 /// no `.zmetadata`. Its arrays are then found by name ([`member_keys`]).
 pub fn lists_no_arrays(docs: &[(String, Vec<u8>)]) -> bool {
-    let doc = |k: &str| docs.iter().find(|(d, _)| d == k).and_then(|(_, b)| serde_json::from_slice::<Value>(b).ok());
+    let json = small_json(docs);
+    let doc = |k: &str| json.iter().find(|(d, _)| *d == k).map(|(_, v)| v);
     match doc("zarr.json") {
         Some(z) => {
             z.get("node_type").and_then(Value::as_str) == Some("group") && !z.get("consolidated_metadata").is_some_and(Value::is_object)
@@ -502,51 +512,68 @@ pub fn lists_no_arrays(docs: &[(String, Vec<u8>)]) -> bool {
     }
 }
 
-/// Most member names one round of [`member_keys`] asks for.
-const MAX_PROBES: usize = 4 * MAX_DIMS;
+/// Most names one round of [`member_keys`] asks for: room for the variable's groups (up to
+/// [`MAX_GROUP_DEPTH`]), the variable, the root's `spatial:dimensions`, and the variable's own
+/// dimensions and grid mapping in its group and at the root (each at most [`MAX_DIMS`]), which
+/// come first.
+const MAX_PROBES: usize = MAX_GROUP_DEPTH + 3 + 3 * MAX_DIMS;
 
 /// The metadata files to fetch next from a store whose root lists no arrays ([`lists_no_arrays`]),
-/// given the files fetched so far (`docs`): those of `variable` (its path in the store) and of the
-/// groups above it, of the root group's `spatial:dimensions`, and of every dimension the arrays
-/// fetched so far name (in their group, and at the root, where [`Store`] looks for coordinates).
-/// Zarr 3 asks for `<name>/zarr.json`, Zarr 2 for `<name>/.zarray` and `<name>/.zattrs` (and a
-/// group's `.zgroup`). Files already in `docs` and names that would lead out of the store are left
-/// out, and at most [`MAX_PROBES`] names are asked for. Empty when the root lists its arrays.
+/// given the files fetched so far (`docs`), in this order: the groups above `variable` (its path in
+/// the store, at most [`MAX_GROUP_DEPTH`] of them), the variable, the root group's
+/// `spatial:dimensions`, the variable's dimensions and grid mapping (CF `grid_mapping`), then those
+/// the other arrays fetched so far name. Each is asked for in its array's group and at the root,
+/// where [`Store`] looks for coordinates and grid mappings. Zarr 3 asks for `<name>/zarr.json`, Zarr 2 for `<name>/.zarray` and
+/// `<name>/.zattrs` (a group's `.zgroup` and `.zattrs`).
+///
+/// Files already in `docs`, documents over [`MAX_METADATA`], names that would lead out of the store
+/// and names with `?`, `#` or `%` (which an address would read as something else) are left out.
+/// At most [`MAX_PROBES`] names are asked for, with room for everything a read of the variable
+/// uses: only the other arrays' dimensions (coordinates of coordinates, which no read looks up) can
+/// be left past it. Empty when the root lists its arrays.
 pub fn member_keys(docs: &[(String, Vec<u8>)], variable: &str) -> Vec<String> {
     if !lists_no_arrays(docs) {
         return Vec::new();
     }
     let v3 = docs.iter().any(|(k, _)| k == "zarr.json");
-    let json: Vec<(&str, Value)> =
-        docs.iter().filter_map(|(k, b)| serde_json::from_slice::<Value>(b).ok().map(|v| (k.trim_start_matches('/'), v))).collect();
+    let json = small_json(docs);
     let strings = |v: Option<&Value>| -> Vec<String> {
-        v.and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
+        v.and_then(Value::as_array)
+            .map(|a| a.iter().take(MAX_DIMS).filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default()
     };
+    // Each array's dimension names and its grid mapping's (CF `grid_mapping`, which `crs_of`
+    // looks up), by its path; the variable's first.
+    let mut arrays: Vec<(&str, Vec<String>)> = json
+        .iter()
+        .filter_map(|(k, v)| {
+            let (p, dims, attrs) = if v3 {
+                let p = k.strip_suffix("zarr.json")?;
+                if v.get("node_type").and_then(Value::as_str) != Some("array") {
+                    return None;
+                }
+                (p, strings(v.get("dimension_names")), v.get("attributes"))
+            } else {
+                (k.strip_suffix(".zattrs")?, strings(v.get("_ARRAY_DIMENSIONS")), Some(v))
+            };
+            let mapping = attrs.and_then(|a| a.get("grid_mapping")).and_then(Value::as_str).map(str::to_string);
+            Some((p.trim_end_matches('/'), dims.into_iter().chain(mapping).collect()))
+        })
+        .collect();
+    let variable = variable.trim().trim_matches('/');
+    arrays.sort_by_key(|(p, _)| (*p != variable, *p));
     let mut groups = Vec::new();
     let mut names = Vec::new();
-    let variable = variable.trim().trim_matches('/');
     if !variable.is_empty() {
         let parts: Vec<&str> = variable.split('/').collect();
-        for depth in 1..parts.len() {
-            groups.push(parts[..depth].join("/"));
-        }
+        groups.extend((1..parts.len()).map(|depth| parts[..depth].join("/")).take(MAX_GROUP_DEPTH));
         names.push(variable.to_string());
     }
     let root = json.iter().find(|(k, _)| *k == if v3 { "zarr.json" } else { ".zattrs" }).map(|(_, v)| v);
     let root_attrs = if v3 { root.and_then(|r| r.get("attributes")) } else { root };
     names.extend(strings(root_attrs.and_then(|a| a.get("spatial:dimensions"))));
-    for (k, v) in &json {
-        let (path, dims) = if v3 {
-            let Some(p) = k.strip_suffix("zarr.json") else { continue };
-            if v.get("node_type").and_then(Value::as_str) != Some("array") {
-                continue;
-            }
-            (p, strings(v.get("dimension_names")))
-        } else {
-            let Some(p) = k.strip_suffix(".zattrs") else { continue };
-            (p, strings(v.get("_ARRAY_DIMENSIONS")))
-        };
-        let group = path.trim_end_matches('/').rsplit_once('/').map(|(g, _)| g);
+    for (path, dims) in arrays {
+        let group = path.rsplit_once('/').map(|(g, _)| g);
         for d in dims {
             if let Some(g) = group {
                 names.push(format!("{g}/{d}"));
@@ -555,22 +582,19 @@ pub fn member_keys(docs: &[(String, Vec<u8>)], variable: &str) -> Vec<String> {
         }
     }
     let have: HashSet<&str> = docs.iter().map(|(k, _)| k.trim_start_matches('/')).collect();
+    let fine = |n: &str| !n.is_empty() && safe_path(n) && !n.contains(['?', '#', '%']);
+    let (group_files, array_files): (&[&str], &[&str]) =
+        if v3 { (&["zarr.json"], &["zarr.json"]) } else { (&[".zgroup", ".zattrs"], &[".zarray", ".zattrs"]) };
+    // Each name once, those with every file fetched already left out, before the cap.
     let mut seen = HashSet::new();
+    let wanted = groups
+        .iter()
+        .map(|g| (g.as_str(), group_files))
+        .chain(names.iter().map(|n| (n.as_str(), array_files)))
+        .filter(|(n, files)| fine(n) && seen.insert(*n) && files.iter().any(|f| !have.contains(format!("{n}/{f}").as_str())));
     let mut out = Vec::new();
-    let mut probe = |name: &str, files: &[&str]| {
-        for f in files {
-            let key = format!("{name}/{f}");
-            if !have.contains(key.as_str()) && seen.insert(key.clone()) {
-                out.push(key);
-            }
-        }
-    };
-    let names: Vec<String> = names.into_iter().filter(|n| !n.is_empty() && safe_path(n)).collect();
-    for g in groups.iter().filter(|g| safe_path(g)).take(MAX_PROBES) {
-        probe(g, if v3 { &["zarr.json"] } else { &[".zgroup", ".zattrs"] });
-    }
-    for n in names.iter().take(MAX_PROBES) {
-        probe(n, if v3 { &["zarr.json"] } else { &[".zarray", ".zattrs"] });
+    for (n, files) in wanted.take(MAX_PROBES) {
+        out.extend(files.iter().map(|f| format!("{n}/{f}")).filter(|k| !have.contains(k.as_str())));
     }
     out
 }
@@ -2024,8 +2048,9 @@ pub fn coordinate_keys(store: &Store, variable: &str) -> Vec<String> {
 /// coordinate has CF time units (`days since 2001-01-01`), with its steps as milliseconds since
 /// 1970 (UTC). A `noleap` date is the same real date; a 360- or 366-day year is laid over its real
 /// year in proportion (360_day's 30 February falls about 1 March), so its dates stay distinct and
-/// in order. A coordinate of whole years ([`year_axis`]) is a time dimension too, each year's
-/// step on its 1 January. `None` when no dimension has such a coordinate, or one of its steps
+/// in order. A coordinate of whole years with no CF units ([`year_axis`]: named `time` or `year`,
+/// or marked `axis: "T"` or `standard_name: "time"`) is a time dimension too, each year's step on
+/// its 1 January. `None` when no dimension has such a coordinate, or one of its steps
 /// isn't a date.
 pub fn time_axis(store: &Store, variable: &str, chunks: &HashMap<String, Vec<u8>>) -> Option<(String, Vec<f64>)> {
     let v = store.array(variable)?;
@@ -4019,6 +4044,38 @@ mod tests {
         let v2 =
             [zgroup(".zgroup"), zgroup("v/.zarray"), ("v/.zattrs".into(), br#"{"_ARRAY_DIMENSIONS": ["year", "lat", "lon"]}"#.to_vec())];
         assert_eq!(member_keys(&v2, "v"), ["year/.zarray", "year/.zattrs", "lat/.zarray", "lat/.zattrs", "lon/.zarray", "lon/.zattrs"]);
+
+        // The variable's CF grid mapping is asked for with its dimensions, and its system wins
+        // over the root's proj:code, as when the store lists it.
+        let mut mapped = files.clone();
+        let mut emb = serde_json::from_slice::<Value>(&mapped[1].1).unwrap();
+        emb["attributes"] = serde_json::json!({"grid_mapping": "gm"});
+        mapped[1].1 = emb.to_string().into_bytes();
+        let gm = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [1], "data_type": "int8",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1]}}, "codecs": [{"name": "bytes"}],
+            "attributes": {"epsg_code": 3857}});
+        mapped.push(("gm/zarr.json".into(), gm.to_string().into_bytes()));
+        let (docs, rounds) = discover(&mapped, "emb");
+        assert_eq!(rounds[1], ["time/zarr.json", "band/zarr.json", "gm/zarr.json"]);
+        let store = parse_store(&docs).unwrap();
+        assert!(matches!(crs_of(&store, store.array("emb").unwrap()), Some((Crs::WebMercator, _))));
+        // Names an address would read as something else aren't asked for.
+        assert_eq!(member_keys(&files[..1], "emb#x"), ["y/zarr.json", "x/zarr.json"]);
+        assert_eq!(member_keys(&files[..1], "emb?x"), ["y/zarr.json", "x/zarr.json"]);
+        // A root over MAX_METADATA isn't read (parse_store refuses it too).
+        let mut huge = serde_json::from_slice::<Value>(&files[0].1).unwrap();
+        huge["attributes"]["pad"] = "x".repeat(MAX_METADATA).into();
+        assert!(!lists_no_arrays(&[("zarr.json".into(), huge.to_string().into_bytes())]));
+        // Many other arrays naming many dimensions: the variable's own come first, within the cap.
+        let mut crowded = discover(&files, "emb").0;
+        for i in 0..16 {
+            let dims: Vec<String> = (0..MAX_DIMS).map(|d| format!("o{i}_{d}")).collect();
+            let other = serde_json::json!({"zarr_format": 3, "node_type": "array", "dimension_names": dims});
+            crowded.insert(1, (format!("a{i}/zarr.json"), other.to_string().into_bytes()));
+        }
+        let keys = member_keys(&crowded, "emb");
+        assert_eq!(keys.len(), MAX_PROBES);
+        assert_eq!(keys[..4], ["y/zarr.json", "x/zarr.json", "band/zarr.json", "o0_0/zarr.json"]);
 
         // Not years: step numbers, units that aren't years, a float axis.
         let not_years = |years: Value, time_type: &str, attrs: Value| {

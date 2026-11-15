@@ -49019,8 +49019,9 @@ fn an_imported_name_cut_to_fit_its_number_says_it_came_from_the_file() {
     }
 }
 
-/// Serves each file by its path (others are 404) with byte ranges (`bytes=a-b`, `bytes=-n`)
-/// answered 206, keeping each request's path and range (empty for a whole file).
+/// Serves each file by its path (others are 404, or 403 as S3 answers when a file `/!403` is
+/// listed) with byte ranges (`bytes=a-b`, `bytes=-n`) answered 206, keeping each request's path
+/// and range (empty for a whole file).
 #[cfg(not(target_arch = "wasm32"))]
 fn serve_ranged_files(files: Vec<(String, Vec<u8>)>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>) {
     use std::io::{Read, Write};
@@ -49047,7 +49048,8 @@ fn serve_ranged_files(files: Vec<(String, Vec<u8>)>) -> (String, std::sync::Arc<
                 let range = req.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(|r| r.trim().to_string()));
                 log.lock().unwrap().push((path.clone(), range.clone().unwrap_or_default()));
                 let Some((_, body)) = files.iter().find(|(p, _)| *p == path) else {
-                    let _ = write!(s, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    let missing = if files.iter().any(|(p, _)| p == "/!403") { "403 Forbidden" } else { "404 Not Found" };
+                    let _ = write!(s, "HTTP/1.1 {missing}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     return;
                 };
                 let (status, part) = match range.as_deref().and_then(|r| r.split_once('-')) {
@@ -49269,7 +49271,7 @@ fn a_zarr_store_without_consolidated_metadata_is_read_by_its_variables_name() {
     for t in 0..3u8 {
         files.push((format!("/s.zarr/emb/c/{t}/0/0"), (0..4u8).flat_map(|r| [10 * t + r; 6]).collect()));
     }
-    let (base, log) = serve_ranged_files(files);
+    let (base, log) = serve_ranged_files(files.clone());
     let url = format!("{base}/s.zarr");
     let mut s = Session::new(Project::default());
     // With no variable, the store's arrays can't be listed, and that is said.
@@ -49286,6 +49288,16 @@ fn a_zarr_store_without_consolidated_metadata_is_read_by_its_variables_name() {
     // The missing coordinates are asked for once each.
     let asked: Vec<String> = log.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
     assert_eq!(asked.iter().filter(|p| p.as_str() == "/s.zarr/y/zarr.json").count(), 2, "one store read per command: {asked:?}");
+
+    // A host answering 403 for files that don't exist (S3 without listing): the missing
+    // coordinates aren't taken for access denied, but a missing variable is.
+    files.push(("/!403".to_string(), Vec::new()));
+    let (base, _) = serve_ranged_files(files);
+    let url = format!("{base}/s.zarr");
+    let info = s.run("raster.zarrInfo", &json!({"url": url, "variable": "emb"})).unwrap();
+    assert_eq!(info["variables"][0]["dims"][0]["labels"], json!(["2017", "2018", "2025"]), "{info}");
+    let e = s.run("raster.zarrInfo", &json!({"url": url, "variable": "nothing"})).unwrap_err();
+    assert!(e.contains("access denied"), "{e}");
 }
 
 /// `layer.rename` refuses a name over 200 characters (once trimmed) rather than cutting it

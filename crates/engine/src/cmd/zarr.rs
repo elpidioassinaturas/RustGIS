@@ -20,7 +20,7 @@ pub fn commands() -> Vec<C> {
     vec![
         C::new("raster.zarrInfo", "Zarr Variables", "Home › Add › Add Data › Zarr", info).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network).with(crate::policy::Effect::Files))
             .view()
-            .params(r#"{"path": "a Zarr store's folder" | "url": "https://… a store with consolidated metadata", "bbox"?: [west, south, east, north] (in the grid's coordinates: the window of cells it is in a variable's grid, for layer.addZarr's cells), "variable"?: (with bbox; default the first)} → variables with their dimensions, chunks and shards' chunks (innerChunks)"#),
+            .params(r#"{"path": "a Zarr store's folder" | "url": "https://… a store (one with no consolidated metadata needs variable)", "bbox"?: [west, south, east, north] (in the grid's coordinates: the window of cells it is in a variable's grid, for layer.addZarr's cells), "variable"?: (its path in the store: with bbox, or for a store with no consolidated metadata; default the first)} → variables with their dimensions, chunks and shards' chunks (innerChunks)"#),
         C::new("zarr.series", "Time Series at a Point", "View › Time Series", series).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network).with(crate::policy::Effect::Files)).view().params(
             r#"{"lon", "lat", "layer"? (a Zarr layer: its store, variable and steps; default the active layer) | "path": folder | "url": "https://…", "variable"?, "index"?: {"level": 0} (the other dimensions' steps), "start"?, "end"?: dates (default: the layer's period, else the whole axis), "crs"?: for a projected store that doesn't say} → dates, values (null for no data) and labels along the variable's time dimension at the cell holding the point (desktop)"#,
         ),
@@ -263,13 +263,15 @@ fn store_at(url: &str, variable: &str) -> Result<zarr::Store, String> {
             ));
         }
         let mut tried = std::collections::HashSet::new();
-        for _ in 0..MEMBER_ROUNDS {
+        for round in 0..MEMBER_ROUNDS {
             let next: Vec<String> = zarr::member_keys(&docs, variable).into_iter().filter(|k| tried.insert(k.clone())).collect();
             if next.is_empty() {
                 break;
             }
             let (found, refused) = fetch(url, &next)?;
-            if refused > 0 && found.is_empty() {
+            // The variable's own files refused: access is denied. Later rounds' coordinates may
+            // just not exist, which S3 answers with 403 too (`is_absent`).
+            if round == 0 && refused > 0 && found.is_empty() {
                 return Err(crate::sources::message_with_address(url, "access denied (HTTP 403)"));
             }
             docs.extend(found);
@@ -282,7 +284,9 @@ fn store_at(url: &str, variable: &str) -> Result<zarr::Store, String> {
 /// Cancel, as it did before windows: the Add Data › Zarr dialog reads them off the frame, and none
 /// of the background paths takes a command that answers with what a store holds yet. A `"bbox"`
 /// adds the variable's two map coordinates, read whole: at most `MAX_COORDS` values each (32 MB
-/// as Float64), each file a download of at most 60 s.
+/// as Float64), each file a download of at most 60 s. A store whose root lists no arrays is read
+/// in up to [`MEMBER_ROUNDS`] more rounds of metadata files ([`store_at`]), each at most
+/// `zarr::member_keys`' 163 names (one or two files each), fetched several at a time.
 fn info(_s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(target_arch = "wasm32")]
     {
@@ -564,7 +568,8 @@ fn is_web(store: &str) -> bool {
 }
 
 /// A web store's metadata, from the run's cache when it was read before and holds `variable`
-/// (a store whose root lists no arrays holds only those found from the variable it was read for).
+/// (a store whose root lists no arrays holds only those found from the variable it was read for,
+/// so each variable read of it is kept beside the others, among the last four kept).
 #[cfg(not(target_arch = "wasm32"))]
 fn cached_store(url: &str, variable: &str) -> Result<std::sync::Arc<zarr::Store>, String> {
     let holds = |st: &zarr::Store| variable.trim().is_empty() || st.array(variable.trim()).is_some();
@@ -573,7 +578,6 @@ fn cached_store(url: &str, variable: &str) -> Result<std::sync::Arc<zarr::Store>
     }
     let st = std::sync::Arc::new(store_at(url, variable)?);
     if let Ok(mut c) = stores().lock() {
-        c.retain(|(u, _)| u != url);
         c.push((url.to_string(), st.clone()));
         let excess = c.len().saturating_sub(4);
         c.drain(..excess);
