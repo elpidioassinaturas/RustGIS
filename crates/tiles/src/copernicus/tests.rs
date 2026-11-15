@@ -421,3 +421,38 @@ fn a_refused_remembered_sign_in_is_deleted_and_an_unreachable_host_is_tried_agai
     assert!(asked.recv_timeout(Duration::from_millis(200)).is_err());
     assert!(store.kept().is_none());
 }
+
+/// A store that reads and saves but refuses to delete (a policy-locked keychain).
+struct Undeletable(rustgis_data::secrets::MemorySecrets);
+
+impl SecretStore for Undeletable {
+    fn load(&self, account: &str) -> Result<Option<rustgis_data::secrets::Secret>, SecretError> {
+        self.0.load(account)
+    }
+    fn save(&self, account: &str, value: &rustgis_data::secrets::Secret) -> Result<(), SecretError> {
+        self.0.save(account, value)
+    }
+    fn delete(&self, _account: &str) -> Result<(), SecretError> {
+        Err(SecretError::Denied)
+    }
+}
+
+#[test]
+fn a_remembered_sign_in_that_couldnt_be_deleted_is_never_signed_in_with() {
+    let _turn = crate::cache::turn();
+    logout();
+    let (base, asked) = serve(|_| json_answer(200, &grant("access", "refresh", 1800, 3600)));
+    let _clean = Remembering::new(&base);
+    let store = Arc::new(Undeletable(rustgis_data::secrets::MemorySecrets::new()));
+    store.save(ACCOUNT, &remembered_value("earlier.user@example.invalid", "earlier")).unwrap();
+    // A new run, the store unread: signing in without `remember` can't delete the earlier one.
+    set_secret_store(Some(store.clone()));
+    assert_eq!(login_remembering_at(&base, USER, PASSWORD, None, false).unwrap().1, Some(NOT_FORGOTTEN));
+    let _ = asked.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(!is_remembered(), "an intervening status doesn't make it usable again");
+    // The session ends: the earlier account isn't signed in with.
+    logout();
+    assert_eq!(restore(), Restored::Nothing);
+    assert_eq!(authorization_fresh(DATA), None);
+    assert!(asked.recv_timeout(Duration::from_millis(200)).is_err(), "the earlier password is never sent");
+}
