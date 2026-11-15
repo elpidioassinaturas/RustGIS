@@ -50223,10 +50223,11 @@ fn a_publication_legend_over_plain_paper_has_no_box() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A map moved aside for its legend moves the least that makes room, so it stays nearest the page's
-/// visual centre: less than all of the way the extent can go, when part of it is enough (#1379).
+/// A map moved aside for its legend stays nearest the page's visual centre: moved away from it (down,
+/// here, the frame's centre being under the page's), it goes less than all of the way the extent
+/// can go when part of it is enough (#1379).
 #[test]
-fn a_publication_map_moves_the_least_that_makes_room() {
+fn a_publication_map_moved_aside_stays_nearest_the_visual_centre() {
     let mut s = Session::new(Project::default());
     for name in ["Other countries", "Area"] {
         s.run("layer.addSample", &json!({"name": "countries"})).unwrap();

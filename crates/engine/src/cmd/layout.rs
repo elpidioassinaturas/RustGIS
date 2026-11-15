@@ -2133,8 +2133,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         (cw as f64 * fw / gw as f64, ch as f64 * fh / gh as f64)
     };
     // When no shape of the legend fits the room the map leaves, the map moves towards an edge, so
-    // the room on both its sides joins, the least it can (up to as far as the asked extent stays in
-    // the frame) and on the side that keeps it nearest the page's visual centre. Failing
+    // the room on both its sides joins, by part or all of the way the asked extent can go and stay
+    // in the frame: of the moves that make room, the one keeping it nearest the page's visual
+    // centre. Failing
     // that, on a continuous map (drawn over most of the extent and running on past it) with a long
     // legend (a short one sits over the map as well as ever), what is outside the extent is veiled,
     // and counts as room; and failing that, the map is drawn at up to half the scale, for a band of
@@ -2275,9 +2276,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     sizes.iter().position(|size| whole(*size).0 <= room.0 && whole(*size).1 <= room.1)
                 };
                 // Of the places with the fewest columns, the one leaving the extent nearest the
-                // page's visual centre (a little above its middle) is kept, so the least move, on
-                // the side nearer that centre; on a tie (within a millimetre), the one with the most
-                // room (#1379).
+                // page's visual centre (a little above its middle) is kept, a move away from that
+                // centre as short as makes room, one towards it as far as stays nearest it; within a
+                // millimetre of the nearest, the one with the most room (#1379).
                 // Each place that fits: its columns, its distance from that centre, its room, and the
                 // map's centre, coverage, move, veil and legend there.
                 type Fit = (
@@ -2292,9 +2293,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     Vec<String>,
                 );
                 let mut fits: Vec<Fit> = Vec::new();
-                // Each way a quarter, half, three quarters and all of the way the extent can go: the
-                // least move that makes room keeps the map nearest the middle. A way with no room to
-                // go is left out (its moves are the centred place, tried first).
+                // Each way a quarter, half, three quarters and all of the way the extent can go, so
+                // a move can stop short of the edge. A way with no room to go is left out (its moves
+                // are the centred place, tried first).
                 let moves = [(to_right, 0.0), (-to_left, 0.0), (0.0, to_bottom), (0.0, -to_top)]
                     .into_iter()
                     .filter(|&(x, y)| x != 0.0 || y != 0.0)

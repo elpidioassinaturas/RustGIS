@@ -2552,7 +2552,8 @@ pub fn frame_plain_under(
     let (w, h) = (w_mm * PT_PER_MM, h_mm * PT_PER_MM);
     let ppp = f64::from(cells.clamp(8, 1024)) / w.max(h);
     let view = View { width: w, height: h, pixels_per_point: ppp, camera: frame_camera(map, center, scale, 0.0, 0.0), sky: false };
-    let basemap = map.basemap;
+    // The background as the map draws it: on another body, the land's grey (Map::palette).
+    let (water, land, ..) = map.palette();
     struct Lock<'a> {
         lock: Option<Vec<(rustgis_map::LabelKey, rustgis_map::LockedPlace)>>,
         anchors: std::collections::HashMap<rustgis_map::LabelKey, Coord>,
@@ -2586,7 +2587,6 @@ pub fn frame_plain_under(
     let mut seen = (r0..r1).flat_map(|r| (c0..c1).map(move |c| r * gw + c)).map(|i| px[i]);
     // One colour, and that the basemap's water or land: a polygon filling the whole rectangle in
     // one colour, data or context, isn't the background.
-    let (water, land, ..) = basemap.palette();
     let rgba = |p: tiny_skia::PremultipliedColorU8| (p.red(), p.green(), p.blue(), p.alpha());
     let Some(first) = seen.next().map(rgba) else { return false };
     let background = [water, land].iter().any(|c| (c.0[0], c.0[1], c.0[2], 255) == first);
@@ -3428,6 +3428,11 @@ mod tests {
         map.layer_mut(named).unwrap().labels.enabled = true;
         assert!(!plain(&mut map, right_of_it), "its label lies inside it");
         map.layer_mut(named).unwrap().labels.enabled = false;
+        // On another body the background is drawn in the land's grey (Map::palette), not the
+        // Earth basemap's water: that grey is the background there.
+        (map.body, map.basemap) = ("mars".into(), rustgis_map::Basemap::Paper);
+        assert!(plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "Mars's plain grey is its background");
+        (map.body, map.basemap) = ("earth".into(), rustgis_map::Basemap::Blank);
         map.tiles.push(rustgis_map::TileLayer::new("tiles", rustgis_map::TileKind::Raster, "https://example.invalid/{z}/{x}/{y}.png"));
         assert!(!plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "web tiles aren't fetched for it, so nothing is plain");
     }

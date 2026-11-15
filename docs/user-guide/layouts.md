@@ -89,8 +89,10 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     or all of the way the asked extent can go and stay in the frame, so the room on both its sides
     joins (the answer's `mapShift`, in mm right and down, and a warning). Of the moves that need the
     fewest legend columns, the one that leaves the extent's centre nearest the page's visual centre
-    (in the middle across, 45% of the way down) is kept, so the least move on the side nearer it,
-    then the one with the most room. Where the projection stretches, as Web Mercator does away from the equator, the
+    (in the middle across, 45% of the way down) is kept: a move away from that centre goes only as
+    far as makes room, one towards it as far as keeps it nearest. Of the moves within 1 mm of the
+    nearest, the one with the most room is kept. Where the projection stretches, as Web Mercator
+    does away from the equator, the
     moved frame is drawn at its new centre's ground scale, and the extent has to stay whole at that
     scale. Only when no move makes room for it, a continuous map with a long legend is veiled: at
     the asked scale, at least 80% of the extent's part of the frame and 30% of the rest are drawn
