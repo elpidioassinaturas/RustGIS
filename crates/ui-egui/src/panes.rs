@@ -2805,6 +2805,13 @@ pub struct GpForm {
     pub confirm_uninstall: bool,
     /// Why the last uninstall failed (apart from `last`, which a tool run sets too).
     pub uninstall_error: Option<String>,
+    /// GeoLibre tool translations downloading (#2224): the language, and the tools they name
+    /// (or why they couldn't be had) once the download is done.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub language_download: Option<(&'static str, crate::Slot<Result<usize, String>>)>,
+    /// Why the last download or removal of tool translations failed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub language_error: Option<String>,
 }
 
 /// A plugin tool running on a thread of its own.
@@ -3381,6 +3388,61 @@ fn geolibre_uninstall(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
 }
 
+/// The GeoLibre tools in the interface's language (#2224): **Translate tools** downloads
+/// GeoLibre's pack for it, on a thread (one request of about 2 MB); **Remove translations**
+/// deletes the kept one. Nothing for English, or a language GeoLibre has no pack for.
+#[cfg(not(target_arch = "wasm32"))]
+fn geolibre_language(app: &mut RustGisApp, ui: &mut Ui) {
+    let lang = crate::i18n::current().code();
+    if let Some((for_lang, slot)) = &app.gp.language_download {
+        let done = slot.lock().ok().and_then(|mut r| r.take());
+        match done {
+            Some(Ok(_)) => {
+                app.gp.language_download = None;
+                app.gp.language_error = None;
+            }
+            Some(Err(e)) => {
+                app.gp.language_download = None;
+                app.gp.language_error = Some(e);
+            }
+            None if *for_lang == lang => {
+                ui.spinner().on_hover_text(tl!("Downloading the tool translations…"));
+                return;
+            }
+            None => {}
+        }
+    }
+    if !rustgis_engine::cmd::gp::geolibre_language_available(lang) {
+        return;
+    }
+    if rustgis_engine::cmd::gp::geolibre_language_in_use(lang) {
+        let resp = ui
+            .small_button(egui::RichText::new(tl!("Remove translations")).size(11.0))
+            .on_hover_text(tl!("Show these tools in English again"));
+        if resp.clicked() {
+            app.gp.language_error = app.run("gp.uninstallGeolibreLanguage", json!({"locale": lang})).err();
+        }
+        return;
+    }
+    let tip = crate::i18n::fmt(
+        "Download GeoLibre's translations of these tools into {language} (about 2 MB, from languages.geolibre.app)",
+        &[("language", crate::i18n::current().name())],
+    );
+    if ui.small_button(egui::RichText::new(tl!("Translate tools")).size(11.0)).on_hover_text(tip).clicked() {
+        let slot: crate::Slot<Result<usize, String>> = Default::default();
+        app.gp.language_download = Some((lang, slot.clone()));
+        app.gp.language_error = None;
+        let ctx = ui.ctx().clone();
+        std::thread::spawn(move || {
+            let result = rustgis_engine::cmd::gp::install_geolibre_language(lang);
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(result);
+            }
+            ctx.request_repaint();
+        });
+    }
+}
+
 /// The browser's version of the card: load the WASI runner's tools.
 fn geolibre_web_card(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     ui.add_space(6.0);
@@ -3548,6 +3610,22 @@ pub(crate) fn input_table<'a>(session: &'a Session, name: &str) -> Option<&'a ru
     rustgis_engine::project::find_table(tables, name).and_then(|i| tables.get(i))
 }
 
+/// Whether Find Tools shows `tool` for `q`, the search as [`TreeNode::fold`] folds it (lower case,
+/// no accents): its name or summary as shown (translated) or in English, or its id, holds it.
+/// `curvas de nivel` finds `Curvas de nível a partir de raster`, `dissolver` the built-in
+/// Dissolve shown as `Dissolver` (#2224).
+///
+/// [`TreeNode::fold`]: rustgis_engine::plugins::TreeNode::fold
+fn tool_matches(q: &str, tool: &rustgis_engine::analysis::ToolSpec) -> bool {
+    let fold = rustgis_engine::plugins::TreeNode::fold;
+    q.is_empty()
+        || tool.id.to_lowercase().contains(q)
+        || [tool.name, tool.summary].into_iter().any(|en| {
+            let shown = crate::i18n::t_raw(en);
+            fold(en).contains(q) || (shown != en && fold(shown).contains(q))
+        })
+}
+
 fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let Some(spec) = app.gp.tool.and_then(rustgis_engine::analysis::tool) else {
         // Tool finder, under the tool running, if one is.
@@ -3561,10 +3639,8 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         crate::widgets::search_field(ui, &mut app.gp.search, tl!("Find Tools"));
         ui.separator();
         ui.add_space(4.0);
-        let q = app.gp.search.to_lowercase();
-        let matches = |x: &rustgis_engine::analysis::ToolSpec| {
-            q.is_empty() || x.name.to_lowercase().contains(&q) || x.summary.to_lowercase().contains(&q) || x.id.to_lowercase().contains(&q)
-        };
+        let q = rustgis_engine::plugins::TreeNode::fold(&app.gp.search);
+        let matches = |x: &rustgis_engine::analysis::ToolSpec| tool_matches(&q, x);
         let row = |app: &mut RustGisApp, ui: &mut Ui, tool: &'static rustgis_engine::analysis::ToolSpec| {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!(tool.name)));
@@ -3600,9 +3676,17 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             if q.is_empty() {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(tl!("GeoLibre")).size(11.0).color(t.text_dim));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| geolibre_uninstall(app, ui, t));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        geolibre_uninstall(app, ui, t);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        geolibre_language(app, ui);
+                    });
                 });
                 if let Some(e) = &app.gp.uninstall_error {
+                    ui.label(egui::RichText::new(e).size(11.0).color(t.red));
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(e) = &app.gp.language_error {
                     ui.label(egui::RichText::new(e).size(11.0).color(t.red));
                 }
                 geolibre_passed_over(app, ui, t, false);
@@ -3763,7 +3847,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         }
         let label = ui.label(egui::RichText::new(format!("{}{}", tl!(p.label), if p.required { " *" } else { "" })).size(12.0));
         if !p.help.is_empty() {
-            label.on_hover_text(p.help);
+            label.on_hover_text(tl!(p.help));
         }
         let mut cur = app.gp.values.get(p.name).cloned().unwrap_or_default();
         if let Some(input) = crate::fieldlists::input(p.kind) {
@@ -7198,6 +7282,30 @@ pub(crate) fn layout_menu(app: &mut RustGisApp, ui: &mut Ui, n: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Find Tools finds a tool by what it shows in the interface's language as well as by its
+    /// English name and id, without minding case or accents (#2224).
+    #[test]
+    fn find_tools_matches_the_shown_name_without_accents() {
+        let dissolve = rustgis_engine::analysis::tool("dissolve").expect("the built-in Dissolve");
+        let kernel = rustgis_engine::analysis::tool("kernelDensity").expect("the built-in Kernel Density");
+        let fold = rustgis_engine::plugins::TreeNode::fold;
+        crate::i18n::set_current(crate::i18n::Lang::from_code("pt").expect("Portuguese"));
+        let shown = crate::i18n::t_raw(dissolve.name);
+        assert_ne!(shown, dissolve.name, "the test needs Dissolve translated into Portuguese");
+        assert!(tool_matches(&fold(shown), dissolve), "{shown}");
+        assert!(tool_matches(&fold("DISSOLVE"), dissolve), "the English name still finds it");
+        assert!(tool_matches(&fold("dissolve"), dissolve) && tool_matches("", dissolve));
+        let shown = crate::i18n::t_raw(kernel.name);
+        let plain: String = fold(shown);
+        assert!(tool_matches(&plain, kernel), "{shown} without its accents or case");
+        assert!(!tool_matches(&fold("curvas de nivel"), dissolve));
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        assert!(!tool_matches(
+            &fold(crate::i18n::Lang::from_code("pt").map(|pt| crate::i18n::tr_raw(pt, dissolve.name)).unwrap_or("")),
+            dissolve
+        ));
+    }
 
     /// An external tool's optional layer inputs stay empty until they're picked, and its required
     /// ones start at the active layer; a built-in tool's optional one still follows it (#1517).
