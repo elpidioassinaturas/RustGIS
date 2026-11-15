@@ -12,7 +12,10 @@
 //! [`translate`] maps the English text the tools show (the [`ToolSpec`] strings) to the pack's,
 //! by tool id and parameter name, so the interface's catalogue lookup can fall back to it like
 //! a plugin's `i18n`. The English names stay the tools' names everywhere else (scripts, the
-//! command line, layer names, search by the English words).
+//! command line, layer names, search by the English words). Because the lookup is keyed by the
+//! English text, two tools that share an English string get one translation of it: the first
+//! tool's, in the tool list's order. The packs rarely disagree on one: the Portuguese pack has two
+//! translations for one of its 7,068 English strings (`Ripley's K Function`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
@@ -273,6 +276,22 @@ static REVISION: AtomicU64 = AtomicU64::new(0);
 /// Languages whose pack was looked for in the data folder and isn't there.
 static MISSING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
+/// Why the pack kept for a language couldn't be read, by language.
+static LOAD_ERRORS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// Why the pack kept for `locale` can't be used (a damaged file, another format version), if
+/// it was tried and failed: the Tools pane and `gp.geolibre` say it.
+pub fn load_error(locale: &str) -> Option<String> {
+    LOAD_ERRORS.lock().ok()?.as_ref()?.get(locale).cloned()
+}
+
+/// Every language whose kept pack couldn't be read, with the reason.
+pub fn load_errors() -> Vec<(String, String)> {
+    let mut v: Vec<_> = LOAD_ERRORS.lock().ok().and_then(|e| e.clone()).unwrap_or_default().into_iter().collect();
+    v.sort();
+    v
+}
+
 fn published() -> &'static [ToolSpec] {
     rustgis_analysis::published_external_tools_of(crate::SOURCE)
 }
@@ -291,6 +310,9 @@ pub fn activate(pack: Option<Pack>) {
     }
     if let Ok(mut m) = MISSING.lock() {
         *m = None;
+    }
+    if let Ok(mut e) = LOAD_ERRORS.lock() {
+        *e = None;
     }
     REVISION.fetch_add(1, Ordering::Relaxed);
 }
@@ -353,6 +375,9 @@ fn load_kept(locale: &str) {
             if let Ok(mut m) = MISSING.lock() {
                 m.get_or_insert_with(Default::default).insert(locale.to_string());
             }
+            if let Ok(mut errors) = LOAD_ERRORS.lock() {
+                errors.get_or_insert_with(Default::default).insert(locale.to_string(), e);
+            }
         }
     }
 }
@@ -361,6 +386,10 @@ fn load_kept(locale: &str) {
 /// `<locale>.json` each.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(d) = tests::DIR.lock().ok().and_then(|d| d.clone()) {
+        return Some(d);
+    }
     rustgis_data::dirs::app_data_dir().map(|d| d.join("geolibre-languages"))
 }
 
@@ -401,13 +430,25 @@ fn load(locale: &str) -> Result<Option<Pack>, String> {
     Ok(Some(pack))
 }
 
+/// Reads at most [`MAX_BYTES`] of `path` (one byte more tells a larger file), whatever its size
+/// says: a pipe or a device (`/dev/zero`) reports none.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_limited(path: &std::path::Path) -> Result<String, String> {
-    let len = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.len();
-    if len > MAX_BYTES as u64 {
+    use std::io::Read;
+    let err = |e: std::io::Error| format!("{}: {e}", path.display());
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).map_err(err)?.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(err)?;
+    if bytes.len() > MAX_BYTES {
         return Err(format!("the language pack is larger than {} MB", MAX_BYTES / (1024 * 1024)));
     }
-    std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+    String::from_utf8(bytes).map_err(|_| format!("{}: the language pack isn't UTF-8 text", path.display()))
+}
+
+/// How many of the listed GeoLibre tools `pack` names: what a download or an import reports, so
+/// a pack made for another runner's tools shows as translating few.
+#[cfg(not(target_arch = "wasm32"))]
+fn matched(pack: &Pack) -> usize {
+    published().iter().filter(|t| pack.tools.get(t.id.trim_start_matches(crate::PREFIX)).is_some_and(|x| x.name.is_some())).count()
 }
 
 /// Keeps `text`, a checked pack for `locale`, and puts it in use.
@@ -418,13 +459,13 @@ fn keep(pack: Pack, text: &str) -> Result<usize, String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
     rustgis_data::io::write_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
-    let n = pack.tools();
+    let n = matched(&pack);
     activate(Some(pack));
     Ok(n)
 }
 
-/// Downloads GeoLibre's pack for `locale`, keeps it and puts it in use; returns how many tools
-/// it names. One request of about 2 MB, which gives up after a minute.
+/// Downloads GeoLibre's pack for `locale`, keeps it and puts it in use; returns how many of the
+/// listed tools it names. One request of about 2 MB, which gives up after a minute.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn download(locale: &str) -> Result<usize, String> {
     let url = url(locale).ok_or_else(|| format!("GeoLibre publishes no tool translations for '{locale}'"))?;
@@ -453,7 +494,7 @@ pub fn download(locale: &str) -> Result<usize, String> {
 }
 
 /// Reads a pack from `path`, keeps it for the language it names and puts it in use; returns
-/// that language and how many tools it names.
+/// that language and how many of the listed tools it names.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn import(path: &std::path::Path) -> Result<(String, usize), String> {
     let text = read_limited(path)?;
@@ -473,6 +514,11 @@ pub fn remove(locale: &str) -> Result<(), String> {
     if active_locale().as_deref() == Some(locale) {
         activate(None);
     }
+    if let Ok(mut errors) = LOAD_ERRORS.lock()
+        && let Some(errors) = errors.as_mut()
+    {
+        errors.remove(locale);
+    }
     Ok(())
 }
 
@@ -480,6 +526,9 @@ pub fn remove(locale: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use rustgis_analysis::{ParamKind, ParamSpec};
+
+    /// Where [`dir`] keeps packs in these tests, instead of the app's data folder.
+    pub(super) static DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
     fn pack_text(locale: &str) -> String {
         serde_json::json!({
@@ -583,6 +632,41 @@ mod tests {
         assert!(parse("[").is_err());
         assert!(parse(&" ".repeat(MAX_BYTES + 1)).is_err());
         assert!(valid_locale("zh-Hant") && valid_locale("pt") && !valid_locale("p") && !valid_locale("pt-"));
+    }
+
+    /// A pack kept, read again in a later session, damaged (and said so), then removed.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_kept_pack_is_read_back_said_when_damaged_and_removed() {
+        let dir = std::env::temp_dir().join(format!("rustgis-langpack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        *DIR.lock().unwrap() = Some(dir.clone());
+        let src = dir.with_extension("json");
+        std::fs::write(&src, pack_text("pt")).unwrap();
+        let (locale, _) = import(&src).unwrap();
+        assert_eq!(locale, "pt");
+        assert!(dir.join("pt.json").is_file() && kept() == ["pt"]);
+        assert!(in_use("pt"));
+        // A later session: nothing in use, the kept file read the first time it's asked for.
+        let before = revision();
+        activate(None);
+        assert!(revision() > before, "a change of pack starts a cache over");
+        assert!(in_use("pt") && load_error("pt").is_none());
+        // Damaged: said, and not in use.
+        activate(None);
+        std::fs::write(dir.join("pt.json"), "{").unwrap();
+        assert!(!in_use("pt"));
+        assert!(load_error("pt").is_some_and(|e| e.contains("JSON")), "{:?}", load_error("pt"));
+        assert_eq!(load_errors().len(), 1);
+        remove("pt").unwrap();
+        assert!(kept().is_empty() && load_error("pt").is_none() && !in_use("pt"));
+        assert!(remove("pt").is_err(), "nothing left to remove");
+        // A pipe or a device reports no size: the read is bounded all the same.
+        #[cfg(unix)]
+        assert!(import(std::path::Path::new("/dev/zero")).is_err());
+        *DIR.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&src);
     }
 
     #[test]

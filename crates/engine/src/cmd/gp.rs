@@ -156,12 +156,14 @@ pub fn geolibre_passed_over() -> Option<String> {
 fn geolibre_languages() -> Value {
     #[cfg(all(feature = "geolibre", not(target_arch = "wasm32")))]
     {
+        let errors: serde_json::Map<String, Value> =
+            rustgis_geolibre::langpack::load_errors().into_iter().map(|(locale, e)| (locale, Value::String(e))).collect();
         json!({"available": rustgis_geolibre::langpack::LOCALES, "installed": rustgis_geolibre::langpack::kept(),
-            "active": rustgis_geolibre::langpack::active_locale()})
+            "active": rustgis_geolibre::langpack::active_locale(), "errors": errors})
     }
     #[cfg(not(all(feature = "geolibre", not(target_arch = "wasm32"))))]
     {
-        json!({"available": [], "installed": [], "active": null})
+        json!({"available": [], "installed": [], "active": null, "errors": {}})
     }
 }
 
@@ -207,6 +209,20 @@ pub fn geolibre_translate(locale: &str, english: &str) -> Option<String> {
     }
 }
 
+/// Why the tool translations kept for `locale` can't be used (a damaged file, another format
+/// version), once they were tried: the Tools pane shows it beside **Translate tools**.
+pub fn geolibre_language_error(locale: &str) -> Option<String> {
+    #[cfg(feature = "geolibre")]
+    {
+        rustgis_geolibre::langpack::load_error(locale)
+    }
+    #[cfg(not(feature = "geolibre"))]
+    {
+        let _ = locale;
+        None
+    }
+}
+
 /// Changes whenever [`geolibre_translate`] may answer differently (translations installed or
 /// removed, the tools reloaded), so a cache of its answers starts over.
 pub fn geolibre_language_revision() -> u64 {
@@ -219,7 +235,7 @@ pub fn geolibre_language_revision() -> u64 {
 }
 
 /// Downloads GeoLibre's tool translations for `locale` (about 2 MB), keeps them and puts them in
-/// use; returns how many tools they name. Blocks on one request: the app calls it from a
+/// use; returns how many of the listed tools they name. Blocks on one request: the app calls it from a
 /// background thread. Native only.
 pub fn install_geolibre_language(locale: &str) -> Result<usize, String> {
     #[cfg(all(feature = "geolibre", not(target_arch = "wasm32")))]
@@ -233,8 +249,11 @@ pub fn install_geolibre_language(locale: &str) -> Result<usize, String> {
     }
 }
 
-/// `gp.installGeolibreLanguage`: one request of about 2 MB, which gives up after a minute, run
-/// where it is called (like `gp.installGeolibre`); the app's button runs it on a thread.
+/// `gp.installGeolibreLanguage`. It runs where it is called, without Cancel, because its work
+/// doesn't grow with anything the user has: one request for one file, read up to 5 MB and given
+/// up after 60 s, then one parse, the same for every project. The Tools pane's button, the way
+/// the app downloads a pack, runs it on a thread of its own; called from a script, the command line
+/// or Python, it waits for that one request like `gp.installGeolibre` waits for the runner's.
 fn install_geolibre_language_cmd(_s: &mut Session, p: &Value) -> CmdResult {
     let locale = ps(p, "locale").map(str::trim).filter(|l| !l.is_empty()).ok_or("give the language's \"locale\", such as \"pt\"")?;
     let tools = install_geolibre_language(locale)?;

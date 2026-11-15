@@ -3281,7 +3281,7 @@ fn geolibre_card(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         app.gp.install = Some(st.clone());
                         app.gp.last = None;
                         let ctx = ui.ctx().clone();
-                        std::thread::spawn(move || {
+                        let spawned = std::thread::Builder::new().name("geolibre-install".into()).spawn(move || {
                             let result = rustgis_engine::cmd::gp::install_geolibre(&|done, total| {
                                 if let Ok(mut s) = st.lock() {
                                     s.done = done;
@@ -3293,6 +3293,10 @@ fn geolibre_card(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                             }
                             ctx.request_repaint();
                         });
+                        if let Err(e) = spawned {
+                            app.gp.install = None;
+                            app.gp.last = Some((false, vec![e.to_string()]));
+                        }
                     }
                     ui.add_space(2.0);
                     ui.horizontal_wrapped(|ui| {
@@ -3433,13 +3437,17 @@ fn geolibre_language(app: &mut RustGisApp, ui: &mut Ui) {
         app.gp.language_download = Some((lang, slot.clone()));
         app.gp.language_error = None;
         let ctx = ui.ctx().clone();
-        std::thread::spawn(move || {
+        let spawned = std::thread::Builder::new().name("geolibre-language".into()).spawn(move || {
             let result = rustgis_engine::cmd::gp::install_geolibre_language(lang);
             if let Ok(mut s) = slot.lock() {
                 *s = Some(result);
             }
             ctx.request_repaint();
         });
+        if let Err(e) = spawned {
+            app.gp.language_download = None;
+            app.gp.language_error = Some(e.to_string());
+        }
     }
 }
 
@@ -3687,6 +3695,9 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(e) = &app.gp.language_error {
+                    ui.label(egui::RichText::new(e).size(11.0).color(t.red));
+                } else if let Some(e) = rustgis_engine::cmd::gp::geolibre_language_error(crate::i18n::current().code()) {
+                    let e = crate::i18n::fmt("The kept tool translations can't be read: {error}", &[("error", &e)]);
                     ui.label(egui::RichText::new(e).size(11.0).color(t.red));
                 }
                 geolibre_passed_over(app, ui, t, false);
