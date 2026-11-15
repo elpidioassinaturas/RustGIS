@@ -330,7 +330,16 @@ fn reset(s: &mut Session, p: Project) {
     let mut dropped: Vec<(String, String)> = Vec::new();
     for m in s.project.maps.iter_mut() {
         let Some(t) = m.view.terrain.as_mut() else { continue };
-        let Some(e) = t.block.as_ref().and_then(|b| b.check().err()) else { continue };
+        // Over elevation tiles there is no layer's extent to cut the block to, so it needs a box.
+        let over_tiles = matches!(t.source, rustgis_map::view::TerrainSource::Tiles { .. });
+        let Some(e) = t.block.as_ref().and_then(|b| {
+            b.check().err().or_else(|| {
+                (over_tiles && b.extent.is_none())
+                    .then(|| "over elevation tiles a block needs an extent box [xmin, ymin, xmax, ymax]".to_string())
+            })
+        }) else {
+            continue;
+        };
         t.block = None;
         dropped.push((m.name.clone(), e));
     }

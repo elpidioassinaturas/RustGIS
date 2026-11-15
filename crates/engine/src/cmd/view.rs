@@ -500,6 +500,8 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
             .map(|r| (n.clone(), rustgis_render::terrain::raster_box(&r), rustgis_render::terrain::raster_footprint(&r))),
         _ => None,
     };
+    // A block this call leaves out is the one the terrain had: the refusal says so, and how to take it off.
+    let kept = if block.is_none() { "; the block is the one kept from before, and \"block\": false takes it off" } else { "" };
     let refused = match (&dem_box, t.block.as_ref().and_then(|b| b.extent)) {
         // A DEM whose corners give no box (one off the map's world, say) would draw no block.
         (Some((n, None, _)), None) => Some(format!(
@@ -508,7 +510,7 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         // A box off the DEM would draw nothing. A box inside its footprint but off its inner box
         // still draws the ground it reaches (a DEM turned by its projection has corners beyond it).
         (Some((n, _, Some(d))), Some(e)) if e[2] <= d[0] || e[0] >= d[2] || e[3] <= d[1] || e[1] >= d[3] => Some(format!(
-            "block's extent doesn't overlap '{n}' (its corners are [{:.0}, {:.0}, {:.0}, {:.0}] in Web Mercator metres; Terrain stays as it was)",
+            "block's extent doesn't overlap '{n}' (its corners are [{:.0}, {:.0}, {:.0}, {:.0}] in Web Mercator metres{kept}; Terrain stays as it was)",
             d[0], d[1], d[2], d[3]
         )),
         _ => None,

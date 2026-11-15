@@ -7711,6 +7711,24 @@ fn terrain_block_is_checked_kept_and_taken_off() {
     let v = s.run("map.terrain", &json!({"block": false})).unwrap();
     assert!(v["block"].is_null());
     assert!(!serde_json::to_string(&s.map().view).unwrap_or_default().contains("block"));
+    // A block kept from before that a DEM off its box can't take is refused, and the refusal says
+    // it was kept and that "block": false takes it off (a block given in the call isn't said so).
+    s.map_mut().view.terrain = Some(rustgis_map::view::Terrain {
+        source: rustgis_map::view::TerrainSource::Layer(dem.clone()),
+        exaggeration: 1.0,
+        block: Some(rustgis_map::view::TerrainBlock {
+            extent: Some([0.0, 0.0, 1000.0, 1000.0]),
+            depth: None,
+            walls: rustgis_map::view::BLOCK_WALLS,
+        }),
+        water: None,
+    });
+    let e = s.run("map.terrain", &json!({"exaggeration": 2})).unwrap_err();
+    assert!(e.contains("the block is the one kept from before"), "{e}");
+    assert!(s.map().view.terrain.as_ref().is_some_and(|t| t.block.is_some()), "the terrain stays as it was");
+    let e = s.run("map.terrain", &json!({"exaggeration": 2, "block": {"extent": [0, 0, 1000, 1000]}})).unwrap_err();
+    assert!(!e.contains("kept from before"), "{e}");
+    s.run("map.terrain", &json!({"block": false})).unwrap();
     // Over elevation tiles there's no layer extent: a box is needed, and the terrain stays.
     let e = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {}})).unwrap_err();
     assert!(e.contains("needs an extent box"), "{e}");
@@ -7819,6 +7837,44 @@ fn terrain_is_set_from_a_dem_or_tiles() {
         let t = opened.project.maps[0].view.terrain.clone();
         assert!(t.as_ref().is_some_and(|t| t.block.is_none()), "{t:?}");
         assert!(opened.notices.iter().any(|n| n.text.contains("block's extent is")), "{:?}", opened.notices);
+    }
+    // A valid saved block survives the open with its box, and nothing is said of it.
+    {
+        let mut clean = s.project.clone();
+        clean.maps[0].view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer(name.clone()),
+            exaggeration: 1.0,
+            block: Some(rustgis_map::view::TerrainBlock {
+                extent: Some([1114000.0, 5622000.0, 1116000.0, 5625000.0]),
+                depth: None,
+                walls: rustgis_map::view::BLOCK_WALLS,
+            }),
+            water: None,
+        });
+        let mut opened = Session::new(Project::default());
+        crate::cmd::project::reset_to(&mut opened, clean);
+        let t = opened.project.maps[0].view.terrain.clone();
+        assert!(t.as_ref().is_some_and(|t| t.block.as_ref().is_some_and(|b| b.extent.is_some())), "{t:?}");
+        assert!(!opened.notices.iter().any(|n| n.text.contains("block diagram")), "{:?}", opened.notices);
+    }
+    // A saved block over elevation tiles with no box (the terrain command refuses one) is dropped as
+    // the project opens, and said with the reason.
+    {
+        let mut saved = s.project.clone();
+        saved.maps[0].view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Tiles {
+                url: "https://e.com/{z}/{x}/{y}.png".into(),
+                encoding: rustgis_map::view::TerrainEncoding::Terrarium,
+            },
+            exaggeration: 1.0,
+            block: Some(rustgis_map::view::TerrainBlock { extent: None, depth: None, walls: rustgis_map::view::BLOCK_WALLS }),
+            water: None,
+        });
+        let mut opened = Session::new(Project::default());
+        crate::cmd::project::reset_to(&mut opened, saved);
+        let t = opened.project.maps[0].view.terrain.clone();
+        assert!(t.as_ref().is_some_and(|t| t.block.is_none()), "{t:?}");
+        assert!(opened.notices.iter().any(|n| n.text.contains("needs an extent box")), "{:?}", opened.notices);
     }
     // Renaming another layer leaves the terrain as it is.
     s.run("layer.rename", &json!({"layer": "Countries", "name": "Paises"})).unwrap();

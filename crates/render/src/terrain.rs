@@ -595,6 +595,7 @@ mod tests {
             },
             exaggeration: 1.0,
             body: 1.0,
+            water: None,
         };
         let mut m = Map::new("Map");
         let block = rustgis_map::view::TerrainBlock {
