@@ -189,6 +189,9 @@ pub struct Terrain {
     /// drapes the map as far as the view reaches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<TerrainBlock>,
+    /// Water bodies drawn flat at their level (#1915). None: the ground's heights everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub water: Option<TerrainWater>,
 }
 
 fn one() -> f64 {
@@ -222,6 +225,19 @@ pub struct TerrainBlock {
 /// The least depth (metres, before exaggeration) of a block diagram's base below its lowest
 /// ground when no depth is given.
 pub const BLOCK_MIN_DEPTH: f64 = 100.0;
+
+/// A terrain's water (#1915): inside each polygon of a layer the ground is flat, at the lowest
+/// height along the polygon's shore or at the value of a field, instead of the DEM's heights
+/// (a surface model is often noisy or stepped over water).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TerrainWater {
+    /// The polygon layer of water bodies, by name (as the terrain's DEM).
+    pub layer: String,
+    /// A numeric field holding each water body's level (metres); a row without one takes its
+    /// shore's lowest height. None: every water body's shore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+}
 
 /// The most a terrain's heights are exaggerated.
 pub const MAX_EXAGGERATION: f64 = 20.0;

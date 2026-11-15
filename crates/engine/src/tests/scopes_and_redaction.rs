@@ -587,6 +587,7 @@ fn outputs_redact_urls_capabilities_and_local_paths_across_scopes() {
         },
         exaggeration: 1.5,
         block: None,
+        water: None,
     });
 
     // 4. Rasters: one local filesystem path, one URL with ?token=..., and one rustgis-s3: wrapper.

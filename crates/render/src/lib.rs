@@ -9097,6 +9097,7 @@ mod tests {
             source: rustgis_map::view::TerrainSource::Layer("dem".into()),
             exaggeration: 2.0,
             block: None,
+            water: None,
         });
         // The ground's height is read from the DEM (exaggerated), and nothing off it.
         let g = terrain::Ground::of(&hilly, &camera).expect("terrain");
@@ -9124,6 +9125,7 @@ mod tests {
             source: rustgis_map::view::TerrainSource::Layer("none".into()),
             exaggeration: 1.0,
             block: None,
+            water: None,
         });
         assert!(terrain::Ground::of(&hilly, &camera).is_none());
         assert!(render(&mut hilly, &view).is_some());
@@ -9341,6 +9343,7 @@ mod tests {
                 source: rustgis_map::view::TerrainSource::Layer(name.into()),
                 exaggeration: 2.0,
                 block: None,
+                water: None,
             })
         };
         // Where its far edge lies flat, and raised to its height.
@@ -9376,7 +9379,7 @@ mod tests {
         m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
         let block = |extent| rustgis_map::view::TerrainBlock { extent, depth: Some(1000.0), walls: rustgis_map::view::BLOCK_WALLS };
         let terrain = |block: Option<rustgis_map::view::TerrainBlock>| {
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("dem".into()), exaggeration: 1.0, block })
+            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("dem".into()), exaggeration: 1.0, block, water: None })
         };
         // With no box, the DEM's extent.
         m.view.terrain = terrain(Some(block(None)));
@@ -9430,6 +9433,7 @@ mod tests {
                 source: rustgis_map::view::TerrainSource::Layer("dem".into()),
                 exaggeration: 1.0,
                 block: None,
+                water: None,
             });
             let g = terrain::Ground::of(&m, &camera).expect("terrain");
             let view = View { width: 1600.0, height: 1100.0, pixels_per_point: ppp, camera, sky: false };
@@ -9492,6 +9496,7 @@ mod tests {
             source: rustgis_map::view::TerrainSource::Layer("dem".into()),
             exaggeration: 2.0,
             block: None,
+            water: None,
         });
         if let Some(l) = m.layers.iter_mut().find(|l| l.name == "dem") {
             l.visible = true;
@@ -9522,6 +9527,7 @@ mod tests {
             source: rustgis_map::view::TerrainSource::Layer("dem".into()),
             exaggeration: 2.0,
             block: None,
+            water: None,
         });
         let ground = terrain::Ground::of(&m, &camera).expect("terrain");
         let bands: Vec<(View, (f64, f64), Pixmap)> = camera

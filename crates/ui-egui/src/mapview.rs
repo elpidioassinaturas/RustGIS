@@ -6011,6 +6011,7 @@ mod tests {
                 source: rustgis_engine::map::view::TerrainSource::Layer("dem".into()),
                 exaggeration: 2.0,
                 block: None,
+                water: None,
             });
             m.camera =
                 Camera { center: rustgis_engine::geom::lonlat_to_merc(Coord::new(10.0, 47.6)), res: 300.0, bearing: 0.0, pitch: 60.0 };

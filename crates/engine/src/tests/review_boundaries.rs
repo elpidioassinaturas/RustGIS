@@ -235,6 +235,7 @@ fn permission_review_render_owners_count_terrain_elevation_tiles() {
             source: rustgis_map::view::TerrainSource::Tiles { url, encoding: rustgis_map::view::TerrainEncoding::Terrarium },
             exaggeration: 1.0,
             block: None,
+            water: None,
         });
     };
     terrain(&mut s, "one");
