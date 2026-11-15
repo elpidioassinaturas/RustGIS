@@ -1075,13 +1075,15 @@ mod tests {
         assert!(sum(&ahead) > sum(&behind) + 200, "{ahead:?} against {behind:?} (dull {dull:?})");
     }
 
-    /// A tilted view drawn whole (as exported) glints too: only toward white, and nothing changes
-    /// in a flat view.
+    /// A tilted view drawn whole (as exported, and on screen: terrain keeps it on the CPU) glints
+    /// too: only toward white, and nothing changes in a flat view.
     #[test]
     fn a_tilted_export_glints_and_a_flat_one_doesnt() {
         let drawn = |glint: f64, pitch: f64| {
             let (mut m, mut view) = glinting(0.0, glint);
             view.camera.pitch = pitch;
+            // Terrain keeps the view off the GPU scene, which has no glint: the CPU draws it.
+            assert!(!crate::gpu_may_turn(&m, &view));
             crate::render_complete(&mut m, &view).unwrap().pixmap
         };
         let (dull, shiny) = (drawn(0.0, 65.0), drawn(1.0, 65.0));
