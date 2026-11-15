@@ -9740,8 +9740,9 @@ fn a_publication_legend_takes_the_columns_that_fit_the_free_rectangle() {
 
 /// Context around the data is left out of a publication's legend, which a warning names (#1379):
 /// a layer that only outlines its polygons, and one in one colour running on past the frame beside
-/// a layer drawn by classes. A study area in one colour inside the frame is data, and stays listed.
-/// `"contextInLegend": true` lists them all; a choice that isn't true or false is refused.
+/// a layer drawn by classes. A study area in one colour inside the frame is data, and stays listed,
+/// and so does a context layer sharing its name. `"contextInLegend": true` lists them all; a choice
+/// that isn't true or false is refused.
 #[test]
 fn a_publication_legend_leaves_out_context_layers() {
     let dir = std::env::temp_dir().join(format!("rustgis-legend-context-{}", std::process::id()));
@@ -9764,10 +9765,14 @@ fn a_publication_legend_leaves_out_context_layers() {
         for path in [&around, &data, &study, &border] {
             s.run("layer.addData", &json!({"path": path})).unwrap();
         }
+        // The study area under the name of the context layer around: that name stays listed.
+        if extra.get("mixed").is_some() {
+            s.run("layer.rename", &json!({"layer": "study", "name": "around"})).unwrap();
+        }
         s.run("layer.symbology", &json!({"layer": "data", "type": "unique", "field": "k"})).unwrap();
         s.run("layer.color", &json!({"layer": "border", "color": "#00000000"})).unwrap();
         let mut p = json!({"profile": "a4-portrait", "extent": [0, 0, 10, 10], "author": "", "locator": "none"});
-        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone().into_iter().filter(|(k, _)| k != "mixed"));
         let r = s.run("layout.publication", &p)?;
         let layout = s.project.layouts.last().unwrap();
         let exclude = layout
@@ -9787,6 +9792,8 @@ fn a_publication_legend_leaves_out_context_layers() {
     assert_eq!(exclude, ["around", "border"], "the context, not the data nor the study area");
     let said = said.expect("said");
     assert!(said.contains("2 context layers") && said.contains("around") && said.contains("border"), "{said}");
+    let (exclude, said) = laid(json!({"mixed": true})).unwrap();
+    assert_eq!(exclude, ["border"], "a name a data layer shares stays: {said:?}");
     let (exclude, said) = laid(json!({"contextInLegend": true})).unwrap();
     assert!(exclude.is_empty() && said.is_none(), "{exclude:?} {said:?}");
     let bad = laid(json!({"contextInLegend": "yes"})).unwrap_err();

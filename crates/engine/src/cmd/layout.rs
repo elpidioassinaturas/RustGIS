@@ -1993,31 +1993,14 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // placement already sets aside, is left out of the legend too, unless "contextInLegend" (#1379).
     // A name is left out only when every shown layer under it is context: the legend leaves layers
     // out by name.
-    let context: Vec<String> = if context_in_legend {
-        Vec::new()
-    } else {
-        let ids = crate::render::layout::context_layers(s.map(), center, scale, (fw, fh));
-        let map = s.map();
-        let shown: Vec<&rustgis_map::Layer> =
-            map.layers.iter().filter(|l| map.shows(l) && crate::render::layout::legend_lists(l)).collect();
-        let mut names: Vec<String> = Vec::new();
-        for l in shown.iter().filter(|l| ids.contains(&l.id)) {
-            let all = shown.iter().filter(|o| o.name.eq_ignore_ascii_case(&l.name)).all(|o| ids.contains(&o.id));
-            if all && !names.iter().any(|n| n.eq_ignore_ascii_case(&l.name)) {
-                names.push(l.name.clone());
-            }
-        }
-        names
+    // Context around the data (neighbouring borders, the states around in one colour), which the
+    // placement already sets aside, is left out of the legend too, unless "contextInLegend" (#1379).
+    // It is judged again at each other scale the search below draws the map at, as the placement
+    // judges it there, and the legend takes the one at the scale settled on.
+    let context_at = |s: &Session, center: Coord, scale: f64| {
+        if context_in_legend { Vec::new() } else { legend_context(s.map(), center, scale, (fw, fh)) }
     };
-    if !context.is_empty() {
-        warnings.push(format!(
-            "the legend leaves out {} context layer{} around the data ({}): \"contextInLegend\": true lists {}",
-            context.len(),
-            if context.len() == 1 { "" } else { "s" },
-            context.join(", "),
-            if context.len() == 1 { "it" } else { "them" }
-        ));
-    }
+    let mut context = context_at(s, center, scale);
     let mut sizes = crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, (&context, &Default::default()));
     let (mut cw, mut ch) = match sizes {
         Some(sizes) => sizes[0],
@@ -2200,8 +2183,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             // cut from it: a move is a translation on the page. So the search draws the map once per
             // scale it tries (at most four times), not once per place. Its legend is measured at
             // that scale, once, and those sizes are the ones laid out.
-            let mut drawn: Option<(f64, Option<(u32, u32, Vec<bool>)>, Option<[(f64, f64); MAX_LEGEND_COLUMNS]>)> = None;
-            let mut chosen = known;
+            type Drawn = (f64, Option<(u32, u32, Vec<bool>)>, Option<[(f64, f64); MAX_LEGEND_COLUMNS]>, Vec<String>);
+            let mut drawn: Option<Drawn> = None;
+            let (mut chosen, mut chosen_context) = (known, context.clone());
             let mut unknown_at: Option<f64> = None;
             // Moved frames drawn on their own (below), by scale and move: a pass with the veil
             // tries the same moves as the one before it.
@@ -2236,6 +2220,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     };
                     let lonlat = crate::render::view_lonlat(s.map(), &view);
                     let reading = s.map_mut().sync_sources(&lonlat, render_scale, true);
+                    let here_context = if tried == asked_scale { context.clone() } else { context_at(s, centred, tried) };
                     let here =
                         if reading || (tried != asked_scale && crate::render::layout::tile_legends_pending(s.map(), render_scale, &[])) {
                             unknown_at.get_or_insert(tried);
@@ -2250,7 +2235,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                                 render_scale,
                                 false,
                                 false,
-                                (&context, &Default::default()),
+                                (&here_context, &Default::default()),
                             );
                             if measured.is_none() {
                                 unknown_at.get_or_insert(tried);
@@ -2262,9 +2247,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     // every move's cut leaves out the same layers.
                     let whole_frame = here
                         .and_then(|_| crate::render::layout::frame_coverage_judged_on(s.map_mut(), centred, tried, wide, (fw, fh), cells));
-                    drawn = Some((tried, whole_frame, here));
+                    drawn = Some((tried, whole_frame, here, here_context));
                 }
-                let Some((_, Some(whole_frame), Some(here))) = &drawn else { continue };
+                let Some((_, Some(whole_frame), Some(here), here_context)) = &drawn else { continue };
                 let need = |room: (f64, f64)| here.iter().position(|size| whole(*size).0 <= room.0 && whole(*size).1 <= room.1);
                 let mut found: Option<(usize, f64)> = None;
                 for (dx, dy) in [(0.0, 0.0), (to_right, 0.0), (-to_left, 0.0), (0.0, to_bottom), (0.0, -to_top)] {
@@ -2327,7 +2312,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         found = Some((n, room.0 * room.1));
                         (center, scale, coverage, map_shift) = (there, tried, Some(moved), (dx, dy));
                         veiled = veil.then_some(clip);
-                        chosen = *here;
+                        (chosen, chosen_context) = (*here, here_context.clone());
                     }
                 }
                 if found.is_some() {
@@ -2352,7 +2337,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             }
             if scale != asked_scale {
                 warnings.push(format!("the map is drawn at 1:{scale:.0}, not 1:{asked_scale:.0}, to leave the legend room"));
-                sizes = Some(chosen);
+                (sizes, context) = (Some(chosen), chosen_context);
                 (cw, ch) = chosen[0];
                 let (w, h) = whole(chosen[0]);
                 if let Some(entry) = surrounds.iter_mut().find(|x| x.0 == Surround::Legend) {
@@ -2360,6 +2345,15 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 }
             }
         }
+    }
+    if !context.is_empty() {
+        warnings.push(format!(
+            "the legend leaves out {} context layer{} around the data ({}): \"contextInLegend\": true lists {}",
+            context.len(),
+            if context.len() == 1 { "" } else { "s" },
+            context.join(", "),
+            if context.len() == 1 { "it" } else { "them" }
+        ));
     }
     // The scale bar's box as the frame is drawn, moved or at another scale or not.
     let bar_box = scale_box(ground_per_pt(s, center, scale), scale);
@@ -2480,7 +2474,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         let shown = |laid: &Laid, (w, h): (f64, f64)| laid.0.map_or(0.0, |(_, lw, lh)| (lw / w).min(1.0) * (lh / h).min(1.0));
         let long = whole(sizes[0]).1 > fh * 0.25;
         let mut score = (shown(&best.1, whole(sizes[0])), best.1.3.1);
-        let wide = fw - left - right - 2.0 - aw;
+        let wide = fw - left - right - 2.0 - arrow_size.map_or(0.0, |(w, _)| w);
         let free = coverage.as_ref().map(free_room);
         let fits = free.and_then(|(rw, rh)| sizes.iter().position(|size| whole(*size).0 <= rw && whole(*size).1 <= rh));
         // One column too, when the rectangle holds what the box a legend starts with cuts.
@@ -5346,6 +5340,25 @@ fn publication_colorbar(p: &Value) -> Result<bool, String> {
             _ => Err("colorbar is \"auto\" or \"none\"".into()),
         },
     }
+}
+
+/// The names a publication's legend leaves out as context around the data: the layers the placement
+/// takes as context in a frame `size` (mm) showing `map` at 1:`scale` around `center`
+/// ([`crate::render::layout::context_layers`], #1379). The legend leaves layers out by name, so a
+/// name is left out only when every layer it would list under that name is context, and no web
+/// tile layer has it.
+fn legend_context(map: &Map, center: Coord, scale: f64, size: (f64, f64)) -> Vec<String> {
+    let ids = crate::render::layout::context_layers(map, center, scale, size);
+    let shown: Vec<&rustgis_map::Layer> = map.layers.iter().filter(|l| map.shows(l) && crate::render::layout::legend_lists(l)).collect();
+    let mut names: Vec<String> = Vec::new();
+    for l in shown.iter().filter(|l| ids.contains(&l.id)) {
+        let same = |name: &str| name.eq_ignore_ascii_case(&l.name);
+        let all = shown.iter().filter(|o| same(&o.name)).all(|o| ids.contains(&o.id));
+        if all && !map.tiles.iter().any(|t| same(&t.name)) && !names.iter().any(|n| same(n)) {
+            names.push(l.name.clone());
+        }
+    }
+    names
 }
 
 /// A publication's `key` given as `true` or `false`; `None` when it isn't given.
