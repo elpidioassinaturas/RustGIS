@@ -8,6 +8,7 @@
 //! hostile input and bounded.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
@@ -258,8 +259,9 @@ pub struct Array {
     pub dims: Vec<String>,
     pub attrs: Map<String, Value>,
     /// The georeferencing its groups give it (`inherit_georeferencing`), apart from its own
-    /// attributes so those (and its grid mapping's) come first.
-    pub inherited: Map<String, Value>,
+    /// attributes so those (and its grid mapping's) come first: each part (transform, coordinate
+    /// system, dimensions) as one group gives it, shared by the arrays under that group.
+    pub inherited: Vec<Arc<Map<String, Value>>>,
     /// Chunk keys: a prefix (`c/` in Zarr 3) and the separator between indexes.
     key_prefix: String,
     separator: char,
@@ -477,8 +479,10 @@ pub fn parse_store(docs: &[(String, Vec<u8>)]) -> Result<Store> {
             "no Zarr arrays found: give a store with consolidated metadata (.zmetadata, or zarr.json at its root), a folder on this computer, or the address of one array",
         ));
     }
+    // Each group's part made once, so a large group attribute isn't copied for every array.
+    let mut parts = HashMap::new();
     for a in &mut arrays {
-        inherit_georeferencing(a, &json);
+        inherit_georeferencing(a, &json, &mut parts);
     }
     Ok(Store { arrays })
 }
@@ -499,7 +503,7 @@ const PROJ_KEYS: [&str; 3] = ["proj:wkt2", "proj:code", "proj:epsg"];
 /// - the coordinate system (`proj:wkt2`, `proj:code`, `proj:epsg`), from the nearest group giving
 ///   one, unless the array gives any of them;
 /// - `spatial:dimensions`.
-fn inherit_georeferencing(a: &mut Array, json: &HashMap<String, Value>) {
+fn inherit_georeferencing(a: &mut Array, json: &HashMap<String, Value>, parts: &mut HashMap<(String, usize), Arc<Map<String, Value>>>) {
     let has = |keys: &[&str], m: &Map<String, Value>| keys.iter().any(|k| m.contains_key(*k));
     let mut transform = a.attrs.contains_key("spatial:transform");
     let mut proj = has(&PROJ_KEYS, &a.attrs);
@@ -515,26 +519,25 @@ fn inherit_georeferencing(a: &mut Array, json: &HashMap<String, Value>) {
             None => None,
         };
         if let Some(g) = attrs.and_then(Value::as_object) {
-            let mut take = |keys: &[&str]| {
-                for k in keys {
-                    if let Some(v) = g.get(*k) {
-                        a.inherited.insert(k.to_string(), v.clone());
-                    }
-                }
+            let mut take = |part: usize, keys: &[&str]| {
+                let made = parts
+                    .entry((dir.clone(), part))
+                    .or_insert_with(|| Arc::new(keys.iter().filter_map(|k| g.get(*k).map(|v| (k.to_string(), v.clone()))).collect()));
+                a.inherited.push(made.clone());
             };
             if !transform && g.contains_key("spatial:transform") {
                 transform = true;
                 if g.contains_key("spatial:shape") {
-                    take(&TRANSFORM_KEYS);
+                    take(0, &TRANSFORM_KEYS);
                 }
             }
             if !proj && has(&PROJ_KEYS, g) {
                 proj = true;
-                take(&PROJ_KEYS);
+                take(1, &PROJ_KEYS);
             }
             if !dims && g.contains_key("spatial:dimensions") {
                 dims = true;
-                take(&["spatial:dimensions"]);
+                take(2, &["spatial:dimensions"]);
             }
         }
         if dir.is_empty() {
@@ -543,9 +546,18 @@ fn inherit_georeferencing(a: &mut Array, json: &HashMap<String, Value>) {
     }
 }
 
-/// The attributes `a`'s transform is read from: its own when it gives one, else those it inherits.
-fn transform_attrs(a: &Array) -> &Map<String, Value> {
-    if a.attrs.contains_key("spatial:transform") { &a.attrs } else { &a.inherited }
+/// The attributes `a`'s transform is read from: its own when it gives one, else the part it
+/// inherits; `None` when it has neither.
+fn transform_attrs(a: &Array) -> Option<&Map<String, Value>> {
+    if a.attrs.contains_key("spatial:transform") {
+        return Some(&a.attrs);
+    }
+    a.inherited.iter().map(|m| &**m).find(|m| m.contains_key("spatial:transform"))
+}
+
+/// Whether `a` gives a `spatial:transform`, its own or a group's, whether or not it is applied.
+fn has_transform(a: &Array) -> bool {
+    transform_attrs(a).is_some()
 }
 
 fn u64s(v: Option<&Value>) -> Option<Vec<u64>> {
@@ -608,7 +620,7 @@ fn array_v2(path: &str, z: &Value, attrs: Option<&Value>) -> Option<Array> {
         fortran: z.get("order").and_then(Value::as_str) == Some("F"),
         codecs,
         attrs,
-        inherited: Map::new(),
+        inherited: Vec::new(),
         key_prefix: String::new(),
         separator: if z.get("dimension_separator").and_then(Value::as_str) == Some("/") { '/' } else { '.' },
     })
@@ -710,7 +722,7 @@ fn array_v3(path: &str, z: &Value) -> Option<Array> {
         fortran: false,
         codecs,
         attrs: z.get("attributes").and_then(Value::as_object).cloned().unwrap_or_default(),
-        inherited: Map::new(),
+        inherited: Vec::new(),
         key_prefix,
         separator,
     })
@@ -1176,7 +1188,7 @@ fn map_dims(a: &Array) -> (usize, usize) {
     let named = |i: usize| {
         a.attrs
             .get("spatial:dimensions")
-            .or_else(|| a.inherited.get("spatial:dimensions"))?
+            .or_else(|| a.inherited.iter().find_map(|m| m.get("spatial:dimensions")))?
             .get(i)?
             .as_str()
             .and_then(|n| names.iter().position(|d| d == n))
@@ -1210,7 +1222,7 @@ struct Affine {
 /// its first cell's centre. `None` when there is none, or it is one this reader doesn't apply
 /// (rotated, another `spatial:transform_type`): the coordinate arrays place the grid then.
 fn spatial_grid(a: &Array) -> Option<Affine> {
-    let attrs = transform_attrs(a);
+    let attrs = transform_attrs(a)?;
     if attrs.get("spatial:transform_type").is_some_and(|t| t.as_str() != Some("affine")) {
         return None;
     }
@@ -1230,17 +1242,14 @@ fn spatial_grid(a: &Array) -> Option<Affine> {
     Some(Affine { x0: x0 - dx * half, dx, y0: y0 - dy * half, dy })
 }
 
+/// What a `spatial:transform` that [`spatial_grid`] doesn't apply is said to be.
+const TRANSFORM_UNREAD: &str = "its spatial:transform isn't one that is read (rotated, of another spatial:transform_type, or with a spatial:shape that isn't its map's)";
+
 /// Why `a`'s map can't be placed when its y and x have no coordinates: said with its
 /// `spatial:transform` when it has one [`spatial_grid`] doesn't apply.
 fn no_coordinates(a: &Array) -> String {
     let base = "its y and x dimensions have no coordinates";
-    if a.attrs.contains_key("spatial:transform") || a.inherited.contains_key("spatial:transform") {
-        format!(
-            "{base}, and its spatial:transform isn't one that is read (rotated, of another spatial:transform_type, or with a spatial:shape that isn't its map's)"
-        )
-    } else {
-        base.to_string()
-    }
+    if has_transform(a) { format!("{base}, and {TRANSFORM_UNREAD}") } else { base.to_string() }
 }
 
 /// The chunk keys of all of a 1D array.
@@ -1521,7 +1530,7 @@ fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
             attr_str(a, "grid_mapping").and_then(|g| store.coordinate(a, g).or_else(|| store.array(g))).and_then(|g| from(&g.attrs))
         })
         // What a group says comes after the variable and its grid mapping.
-        .or_else(|| from(&a.inherited))
+        .or_else(|| a.inherited.iter().find_map(|m| from(m)))
         // A store that doesn't name its grid mapping may still hold rioxarray's `spatial_ref` (or a
         // `crs`) array beside its variables.
         .or_else(|| ["spatial_ref", "crs"].iter().filter_map(|n| store.array(n)).find_map(|x| from(&x.attrs)))
@@ -1780,6 +1789,10 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         r.rounded = vec![rounded];
     }
     r.lost.extend(crs_note);
+    // A transform the coordinates stood in for is said, not dropped without a word.
+    if has_transform(a) && spatial_grid(a).is_none() {
+        r.lost.push(format!("{}: {TRANSFORM_UNREAD}: its coordinates place it", a.path));
+    }
     Ok(r)
 }
 
@@ -3278,7 +3291,8 @@ mod tests {
         let read = |root: &Value| parse_store(&[("zarr.json".into(), root.to_string().into_bytes())]).unwrap();
         let store = read(&root);
         let v = store.array("v").unwrap();
-        assert!(v.attrs.is_empty() && v.inherited.len() == 4 && !v.inherited.contains_key("other"), "{:?}", v.inherited);
+        let keys: Vec<&String> = v.inherited.iter().flat_map(|m| m.keys()).collect();
+        assert!(v.attrs.is_empty() && keys.len() == 4 && !keys.contains(&&"other".to_string()), "{keys:?}");
         // Columns 2–5 and rows 1–4 of step 1: its four chunks, and no coordinates.
         let w = Window { x0: 2, y0: 1, x1: 5, y1: 4 };
         let sel = Selection { variable: "v".into(), index: vec![("time".into(), 1)], window: Some(w) };
@@ -3367,6 +3381,34 @@ mod tests {
         let store = parse_store(&v2.map(|(k, v)| (k.to_string(), v.to_string().into_bytes()))).unwrap();
         assert!(is_lonlat_grid(&store, "v"));
         assert_eq!(locate(&store, "v", &none, -48.2, 9.3).unwrap(), Some((2, 3)));
+        // Each group's part is made once and shared by its arrays, so a large group attribute
+        // (a long proj:wkt2) isn't copied for each of them.
+        let mut many = root.clone();
+        let wkt = format!("GEOGCRS[\"x\"{}]", " ".repeat(1 << 20));
+        many["attributes"] = serde_json::json!({"proj:wkt2": wkt});
+        for i in 0..200 {
+            many["consolidated_metadata"]["metadata"][format!("w{i}")] = many["consolidated_metadata"]["metadata"]["v"].clone();
+        }
+        let store = read(&many);
+        let first = &store.array("w0").unwrap().inherited;
+        assert_eq!(first.len(), 1);
+        assert!((1..200).all(|i| Arc::ptr_eq(&store.array(&format!("w{i}")).unwrap().inherited[0], &first[0])));
+        // A transform that isn't applied, beside coordinates that place the grid, is said; a store
+        // with no transform says nothing of one.
+        let mut placed: Value = serde_json::from_slice(&files[0].1).unwrap();
+        let p = plan(&read(&placed), &sel).unwrap();
+        let r = assemble(&read(&placed), &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert!(r.lost.iter().all(|l| !l.contains("spatial:transform")), "{:?}", r.lost);
+        placed["attributes"] = serde_json::json!({"spatial:transform": [0.5, 0.1, -50.0, 0.0, -0.25, 10.0], "spatial:shape": [8, 12]});
+        let store = read(&placed);
+        let p = plan(&store, &sel).unwrap();
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert_eq!(r.transform, GeoTransform { origin_x: 20.0, origin_y: 70.0, pixel_width: 10.0, pixel_height: -10.0 });
+        assert!(
+            r.lost.iter().any(|l| l.contains("spatial:transform isn't one that is read") && l.contains("its coordinates place it")),
+            "{:?}",
+            r.lost
+        );
         // spatial:dimensions names the map's dimensions, y first, whatever they are called.
         let a = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [3, 4, 5], "data_type": "int8",
             "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [3, 4, 5]}}, "codecs": [{"name": "bytes"}],
