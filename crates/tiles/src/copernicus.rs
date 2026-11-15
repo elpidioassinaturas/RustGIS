@@ -80,8 +80,8 @@ fn drop_if_expired(st: &mut State, now: i64) -> bool {
 }
 
 /// An immutable, exact snapshot of the sign-in, for binding approvals to it. It holds tokens and
-/// deliberately has no formatting, serialization or raw-value accessors. A renewal changes it; a
-/// renewal that failed (and only holds off the next try) doesn't.
+/// deliberately has no formatting, serialization or raw-value accessors. A renewal changes it, as
+/// `RuntimeAccounts` asks; a renewal that failed (and only holds off the next try) doesn't.
 #[derive(Clone)]
 pub struct AccountIdentity {
     session: Option<Session>,
@@ -224,6 +224,12 @@ fn parse_grant(status: u16, body: &[u8], now: i64) -> Result<Grant, String> {
     })
 }
 
+/// Keycloak's error code in a token answer (`invalid_grant`…), if it gave one.
+fn grant_error(body: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    v.get("error").and_then(Value::as_str).map(str::to_string)
+}
+
 /// Keeps a sign-in made at `endpoint` from its token answer; what the status tells of it.
 #[cfg(not(target_arch = "wasm32"))]
 fn keep(endpoint: &str, username: &str, status: u16, body: &[u8]) -> Result<Info, String> {
@@ -319,8 +325,12 @@ pub fn renewal_done(r: &Renewal, answer: Result<(u16, &[u8]), String>) {
     let mut st = state();
     let Some(s) = st.session.as_mut().filter(|s| s.refresh.as_deref() == Some(r.refresh.as_str())) else { return };
     let now = now_secs();
-    match answer.map(|(status, body)| (status, parse_grant(status, body, now))) {
-        Ok((_, Ok(g))) => {
+    // Keycloak refuses an expired or revoked refresh token with 400 `invalid_grant` (401 for a
+    // refused client). Any other answer (a rate limit, a malformed-request 400, a proxy's page)
+    // says nothing of the refresh token: the sign-in is kept and renewed again later.
+    let refused = |status: u16, body: &[u8]| status == 401 || (status == 400 && grant_error(body).as_deref() == Some("invalid_grant"));
+    match answer.map(|(status, body)| (status, refused(status, body), parse_grant(status, body, now))) {
+        Ok((_, _, Ok(g))) => {
             s.access = g.access;
             s.expires_at = g.expires_at;
             if g.refresh.is_some() {
@@ -328,15 +338,12 @@ pub fn renewal_done(r: &Renewal, answer: Result<(u16, &[u8]), String>) {
                 s.refresh_expires_at = g.refresh_expires_at;
             }
         }
-        // Keycloak refuses an expired or revoked refresh token with 400 `invalid_grant` (401 for a
-        // refused client). Any other 4xx (a rate limit, a timeout, a proxy's 403 page) says
-        // nothing of the refresh token: the sign-in is kept and renewed again later.
-        Ok((400 | 401, Err(e))) => {
+        Ok((_, true, Err(e))) => {
             log::warn!("the Copernicus Data Space sign-in ended: {e}");
             st.session = None;
             st.expired = true;
         }
-        Ok((status, Err(_))) => {
+        Ok((status, false, Err(_))) => {
             log::warn!("couldn't renew the Copernicus Data Space sign-in: HTTP {status}");
             s.retry_at = now + RETRY_RENEWAL;
         }

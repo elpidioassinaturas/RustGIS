@@ -207,9 +207,16 @@ fn a_refused_renewal_ends_the_sign_in_and_an_unreachable_host_keeps_it() {
     // A rate limit, a timeout or a proxy's 403 page says nothing of the refresh token: kept too,
     // and the account is the same one (a renewal that failed doesn't change it).
     let identity = account_identity().unwrap();
-    for status in [429, 408, 403] {
+    let malformed = br#"{"error":"invalid_request","error_description":"Missing parameter"}"#;
+    for (status, body) in [
+        (429, &b"<html>busy</html>"[..]),
+        (408, b"<html>busy</html>"),
+        (403, b"<html>busy</html>"),
+        (400, b"<html>bad</html>"),
+        (400, malformed),
+    ] {
         state().session.as_mut().unwrap().retry_at = 0;
-        let answer = authorization_fresh_using(DATA, None, move |_, _, _| Ok((status, b"<html>busy</html>".to_vec())));
+        let answer = authorization_fresh_using(DATA, None, move |_, _, _| Ok((status, body.to_vec())));
         assert_eq!(answer.as_deref(), Some("Bearer access-old"), "HTTP {status}");
         assert!(signed_in().is_some() && !expired(), "HTTP {status}");
     }
@@ -262,6 +269,7 @@ fn a_renewal_lands_only_on_the_sign_in_it_was_for() {
     let identity = account_identity().unwrap();
     assert!(identity.is_current());
     renewal_done(&renewal_due().unwrap(), Ok((200, grant("renewed", "renewed", 1800, 3600).as_bytes())));
+    assert_eq!(authorization(DATA).as_deref(), Some("Bearer renewed"));
     assert!(!identity.is_current(), "a renewal changes the identity");
     logout();
 }
