@@ -2531,10 +2531,16 @@ pub fn frame_coverage_judged_on(
     Some((gw, gh, drawn))
 }
 
+/// The least lightness (0-255, weighted 3:6:1 as the renderer's greys are) of a background a
+/// publication's dark legend text reads on without its box: Paper, Ocean and Atlas are lighter,
+/// Midnight darker (#1379).
+const LIGHT_BACKGROUND: u32 = 160;
+
 /// Whether a frame showing `map` at 1:`scale` around `center`, `size` (mm) wide and tall, shows
 /// one plain colour under `under` (mm from the frame's top left), the basemap's water or land
-/// colour, and nothing else: no layer, label or context layer, no outline of the basemap's. Drawn as the map is, on a
-/// grid of about `cells` cells across the frame's longer side, its label lock set aside (and put
+/// colour and a light one ([`LIGHT_BACKGROUND`]), and nothing else: no layer, label or context
+/// layer, no outline of the basemap's. Drawn as the map is, on a grid of about `cells` cells
+/// across the frame's longer side, its label lock set aside (and put
 /// back) as [`frame_coverage`] does. Web tiles aren't fetched for it, so a map with any is not
 /// plain anywhere; nor is a frame that can't be drawn. For a publication's legend, which needs no
 /// box there (#1379).
@@ -2586,10 +2592,12 @@ pub fn frame_plain_under(
     let px = pm.pixels();
     let mut seen = (r0..r1).flat_map(|r| (c0..c1).map(move |c| r * gw + c)).map(|i| px[i]);
     // One colour, and that the basemap's water or land: a polygon filling the whole rectangle in
-    // one colour, data or context, isn't the background.
+    // one colour, data or context, isn't the background. And a light one: the legend's text is
+    // dark, so over a dark background (Midnight's) it keeps its box.
     let rgba = |p: tiny_skia::PremultipliedColorU8| (p.red(), p.green(), p.blue(), p.alpha());
     let Some(first) = seen.next().map(rgba) else { return false };
-    let background = [water, land].iter().any(|c| (c.0[0], c.0[1], c.0[2], 255) == first);
+    let light = |c: &Rgba| (3 * u32::from(c.0[0]) + 6 * u32::from(c.0[1]) + u32::from(c.0[2])) / 10 >= LIGHT_BACKGROUND;
+    let background = [water, land].iter().any(|c| (c.0[0], c.0[1], c.0[2], 255) == first && light(c));
     background && seen.all(|p| rgba(p) == first)
 }
 
@@ -3432,7 +3440,12 @@ mod tests {
         // Earth basemap's water: that grey is the background there.
         (map.body, map.basemap) = ("mars".into(), rustgis_map::Basemap::Paper);
         assert!(plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "Mars's plain grey is its background");
-        (map.body, map.basemap) = ("earth".into(), rustgis_map::Basemap::Blank);
+        // A dark background (Midnight's water) isn't plain for a legend: its dark text needs the box.
+        (map.body, map.basemap) = ("earth".into(), rustgis_map::Basemap::Midnight);
+        assert!(!plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "Midnight's dark water keeps the box");
+        map.basemap = rustgis_map::Basemap::Ocean;
+        assert!(plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "Ocean's light water is plain");
+        map.basemap = rustgis_map::Basemap::Blank;
         map.tiles.push(rustgis_map::TileLayer::new("tiles", rustgis_map::TileKind::Raster, "https://example.invalid/{z}/{x}/{y}.png"));
         assert!(!plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "web tiles aren't fetched for it, so nothing is plain");
     }
