@@ -180,6 +180,8 @@ fn credential(k: &str, query: &QueryNames) -> bool {
         || [
             "password",
             "passwd",
+            // A one-time code (`totp`), as CDSE's sign-in takes it.
+            "totp",
             "secret",
             "token",
             "credential",
