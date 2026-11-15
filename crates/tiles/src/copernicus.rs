@@ -253,8 +253,13 @@ fn remember_after(known: &mut Known, username: &str, password: &str, totp: bool,
     // Unread: an earlier run may have remembered one, unless there's no store at all.
     let lingers = |e: &SecretError| was || (*known == Known::Unread && !matches!(e, SecretError::Unavailable(_)));
     let left = deleted.as_ref().err().is_some_and(lingers);
-    // One that couldn't be deleted is never signed in with again this session.
-    *known = if left { Known::Kept { retry_at: i64::MAX } } else { Known::Nothing };
+    // One known to be there that couldn't be deleted is never signed in with again this session;
+    // one that may be there stays unknown (`remembered` reports only what was found).
+    *known = match deleted {
+        Err(_) if was => Known::Kept { retry_at: i64::MAX },
+        Err(_) if left => Known::Unread,
+        _ => Known::Nothing,
+    };
     match deleted {
         // Said first: a password remembered before may still be there.
         Err(_) if left => Some(NOT_FORGOTTEN),

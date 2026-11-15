@@ -368,6 +368,7 @@ fn a_sign_in_not_to_be_remembered_deletes_the_one_before_and_two_factor_is_never
     for totp in [None, Some("123456")] {
         set_secret_store(Some(Arc::new(MemorySecrets::failing(SecretError::Denied))));
         assert_eq!(login_remembering_at(&base, USER, PASSWORD, totp, true).unwrap().1, Some(NOT_FORGOTTEN));
+        assert!(!is_remembered(), "not claimed remembered: nothing was found");
     }
     // No credential store on this system: nothing could have been kept.
     set_secret_store(Some(Arc::new(MemorySecrets::failing(SecretError::Unavailable("none".into())))));
