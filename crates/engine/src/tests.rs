@@ -12625,7 +12625,7 @@ fn a_link_chart_says_what_its_limits_leave_out() {
         let html = std::fs::read_to_string(dir.join(format!("{name}.html"))).unwrap();
         (html.matches("\"relationship\":").count(), html.matches("\"group\":").count(), html)
     };
-    let limits = "a link chart takes at most 3000 features, 20000 links and 200 links from one feature";
+    let limits = "a link chart takes at most 3000 features, 20000 links and 200 links from one feature in each relationship";
     // One feature related to 250: 200 links are drawn from it.
     add(&mut s, "fan_one.csv", &["k".to_string()]);
     add(&mut s, "fan_many.csv", &vec!["k".to_string(); 250]);
@@ -12672,6 +12672,53 @@ fn a_link_chart_says_what_its_limits_leave_out() {
     let (links, nodes, html) = drawn("Full");
     assert_eq!((links, nodes), (200, 201));
     assert!(said(&s, mark, "Full").is_empty() && !html.contains("Shows "));
+    // The 200 a feature takes counts links drawn, not destinations tried: with the chart at 2,999,
+    // a feature whose first 200 destinations need room it hasn't got still draws its link to one
+    // already in the chart. On a session of its own, so the relationships are only these three.
+    let mut t = world();
+    t.run("share.dataStore", &json!({"name": "out", "path": dir.to_str().unwrap()})).unwrap();
+    let rows: String = (0..200).map(|i| format!("10,{},-,q\n", 45.0 + i as f64 * 0.0001)).collect();
+    let csv = format!("lon,lat,key,key2\n{rows}10,46,x,q\n");
+    t.run("layer.addDataBytes", &json!({"fileName": "past_d.csv", "data": base64::engine::general_purpose::STANDARD.encode(csv)})).unwrap();
+    add(&mut t, "past_first.csv", &["x".to_string()]);
+    let fill_one: Vec<String> = std::iter::once("s".to_string()).chain((0..1497).map(|i| format!("f{i}"))).collect();
+    let fill_many: Vec<String> = ["s", "s"].iter().map(|k| k.to_string()).chain((0..1497).map(|i| format!("f{i}"))).collect();
+    add(&mut t, "past_fill_one.csv", &fill_one);
+    add(&mut t, "past_fill_many.csv", &fill_many);
+    add(&mut t, "past_last.csv", &["q".to_string()]);
+    for (name, origin, destination, key) in [
+        ("First", "past_first", "past_d", "key"),
+        ("Fill", "past_fill_one", "past_fill_many", "key"),
+        ("Last", "past_last", "past_d", "key2"),
+    ] {
+        t.run(
+            "data.relate",
+            &json!({"name": name, "origin": origin, "originKey": "key", "destination": destination, "destinationKey": key}),
+        )
+        .unwrap();
+    }
+    t.run("share.linkChart", &json!({})).unwrap();
+    // First draws 1 link (2 features), Fill 1,499 (2,997), and Last its one link to x (1 more).
+    assert_eq!((drawn("Relationships").0, drawn("Relationships").1), (1501, 3000));
+    // A feature isn't drawn alone: one feature related to 2 (3 features), then pairs. After 1,498
+    // pairs the chart holds 2,999, and a pair needs 2 more: the rest are left out whole, rather
+    // than an origin drawn without its link.
+    let odd_one: Vec<String> = std::iter::once("s".to_string()).chain((0..1500).map(|i| format!("o{i}"))).collect();
+    let odd_many: Vec<String> = ["s", "s"].iter().map(|k| k.to_string()).chain((0..1500).map(|i| format!("o{i}"))).collect();
+    add(&mut s, "odd_one.csv", &odd_one);
+    add(&mut s, "odd_many.csv", &odd_many);
+    s.run(
+        "data.relate",
+        &json!({"name": "Odd", "origin": "odd_one", "originKey": "key", "destination": "odd_many", "destinationKey": "key"}),
+    )
+    .unwrap();
+    let mark = s.notice_mark();
+    s.run("share.linkChart", &json!({"relationship": "Odd"})).unwrap();
+    assert_eq!((drawn("Odd").0, drawn("Odd").1), (1500, 2999), "every feature drawn has a link");
+    assert_eq!(
+        said(&s, mark, "Odd"),
+        [format!("Odd: the link chart shows 2999 of the 3003 related features and 1500 of the 1502 links; {limits}")]
+    );
     // 101 features each related to the same 200: 20,200 links, each feature within its 200. The
     // chart's 20,000 links are the first 100 features'; the 101st has no room.
     add(&mut s, "mesh_one.csv", &vec!["m".to_string(); 101]);
@@ -21758,6 +21805,128 @@ fn repair_source_checks_the_extrusion_base_field() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+#[test]
+fn deleting_a_field_clears_the_extrusion_marker_rotation_and_symbol_expressions_reading_it() {
+    // #2081: the extrusion's height and base, the marker rotation and the symbol's expressions
+    // by feature stopped reading a deleted field without a word, and the saved project kept its
+    // name for a field added later.
+    let mut s = world();
+    let x = |s: &Session| s.map().layer_by_name("Countries").and_then(|l| l.extrusion.clone()).unwrap();
+    let about = |s: &Session, mark: u64, word: &str| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains(word)).map(|n| n.text.clone()).collect()
+    };
+    for f in ["tall", "low", "both", "spare"] {
+        s.run("edit.addField", &json!({"layer": "Countries", "name": f, "type": "double"})).unwrap();
+    }
+    s.run("layer.extrusion", &json!({"layer": "Countries", "type": "field", "field": "tall", "factor": 2})).unwrap();
+    s.run("layer.extrusionBase", &json!({"layer": "Countries", "field": "low", "base": 5})).unwrap();
+    let height = x(&s).height;
+    // A field the extrusion doesn't read goes without a word about it.
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Countries", "field": "spare"})).unwrap();
+    assert_eq!((x(&s).field.as_deref(), x(&s).base_field.as_deref()), (Some("tall"), Some("low")));
+    assert_eq!(about(&s, mark, "extrusion"), Vec::<String>::new());
+    // A refused deletion changes nothing and says nothing about the extrusion.
+    s.run("layer.definitionQuery", &json!({"layer": "Countries", "where": "low is null"})).unwrap();
+    let mark = s.notice_mark();
+    assert!(s.run("edit.deleteField", &json!({"layer": "Countries", "field": "low"})).is_err());
+    assert_eq!(x(&s).base_field.as_deref(), Some("low"));
+    assert_eq!(about(&s, mark, "extrusion"), Vec::<String>::new());
+    s.run("layer.definitionQuery", &json!({"layer": "Countries", "where": ""})).unwrap();
+    // The base's field (named in another case): the base goes back to its constant, the height
+    // keeps its field, said once.
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Countries", "field": "LOW"})).unwrap();
+    let got = x(&s);
+    assert_eq!((got.base_field.as_deref(), got.base, got.field.as_deref(), got.factor), (None, 5.0, Some("tall"), 2.0));
+    assert_eq!(about(&s, mark, "extrusion"), ["Countries: its extrusion's base read the deleted field low, so it uses its constant base"]);
+    // Undo brings the field and the base's reference back.
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(x(&s).base_field.as_deref(), Some("low"));
+    // The height's field: the height goes back to its constant.
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Countries", "field": "tall"})).unwrap();
+    let got = x(&s);
+    assert_eq!((got.field.as_deref(), got.height, got.base_field.as_deref()), (None, height, Some("low")));
+    assert_eq!(
+        about(&s, mark, "extrusion"),
+        ["Countries: its extrusion's height read the deleted field tall, so it uses its constant height"]
+    );
+    // Both on one field: both cleared, one notice naming both, and the saved extrusion forgets it.
+    s.run("layer.extrusion", &json!({"layer": "Countries", "type": "field", "field": "both"})).unwrap();
+    s.run("layer.extrusionBase", &json!({"layer": "Countries", "field": "both"})).unwrap();
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Countries", "field": "both"})).unwrap();
+    let got = x(&s);
+    assert_eq!((got.field.as_deref(), got.base_field.as_deref()), (None, None));
+    assert_eq!(
+        about(&s, mark, "extrusion"),
+        ["Countries: its extrusion's height and base read the deleted field both, so it uses its constant height and base"]
+    );
+    let saved = serde_json::to_string(&got).unwrap();
+    assert!(!saved.contains("\"both\""), "{saved}");
+    // The marker rotation: one on another field stays; one on the field (set in another case) goes.
+    let r = |s: &Session| s.map().layer_by_name("Cities").and_then(|l| l.marker_rotation.clone());
+    for f in ["angle", "other"] {
+        s.run("edit.addField", &json!({"layer": "Cities", "name": f, "type": "double"})).unwrap();
+    }
+    s.run("layer.markerRotation", &json!({"layer": "Cities", "field": "ANGLE", "counterclockwise": true})).unwrap();
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Cities", "field": "other"})).unwrap();
+    assert!(r(&s).is_some());
+    assert_eq!(about(&s, mark, "markers"), Vec::<String>::new());
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Cities", "field": "angle"})).unwrap();
+    assert!(r(&s).is_none());
+    assert_eq!(about(&s, mark, "markers"), ["Cities: its markers turned by the deleted field angle, so they are no longer turned"]);
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(r(&s).map(|r| (r.field, r.counterclockwise)), Some(("ANGLE".to_string(), true)));
+    // The symbol's expressions by feature: those reading the field go, the others stay (one that
+    // read no field, one that named a field already gone); said once per layer, naming each.
+    let by = |s: &Session, layer: &str| s.map().layer_by_name(layer).map(|l| l.symbol_by.clone()).unwrap();
+    s.run("edit.addField", &json!({"layer": "Countries", "name": "shade", "type": "double"})).unwrap();
+    s.run("layer.symbolBy", &json!({"layer": "Countries", "fill": "CASE WHEN shade > 1 THEN 'red' ELSE 'blue' END", "strokeWidth": "2"}))
+        .unwrap();
+    let countries = s.map().layer_by_name("Countries").unwrap().id;
+    s.map_mut().layer_mut(countries).unwrap().symbol_by.stroke = Some("CASE WHEN ghost > 1 THEN 'red' ELSE 'blue' END".into());
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Countries", "field": "shade"})).unwrap();
+    let got = by(&s, "Countries");
+    assert_eq!((got.fill, got.stroke_width.as_deref()), (None, Some("2")));
+    assert!(got.stroke.is_some_and(|t| t.contains("ghost")), "an expression that read nothing before stays");
+    assert_eq!(
+        about(&s, mark, "expression"),
+        ["Countries: its symbol's fill colour expression read the deleted field shade, so it is removed"]
+    );
+    for f in ["turn", "aside"] {
+        s.run("edit.addField", &json!({"layer": "Cities", "name": f, "type": "double"})).unwrap();
+    }
+    s.run("layer.symbolBy", &json!({"layer": "Cities", "size": "turn / 10 + 4", "fill": "'red'", "angle": "TURN"})).unwrap();
+    s.run("layer.symbolBy", &json!({"layer": "Cities", "stroke": "CASE WHEN turn > 1 THEN 'black' ELSE 'white' END"})).unwrap();
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Cities", "field": "aside"})).unwrap();
+    assert_eq!(about(&s, mark, "expression"), Vec::<String>::new());
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Cities", "field": "turn"})).unwrap();
+    let got = by(&s, "Cities");
+    assert_eq!((got.size, got.fill.as_deref(), got.stroke, got.angle), (None, Some("'red'"), None, None));
+    assert_eq!(
+        about(&s, mark, "expression"),
+        ["Cities: its symbol's size, outline colour and angle expressions read the deleted field turn, so they are removed"]
+    );
+    s.run("edit.undo", &Value::Null).unwrap();
+    let got = by(&s, "Cities");
+    assert_eq!((got.size.as_deref(), got.angle.as_deref()), (Some("turn / 10 + 4"), Some("TURN")));
+    // Two fields named the same but for case: `pop` reads the first, which deleting `pop` removes.
+    // Its text would still parse, reading the second, so it is judged by the field it read.
+    s.run("layer.addDataText", &json!({"fileName": "twins.csv", "text": "lon,lat,Pop,pop\n1,2,5,0\n3,4,0,5\n"})).unwrap();
+    s.run("layer.symbolBy", &json!({"layer": "twins", "size": "pop * 2"})).unwrap();
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "twins", "field": "pop"})).unwrap();
+    assert_eq!(by(&s, "twins").size, None);
+    assert_eq!(about(&s, mark, "expression"), ["twins: its symbol's size expression read the deleted field Pop, so it is removed"]);
+}
+
 /// Extrusion Base sets what an extrusion stands on, a numeric field or a constant, and changes
 /// nothing else: the height, its field and the factor stay, as does whatever is left out. Null or
 /// an empty name clears the field; a field that isn't numeric, or a base that is no number or is
@@ -29499,6 +29668,7 @@ fn connections_commands() {
         "connection.remove",
         "connection.login",
         "connection.forgetPassword",
+        "connection.forgetLogin",
         "connection.test",
         "connection.browse",
     ] {
@@ -31055,8 +31225,8 @@ fn map_rename_keeps_map_names_unique() {
     for p in [json!({}), json!({"name": "  "}), json!({"name": 3})] {
         assert!(s.run("map.rename", &p).is_err(), "{p}");
     }
-    // A long name keeps to 200 characters, number included.
-    let long = "é".repeat(300);
+    // A name at the limit keeps to 200 characters, number included.
+    let long = "é".repeat(200);
     s.run("map.rename", &json!({"name": long})).unwrap();
     s.run("map.new", &Value::Null).unwrap();
     let r = s.run("map.rename", &json!({"name": long})).unwrap();
@@ -31203,8 +31373,8 @@ fn bookmarks_are_managed_in_place_on_any_map() {
     assert_eq!(s.run("bookmark.add", &json!({"name": "europe"})).unwrap()["name"], "europe 2");
     assert_eq!(s.run("bookmark.add", &json!({"name": "Europe"})).unwrap()["name"], "Europe 3");
     assert_eq!(names(&s).len(), first.len() + 2);
-    // A long name that is taken keeps its number within the 120 characters.
-    let long = "x".repeat(150);
+    // A name at the limit that is taken keeps its number within the 120 characters.
+    let long = "x".repeat(120);
     let mut longs = Vec::new();
     for _ in 0..2 {
         longs.push(s.run("bookmark.add", &json!({"name": long})).unwrap()["name"].as_str().unwrap().to_string());
@@ -31230,7 +31400,8 @@ fn bookmarks_are_managed_in_place_on_any_map() {
     // A description, trimmed and kept to 2000 characters; empty clears it.
     s.run("bookmark.describe", &json!({"name": "Africa", "description": "  Indonesia, really  "})).unwrap();
     assert_eq!(s.map().bookmarks.iter().find(|b| b.name == "Africa").map(|b| b.description.as_str()), Some("Indonesia, really"));
-    s.run("bookmark.describe", &json!({"name": "Africa", "description": "é".repeat(3000)})).unwrap();
+    assert!(s.run("bookmark.describe", &json!({"name": "Africa", "description": "é".repeat(2001)})).is_err());
+    s.run("bookmark.describe", &json!({"name": "Africa", "description": "é".repeat(2000)})).unwrap();
     assert_eq!(s.map().bookmarks.iter().find(|b| b.name == "Africa").map(|b| b.description.chars().count()), Some(2000));
     // Move: to the front, and past the end to the back.
     s.run("bookmark.move", &json!({"name": "Africa", "to": 0})).unwrap();
@@ -32045,7 +32216,7 @@ fn layout_guides_are_set_kept_and_undone() {
 #[test]
 fn layout_names_keep_to_200_characters_with_their_number() {
     let mut s = world();
-    let long = "é".repeat(300);
+    let long = "é".repeat(200);
     s.run("layout.new", &json!({"name": long})).unwrap();
     let r = s.run("layout.new", &json!({"name": long})).unwrap();
     let name = r["name"].as_str().unwrap_or_default().to_string();
@@ -32183,8 +32354,8 @@ fn map_duplicate_copies_a_map_beside_it_and_leaves_layouts_alone() {
     for m in [json!(0), json!("Nowhere")] {
         assert!(s.run("map.duplicate", &json!({"map": m})).is_err(), "{m}");
     }
-    // A long name keeps to 200 characters with " copy".
-    s.run("map.rename", &json!({"name": "é".repeat(300)})).unwrap();
+    // A name at the limit keeps to 200 characters with " copy".
+    s.run("map.rename", &json!({"name": "é".repeat(200)})).unwrap();
     let name = s.run("map.duplicate", &Value::Null).unwrap()["name"].as_str().unwrap_or_default().to_string();
     assert_eq!((name.chars().count(), name.ends_with(" copy")), (200, true), "{name}");
 }
@@ -39385,8 +39556,9 @@ fn the_session_log_records_each_command_run_in_the_session() {
     let _ = s.run("project.rename", &json!({"name": "Long", "tags": long}));
     let tags = last(&s).params.to_string();
     assert_eq!(last(&s).params, json!({"name": "Long", "tags": "…"}), "{tags}");
-    // Large values clipped.
-    s.run("project.rename", &json!({"name": "x".repeat(20_000), "note": vec![1; 5_000]})).ok();
+    // Large values clipped. The long text is a key the command doesn't know, because a long name is
+    // now refused before it is logged.
+    s.run("project.rename", &json!({"name": "Big", "text": "x".repeat(20_000), "note": vec![1; 5_000]})).ok();
     let big = last(&s);
     assert!(serde_json::to_vec(&big.params).unwrap().len() <= LOG_PARAMS_BYTES, "{}", big.params.to_string().len());
     // The project carries none of it: a saved project, or its recovery copy, holds no log.
@@ -46569,26 +46741,35 @@ fn the_thread_setting_is_reserved() {
     assert!(!spec.mutates, "no undo step");
 }
 
-/// A long command stops when it is cancelled while it runs (#1562): every command the app runs
-/// on another thread (its exports and the commands that make a raster) and the long-running tools
-/// look at the Cancel flag in their work, not only before it starts. Their control is cancelled
-/// as soon as the work starts ([`rustgis_analysis::control::Control::cancelled_once_started`]),
-/// so no timing is involved: a run that never looks finishes and is caught by its count of looks.
+/// A folder in the temp directory that the test owns and that is removed however it ends.
 #[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn long_commands_stop_when_cancelled_while_they_run() {
-    use rustgis_analysis::control::Control;
-    // Removed however the test ends.
-    struct Dir(std::path::PathBuf);
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+struct CancelDir(std::path::PathBuf);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl CancelDir {
+    /// The folder `{prefix}-{process id}` in the temp directory, empty and created.
+    fn new(prefix: &str) -> CancelDir {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        CancelDir(dir)
     }
-    let dir = Dir(std::env::temp_dir().join(format!("rustgis-cancel-{}", std::process::id())));
-    let _ = std::fs::remove_dir_all(&dir.0);
-    std::fs::create_dir_all(&dir.0).unwrap();
-    let out = |f: &str| dir.0.join(f).display().to_string();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for CancelDir {
+    /// Removes the folder and what the test left in it.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The sample project with what the background commands read: a DEM and what is made of it, training
+/// squares, an imagery workspace, a two-class scene with its training polygons, a layout, a report
+/// and a Shapefile layer with an edit to publish. Files go in `dir`. Returns it with the DEM's name.
+#[cfg(not(target_arch = "wasm32"))]
+fn cancel_world(dir: &std::path::Path) -> (Session, String) {
+    let out = |f: &str| dir.join(f).display().to_string();
     let mut s = world();
     s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
     let dem = s.map().layers.iter().find(|l| l.is_raster()).unwrap().name.clone();
@@ -46615,17 +46796,14 @@ fn long_commands_stop_when_cancelled_while_they_run() {
     s.run("share.exportLayer", &json!({"layer": "Cities", "path": out("towns.shp")})).unwrap();
     s.run("layer.addData", &json!({"path": out("towns.shp"), "name": "towns"})).unwrap();
     s.run("edit.setValue", &json!({"layer": "towns", "row": 0, "field": "name", "value": "Renamed"})).unwrap();
+    s.run("report.new", &json!({"layer": "Cities"})).unwrap();
+    (s, dem)
+}
 
-    // What didn't stop, and how often it looked.
-    let mut kept_going = Vec::new();
-    let mut note = |what: &str, result: Result<(), String>, control: &Control| {
-        let stopped = result.as_ref().is_err_and(|e| e.contains("cancelled"));
-        if !stopped || control.looked() == 0 {
-            kept_going.push(format!("{what}: {result:?}, looked {} times", control.looked()));
-        }
-    };
-
-    let rasters = [
+/// The commands that make a raster in the background, with parameters that run on [`cancel_world`].
+#[cfg(not(target_arch = "wasm32"))]
+fn cancel_rasters(dem: &str) -> Vec<(&'static str, Value)> {
+    vec![
         ("analysis.viewshed", json!({"layer": dem, "lon": 10.0055, "lat": 45.0395, "height": 2})),
         ("analysis.interpolate", json!({"layer": "Cities", "field": "pop_max"})),
         (
@@ -46649,7 +46827,73 @@ fn long_commands_stop_when_cancelled_while_they_run() {
         // Cancelled before the index is read: nothing reaches the network.
         ("embeddings.similarity", json!({"dataset": "alphaearth", "point": [10.01, 45.01], "bbox": [10.0, 45.0, 10.02, 45.02]})),
         ("embeddings.change", json!({"dataset": "alphaearth", "bbox": [10.0, 45.0, 10.02, 45.02]})),
-    ];
+    ]
+}
+
+/// The exports that run in the background, writing into `out`, with parameters that run on
+/// [`cancel_world`].
+#[cfg(not(target_arch = "wasm32"))]
+fn cancel_exports(out: &dyn Fn(&str) -> String, dem: &str) -> Vec<(&'static str, Value)> {
+    vec![
+        ("data.convert", json!({"layer": "Cities", "format": "geojson", "path": out("converted.geojson")})),
+        ("share.exportLayer", json!({"layer": "Cities", "path": out("cities.geojson")})),
+        ("share.exportRaster", json!({"layer": dem, "path": out("dem.tif")})),
+        ("share.exportMap", json!({"path": out("map.png"), "width": 320, "height": 200})),
+        ("map.exportOrbit", json!({"path": out("orbit.zip"), "frames": 3, "width": 96, "height": 64})),
+        ("layout.export", json!({"path": out("layout.pdf"), "dpi": 72})),
+        ("report.export", json!({"path": out("report.pdf"), "dpi": 72})),
+        ("source.publish", json!({"layer": "towns"})),
+    ]
+}
+
+/// The tools whose work grows past a second or two on real data: buffers, overlays, joins, hulls,
+/// densities and interpolation. A new long tool is added here (AGENTS.md › Never hold the window).
+#[cfg(not(target_arch = "wasm32"))]
+fn cancel_tools() -> Vec<(&'static str, Value)> {
+    vec![
+        ("buffer", json!({"input": "Cities", "distance": 100})),
+        ("dissolve", json!({"input": "Countries"})),
+        ("spatialJoin", json!({"target": "Cities", "join": "Countries"})),
+        ("clip", json!({"input": "Rivers", "clip": "Countries"})),
+        ("erase", json!({"input": "Rivers", "erase": "Countries"})),
+        ("intersect", json!({"input": "Rivers", "overlay": "Countries"})),
+        ("identity", json!({"input": "Rivers", "overlay": "Countries"})),
+        ("union", json!({"input": "Lakes", "overlay": "Countries"})),
+        ("symmetricalDifference", json!({"input": "Lakes", "overlay": "Countries"})),
+        ("update", json!({"input": "Countries", "update": "Lakes"})),
+        ("split", json!({"input": "Rivers", "split": "Countries"})),
+        ("simplify", json!({"input": "Countries", "tolerance": 1})),
+        ("countPoints", json!({"polygons": "Countries", "points": "Cities"})),
+        ("convexHull", json!({"input": "Countries", "group": "None", "output": "Hulls_each"})),
+        ("convexHull", json!({"input": "Countries", "group": "All", "output": "Hulls_all"})),
+        ("kernelDensity", json!({"input": "Cities", "crs": "EPSG:3857"})),
+        ("kriging", json!({"input": "Cities", "field": "pop_max"})),
+    ]
+}
+
+/// A long command stops when it is cancelled while it runs (#1562): every command the app runs
+/// on another thread (its exports and the commands that make a raster) and the long-running tools
+/// look at the Cancel flag in their work, not only before it starts. Their control is cancelled
+/// as soon as the work starts ([`rustgis_analysis::control::Control::cancelled_once_started`]),
+/// so no timing is involved: a run that never looks finishes and is caught by its count of looks.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn long_commands_stop_when_cancelled_while_they_run() {
+    use rustgis_analysis::control::Control;
+    let dir = CancelDir::new("rustgis-cancel");
+    let out = |f: &str| dir.0.join(f).display().to_string();
+    let (mut s, dem) = cancel_world(&dir.0);
+
+    // What didn't stop, and how often it looked.
+    let mut kept_going = Vec::new();
+    let mut note = |what: &str, result: Result<(), String>, control: &Control| {
+        let stopped = result.as_ref().is_err_and(|e| e.contains("cancelled"));
+        if !stopped || control.looked() == 0 {
+            kept_going.push(format!("{what}: {result:?}, looked {} times", control.looked()));
+        }
+    };
+
+    let rasters = cancel_rasters(&dem);
     // Every command that runs in the background is here, and only those.
     fn listed<'a>(l: &[(&'a str, Value)]) -> std::collections::BTreeSet<&'a str> {
         l.iter().map(|(c, _)| *c).collect()
@@ -46664,17 +46908,7 @@ fn long_commands_stop_when_cancelled_while_they_run() {
         crate::cmd::workflows::raster_abandon(&mut s, id);
     }
 
-    let exports = [
-        ("data.convert", json!({"layer": "Cities", "format": "geojson", "path": out("converted.geojson")})),
-        ("share.exportLayer", json!({"layer": "Cities", "path": out("cities.geojson")})),
-        ("share.exportRaster", json!({"layer": dem, "path": out("dem.tif")})),
-        ("share.exportMap", json!({"path": out("map.png"), "width": 320, "height": 200})),
-        ("map.exportOrbit", json!({"path": out("orbit.zip"), "frames": 3, "width": 96, "height": 64})),
-        ("layout.export", json!({"path": out("layout.pdf"), "dpi": 72})),
-        ("report.export", json!({"path": out("report.pdf"), "dpi": 72})),
-        ("source.publish", json!({"layer": "towns"})),
-    ];
-    s.run("report.new", &json!({"layer": "Cities"})).unwrap();
+    let exports = cancel_exports(&out, &dem);
     let registered = crate::cmd::exports::IN_BACKGROUND.iter().map(|(c, ..)| *c).collect::<std::collections::BTreeSet<_>>();
     assert_eq!(listed(&exports), registered, "add a new background export here");
     for (command, p) in &exports {
@@ -46748,28 +46982,7 @@ fn long_commands_stop_when_cancelled_while_they_run() {
     note("layer.repairSource", read.run(&control).map(|_| ()), &control);
     std::fs::remove_file(replacement).unwrap();
 
-    // The tools whose work grows past a second or two on real data: buffers, overlays, joins,
-    // hulls, densities and interpolation. Run in the background as the Analysis pane runs them; a
-    // new long tool is added here (AGENTS.md › Never hold the window).
-    let tools = [
-        ("buffer", json!({"input": "Cities", "distance": 100})),
-        ("dissolve", json!({"input": "Countries"})),
-        ("spatialJoin", json!({"target": "Cities", "join": "Countries"})),
-        ("clip", json!({"input": "Rivers", "clip": "Countries"})),
-        ("erase", json!({"input": "Rivers", "erase": "Countries"})),
-        ("intersect", json!({"input": "Rivers", "overlay": "Countries"})),
-        ("identity", json!({"input": "Rivers", "overlay": "Countries"})),
-        ("union", json!({"input": "Lakes", "overlay": "Countries"})),
-        ("symmetricalDifference", json!({"input": "Lakes", "overlay": "Countries"})),
-        ("update", json!({"input": "Countries", "update": "Lakes"})),
-        ("split", json!({"input": "Rivers", "split": "Countries"})),
-        ("simplify", json!({"input": "Countries", "tolerance": 1})),
-        ("countPoints", json!({"polygons": "Countries", "points": "Cities"})),
-        ("convexHull", json!({"input": "Countries", "group": "None", "output": "Hulls_each"})),
-        ("convexHull", json!({"input": "Countries", "group": "All", "output": "Hulls_all"})),
-        ("kernelDensity", json!({"input": "Cities", "crs": "EPSG:3857"})),
-        ("kriging", json!({"input": "Cities", "field": "pop_max"})),
-    ];
+    let tools = cancel_tools();
     for (tool, params) in &tools {
         // The parameters are good: a run that isn't cancelled succeeds.
         s.run("gp.run", &json!({"tool": tool, "params": params})).unwrap_or_else(|e| panic!("{tool}: {e}"));
@@ -46783,6 +46996,162 @@ fn long_commands_stop_when_cancelled_while_they_run() {
         note(&format!("{tool} {params}"), finished, &control);
     }
     assert!(kept_going.is_empty(), "these ran on after Cancel:\n{}", kept_going.join("\n"));
+}
+
+/// What Cancel leaves behind (#1562): each command that runs in the background (the rasters, the
+/// exports and the long tools of [`long_commands_stop_when_cancelled_while_they_run`]) is cancelled
+/// at its 1st, 2nd, 3rd… look at the flag ([`Control::cancelled_at_look`]) and the session, the
+/// folder and the next run are looked at. Cancel must leave the project, its undo steps and the
+/// files as they were, and the same command run again must work and undo like a first run. The
+/// commands that read from the network (`embeddings.*`) aren't here: nothing offline runs them to
+/// the end.
+///
+/// The first looks are tried in turn up to [`LOOKS`], and the command's last, which has the most
+/// done (a long command has hundreds: a look for each feature). A command ends the sweep when it
+/// finishes before reaching the look.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn cancelling_at_each_check_leaves_nothing_behind() {
+    use rustgis_analysis::control::Control;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    /// The looks tried one by one, from the first.
+    const LOOKS: u64 = 3;
+    let dir = CancelDir::new("rustgis-cancel-state");
+    let out = |f: &str| dir.0.join(f).display().to_string();
+    let (mut s, dem) = cancel_world(&dir.0);
+    // The project (but for the counters undo moves on to redraw the layers), its undo steps and
+    // what waits to be applied; and the folder's files.
+    /// Takes the counters of how often a layer's geometry changed out of a serialized project.
+    fn without_revisions(v: &mut Value) {
+        match v {
+            Value::Object(m) => {
+                m.remove("geometry_rev");
+                m.values_mut().for_each(without_revisions);
+            }
+            Value::Array(a) => a.iter_mut().for_each(without_revisions),
+            _ => {}
+        }
+    }
+    let state = |s: &Session| {
+        let mut project = serde_json::to_value(&s.project).unwrap();
+        without_revisions(&mut project);
+        (project, s.undo_depth(), s.pending.len(), s.plugin_runs.len(), s.raster_runs.len())
+    };
+    let files = || -> BTreeMap<String, Vec<u8>> {
+        let read = std::fs::read_dir(&dir.0).unwrap();
+        read.map(|e| e.unwrap())
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap_or_default()))
+            .collect()
+    };
+    let mut problems = Vec::new();
+    // Each family runs and applies a command as the app does; `adds` is whether a finished run
+    // adds an undo step. `fresh` builds the world again before each run, for a command whose
+    // finished run can't be undone and leaves nothing for the next to do (publishing an edit).
+    type Attempt<'a> = &'a dyn Fn(&mut Session, &Arc<Control>) -> Result<(), String>;
+    let mut sweep = |s: &mut Session, what: &str, adds: bool, fresh: bool, attempt: Attempt| {
+        let renew = |s: &mut Session| {
+            if fresh {
+                *s = cancel_world(&dir.0).0;
+            }
+        };
+        renew(s);
+        // How many looks a whole run takes.
+        let counting = Control::cancelled_at_look(u64::MAX);
+        let before = state(s);
+        if let Err(e) = attempt(s, &counting) {
+            problems.push(format!("{what}: a run that isn't cancelled failed: {e}"));
+            return;
+        }
+        let total = counting.looked();
+        if adds {
+            while s.undo_depth() > before.1 {
+                s.undo();
+            }
+        }
+        for n in (1..=total.min(LOOKS)).chain([total]) {
+            renew(s);
+            let (before, held) = (state(s), files());
+            let control = Control::cancelled_at_look(n);
+            let result = attempt(s, &control);
+            if result.is_ok() {
+                // Finished before its `n`th look: nothing more to cancel.
+                if adds {
+                    s.undo();
+                }
+                break;
+            }
+            let e = result.unwrap_err();
+            if !e.contains("cancelled") {
+                problems.push(format!("{what}, look {n} of {total}: failed instead of stopping: {e}"));
+            }
+            if state(s) != before {
+                problems.push(format!("{what}, look {n} of {total}: Cancel changed the session"));
+            }
+            if files() != held {
+                problems.push(format!("{what}, look {n} of {total}: Cancel changed the files in the folder"));
+            }
+            match attempt(s, &Control::new()) {
+                Err(e) => problems.push(format!("{what}, look {n} of {total}: it can't be run again: {e}")),
+                Ok(()) if adds => {
+                    if s.undo_depth() != before.1 + 1 {
+                        problems.push(format!(
+                            "{what}, look {n} of {total}: run again, its undo steps went from {} to {}, not by 1",
+                            before.1,
+                            s.undo_depth()
+                        ));
+                    }
+                    while s.undo_depth() > before.1 {
+                        s.undo();
+                    }
+                    if state(s) != before {
+                        problems.push(format!("{what}, look {n} of {total}: undoing the run again doesn't give the project back"));
+                    }
+                }
+                Ok(()) => {}
+            }
+        }
+    };
+
+    // Embeddings read from the network, which no offline run finishes.
+    for (command, p) in cancel_rasters(&dem).into_iter().filter(|(c, _)| !c.starts_with("embeddings.")) {
+        let attempt = |s: &mut Session, control: &Arc<Control>| {
+            let run = crate::cmd::workflows::raster_start(s, command, &p)?;
+            let id = run.id;
+            match run.run(control) {
+                Ok(made) => {
+                    crate::cmd::workflows::raster_land(s, id, made)?;
+                    let mut ran = p.clone();
+                    ran["ran"] = json!(id);
+                    s.run(command, &ran).map(|_| ())
+                }
+                Err(e) => {
+                    crate::cmd::workflows::raster_abandon(s, id);
+                    Err(e)
+                }
+            }
+        };
+        sweep(&mut s, command, true, false, &attempt);
+    }
+    for (command, p) in cancel_exports(&out, &dem) {
+        let attempt = |s: &mut Session, control: &Arc<Control>| {
+            let run = crate::cmd::exports::export_start(s, command, &p)?;
+            let started = run.started();
+            crate::cmd::exports::export_land(s, started, run.run(control)).map(|_| ())
+        };
+        sweep(&mut s, command, false, command == "source.publish", &attempt);
+    }
+    for (tool, params) in cancel_tools() {
+        let attempt = |s: &mut Session, control: &Arc<Control>| {
+            let run = crate::cmd::gp::tool_start(s, tool, &params)?;
+            let id = run.id;
+            let done = run.run(control);
+            crate::cmd::gp::tool_complete(s, id, done)?;
+            s.run("gp.finish", &json!({"id": id})).map(|_| ())
+        };
+        sweep(&mut s, &format!("{tool} {params}"), true, false, &attempt);
+    }
+    assert!(problems.is_empty(), "Cancel left behind:\n{}", problems.join("\n"));
 }
 
 /// A GeoLibre step of a model is worked out on the copy and taken by the run here, as a built-in
@@ -48099,6 +48468,386 @@ fn names_texts_and_lists_over_their_limit_are_refused_not_cut() {
     assert_eq!(g.project.tasks.iter().find(|t| t.name == "Short").map(|t| t.steps.len()), Some(200));
     assert!(history(&g, mark).is_empty());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The output's name given to the commands that make a layer is refused past 200 characters, not
+/// cut (#2044), as the cube and imagery tools refuse it (#1888): the error gives the length and the
+/// limit, and no layer is added. A name at the limit is taken whole, counted in characters (each
+/// `é` is two bytes). A run started in the background is refused before it starts.
+#[test]
+fn output_names_over_their_limit_are_refused() {
+    let mut s = world();
+    let refused = |r: Result<Value, String>, what: &str| {
+        let e = r.unwrap_err();
+        assert!(e.contains("201 characters") && e.contains("at most 200"), "{what}: {e}");
+    };
+    // Each command's name is told apart by its first character, so the map keeps it as given.
+    let name = |i: usize, n: usize| format!("{i}{}", "é".repeat(n - 1));
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).unwrap().name.clone();
+    // A river with more than ten points is long enough for a route between its ends.
+    let river = s
+        .map()
+        .layer_by_name("Rivers")
+        .unwrap()
+        .dataset
+        .features
+        .iter()
+        .filter_map(|f| f.geometry.as_ref())
+        .find_map(|g| match g {
+            rustgis_data::Geometry::Line(p) if p[0].len() > 10 => Some((p[0][0], p[0][p[0].len() - 1])),
+            _ => None,
+        })
+        .unwrap();
+    let commands = [
+        ("raster.function", json!({"layer": dem, "function": "slope"})),
+        ("raster.functionChain", json!({"layer": dem, "steps": [{"function": "slope"}]})),
+        ("analysis.suitability", json!({"criteria": [{"layer": dem, "ranges": [[0, 1000, 1]]}]})),
+        ("analysis.viewshed", json!({"layer": dem, "lon": 10.0055, "lat": 45.0395})),
+        ("analysis.lineOfSight", json!({"layer": dem, "from": [10.0205, 45.0395], "to": [10.0355, 45.0395]})),
+        ("analysis.interpolate", json!({"layer": "Cities", "field": "pop_max", "cellSize": 2})),
+        ("analysis.route", json!({"layer": "Rivers", "from": [river.0.x, river.0.y], "to": [river.1.x, river.1.y]})),
+        ("analysis.simulate", json!({"layer": "Countries", "count": 2})),
+    ];
+    for (i, (command, p)) in commands.iter().enumerate() {
+        let named = |n: usize| {
+            let mut p = p.clone();
+            p["name"] = json!(name(i, n));
+            p
+        };
+        let layers = s.map().layers.len();
+        refused(s.run(command, &named(201)), command);
+        assert_eq!(s.map().layers.len(), layers, "{command}: no layer added");
+        let made = s.run(command, &named(200)).unwrap()["layer"].as_u64().unwrap() as u32;
+        assert_eq!(s.map().layer(made).unwrap().name, name(i, 200), "{command}");
+        // Started in the background, as the app starts it: refused before any run is kept.
+        #[cfg(not(target_arch = "wasm32"))]
+        if crate::cmd::workflows::IN_BACKGROUND.iter().any(|(c, ..)| c == command) {
+            let runs = s.raster_runs.len();
+            refused(crate::cmd::workflows::raster_start(&mut s, command, &named(201)).map(|_| Value::Null), command);
+            assert_eq!(s.raster_runs.len(), runs, "{command}: no run kept");
+        }
+    }
+    // A layer pasted as a new one.
+    s.run("select.byAttributes", &json!({"layer": "Cities", "where": "name = 'Paris'"})).unwrap();
+    s.run("edit.copy", &Value::Null).unwrap();
+    let layers = s.map().layers.len();
+    refused(s.run("edit.pasteSpecial", &json!({"name": name(9, 201)})), "pasted layer");
+    assert_eq!(s.map().layers.len(), layers, "nothing pasted");
+    let pasted = s.run("edit.pasteSpecial", &json!({"name": name(9, 200)})).unwrap()["layer"].as_u64().unwrap() as u32;
+    assert_eq!(s.map().layer(pasted).unwrap().name, name(9, 200));
+    // A model's name and new name, saved or passed with a graph.
+    let graph = json!({
+        "nodes": [
+            {"id": "i1", "kind": "input", "x": 0, "y": 0, "layer": "Cities"},
+            {"id": "o1", "kind": "output", "x": 240, "y": 0, "name": "Kept"}
+        ],
+        "edges": [{"from": "i1", "fromPort": "out", "to": "o1", "toPort": "in"}]
+    });
+    let at = |n: usize| "é".repeat(n);
+    refused(s.run("model.save", &json!({"name": at(201), "graph": graph})), "model name");
+    refused(s.run("model.save", &json!({"name": "Clean", "rename": at(201), "graph": graph})), "model's new name");
+    refused(s.run("model.validate", &json!({"name": at(201), "graph": graph})), "a graph's model name");
+    assert!(s.project.models.is_empty(), "no model saved");
+    s.run("model.save", &json!({"name": at(200), "graph": graph})).unwrap();
+    s.run("model.save", &json!({"name": at(200), "rename": format!("{}a", at(199)), "graph": graph})).unwrap();
+    let models: Vec<&str> = s.project.models.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(models, [format!("{}a", at(199))]);
+    // The output of a Zarr summary and of an embeddings analysis, refused before the store or the
+    // network is read.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _cache = zarr_cache_lock();
+        let (dir, path) = zarr_store_over_time("over-limit");
+        let layers = s.map().layers.len();
+        refused(s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": "mean", "name": at(201)})), "zarr summary");
+        let p = json!({"dataset": "alphaearth", "point": [10.01, 45.01], "bbox": [10.0, 45.0, 10.02, 45.02], "name": at(201)});
+        refused(s.run("embeddings.similarity", &p), "similarity");
+        refused(s.run("embeddings.change", &p), "change");
+        refused(crate::cmd::workflows::raster_start(&mut s, "embeddings.similarity", &p).map(|_| Value::Null), "similarity started");
+        assert_eq!(s.map().layers.len(), layers, "no layer added");
+        let r = s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": "mean", "name": at(200)})).unwrap();
+        assert_eq!(s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().name, at(200));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// The names and texts given to projects, layouts, reports, presentations and notebooks are
+/// refused past their limits, not cut (#2044): the error gives the length and the limit, and nothing
+/// changes. A value at its limit is taken whole, counted in characters.
+#[test]
+fn names_and_texts_over_their_limit_are_refused() {
+    use rustgis_map::layout::ElementKind;
+    use rustgis_map::presentation::{Page, PageKind};
+    use rustgis_map::report::Section;
+    let mut s = world();
+    let at = |n: usize| "é".repeat(n);
+    let refused = |r: Result<Value, String>, what: &str, n: usize, limit: usize| {
+        let e = r.unwrap_err();
+        assert!(e.contains(&format!("{n} characters")) && e.contains(&format!("at most {limit}")), "{what}: {e}");
+    };
+    // A project's name.
+    let project = s.project.name.clone();
+    refused(s.run("project.rename", &json!({"name": at(201)})), "project", 201, 200);
+    assert_eq!(s.project.name, project);
+    s.run("project.rename", &json!({"name": at(200)})).unwrap();
+    assert_eq!(s.project.name, at(200));
+    // A layout element's name, title and text, added and updated.
+    s.run("layout.new", &json!({"page": "a4", "template": "map"})).unwrap();
+    let elements = |s: &Session| s.project.layouts[0].elements.len();
+    let value = |s: &Session, id: u32| match &s.project.layouts[0].element(id).unwrap().kind {
+        ElementKind::Legend { title, .. } | ElementKind::Colorbar { title, .. } => title.clone(),
+        ElementKind::Text { text, .. } => text.clone(),
+        _ => String::new(),
+    };
+    let mut added = Vec::new();
+    for (kind, key, limit) in [("legend", "title", 200), ("colorbar", "title", 200), ("text", "text", 5000), ("dynamicText", "text", 5000)]
+    {
+        let before = elements(&s);
+        refused(s.run("layout.addElement", &json!({"kind": kind, key: at(limit + 1)})), kind, limit + 1, limit);
+        assert_eq!(elements(&s), before, "{kind}: no element added");
+        let id = s.run("layout.addElement", &json!({"kind": kind, key: at(limit)})).unwrap()["element"].as_u64().unwrap() as u32;
+        assert_eq!(value(&s, id), at(limit), "{kind}");
+        added.push(id);
+    }
+    let (legend, text) = (added[0], added[2]);
+    for (id, key, limit) in [(text, "name", 200), (text, "text", 5000), (legend, "title", 200)] {
+        let before = s.project.layouts[0].element(id).cloned();
+        // Refused with a change that comes before it in the element, which is left as it was.
+        refused(s.run("layout.update", &json!({"element": id, key: at(limit + 1), "x": 1})), key, limit + 1, limit);
+        assert_eq!(s.project.layouts[0].element(id).cloned(), before, "{key}: the element unchanged");
+        s.run("layout.update", &json!({"element": id, key: at(limit)})).unwrap();
+        let name = s.project.layouts[0].element(id).unwrap().name.clone();
+        assert_eq!(if key == "name" { name } else { value(&s, id) }, at(limit), "{key}");
+    }
+    // A publication layout's texts, given as one or a list.
+    let layouts = s.project.layouts.len();
+    let extent = json!([-10, 35, 30, 60]);
+    refused(s.run("layout.publication", &json!({"extent": extent, "title": at(2001)})), "publication title", 2001, 2000);
+    refused(
+        s.run("layout.publication", &json!({"extent": extent, "sources": ["Natural Earth", at(2001)]})),
+        "publication source",
+        2001,
+        2000,
+    );
+    assert_eq!(s.project.layouts.len(), layouts, "no layout added");
+    // A report's name and title, and a supplemental page's title and text.
+    refused(s.run("report.new", &json!({"layer": "Cities", "name": at(201)})), "report name", 201, 200);
+    refused(s.run("report.new", &json!({"layer": "Cities", "title": at(501)})), "report title", 501, 500);
+    assert!(s.project.reports.is_empty(), "no report added");
+    s.run("report.new", &json!({"layer": "Cities", "name": at(200), "title": at(500)})).unwrap();
+    assert_eq!((s.project.reports[0].name.clone(), s.project.reports[0].title.clone()), (at(200), at(500)));
+    refused(s.run("report.update", &json!({"name": format!("{}a", at(200))})), "report renamed", 201, 200);
+    refused(s.run("report.update", &json!({"title": at(501)})), "report retitled", 501, 500);
+    assert_eq!((s.project.reports[0].name.clone(), s.project.reports[0].title.clone()), (at(200), at(500)));
+    let sections = s.project.reports[0].sections.len();
+    refused(s.run("report.supplementalPage", &json!({"title": at(501)})), "page title", 501, 500);
+    refused(s.run("report.supplementalPage", &json!({"text": at(100_001)})), "page text", 100_001, 100_000);
+    assert_eq!(s.project.reports[0].sections.len(), sections, "no page added");
+    s.run("report.supplementalPage", &json!({"title": at(500), "text": at(100_000)})).unwrap();
+    assert!(
+        matches!(s.project.reports[0].sections.last(), Some(Section::Page { title, text, .. }) if *title == at(500) && *text == at(100_000))
+    );
+    // A presentation's name and title page, and its pages' titles, texts, notes, captions and
+    // video sources.
+    refused(s.run("presentation.new", &json!({"name": at(201)})), "presentation name", 201, 200);
+    refused(s.run("presentation.new", &json!({"title": at(501)})), "title page", 501, 500);
+    assert!(s.project.presentations.is_empty(), "no presentation added");
+    s.run("presentation.new", &json!({"name": at(200), "title": at(500)})).unwrap();
+    assert_eq!((s.project.presentations[0].name.clone(), s.project.presentations[0].pages[0].title.clone()), (at(200), at(500)));
+    s.run("project.thumbnail", &json!({"create": true})).unwrap();
+    let png = s.project.thumbnail.clone().unwrap();
+    let field = |page: &Page, key: &str| match (key, &page.kind) {
+        ("title", _) => page.title.clone(),
+        ("notes", _) => page.notes.clone(),
+        ("text", PageKind::Blank { text, .. }) => text.clone(),
+        ("caption", PageKind::Image { caption, .. } | PageKind::Video { caption, .. }) => caption.clone(),
+        ("source", PageKind::Video { source, .. }) => source.clone(),
+        _ => String::new(),
+    };
+    let new_pages = [
+        ("presentation.mapPage", json!({}), "title", 500),
+        ("presentation.blankPage", json!({}), "title", 500),
+        ("presentation.blankPage", json!({}), "text", 20_000),
+        ("presentation.imagePage", json!({"image": png}), "title", 500),
+        ("presentation.imagePage", json!({"image": png}), "caption", 2000),
+        ("presentation.videoPage", json!({"source": "walk.webm"}), "title", 500),
+        ("presentation.videoPage", json!({"source": "walk.webm"}), "caption", 2000),
+        ("presentation.videoPage", json!({}), "source", 4000),
+    ];
+    for (command, p, key, limit) in new_pages {
+        let with = |n: usize| {
+            let mut p = p.clone();
+            p[key] = json!(at(n));
+            p
+        };
+        let pages = s.project.presentations[0].pages.len();
+        refused(s.run(command, &with(limit + 1)), command, limit + 1, limit);
+        assert_eq!(s.project.presentations[0].pages.len(), pages, "{command}: no page added");
+        s.run(command, &with(limit)).unwrap();
+        assert_eq!(field(s.project.presentations[0].pages.last().unwrap(), key), at(limit), "{command} {key}");
+    }
+    // The title page is a blank one, and the last page a video.
+    let last = s.project.presentations[0].pages.len() - 1;
+    for (page, key, limit) in [(0, "title", 500), (0, "notes", 20_000), (0, "text", 20_000), (last, "caption", 2000)] {
+        let before = s.project.presentations[0].pages[page].clone();
+        refused(s.run("presentation.updatePage", &json!({"page": page, key: at(limit + 1), "seconds": 9})), key, limit + 1, limit);
+        assert_eq!(s.project.presentations[0].pages[page], before, "{key}: the page unchanged");
+        s.run("presentation.updatePage", &json!({"page": page, key: at(limit)})).unwrap();
+        assert_eq!(field(&s.project.presentations[0].pages[page], key), at(limit), "{key}");
+    }
+    // A notebook's name and a cell's source, added and edited.
+    refused(s.run("notebook.new", &json!({"name": at(201)})), "notebook name", 201, 200);
+    assert!(s.project.notebooks.is_empty(), "no notebook added");
+    s.run("notebook.new", &json!({"name": at(200)})).unwrap();
+    assert_eq!(s.project.notebooks[0].name, at(200));
+    let cells = s.project.notebooks[0].cells.clone();
+    refused(s.run("notebook.addCell", &json!({"source": at(200_001)})), "new cell", 200_001, 200_000);
+    refused(s.run("notebook.editCell", &json!({"cell": 0, "source": at(200_001)})), "edited cell", 200_001, 200_000);
+    assert_eq!(s.project.notebooks[0].cells, cells, "the cells unchanged");
+    let cell = s.run("notebook.addCell", &json!({"source": at(200_000), "kind": "markdown"})).unwrap()["cell"].as_u64().unwrap() as usize;
+    assert_eq!(s.project.notebooks[0].cells[cell].source, at(200_000));
+    s.run("notebook.editCell", &json!({"cell": 0, "source": at(200_000)})).unwrap();
+    assert_eq!(s.project.notebooks[0].cells[0].source, at(200_000));
+}
+
+/// A name at its limit told apart from one already there gives way to the number that tells it
+/// apart, so it stays within the limit, and that is said; a short name only gains the number, and
+/// nothing is said (#2044, as `task.new` does in #1888). A project opened from a file named past
+/// a project name's limit takes the first 200 characters, and that is said.
+#[test]
+fn names_cut_to_fit_their_number_are_said() {
+    let mut s = world();
+    let at = |n: usize| "é".repeat(n);
+    let cut = |s: &Session, mark: u64| {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("has that name already")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let runs: [(&str, Value, &str); 3] = [
+        ("report.new", json!({"layer": "Cities"}), "New Report: a report"),
+        ("presentation.new", json!({}), "New Presentation: a presentation"),
+        ("notebook.new", json!({}), "New Notebook: a notebook"),
+    ];
+    for (command, p, said) in runs {
+        let named = |name: String| {
+            let mut p = p.clone();
+            p["name"] = json!(name);
+            p
+        };
+        s.run(command, &named(at(200))).unwrap();
+        let mark = s.notice_mark();
+        let name = s.run(command, &named(at(200))).unwrap()["name"].as_str().unwrap().to_string();
+        assert_eq!((name.chars().count(), name.ends_with(" 2")), (200, true), "{command}: {name}");
+        assert_eq!(cut(&s, mark), [format!("{said} has that name already, so the name given is cut to 198 characters to fit \" 2\"")]);
+        s.run(command, &named("Tour".into())).unwrap();
+        let mark = s.notice_mark();
+        assert_eq!(s.run(command, &named("Tour".into())).unwrap()["name"], "Tour 2", "{command}");
+        assert!(cut(&s, mark).is_empty(), "{command}");
+    }
+    // A report renamed to another's name.
+    let mark = s.notice_mark();
+    s.run("report.update", &json!({"report": "Tour", "name": at(200)})).unwrap();
+    assert_eq!(cut(&s, mark).len(), 1);
+    let names: Vec<usize> = s.project.reports.iter().map(|r| r.name.chars().count()).collect();
+    assert_eq!(names, [200, 200, 200, 6]);
+    // A project file's name.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let said =
+        |s: &Session, mark: u64| s.notices_since(mark).iter().filter(|n| n.text.starts_with("Open Project: the file's name is")).count();
+    let mark = s.notice_mark();
+    s.run("project.openText", &json!({"text": text, "fileName": format!("{}.rgis", at(201))})).unwrap();
+    assert_eq!((s.project.name.clone(), said(&s, mark)), (at(200), 1));
+    let mark = s.notice_mark();
+    s.run("project.openText", &json!({"text": text, "fileName": format!("{}.rgis", at(200))})).unwrap();
+    assert_eq!((s.project.name.clone(), said(&s, mark)), (at(200), 0));
+}
+
+#[test]
+fn a_report_name_made_from_a_long_layer_name_says_what_it_keeps() {
+    let mut s = world();
+    let at = |n: usize| "é".repeat(n);
+    let new_report = |s: &mut Session, layer: &str| {
+        let mark = s.notice_mark();
+        let name = s.run("report.new", &json!({"layer": layer})).unwrap()["name"].as_str().unwrap().to_string();
+        let said = s.notices_since(mark).iter().filter(|n| n.text.starts_with("New Report: ")).map(|n| n.text.clone()).collect::<Vec<_>>();
+        (name, said)
+    };
+    // "{layer} Report" is 207 characters, so the report's name keeps its first 200.
+    s.run("layer.rename", &json!({"layer": "Cities", "name": at(200)})).unwrap();
+    let (name, said) = new_report(&mut s, &at(200));
+    assert_eq!(name, at(200));
+    assert_eq!(said, ["New Report: the report's name is made from the layer's name and keeps its first 200 characters"]);
+    // A second one keeps fewer to fit its number, and one notice gives that count.
+    let (name, said) = new_report(&mut s, &at(200));
+    assert_eq!(name, format!("{} 2", at(198)));
+    assert_eq!(said, ["New Report: the report's name is made from the layer's name and keeps its first 198 characters before \" 2\""]);
+    // "{layer} Report" of exactly 200 characters is kept whole, without a word.
+    s.run("layer.rename", &json!({"layer": at(200), "name": at(193)})).unwrap();
+    let (name, said) = new_report(&mut s, &at(193));
+    assert_eq!((name, said), (format!("{} Report", at(193)), Vec::<String>::new()));
+    // Its number cuts it, and the notice doesn't call it a name given.
+    let (name, said) = new_report(&mut s, &at(193));
+    assert_eq!(name, format!("{} Repo 2", at(193)));
+    assert_eq!(
+        said,
+        ["New Report: a report has that name already, so the name made from the layer's name is cut to 198 characters to fit \" 2\""]
+    );
+}
+
+#[test]
+fn a_report_title_made_from_a_long_layer_name_says_what_it_keeps() {
+    let mut s = world();
+    let title_said = |s: &Session, mark: u64| {
+        s.notices_since(mark)
+            .iter()
+            .filter(|n| n.text.starts_with("New Report: the report's title"))
+            .map(|n| n.text.clone())
+            .collect::<Vec<_>>()
+    };
+    // An imported layer's name isn't held to the 200 characters Rename takes.
+    for (long, kept) in [(format!("{}x", "é".repeat(500)), "é".repeat(500)), ("é".repeat(500), "é".repeat(500))] {
+        crate::cmd::layer::add_dataset(&mut s, rustgis_data::Dataset::new(&long, rustgis_data::GeometryType::Point, Vec::new()));
+        let mark = s.notice_mark();
+        s.run("report.new", &json!({"layer": long})).unwrap();
+        assert_eq!(s.project.reports.last().unwrap().title, kept);
+        let expected = if long.chars().count() > 500 {
+            vec!["New Report: the report's title is the layer's name and keeps its first 500 characters".to_string()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(title_said(&s, mark), expected, "{} characters", long.chars().count());
+    }
+}
+
+#[test]
+fn an_imported_name_cut_to_fit_its_number_says_it_came_from_the_file() {
+    let mut s = world();
+    let cut = |s: &Session, mark: u64| {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("has that name already")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let imports = [
+        ("report.open", json!({"layer": "Countries"}), "Import Report: a report"),
+        ("presentation.import", json!({}), "Import Presentation: a presentation"),
+        ("notebook.open", json!({"cells": []}), "Add and Open Notebook: a notebook"),
+    ];
+    for (command, item, said) in imports {
+        let import = |s: &mut Session, name: &str| {
+            let mut text = item.clone();
+            text["name"] = json!(name);
+            s.run(command, &json!({"text": text.to_string()})).unwrap()["name"].as_str().unwrap().to_string()
+        };
+        let long = "é".repeat(200);
+        import(&mut s, &long);
+        let mark = s.notice_mark();
+        assert_eq!(import(&mut s, &long), format!("{} 2", "é".repeat(198)), "{command}");
+        assert_eq!(
+            cut(&s, mark),
+            [format!("{said} has that name already, so the name from the file is cut to 198 characters to fit \" 2\"")]
+        );
+        import(&mut s, "Tour");
+        let mark = s.notice_mark();
+        assert_eq!(import(&mut s, "Tour"), "Tour 2", "{command}");
+        assert!(cut(&s, mark).is_empty(), "{command}: {:?}", cut(&s, mark));
+    }
 }
 
 /// Serves each file by its path (others are 404) with byte ranges (`bytes=a-b`, `bytes=-n`)
@@ -49494,4 +50243,41 @@ fn layout_no_data_legend_is_optional_and_saved() {
     ));
     let old: rustgis_map::layout::Layout = serde_json::from_value(old).unwrap();
     assert!(matches!(old.element(3).unwrap().kind, ElementKind::Legend { show_no_data: false, .. }));
+}
+
+/// #2139: a name or text over its limit is refused with its length and the limit, and nothing
+/// changes; one at the limit is taken whole.
+#[test]
+fn bookmark_layout_map_names_over_their_limit_are_refused() {
+    let mut s = world();
+    let long = |n: usize| "x".repeat(n);
+    s.run("map.addTiles", &json!({"url": "https://example.com/{z}/{x}/{y}.png"})).unwrap();
+    s.run("layout.new", &json!({"name": "L"})).unwrap();
+    s.run("bookmark.add", &json!({"name": "b", "description": "d"})).unwrap();
+    let snapshot = |s: &Session| {
+        (
+            s.map().name.clone(),
+            s.map().bookmarks.iter().map(|b| (b.name.clone(), b.description.clone())).collect::<Vec<_>>(),
+            s.project.layouts.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+            s.map().tiles.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+        )
+    };
+    for (cmd, params, of) in [
+        ("bookmark.add", json!({"name": long(121)}), "a bookmark's name takes at most 120"),
+        ("bookmark.add", json!({"name": "b", "description": long(2001)}), "a bookmark's description takes at most 2000"),
+        ("bookmark.rename", json!({"name": "Europe", "newName": long(121)}), "a bookmark's name takes at most 120"),
+        ("map.rename", json!({"name": long(201)}), "a map's name takes at most 200"),
+        ("layout.new", json!({"name": long(201)}), "a layout's name takes at most 200"),
+        ("layout.rename", json!({"name": "L", "newName": long(201)}), "a layout's name takes at most 200"),
+        ("bookmark.describe", json!({"name": "b", "description": long(2001)}), "a bookmark's description takes at most 2000"),
+        ("map.setTiles", json!({"index": 0, "rename": long(121)}), "a tile layer's name takes at most 120"),
+    ] {
+        let before = snapshot(&s);
+        let e = s.run(cmd, &params).unwrap_err();
+        assert!(e.contains(of), "{cmd}: {e}");
+        assert_eq!(snapshot(&s), before, "{cmd}");
+    }
+    s.run("bookmark.add", &json!({"name": long(120), "description": long(2000)})).unwrap();
+    s.run("map.rename", &json!({"name": long(200)})).unwrap();
+    assert_eq!(s.map().name.chars().count(), 200);
 }

@@ -4,8 +4,8 @@ _Last reviewed: 2026-11-10 (v0.6.0). Reviewed at each release; if this date is o
 linked issues over this page._
 
 This page lists the work planned for RustGIS and where help is most useful; details of each item
-live in its linked issue. Gaps nobody has planned are listed in
-[GEOLIBRE_PARITY.md](GEOLIBRE_PARITY.md) without a theme.
+live in its linked issue. Gaps nobody has planned are listed in the
+[GeoLibre parity checklist](docs/geolibre-parity.md) without a theme.
 
 ## Goals
 - **What exists works.** A feature that crashes, misreads data or is undocumented costs more
@@ -48,7 +48,7 @@ Before proposing something, check that RustGIS doesn't already do it: the
 live lists of commands and geoprocessing tools (`rustgis-cli commands`, `rustgis-cli tools`; over
 MCP, `search_commands` and `search_tools`).
 
-[GEOLIBRE_PARITY.md](GEOLIBRE_PARITY.md) compares RustGIS with GeoLibre feature by feature: a
+The [GeoLibre parity checklist](docs/geolibre-parity.md) compares RustGIS with GeoLibre feature by feature: a
 source of ideas, not a plan ([#951](https://github.com/opengeos/RustGIS/discussions/951)). Issues
 labelled [good first issue](https://github.com/opengeos/RustGIS/labels/good%20first%20issue) are a
 place to start.
@@ -159,9 +159,8 @@ Big layers work, or say plainly where they stop
 - Autosave and crash recovery in the browser, as the desktop app has since
   [#873](https://github.com/opengeos/RustGIS/issues/873) (`apps/rustgis-web/src/web.rs`; the
   browser half needs an issue of its own).
-- The OS keychain for the remaining secrets: web-service basic-auth and API-key logins (for the
-  session today), and a plugin `secrets` permission bound to one origin
-  ([#760](https://github.com/opengeos/RustGIS/issues/760)); testing on each platform
+- A plugin `secrets` permission backed by the OS keychain and bound to one origin
+  ([#760](https://github.com/opengeos/RustGIS/issues/760)); testing the secret store on each platform
   ([#891](https://github.com/opengeos/RustGIS/issues/891)).
 - Waiting on upstream releases: Control-click menus on macOS
   ([#707](https://github.com/opengeos/RustGIS/issues/707)) and asking to save on ⌘Q
