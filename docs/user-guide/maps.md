@@ -119,8 +119,12 @@ the box's edge at that point (its Unique Values or Graduated Colors classes, so 
 matches; the topmost polygon where they overlap, among the features its definition query keeps;
 a fill colour partly transparent is laid over `color`). The contacts go straight down to the base,
 outlined: only where they cross the box's edge comes from the map, and the walls show no dip or
-thickness. Off every polygon, and in a polygon with no solid fill (hatches and other patterns
-aren't drawn on walls yet), the walls are `color`. The layer may be hidden, so the walls can
+thickness. Off every polygon, and in a polygon with no solid fill, the walls are `color`. The
+hatches and markers of the class's fill layers (Fill Layers) stacked over that fill are drawn on
+the wall too, in its plane and in perspective, as a geologic block diagram shows its rock units:
+a hatch's angle is from the horizontal (0° gives bedding lines), and a pattern is as big on the
+wall as on the ground at the view's centre. Gradient and shapeburst fills aren't drawn on walls.
+The layer may be hidden, so the walls can
 show geology while the ground shows soils. It must be a polygon layer that holds all its
 features (not one read a view at a time), with a name of its own; it follows the layer's renames,
 and when it is removed, or a project opens without it, the walls are `color` (said) until a
