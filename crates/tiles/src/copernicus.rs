@@ -174,6 +174,15 @@ enum Known {
     Nothing,
     /// It holds one; a sign-in with it isn't tried before `retry_at` (Unix seconds).
     Kept { retry_at: i64 },
+    /// It refused to be read (locked): it may hold one, never signed in with this session.
+    Unreadable,
+}
+
+impl Known {
+    /// What a failed store call leaves known: nothing, where there is no store at all.
+    fn after_failure(e: &SecretError) -> Known {
+        if matches!(e, SecretError::Unavailable(_)) { Known::Nothing } else { Known::Unreadable }
+    }
 }
 
 /// The sign-in remembered on this computer: where it is kept, and what this session knows of it.
@@ -209,7 +218,8 @@ fn read_store(known: &mut Known, store: &dyn SecretStore) {
         // A failing store is asked once: `Reporting` tells the user why.
         *known = match store.load(ACCOUNT) {
             Ok(Some(_)) => Known::Kept { retry_at: 0 },
-            _ => Known::Nothing,
+            Ok(None) => Known::Nothing,
+            Err(e) => Known::after_failure(&e),
         };
     }
 }
@@ -251,13 +261,14 @@ fn remember_after(known: &mut Known, username: &str, password: &str, totp: bool,
     }
     let deleted = store.delete(ACCOUNT);
     // Unread: an earlier run may have remembered one, unless there's no store at all.
-    let lingers = |e: &SecretError| was || (*known == Known::Unread && !matches!(e, SecretError::Unavailable(_)));
+    let unknown = matches!(*known, Known::Unread | Known::Unreadable);
+    let lingers = |e: &SecretError| was || (unknown && !matches!(e, SecretError::Unavailable(_)));
     let left = deleted.as_ref().err().is_some_and(lingers);
     // One known to be there that couldn't be deleted is never signed in with again this session;
     // one that may be there stays unknown (`remembered` reports only what was found).
     *known = match deleted {
         Err(_) if was => Known::Kept { retry_at: i64::MAX },
-        Err(_) if left => Known::Unread,
+        Err(_) if left => Known::Unreadable,
         _ => Known::Nothing,
     };
     match deleted {
@@ -287,8 +298,9 @@ pub fn forget() -> Result<(), &'static str> {
             *known = Known::Nothing;
             Ok(())
         }
-        Err(_) => {
-            *known = Known::Kept { retry_at: i64::MAX };
+        // Known to be there, or may be: `remembered` reports only what was found.
+        Err(e) => {
+            *known = if was { Known::Kept { retry_at: i64::MAX } } else { Known::after_failure(&e) };
             Err(NOT_FORGOTTEN)
         }
     }
@@ -652,13 +664,22 @@ mod native {
         let mut known = super::lock(&super::REMEMBERED.known);
         let Some(store) = super::secret_store() else { return Restored::Nothing };
         let now = super::now_secs();
-        if super::signed_in().is_some() || matches!(*known, Known::Nothing) || matches!(*known, Known::Kept { retry_at } if now < retry_at)
+        if super::signed_in().is_some()
+            || matches!(*known, Known::Nothing | Known::Unreadable)
+            || matches!(*known, Known::Kept { retry_at } if now < retry_at)
         {
             return Restored::Nothing;
         }
-        let Ok(Some(secret)) = store.load(super::ACCOUNT) else {
-            *known = Known::Nothing;
-            return Restored::Nothing;
+        let secret = match store.load(super::ACCOUNT) {
+            Ok(Some(secret)) => secret,
+            Ok(None) => {
+                *known = Known::Nothing;
+                return Restored::Nothing;
+            }
+            Err(e) => {
+                *known = Known::after_failure(&e);
+                return Restored::Nothing;
+            }
         };
         let Some((username, password)) = super::read_remembered(secret.expose()) else {
             // Damaged: of no use to anyone.

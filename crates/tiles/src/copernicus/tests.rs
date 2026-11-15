@@ -370,6 +370,14 @@ fn a_sign_in_not_to_be_remembered_deletes_the_one_before_and_two_factor_is_never
         assert_eq!(login_remembering_at(&base, USER, PASSWORD, totp, true).unwrap().1, Some(NOT_FORGOTTEN));
         assert!(!is_remembered(), "not claimed remembered: nothing was found");
     }
+    // Read and refused at launch: still may hold one, said first; never claimed remembered, and a
+    // sign-out says it couldn't delete it.
+    set_secret_store(Some(Arc::new(MemorySecrets::failing(SecretError::Denied))));
+    assert!(!is_remembered());
+    assert_eq!(restore(), Restored::Nothing);
+    assert_eq!(login_remembering_at(&base, USER, PASSWORD, Some("123456"), true).unwrap().1, Some(NOT_FORGOTTEN));
+    assert_eq!(forget(), Err(NOT_FORGOTTEN));
+    assert!(!is_remembered());
     // No credential store on this system: nothing could have been kept.
     set_secret_store(Some(Arc::new(MemorySecrets::failing(SecretError::Unavailable("none".into())))));
     assert_eq!(login_remembering_at(&base, USER, PASSWORD, None, true).unwrap().1, Some(NOT_REMEMBERED));
