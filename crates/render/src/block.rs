@@ -380,6 +380,11 @@ fn draw_patterns(
         let c = tone(c);
         // Too many lines or markers: the pattern's ink over the stretch as one colour.
         let tint = |pm: &mut Pixmap| {
+            // A dot's outline lit and fogged as its fill is.
+            let mut pattern = pattern;
+            if let FillPattern::Dots { outline: Some(o), .. } = &mut pattern {
+                *o = tone(*o);
+            }
             let ink = crate::pattern_fill::tint(&[FillLayer { color: Some(c), pattern }], c);
             let all = tiny_skia::Rect::from_xywh(0.0, 0.0, pm.width() as f32, pm.height() as f32);
             if let Some(r) = all {
@@ -430,7 +435,30 @@ fn draw_patterns(
                     if t1 <= t0 {
                         continue;
                     }
-                    let (Some(a), Some(b)) = (at(o.0 + co * t0, o.1 + s * t0), at(o.0 + co * t1, o.1 + s * t1)) else { continue };
+                    // Seen from where the eye is in front of it: the part in front is one piece (the
+                    // eye's front is a half-plane of the wall's plane), so an end behind it is
+                    // brought back to where the line leaves the view, found by halving.
+                    let seen = |t: f64| at(o.0 + co * t, o.1 + s * t);
+                    let last_seen = |seen_t: f64, hidden_t: f64| {
+                        let (mut good, mut bad) = (seen_t, hidden_t);
+                        for _ in 0..40 {
+                            let mid = (good + bad) / 2.0;
+                            if seen(mid).is_some() { good = mid } else { bad = mid }
+                        }
+                        seen(good)
+                    };
+                    let (a, b) = match (seen(t0), seen(t1)) {
+                        (Some(a), Some(b)) => (a, b),
+                        (Some(a), None) => match last_seen(t0, t1) {
+                            Some(b) => (a, b),
+                            None => continue,
+                        },
+                        (None, Some(b)) => match last_seen(t1, t0) {
+                            Some(a) => (a, b),
+                            None => continue,
+                        },
+                        (None, None) => continue,
+                    };
                     let (a, b) = (pt(a), pt(b));
                     pb.move_to(a.0, a.1);
                     pb.line_to(b.0, b.1);
@@ -865,6 +893,30 @@ mod tests {
         let fine = FillPattern::Hatch { angle: 0.0, spacing: 1.0, width: 0.25, offset: 0.0 };
         draw_patterns(&mut pm, &mask, &[(fine, blue)], ((0.0, 1e6), (0.0, 1e6)), 1.0, |c| c, at);
         assert!((i32::from(ink(&pm, 10)) - 64).abs() <= 2, "{}", ink(&pm, 10));
+        // So does an outline-only dot pattern, its outline toned as its fill is: in full fog
+        // (grey), no blue left.
+        let mut pm = Pixmap::new(20, 20).unwrap();
+        let hollow = FillPattern::Dots {
+            marker: rustgis_map::Marker::Circle,
+            size: 3.0,
+            outline: Some(blue),
+            outline_width: 1.0,
+            spacing: [1.0, 1.0],
+            displacement: [0.0, 0.0],
+            offset: [0.0, 0.0],
+        };
+        let fogged = |c: Rgba| Rgba::rgb(128, 128, 128).with_alpha(c.a());
+        draw_patterns(&mut pm, &mask, &[(hollow, Rgba::new(0, 0, 0, 0))], ((0.0, 1e6), (0.0, 1e6)), 1.0, fogged, at);
+        let p = pm.pixel(10, 10).unwrap().demultiply();
+        assert!(p.alpha() > 0 && p.blue() == p.red(), "{p:?}");
+        // A vertical line whose top is behind the eye (here, above 15 up) is drawn up to where it
+        // leaves the view, not left off.
+        let mut pm = Pixmap::new(20, 20).unwrap();
+        let near = |x: f64, up: f64| (up <= 15.0).then_some((x, 20.0 - up));
+        let upright = FillPattern::Hatch { angle: 90.0, spacing: 20.0, width: 2.0, offset: 10.0 };
+        draw_patterns(&mut pm, &mask, &[(upright, blue)], ((0.0, 20.0), (0.0, 20.0)), 1.0, |c| c, near);
+        assert!(ink(&pm, 10) > 200, "drawn");
+        assert_eq!(pm.pixel(10, 2).unwrap().alpha(), 0, "not past the view");
     }
 
     #[test]
