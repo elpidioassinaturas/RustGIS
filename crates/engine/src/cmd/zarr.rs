@@ -238,16 +238,43 @@ mod transport_tests {
     }
 }
 
-/// A store's metadata from its web address.
+/// Rounds of [`zarr::member_keys`] a store whose root lists no arrays is read in: the variable
+/// and its groups, then its dimensions' coordinates, then theirs (none, in the stores seen).
 #[cfg(not(target_arch = "wasm32"))]
-fn store_at(url: &str) -> Result<zarr::Store, String> {
+const MEMBER_ROUNDS: usize = 3;
+
+/// A store's metadata from its web address. A root group that lists no arrays (no consolidated
+/// metadata, [`zarr::lists_no_arrays`]) has them found by name from `variable`
+/// ([`zarr::member_keys`]), in up to [`MEMBER_ROUNDS`] rounds; with no `variable`, that is refused.
+#[cfg(not(target_arch = "wasm32"))]
+fn store_at(url: &str, variable: &str) -> Result<zarr::Store, String> {
     let keys: Vec<String> = zarr::METADATA_KEYS.iter().map(|k| k.to_string()).collect();
     let (got, forbidden) = fetch(url, &keys)?;
     // Every metadata file refused: access is denied, not a store without metadata.
     if got.is_empty() && forbidden > 0 {
         return Err(crate::sources::message_with_address(url, "access denied (HTTP 403)"));
     }
-    let docs: Vec<(String, Vec<u8>)> = got.into_iter().collect();
+    let mut docs: Vec<(String, Vec<u8>)> = got.into_iter().collect();
+    if zarr::lists_no_arrays(&docs) {
+        if variable.trim().is_empty() {
+            return Err(crate::sources::message_with_address(
+                url,
+                "the store's root has no consolidated metadata, so its arrays aren't listed: give the variable's name (\"variable\"), or the address of one array",
+            ));
+        }
+        let mut tried = std::collections::HashSet::new();
+        for _ in 0..MEMBER_ROUNDS {
+            let next: Vec<String> = zarr::member_keys(&docs, variable).into_iter().filter(|k| tried.insert(k.clone())).collect();
+            if next.is_empty() {
+                break;
+            }
+            let (found, refused) = fetch(url, &next)?;
+            if refused > 0 && found.is_empty() {
+                return Err(crate::sources::message_with_address(url, "access denied (HTTP 403)"));
+            }
+            docs.extend(found);
+        }
+    }
     zarr::parse_store(&docs).map_err(|e| crate::sources::message_with_address(url, &e.to_string()))
 }
 
@@ -309,7 +336,7 @@ fn info_of(p: &Value) -> Result<(String, zarr::Store, Value), String> {
             Ok((d, store, v))
         }
         Source::Url(u) => {
-            let store = store_at(&u)?;
+            let store = store_at(&u, ps(p, "variable").unwrap_or(""))?;
             let (chunks, _) = fetch(&u, &zarr::info_keys(&store))?;
             let v = zarr::info(&store, &chunks);
             Ok((u, store, v))
@@ -480,7 +507,7 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             super::raster::add_raster(s, &name, layer)
         }
         Source::Url(u) => {
-            let store = store_at(&u)?;
+            let store = store_at(&u, &sel.variable)?;
             pick_variable(&store, &mut sel)?;
             let cut = place_window(&u, &store, &mut sel, asked)?;
             let plan = zarr::plan(&store, &sel).map_err(|e| crate::sources::message_with_address(&u, &e.to_string()))?;
@@ -536,14 +563,17 @@ fn is_web(store: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
-/// A web store's metadata, from the run's cache when it was read before.
+/// A web store's metadata, from the run's cache when it was read before and holds `variable`
+/// (a store whose root lists no arrays holds only those found from the variable it was read for).
 #[cfg(not(target_arch = "wasm32"))]
-fn cached_store(url: &str) -> Result<std::sync::Arc<zarr::Store>, String> {
-    if let Some((_, st)) = stores().lock().ok().and_then(|c| c.iter().find(|(u, _)| u == url).cloned()) {
+fn cached_store(url: &str, variable: &str) -> Result<std::sync::Arc<zarr::Store>, String> {
+    let holds = |st: &zarr::Store| variable.trim().is_empty() || st.array(variable.trim()).is_some();
+    if let Some((_, st)) = stores().lock().ok().and_then(|c| c.iter().find(|(u, st)| u == url && holds(st)).cloned()) {
         return Ok(st);
     }
-    let st = std::sync::Arc::new(store_at(url)?);
+    let st = std::sync::Arc::new(store_at(url, variable)?);
     if let Ok(mut c) = stores().lock() {
+        c.retain(|(u, _)| u != url);
         c.push((url.to_string(), st.clone()));
         let excess = c.len().saturating_sub(4);
         c.drain(..excess);
@@ -736,7 +766,7 @@ pub(crate) fn read_slice(zt: &ZarrTime, i: usize) -> Result<Option<raster::Raste
     let sel = zt.selection(i);
     let crs = zt.crs.as_deref().map(str::trim).filter(|c| !c.is_empty());
     let (read, st) = if is_web(&zt.store) {
-        let st = cached_store(&zt.store)?;
+        let st = cached_store(&zt.store, &zt.variable)?;
         let plan = zarr::plan(&st, &zarr::Selection::parse(&sel)).map_err(|e| e.to_string())?;
         let (chunks, forbidden) = fetch(&zt.store, &plan.keys)?;
         // A chunk refused (HTTP 403) isn't one never written: it's said, not read as fill.
@@ -1216,7 +1246,7 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
                 (full, std::sync::Arc::new(store), chunks)
             }
             Source::Url(u) => {
-                let store = cached_store(&u)?;
+                let store = cached_store(&u, &sel.variable)?;
                 (u, store, HashMap::new())
             }
         };
@@ -1224,7 +1254,7 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         let chunks =
             if chunks.is_empty() && is_web(&root) { fetch(&root, &zarr::coordinate_keys(&store, &sel.variable))?.0 } else { chunks };
         let (dim, dates) = zarr::time_axis(&store, &sel.variable, &chunks).ok_or_else(|| {
-            format!("{} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")", sel.variable)
+            format!("{} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\", or of whole years, such as 2017)", sel.variable)
         })?;
         // Each date is a step: an axis out of order or with a date twice (stores joined end to end)
         // can't be followed step by step.
@@ -1444,7 +1474,7 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
         }
         let mut src = series_source(s, p)?;
         let store = if is_web(&src.root) {
-            cached_store(&src.root)?
+            cached_store(&src.root, &src.sel.variable)?
         } else {
             std::sync::Arc::new(zarr::read_metadata(Path::new(&src.root)).map_err(|e| format!("{}: {e}", src.root))?)
         };
@@ -1454,7 +1484,7 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
         keys.extend(zarr::map_coordinate_keys(&store, &var));
         let coords = store_files(&src.root, &keys)?;
         let (dim, dates) = zarr::time_axis(&store, &var, &coords)
-            .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
+            .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\", or of whole years, such as 2017)"))?;
         // A period is found along the axis in order, as following the slider takes it.
         if !dates.iter().all(|d| d.is_finite()) || !dates.windows(2).all(|w| w[0] < w[1]) {
             return Err(format!("{var}'s time axis isn't in increasing order without repeats, so its series can't be read by date"));
@@ -1699,7 +1729,7 @@ pub fn zarr_cube(s: &Session, p: &Value) -> Result<ZarrCube, String> {
         ));
     }
     let store = if is_web(&src.root) {
-        cached_store(&src.root)?
+        cached_store(&src.root, &src.sel.variable)?
     } else {
         std::sync::Arc::new(zarr::read_metadata(Path::new(&src.root)).map_err(|e| format!("{}: {e}", src.root))?)
     };
@@ -1707,7 +1737,7 @@ pub fn zarr_cube(s: &Session, p: &Value) -> Result<ZarrCube, String> {
     let var = src.sel.variable.clone();
     let coords = store_files(&src.root, &zarr::coordinate_keys(&store, &var))?;
     let (dim, dates) = zarr::time_axis(&store, &var, &coords)
-        .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
+        .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\", or of whole years, such as 2017)"))?;
     // Every step a date, so a period and months pick the steps they say (a summary takes them
     // in any order; a trend asks for time order itself, in `cube_from`).
     if !dates.iter().all(|d| d.is_finite()) {

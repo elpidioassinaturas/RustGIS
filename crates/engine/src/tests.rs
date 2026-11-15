@@ -48999,6 +48999,51 @@ fn a_zarr_box_on_a_spatial_transform_reads_no_coordinates() {
     assert!(asked.iter().all(|p| !p.starts_with("/s.zarr/x") && !p.starts_with("/s.zarr/y")), "{asked:?}");
 }
 
+/// A web store whose root lists no arrays (no consolidated metadata), as the AlphaEarth mosaic
+/// (#1720): its variable is found by name, and its `time` of whole years is a time axis, so the
+/// series at a point is read by year.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_store_without_consolidated_metadata_is_read_by_its_variables_name() {
+    // `emb` (time 3, y 4, x 6; int8, `10·step + row`) in one chunk per step, placed by the root's
+    // transform: 0.5° cells from (-43°, -20°).
+    let bytes = json!([{"name": "bytes", "configuration": {"endian": "little"}}]);
+    let emb = json!({"zarr_format": 3, "node_type": "array", "shape": [3, 4, 6], "data_type": "int8",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 4, 6]}}, "codecs": bytes, "fill_value": -128,
+        "dimension_names": ["time", "y", "x"]});
+    let time = json!({"zarr_format": 3, "node_type": "array", "shape": [3], "data_type": "int32",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [3]}}, "codecs": bytes, "fill_value": 0,
+        "dimension_names": ["time"]});
+    let root = json!({"zarr_format": 3, "node_type": "group", "attributes": {"proj:code": "EPSG:4326",
+        "spatial:dimensions": ["y", "x"], "spatial:transform": [0.5, 0.0, -43.0, 0.0, -0.5, -20.0], "spatial:shape": [4, 6]}});
+    let mut files = vec![
+        ("/s.zarr/zarr.json".to_string(), root.to_string().into_bytes()),
+        ("/s.zarr/emb/zarr.json".to_string(), emb.to_string().into_bytes()),
+        ("/s.zarr/time/zarr.json".to_string(), time.to_string().into_bytes()),
+        ("/s.zarr/time/c/0".to_string(), [2017i32, 2018, 2025].iter().flat_map(|y| y.to_le_bytes()).collect()),
+    ];
+    for t in 0..3u8 {
+        files.push((format!("/s.zarr/emb/c/{t}/0/0"), (0..4u8).flat_map(|r| [10 * t + r; 6]).collect()));
+    }
+    let (base, log) = serve_ranged_files(files);
+    let url = format!("{base}/s.zarr");
+    let mut s = Session::new(Project::default());
+    // With no variable, the store's arrays can't be listed, and that is said.
+    let e = s.run("raster.zarrInfo", &json!({"url": url})).unwrap_err();
+    assert!(e.contains("no consolidated metadata") && e.contains("\"variable\""), "{e}");
+    let info = s.run("raster.zarrInfo", &json!({"url": url, "variable": "emb"})).unwrap();
+    assert_eq!(info["variables"][0]["name"], "emb", "{info}");
+    assert_eq!(info["variables"][0]["dims"][0]["labels"], json!(["2017", "2018", "2025"]), "{info}");
+    // At 42.2°W 20.8°S: row 1, so 10·step + 1 by year.
+    let r = s.run("zarr.series", &json!({"url": url, "variable": "emb", "lon": -42.2, "lat": -20.8})).unwrap();
+    assert_eq!(r["values"], json!([1.0, 11.0, 21.0]), "{r}");
+    assert_eq!(r["dates"].as_array().map(Vec::len), Some(3), "{r}");
+    assert!(r["labels"][0].as_str().is_some_and(|l| l.starts_with("2017-01-01")), "{r}");
+    // The missing coordinates are asked for once each.
+    let asked: Vec<String> = log.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+    assert_eq!(asked.iter().filter(|p| p.as_str() == "/s.zarr/y/zarr.json").count(), 2, "one store read per command: {asked:?}");
+}
+
 /// `layer.rename` refuses a name over 200 characters (once trimmed) rather than cutting it
 /// (#1817): the layer keeps its name and the error gives the length. Characters are counted, not
 /// bytes, so a name in a non-Latin script at 200 is taken; 200 and fewer are taken whole.
