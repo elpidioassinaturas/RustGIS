@@ -1577,7 +1577,16 @@ fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
             PROJ_KEYS.iter().filter_map(move |k| {
                 let v = m.get(*k)?;
                 let read = if *k == "proj:epsg" { epsg(v).is_some() } else { v.as_str().and_then(read).is_some() };
-                (!read).then(|| format!("{k} {v}"))
+                // A long value (a WKT) is said by its start and length, not whole.
+                (!read).then(|| {
+                    let text = v.to_string();
+                    let n = text.chars().count();
+                    if n > 80 {
+                        format!("{k} {}… ({n} characters)", text.chars().take(80).collect::<String>())
+                    } else {
+                        format!("{k} {text}")
+                    }
+                })
             })
         })
         .collect();
@@ -3415,6 +3424,11 @@ mod tests {
         let r = assemble(&read(&odd), &p, &read_plan(&files, &p), "v", None).unwrap();
         assert_eq!(r.crs, Crs::WebMercator);
         assert!(r.lost.iter().any(|l| l.contains("proj:code \"EPSG:nonsense\" isn't a coordinate system that is read")), "{:?}", r.lost);
+        let mut long = odd.clone();
+        long["consolidated_metadata"]["metadata"]["v"]["attributes"]["proj:code"] = format!("X{}", "y".repeat(10_000)).into();
+        let r = assemble(&read(&long), &p, &read_plan(&files, &p), "v", None).unwrap();
+        let note = r.lost.iter().find(|l| l.contains("proj:code")).unwrap();
+        assert!(note.len() < 300 && note.contains("(10003 characters)"), "{note}");
         // A proj: value that is read says nothing.
         let clean = read(&root);
         assert_eq!(crs_of(&clean, clean.array("v").unwrap()), Some((Crs::LonLat, None)));

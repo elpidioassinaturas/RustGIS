@@ -1460,7 +1460,9 @@ rotation, pixel- or node-registered) reads no coordinates, and the transform win
 the store also holds. It is the variable's own, or that of the nearest group above it (up to 64
 levels up) that gives one, taken with that group's `spatial:shape`, which must be the variable's map's. Its map
 dimensions are those `spatial:dimensions` names. `proj:code`, `proj:wkt2` or `proj:epsg` give
-the coordinate system, after the variable's own attributes and its grid mapping.
+the coordinate system, after the variable's own attributes and its grid mapping, and before a
+`spatial_ref` or `crs` array beside it. A variable opened by its own address doesn't see its
+groups' attributes: open the store's address with `"variable"` instead.
 Blosclz-compressed and transposed chunks and shards inside shards aren't read yet, and say so. A
 store by web address must allow the browser to fetch it (CORS) for the web app;
 Google Cloud's CMIP6 bucket does, ARCO-ERA5's doesn't (the desktop reads both).
