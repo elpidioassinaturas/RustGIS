@@ -109,8 +109,21 @@ impl Ground {
     /// there.
     pub fn of(map: &Map, camera: &Camera) -> Option<Ground> {
         let mut ground = Ground::heights_of(map, camera)?;
-        ground.water = water::of(map, &ground);
+        ground.attach_water(map);
         Some(ground)
+    }
+
+    /// Sets the water of `map`'s terrain over these heights. A water read while shore tiles were
+    /// on their way, taken again from its cache, leaves these heights pending too: inside its
+    /// lakes no tile is read, and a frame or an export waiting for tiles must still wait for the
+    /// levels to be read again.
+    fn attach_water(&mut self, map: &Map) {
+        self.water = water::of(map, self);
+        if self.water.as_ref().is_some_and(|w| w.waits_for_tiles())
+            && let Heights::Tiles { pending, .. } = &self.heights
+        {
+            *pending.borrow_mut() = true;
+        }
     }
 
     /// How many polygons of `map`'s water layer have their shore read at wider steps than half a

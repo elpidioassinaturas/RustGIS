@@ -126,6 +126,14 @@ impl Slabs {
 }
 
 impl Water {
+    /// Whether this water was read while tiles along its shores were still on their way, so is
+    /// read again soon ([`RETRY_MISSING`]).
+    pub(super) fn waits_for_tiles(&self) -> bool {
+        self.retry == Some(RETRY_MISSING)
+    }
+}
+
+impl Water {
     /// The level (metres, before exaggeration) of the water at a Web Mercator point, when one of
     /// the lakes holds it. Where water polygons overlap, the first in the layer's rows gives it.
     pub(super) fn level(&self, m: Coord) -> Option<f64> {
@@ -203,8 +211,9 @@ impl Water {
     }
 }
 
-/// The ground's cell in Web Mercator units: a DEM's at its middle (a cell's diagonal over √2),
-/// elevation tiles' pixel at the zoom read. `None` when the DEM's middle can't be placed.
+/// The ground's cell in Web Mercator units: a DEM's at its middle, its shorter side (a geographic
+/// DEM's cells are taller than wide in Web Mercator away from the equator); elevation tiles'
+/// pixel at the zoom read. `None` when the DEM's middle can't be placed.
 fn cell_size(ground: &Ground) -> Option<f64> {
     match &ground.heights {
         Heights::Raster { raster, .. } => {
@@ -214,7 +223,7 @@ fn cell_size(ground: &Ground) -> Option<f64> {
             };
             let (cx, cy) = (f64::from(raster.width) / 2.0, f64::from(raster.height) / 2.0);
             let (a, b) = (at(cx, cy)?, at(cx + 1.0, cy + 1.0)?);
-            let d = (b.x - a.x).hypot(b.y - a.y) / std::f64::consts::SQRT_2;
+            let d = (b.x - a.x).abs().min((b.y - a.y).abs());
             (d.is_finite() && d > 0.0).then_some(d)
         }
         Heights::Tiles { zoom, .. } => Some(2.0 * std::f64::consts::PI * MERCATOR_R / (256.0 * f64::from(1u32 << (*zoom).min(30)))),
@@ -362,10 +371,10 @@ pub(super) fn coarse_shores(map: &Map, ground: &Ground) -> usize {
     if wider { unread } else { 0 }
 }
 
-/// The length of the shores read for levels (those of polygons with no level given), and how
-/// many polygons they are.
+/// The length of the shores read for levels (those of polygons with no level given and some
+/// coordinate, as [`Water::build`] reads them), and how many polygons they are.
 fn shores(polygons: &[(Vec<Vec<Coord>>, Option<f64>)]) -> (f64, usize) {
-    let unread = polygons.iter().filter(|(_, given)| given.is_none());
+    let unread = polygons.iter().filter(|(rings, given)| given.is_none() && rings.iter().flatten().any(|c| c.is_finite()));
     (unread.clone().flat_map(|(rings, _)| rings).map(|r| ring_length(r)).sum(), unread.count())
 }
 
@@ -549,6 +558,66 @@ mod tests {
         *ground_pending(&ground).unwrap().borrow_mut() = true;
         let soon = Water::build(polygons(water_layer(&m).unwrap().0, None), &ground, MAX_SHORE_SAMPLES);
         assert_eq!(soon.retry, Some(RETRY_MISSING));
+        assert!(soon.waits_for_tiles() && !water.waits_for_tiles());
+    }
+
+    /// Elevation tiles at zoom 1 whose tiles, and the one above them, are all recorded as failed
+    /// (so none is asked for), with `pending` as given.
+    fn zoom_one(pending: bool) -> Ground {
+        let ids = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)];
+        let read = ids.map(|(z, x, y)| (rustgis_tiles::template::TileId { z, x, y }, None)).into_iter().collect();
+        Ground {
+            heights: Heights::Tiles {
+                url: "https://tiles.invalid/{z}/{x}/{y}.png".into(),
+                encoding: TerrainEncoding::Terrarium,
+                zoom: 1,
+                read: std::cell::RefCell::new(read),
+                pending: std::cell::RefCell::new(pending),
+                waiting: std::cell::RefCell::new(std::collections::HashSet::new()),
+            },
+            exaggeration: 1.0,
+            body: 1.0,
+            water: None,
+        }
+    }
+
+    #[test]
+    fn a_water_read_while_tiles_came_keeps_the_next_frame_waiting() {
+        let (m, _) = hill_with_water(None);
+        // Read while shore tiles were on their way: kept for a second.
+        let mut first = zoom_one(true);
+        first.attach_water(&m);
+        assert!(first.water.as_ref().unwrap().waits_for_tiles());
+        // The next frame takes it from the cache and reads no tile inside its lakes: its heights
+        // are still pending, so a frame or an export goes on waiting for the levels.
+        let mut next = zoom_one(false);
+        next.attach_water(&m);
+        assert!(next.pending(), "a cached water waiting for tiles leaves the frame pending");
+        // A read with nothing on its way leaves the frame as it is.
+        let (dem, camera) = hill_with_water(None);
+        assert!(!Ground::of(&dem, &camera).unwrap().pending());
+    }
+
+    #[test]
+    fn a_cell_taller_than_wide_is_stepped_by_its_width() {
+        // A Web Mercator DEM of 1 × 10 unit cells: half a cell is half its width.
+        let gt = rustgis_data::raster::GeoTransform { origin_x: 0.0, origin_y: 100.0, pixel_width: 1.0, pixel_height: -10.0 };
+        let raster = rustgis_data::raster::Raster::new(
+            "h",
+            10,
+            10,
+            vec![vec![0.0; 100]],
+            gt,
+            rustgis_data::raster::Crs::WebMercator,
+            None,
+            rustgis_data::raster::ColorHint::Gray,
+            "Float32",
+        )
+        .unwrap();
+        let g =
+            Ground { heights: Heights::Raster { raster: Arc::new(raster), wrap_width: None }, exaggeration: 1.0, body: 1.0, water: None };
+        let c = cell_size(&g).unwrap();
+        assert!((c - 1.0).abs() < 1e-6, "{c}");
     }
 
     fn ground_pending(g: &Ground) -> Option<&std::cell::RefCell<bool>> {
