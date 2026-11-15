@@ -576,7 +576,9 @@ in the shell's history).
 With `"remember": true`, the username and password are also kept on this computer, in the system's
 credential store (Windows Credential Manager, the macOS Keychain, the Secret Service on Linux; the
 command line's only when it opts in to saved secrets), never in the project or a setting. RustGIS
-then signs in by itself when it next reads a file from CDSE, and again whenever the sign-in ends.
+then signs in by itself (sending the remembered password to CDSE's sign-in server): the desktop app
+when it starts, the command line when a command names a file on CDSE, and either one again
+whenever the sign-in ends.
 Signing in without `remember` deletes the one remembered before, and so does `copernicus.logout`;
 if CDSE refuses it (after a password change), it is deleted and `copernicus.status` says the
 sign-in expired. An account with two-factor authentication isn't remembered, since each sign-in
