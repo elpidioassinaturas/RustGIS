@@ -1542,33 +1542,26 @@ fn geographic(c: &Array) -> bool {
         || matches!(c.name().to_ascii_lowercase().as_str(), "lat" | "lon" | "latitude" | "longitude")
 }
 
-/// The coordinate system a variable's attributes (or its grid mapping's, else its groups' `proj:`)
-/// say, and what reading its WKT said, as for a `.prj` ([`super::wkt::read_wkt`]).
-fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
-    let epsg = |v: &Value| {
-        let code = match v {
-            Value::Number(n) => n.as_u64(),
-            Value::String(s) => s.trim_start_matches("EPSG:").parse().ok(),
-            _ => None,
-        };
-        code.and_then(|c| u32::try_from(c).ok()).and_then(Crs::from_epsg)
+/// A coordinate system given as an EPSG code (a number, or `EPSG:n` text).
+fn crs_code(v: &Value) -> Option<Crs> {
+    let code = match v {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.trim_start_matches("EPSG:").parse().ok(),
+        _ => None,
     };
-    let read = |t: &str| {
-        let t = t.trim();
-        if t.contains('[') { super::wkt::read_wkt(t).ok() } else { Crs::parse(t).ok().map(|c| (c, None)) }
-    };
-    // `proj:wkt2`, `proj:code` (`EPSG:4326`) and `proj:epsg` are the zarr-conventions `proj:`
-    // ones, which a group may also set for its arrays (`inherit_georeferencing`).
-    let from = |x: &Map<String, Value>| {
-        for k in ["crs_wkt", "spatial_ref", "crs", "proj:wkt2", "proj:code", "proj4", "proj4text", "proj4_params"] {
-            if let Some(read) = x.get(k).and_then(Value::as_str).and_then(read) {
-                return Some(read);
-            }
-        }
-        ["epsg_code", "epsg", "proj:epsg"].iter().find_map(|k| x.get(*k).and_then(epsg)).map(|c| (c, None))
-    };
-    // A `proj:` value given (the variable's own, else its groups') that isn't read is said, with
-    // the system used instead.
+    code.and_then(|c| u32::try_from(c).ok()).and_then(Crs::from_epsg)
+}
+
+/// A coordinate system given as text (WKT, a code, PROJ), and what reading its WKT said.
+fn crs_text(t: &str) -> Option<(Crs, Option<String>)> {
+    let t = t.trim();
+    if t.contains('[') { super::wkt::read_wkt(t).ok() } else { Crs::parse(t).ok().map(|c| (c, None)) }
+}
+
+/// What `a`'s `proj:` keys (its own, else its groups') give that isn't a coordinate system that is
+/// read, said with each value (a long one, such as a WKT, by its start and length); `None` when
+/// all are read, or there are none.
+fn unread_proj(a: &Array) -> Option<String> {
     let has_proj = |m: &Map<String, Value>| PROJ_KEYS.iter().any(|k| m.contains_key(*k));
     let proj = if has_proj(&a.attrs) { Some(&a.attrs) } else { a.inherited.iter().map(|m| &**m).find(|m| has_proj(m)) };
     let unread: Vec<String> = proj
@@ -1576,8 +1569,7 @@ fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
         .flat_map(|m| {
             PROJ_KEYS.iter().filter_map(move |k| {
                 let v = m.get(*k)?;
-                let read = if *k == "proj:epsg" { epsg(v).is_some() } else { v.as_str().and_then(read).is_some() };
-                // A long value (a WKT) is said by its start and length, not whole.
+                let read = if *k == "proj:epsg" { crs_code(v).is_some() } else { v.as_str().and_then(crs_text).is_some() };
                 (!read).then(|| {
                     let text = v.to_string();
                     let n = text.chars().count();
@@ -1590,7 +1582,25 @@ fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
             })
         })
         .collect();
-    let said = (!unread.is_empty()).then(|| format!("{} isn't a coordinate system that is read, so it isn't used", unread.join(", ")));
+    (!unread.is_empty()).then(|| format!("{} isn't a coordinate system that is read, so it isn't used", unread.join(", ")))
+}
+
+/// The coordinate system a variable's attributes (or its grid mapping's, else its groups' `proj:`)
+/// say, and what reading its WKT said, as for a `.prj` ([`super::wkt::read_wkt`]).
+fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
+    let (epsg, read) = (crs_code, crs_text);
+    // `proj:wkt2`, `proj:code` (`EPSG:4326`) and `proj:epsg` are the zarr-conventions `proj:`
+    // ones, which a group may also set for its arrays (`inherit_georeferencing`).
+    let from = |x: &Map<String, Value>| {
+        for k in ["crs_wkt", "spatial_ref", "crs", "proj:wkt2", "proj:code", "proj4", "proj4text", "proj4_params"] {
+            if let Some(read) = x.get(k).and_then(Value::as_str).and_then(read) {
+                return Some(read);
+            }
+        }
+        ["epsg_code", "epsg", "proj:epsg"].iter().find_map(|k| x.get(*k).and_then(epsg)).map(|c| (c, None))
+    };
+    // A `proj:` value given that isn't read is said, with the system used instead.
+    let said = unread_proj(a);
     let crs = from(&a.attrs)
         .or_else(|| {
             attr_str(a, "grid_mapping").and_then(|g| store.coordinate(a, g).or_else(|| store.array(g))).and_then(|g| from(&g.attrs))
@@ -1817,15 +1827,20 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         x0 += dx * w as f64;
         dx = -dx;
     }
+    // A proj: value that isn't read is said whatever system is used: the store's ([`crs_of`]
+    // says it), the axes' longitude/latitude, or the one given.
+    let found = crs_of(store, a);
+    let unread = if found.is_none() { unread_proj(a) } else { None };
     let (crs, crs_note) = if lonlat {
         // The axes are read as longitude/latitude, whatever the WKT says; a shift it gives that
         // isn't applied is still said.
-        (Some(Crs::LonLat), crs_of(store, a).and_then(|(_, note)| note))
+        (Some(Crs::LonLat), found.and_then(|(_, note)| note).or(unread.clone()))
     } else {
-        crs_of(store, a).map_or((crs, None), |(crs, note)| (Some(crs), note))
+        found.map_or((crs, unread.clone()), |(crs, note)| (Some(crs), note))
     };
     let Some(crs) = crs else {
-        return Err(bad(format!("{}: the store doesn't say its coordinate system; give \"crs\" (such as EPSG:3035)", a.path)));
+        let said = unread.map(|u| format!(" that is read ({u})")).unwrap_or_default();
+        return Err(bad(format!("{}: the store doesn't say its coordinate system{said}; give \"crs\" (such as EPSG:3035)", a.path)));
     };
     // Longitudes of 0–360: a global grid is turned to start at -180; one wholly east of 180 is
     // moved by 360.
@@ -3424,6 +3439,15 @@ mod tests {
         let r = assemble(&read(&odd), &p, &read_plan(&files, &p), "v", None).unwrap();
         assert_eq!(r.crs, Crs::WebMercator);
         assert!(r.lost.iter().any(|l| l.contains("proj:code \"EPSG:nonsense\" isn't a coordinate system that is read")), "{:?}", r.lost);
+        // With no other system read, it is said too: in the error, or beside the system given.
+        let mut alone = odd.clone();
+        alone["consolidated_metadata"]["metadata"]["v"]["attributes"] = serde_json::json!({"proj:code": "EPSG:nonsense"});
+        alone["attributes"].as_object_mut().unwrap().remove("proj:code");
+        let store = read(&alone);
+        let e = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap_err().to_string();
+        assert!(e.contains("doesn't say its coordinate system that is read (proj:code \"EPSG:nonsense\""), "{e}");
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", Some(Crs::WebMercator)).unwrap();
+        assert!(r.crs == Crs::WebMercator && r.lost.iter().any(|l| l.contains("proj:code \"EPSG:nonsense\"")), "{:?}", r.lost);
         let mut long = odd.clone();
         long["consolidated_metadata"]["metadata"]["v"]["attributes"]["proj:code"] = format!("X{}", "y".repeat(10_000)).into();
         let r = assemble(&read(&long), &p, &read_plan(&files, &p), "v", None).unwrap();
