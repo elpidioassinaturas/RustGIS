@@ -226,6 +226,46 @@ pub struct TerrainBlock {
 /// ground when no depth is given.
 pub const BLOCK_MIN_DEPTH: f64 = 100.0;
 
+/// The shortest side of a block diagram's box (Web Mercator metres): shorter, it was most likely
+/// given in degrees.
+pub const BLOCK_MIN_SIDE: f64 = 10.0;
+
+/// The deepest a block diagram's base lies below its lowest ground (metres, before exaggeration).
+pub const BLOCK_MAX_DEPTH: f64 = 20_000.0;
+
+impl TerrainBlock {
+    /// Why this block can't be drawn, when it can't: its box (ordered, within the Web Mercator
+    /// world, at least [`BLOCK_MIN_SIDE`] a side and not in degrees), its depth (0 to
+    /// [`BLOCK_MAX_DEPTH`]) and opaque walls. Checked where a block is set and where a project is
+    /// read, so a saved block that fails it is never drawn.
+    pub fn check(&self) -> Result<(), String> {
+        if let Some([x0, y0, x1, y1]) = self.extent {
+            if !([x0, y0, x1, y1].iter().all(|v| v.is_finite()) && x0 < x1 && y0 < y1) {
+                return Err("block's extent is [xmin, ymin, xmax, ymax], numbers with xmin < xmax and ymin < ymax".into());
+            }
+            let world = rustgis_geom::MERCATOR_R * std::f64::consts::PI;
+            if [x0, y0, x1, y1].iter().any(|v| v.abs() > world) {
+                return Err(format!("block's extent is in Web Mercator metres, within ±{world:.0}"));
+            }
+            // Degrees given for metres make a box a fraction of a metre wide, or one within ±180 by
+            // ±90 of (0, 0): a block under 360 m by 180 m in the Gulf of Guinea, never the one meant.
+            let degrees = x0 >= -180.0 && x1 <= 180.0 && y0 >= -90.0 && y1 <= 90.0;
+            if degrees || x1 - x0 < BLOCK_MIN_SIDE || y1 - y0 < BLOCK_MIN_SIDE {
+                return Err(format!(
+                    "block's extent is in Web Mercator metres, at least {BLOCK_MIN_SIDE} a side (longitude and latitude in degrees need converting)"
+                ));
+            }
+        }
+        if let Some(d) = self.depth && !(d.is_finite() && (0.0..=BLOCK_MAX_DEPTH).contains(&d)) {
+            return Err(format!("block's depth is metres, 0 to {BLOCK_MAX_DEPTH:.0}"));
+        }
+        if self.walls.a() != 255 {
+            return Err("block's walls is an opaque colour, #RRGGBB".into());
+        }
+        Ok(())
+    }
+}
+
 /// A terrain's water (#1915): inside each polygon of a layer the ground is flat, at the lowest
 /// height along the polygon's shore or at the value of a field, instead of the DEM's heights
 /// (a surface model is often noisy or stepped over water).

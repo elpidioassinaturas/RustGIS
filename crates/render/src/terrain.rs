@@ -110,6 +110,15 @@ pub struct Block {
     pub walls: Rgba,
 }
 
+impl Block {
+    /// Whether the walls stand now: the base is settled and no elevation tile is still on its way.
+    /// A tile asked for after the block was read (the mesh's finer samples, say) can make the
+    /// base move, so `settled` alone is not enough once the ground has been sampled.
+    pub fn walls_stand(&self, ground: &Ground) -> bool {
+        self.settled && !ground.pending()
+    }
+}
+
 /// Points along each side of the grid of heights read for a block's lowest and highest ground.
 const BLOCK_SAMPLES: usize = 64;
 
@@ -372,6 +381,24 @@ impl Ground {
 /// geographic or Web Mercator coordinates, a little less for one turned a little by its
 /// projection (UTM). `None` when a corner can't be placed.
 pub fn raster_box(r: &Raster) -> Option<[f64; 4]> {
+    let (xs, ys) = raster_corners(r)?;
+    let b = [xs[1], ys[1], xs[2], ys[2]];
+    (b.iter().all(|v| v.is_finite()) && b[0] < b[2] && b[1] < b[3]).then_some(b)
+}
+
+/// The outer bounds of a DEM's footprint, its four corners' extremes (Web Mercator, `[xmin, ymin,
+/// xmax, ymax]`): every height the DEM gives lies inside them, so a box outside them misses it
+/// altogether, where a box can still reach its corners and miss [`raster_box`]. `None` when a
+/// corner can't be placed.
+pub fn raster_footprint(r: &Raster) -> Option<[f64; 4]> {
+    let (xs, ys) = raster_corners(r)?;
+    let b = [xs[0], ys[0], xs[3], ys[3]];
+    (b.iter().all(|v| v.is_finite()) && b[0] < b[2] && b[1] < b[3]).then_some(b)
+}
+
+/// The x and the y of a DEM's four corners in Web Mercator, each sorted; `None` when a corner
+/// can't be placed.
+fn raster_corners(r: &Raster) -> Option<([f64; 4], [f64; 4])> {
     let gt = &r.transform;
     let (w, h) = (gt.pixel_width * f64::from(r.width), gt.pixel_height * f64::from(r.height));
     let t = r.transformer();
@@ -383,8 +410,7 @@ pub fn raster_box(r: &Raster) -> Option<[f64; 4]> {
     }
     xs.sort_by(f64::total_cmp);
     ys.sort_by(f64::total_cmp);
-    let b = [xs[1], ys[1], xs[2], ys[2]];
-    (b.iter().all(|v| v.is_finite()) && b[0] < b[2] && b[1] < b[3]).then_some(b)
+    Some((xs, ys))
 }
 
 /// A DEM's height at a Web Mercator point, read bilinearly from its first band; nodata and
@@ -589,6 +615,28 @@ mod tests {
         assert!(!waiting.settled);
         let done = ground(false).block(&m).expect("a block");
         assert!(done.settled && (done.base + 300.0).abs() < 1e-6, "{done:?}");
+        // The block read from cached tiles, then finer mesh samples asking for tiles on their way:
+        // the walls wait again, though the base was settled when it was read.
+        let flat = ground(false);
+        let cached = flat.block(&m).expect("a block");
+        assert!(cached.walls_stand(&flat));
+        if let Heights::Tiles { pending, .. } = &flat.heights {
+            *pending.borrow_mut() = true;
+        }
+        assert!(cached.settled && !cached.walls_stand(&flat));
+    }
+
+    #[test]
+    fn a_turned_dems_footprint_reaches_past_its_box() {
+        // A UTM DEM 200 km west of its central meridian is turned by its projection in Web
+        // Mercator: its footprint (the outer bounds of its corners) reaches past the largest box
+        // inside them, where a box given by the user may still reach its corners.
+        let gt = GeoTransform { origin_x: 300_000.0, origin_y: 5_000_000.0, pixel_width: 1000.0, pixel_height: -1000.0 };
+        let utm = Crs::from_epsg(32633).unwrap();
+        let raster = Raster::new("dem", 100, 100, vec![vec![0.0; 10_000]], gt, utm, None, ColorHint::Gray, "Float32").unwrap();
+        let (b, f) = (raster_box(&raster).expect("a box"), raster_footprint(&raster).expect("a footprint"));
+        assert!(f[0] <= b[0] && f[1] <= b[1] && b[2] <= f[2] && b[3] <= f[3], "{f:?} {b:?}");
+        assert!(f != b, "{f:?}");
     }
 
     #[test]

@@ -72,6 +72,17 @@ pub(crate) fn clip(m: [Coord; 3], b: &Block) -> Vec<Clipped> {
     poly
 }
 
+/// How near a corner must lie to a side of the box to be on it (Web Mercator metres).
+const SIDE_TOL: f64 = 1e-6;
+
+/// Whether a corner of the triangle `m` (Web Mercator) lies on a side of the box of `b`. A triangle
+/// wholly inside the box can still have a stretch of its edge under it: the triangles across that
+/// edge are clipped to nothing, so this one has to give the wall its stretch ([`edges`]).
+pub(crate) fn on_side(m: [Coord; 3], b: &Block) -> bool {
+    let near = |d: f64| d.abs() <= SIDE_TOL;
+    m.iter().any(|c| near(c.x - b.x0) || near(c.x - b.x1) || near(c.y - b.y0) || near(c.y - b.y1))
+}
+
 /// A stretch of the box's edge under a clipped triangle of ground: its side, its ends (Web
 /// Mercator) and the ground's screen points over them (physical px), running round the box
 /// anticlockwise (east along the south side, north along the east…), and how far it lies.
@@ -249,6 +260,23 @@ mod tests {
         assert!((e.ends[0].x - 10.0).abs() < 1e-9 && (e.ends[0].y - 2.0).abs() < 1e-9);
         assert!((e.ends[1].x - 10.0).abs() < 1e-9 && (e.ends[1].y - 4.0).abs() < 1e-9);
         assert_eq!(e.top, [(e.ends[0].x, -e.ends[0].y), (e.ends[1].x, -e.ends[1].y)]);
+    }
+
+    #[test]
+    fn a_triangle_inside_with_an_edge_on_a_side_gives_the_wall_its_stretch() {
+        // A mesh column exactly on the east side: the triangle inside it is wholly within the box,
+        // and its edge on x = 10 is the wall's stretch (the outside triangles across it clip away).
+        let b = unit_block();
+        let m = [Coord::new(10.0, 2.0), Coord::new(10.0, 6.0), Coord::new(5.0, 4.0)];
+        assert!(on_side(m, &b));
+        assert!(!on_side([Coord::new(1.0, 1.0), Coord::new(5.0, 1.0), Coord::new(1.0, 5.0)], &b));
+        let poly = clip(m, &b);
+        let screen: Vec<(f64, f64)> = poly.iter().map(|c| (c.1.x, -c.1.y)).collect();
+        let mut out = Vec::new();
+        edges(&poly, &screen, 1.0, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].side, EAST);
+        assert!((out[0].ends[0].y - 2.0).abs() < 1e-9 && (out[0].ends[1].y - 6.0).abs() < 1e-9);
     }
 
     #[test]

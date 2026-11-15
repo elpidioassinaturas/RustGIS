@@ -7800,6 +7800,26 @@ fn terrain_is_set_from_a_dem_or_tiles() {
         crate::cmd::project::reset_to(&mut opened, saved);
         assert!(opened.notices.iter().any(|n| n.text.contains("is shared by two layers")), "{:?}", opened.notices);
     }
+    // A saved block the terrain command would refuse (a box turned inside out) is dropped as the
+    // project opens, and said: the terrain keeps its DEM and draws the whole map.
+    {
+        let mut saved = s.project.clone();
+        saved.maps[0].view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer(name.clone()),
+            exaggeration: 1.0,
+            block: Some(rustgis_map::view::TerrainBlock {
+                extent: Some([1116000.0, 5625000.0, 1114000.0, 5622000.0]),
+                depth: None,
+                walls: rustgis_map::view::BLOCK_WALLS,
+            }),
+            water: None,
+        });
+        let mut opened = Session::new(Project::default());
+        crate::cmd::project::reset_to(&mut opened, saved);
+        let t = opened.project.maps[0].view.terrain.clone();
+        assert!(t.as_ref().is_some_and(|t| t.block.is_none()), "{t:?}");
+        assert!(opened.notices.iter().any(|n| n.text.contains("block's extent is")), "{:?}", opened.notices);
+    }
     // Renaming another layer leaves the terrain as it is.
     s.run("layer.rename", &json!({"layer": "Countries", "name": "Paises"})).unwrap();
     assert!(s.map().view.terrain.is_some());

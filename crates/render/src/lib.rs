@@ -2704,18 +2704,24 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
         // Across the block's edge: the part inside the box, fanned into triangles from its first
         // corner, and the stretch of edge under it kept for the walls.
         let cut = match (&block, triangles(codes, nx, cell % nx, cell / nx).and_then(|c| c.get(half).copied())) {
-            (Some(b), Some(c)) if c != [0; 3] => {
+            (Some(b), Some(c)) => {
                 let kb = f64::from(pic.width()) / v.width.max(1e-9);
                 let m = src.map(|(x, y)| v.camera.to_map(x / kb, y / kb, v.width, v.height));
-                let poly = block::clip(m, b);
-                let screen: Vec<(f64, f64)> = poly
-                    .iter()
-                    .map(|(w, _, _)| {
-                        (w[0] * dst[0].0 + w[1] * dst[1].0 + w[2] * dst[2].0, w[0] * dst[0].1 + w[1] * dst[1].1 + w[2] * dst[2].1)
-                    })
-                    .collect();
-                block::edges(&poly, &screen, depth, &mut edges);
-                Some(screen)
+                // Wholly inside the box it is drawn whole; but a corner on the box's edge still
+                // gives its wall a stretch, as the triangles across that edge clip to nothing.
+                if c == [0; 3] && !block::on_side(m, b) {
+                    None
+                } else {
+                    let poly = block::clip(m, b);
+                    let screen: Vec<(f64, f64)> = poly
+                        .iter()
+                        .map(|(w, _, _)| {
+                            (w[0] * dst[0].0 + w[1] * dst[1].0 + w[2] * dst[2].0, w[0] * dst[0].1 + w[1] * dst[1].1 + w[2] * dst[2].1)
+                        })
+                        .collect();
+                    block::edges(&poly, &screen, depth, &mut edges);
+                    (c != [0; 3]).then_some(screen)
+                }
             }
             _ => None,
         };
@@ -2737,7 +2743,7 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
     }
     // Walls once the base is settled: over elevation tiles still on their way it would move with
     // each tile (the frame is drawn again when they arrive, `Ground::pending`).
-    if let Some(b) = block.as_ref().filter(|b| b.settled) {
+    if let Some(b) = block.as_ref().filter(|b| b.walls_stand(ground)) {
         block::draw_walls(pm, view, ground, b, &edges, fog, far);
     }
     true

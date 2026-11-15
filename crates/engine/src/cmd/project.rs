@@ -325,6 +325,30 @@ fn reset(s: &mut Session, p: Project) {
     }
     super::raster::say_losses(s, lost);
     say_conversion_fallbacks(s);
+    // A block diagram the terrain command would refuse (a box turned inside out, say) is dropped
+    // as the project opens, and said: the terrain then draws the whole map.
+    let mut dropped: Vec<(String, String)> = Vec::new();
+    for m in s.project.maps.iter_mut() {
+        let Some(t) = m.view.terrain.as_mut() else { continue };
+        let Some(e) = t.block.as_ref().and_then(|b| b.check().err()) else { continue };
+        t.block = None;
+        dropped.push((m.name.clone(), e));
+    }
+    match dropped.as_slice() {
+        [] => {}
+        [(map, e)] => s.notify(format!("{map}: a block diagram on its terrain was dropped ({e}); the terrain draws the whole map"), false),
+        _ => {
+            let maps: Vec<String> = dropped.iter().map(|(map, e)| format!("{map} ({e})")).collect();
+            s.notify(
+                format!(
+                    "{} maps have a block diagram on their terrain that was dropped: {}; their terrains draw the whole map",
+                    dropped.len(),
+                    maps.join(", ")
+                ),
+                false,
+            );
+        }
+    }
     // A terrain saved on a DEM name two layers share draws the first of them: said, as the
     // project opens (its layers keep their names).
     let shared: Vec<(String, String)> = s
