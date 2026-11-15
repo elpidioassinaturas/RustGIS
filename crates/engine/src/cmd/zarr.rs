@@ -285,7 +285,19 @@ fn read_store(url: &str, variable: &str) -> Result<(zarr::Store, bool), String> 
             docs.extend(found);
         }
     }
-    let store = zarr::parse_store(&docs).map_err(|e| crate::sources::message_with_address(url, &e.to_string()))?;
+    // Found by name from the variable: one that isn't there is said, not read as an empty store.
+    let name = variable.trim().trim_matches('/');
+    let store = zarr::parse_store(&docs).ok().filter(|st| !partial || st.array(name).is_some());
+    let store = match store {
+        Some(st) => st,
+        None if partial => {
+            return Err(crate::sources::message_with_address(
+                url,
+                &format!("no array named {name} in the store, whose root has no consolidated metadata: check the variable's path"),
+            ));
+        }
+        None => zarr::parse_store(&docs).map_err(|e| crate::sources::message_with_address(url, &e.to_string()))?,
+    };
     Ok((store, partial))
 }
 

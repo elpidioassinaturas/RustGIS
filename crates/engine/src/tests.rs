@@ -49280,14 +49280,18 @@ fn a_zarr_store_without_consolidated_metadata_is_read_by_its_variables_name() {
     let info = s.run("raster.zarrInfo", &json!({"url": url, "variable": "emb"})).unwrap();
     assert_eq!(info["variables"][0]["name"], "emb", "{info}");
     assert_eq!(info["variables"][0]["dims"][0]["labels"], json!(["2017", "2018", "2025"]), "{info}");
+    // A variable that isn't there is said, not answered with an empty list.
+    let e = s.run("raster.zarrInfo", &json!({"url": url, "variable": "emv"})).unwrap_err();
+    assert!(e.contains("no array named emv"), "{e}");
     // At 42.2°W 20.8°S: row 1, so 10·step + 1 by year.
     let r = s.run("zarr.series", &json!({"url": url, "variable": "emb", "lon": -42.2, "lat": -20.8})).unwrap();
     assert_eq!(r["values"], json!([1.0, 11.0, 21.0]), "{r}");
     assert_eq!(r["dates"].as_array().map(Vec::len), Some(3), "{r}");
     assert!(r["labels"][0].as_str().is_some_and(|l| l.starts_with("2017-01-01")), "{r}");
-    // The missing coordinates are asked for once each.
+    // The missing coordinates are asked for once in each of the three store reads (zarrInfo with
+    // emb, with emv, then zarr.series).
     let asked: Vec<String> = log.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
-    assert_eq!(asked.iter().filter(|p| p.as_str() == "/s.zarr/y/zarr.json").count(), 2, "one store read per command: {asked:?}");
+    assert_eq!(asked.iter().filter(|p| p.as_str() == "/s.zarr/y/zarr.json").count(), 3, "one store read per command: {asked:?}");
 
     // A nested g/emb (50 + 10·step + row) read first doesn't stand in for the root's emb in the
     // run's store cache.
