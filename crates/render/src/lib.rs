@@ -3880,7 +3880,8 @@ impl Drop for BandWater {
 thread_local! {
     /// The sun glint on the terrain's water (#1915) the bands of the tilted view being drawn add to
     /// their frames ([`render_tilted`], [`render_tilt_drape`]): worked out once for the view, whose
-    /// eye it shines toward, not for each band's own camera.
+    /// eye it shines toward, not for each band's own camera. Both draw their bands one after
+    /// another on the thread that sets it: a band drawn on another thread would get no glint.
     static TILT_GLINT: std::cell::RefCell<Option<std::rc::Rc<terrain::Glint>>> = const { std::cell::RefCell::new(None) };
 }
 

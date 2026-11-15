@@ -11908,6 +11908,9 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
         water,
         Some(rustgis_map::view::TerrainWater { layer: "lagos".into(), level: Some("nivel".into()), glint: rustgis_map::view::WATER_GLINT })
     );
+    // One saved with its glint off keeps it off (`terrain_water_glint.rgis`).
+    let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_water_glint.rgis")).unwrap();
+    assert_eq!(saved.maps[0].view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.glint), Some(0.0));
 }
 
 /// A saved project's block is read back (the schema fixture `terrain_block.rgis`), its walls left

@@ -413,7 +413,7 @@ pub(super) fn of(map: &Map, ground: &Ground) -> Option<Arc<Water>> {
 /// 14° off the normal.
 const GLINT_SHININESS: i32 = 24;
 
-/// The sun the water glints in when no Shaded Relief layer is shown: the hillshade's usual one,
+/// The sun the water glints in when no Shaded Relief layer is drawn: the hillshade's usual one,
 /// azimuth 315° (north-west) and altitude 45°.
 const GLINT_SUN: (f64, f64) = (315.0, 45.0);
 
@@ -422,7 +422,8 @@ const GLINT_LEAST: f64 = 0.5 / 255.0;
 
 /// A tilted view's sun glint on the terrain's water (#1915): where the flat water would reflect
 /// the sun toward the eye, its colour goes toward white, broad and faint, so the water shines a
-/// little on the sun's side. The sun is the first Shaded Relief layer shown's, or [`GLINT_SUN`].
+/// little on the sun's side. The sun is the first Shaded Relief layer drawn at the view's centre's,
+/// or [`GLINT_SUN`].
 pub(crate) struct Glint {
     water: Arc<Water>,
     /// The tilted view's camera, and its eye in the frame of [`Camera::ground_px`] (logical px).
@@ -446,10 +447,13 @@ impl Glint {
             return None;
         }
         let water = ground.water.clone()?;
+        // A Shaded Relief layer drawn at the view's centre (shown, its groups too, within their
+        // scale ranges), as `relief_water` takes it.
+        let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
         let (azimuth, altitude) = map
             .layers
             .iter()
-            .filter(|l| l.visible)
+            .filter(|l| map.draws_at(l, scale))
             .find_map(|l| match l.raster.as_ref()?.style.renderer {
                 rustgis_map::RasterRenderer::ShadedRelief { azimuth, altitude, .. } => Some((azimuth, altitude)),
                 _ => None,
@@ -1090,5 +1094,24 @@ mod tests {
         }
         assert!(brighter > 100, "{brighter} pixels glint");
         assert_eq!(drawn(1.0, 0.0).data(), drawn(0.0, 0.0).data(), "a flat view has no glint");
+    }
+
+    /// The glint's sun is a Shaded Relief layer's only when that layer is drawn at the view's
+    /// scale: out of its scale range, or in a hidden group, the north-west sun stands in.
+    #[test]
+    fn the_glints_sun_is_a_drawn_relief_layers() {
+        let (mut m, view) = glinting(90.0, 0.5);
+        let sun = |m: &Map| {
+            let ground = Ground::of(m, &view.camera).unwrap();
+            Glint::of(m, &view, &ground).unwrap().sun
+        };
+        let east = sun(&m);
+        assert!(east[0] > 0.9, "the relief's sun in the east: {east:?}");
+        let dem = m.layers.iter().find(|l| l.raster.is_some()).map(|l| l.id).unwrap();
+        m.layer_mut(dem).unwrap().max_scale = Some(1e12);
+        let north_west = sun(&m);
+        let (a, e) = (GLINT_SUN.0.to_radians(), GLINT_SUN.1.to_radians());
+        let want = [a.sin() * e.cos(), -a.cos() * e.cos(), e.sin()];
+        assert!(north_west.iter().zip(want).all(|(s, w)| (s - w).abs() < 1e-9), "{north_west:?} against {want:?}");
     }
 }
