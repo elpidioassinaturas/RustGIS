@@ -47328,7 +47328,9 @@ fn the_footer_lines_up_with_a_legend_at_the_right() {
 
 /// `layout.publication` itself lines the footer's right column up with a legend placed at the
 /// right (#1379): with `"arrangement": "legendRight"` and a legend wide enough to start between
-/// 45 % and 70 % of the frame's width, the Reference Box starts where the Legend Box does.
+/// 45 % and 70 % of the frame's width, the Reference Box starts where the Legend Box does. The
+/// sample's lakes stay listed (`"contextInLegend": true`): the legend's widths these names give
+/// are measured with them.
 #[test]
 fn a_publication_footer_lines_up_with_its_legend() {
     let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
@@ -47344,7 +47346,7 @@ fn a_publication_footer_lines_up_with_its_legend() {
         s.run("layer.rename", &json!({"layer": "Countries", "name": name})).unwrap();
         s.run(
             "layout.publication",
-            &json!({"profile": "a4-portrait", "extent": piaui, "arrangement": "legendRight", "author": "", "sources": "Natural Earth"}),
+            &json!({"profile": "a4-portrait", "extent": piaui, "arrangement": "legendRight", "author": "", "sources": "Natural Earth", "contextInLegend": true}),
         )
         .unwrap();
         let l = s.project.layouts.last().unwrap();

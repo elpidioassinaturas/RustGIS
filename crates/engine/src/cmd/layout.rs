@@ -1991,10 +1991,6 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let reading = s.map_mut().sync_sources(&lonlat, render_scale, true);
     // Context around the data (neighbouring borders, the states around in one colour), which the
     // placement already sets aside, is left out of the legend too, unless "contextInLegend" (#1379).
-    // A name is left out only when every shown layer under it is context: the legend leaves layers
-    // out by name.
-    // Context around the data (neighbouring borders, the states around in one colour), which the
-    // placement already sets aside, is left out of the legend too, unless "contextInLegend" (#1379).
     // It is judged again at each other scale the search below draws the map at, as the placement
     // judges it there, and the legend takes the one at the scale settled on.
     let context_at = |s: &Session, center: Coord, scale: f64| {
