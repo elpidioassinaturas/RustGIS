@@ -5837,9 +5837,11 @@ fn terrain_follows_removal(s: &mut Session, names: &[String]) {
             false,
         );
     }
-    // So does the block's walls layer (#1914): its walls are their own colour meanwhile.
+    let dem = terrain_dem(s).filter(|d| names.iter().any(|n| n.eq_ignore_ascii_case(d)));
+    // So does the block's walls layer (#1914): its walls are their own colour meanwhile. Not when
+    // the DEM goes too: the terrain, its block with it, is turned off below.
     let walls = s.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).and_then(|b| b.walls_layer.clone());
-    if let Some(w) = walls.filter(|w| names.iter().any(|n| n.eq_ignore_ascii_case(w)) && named_layers(s, w) == 0) {
+    if let Some(w) = walls.filter(|w| dem.is_none() && names.iter().any(|n| n.eq_ignore_ascii_case(w)) && named_layers(s, w) == 0) {
         s.notify(
             format!(
                 "Terrain: the block's walls layer '{w}' was removed, so the walls are one colour until a layer of that name comes back"
@@ -5847,7 +5849,7 @@ fn terrain_follows_removal(s: &mut Session, names: &[String]) {
             false,
         );
     }
-    let Some(dem) = terrain_dem(s).filter(|d| names.iter().any(|n| n.eq_ignore_ascii_case(d))) else { return };
+    let Some(dem) = dem else { return };
     s.map_mut().view.terrain = None;
     let said = if named_layers(s, &dem) > 0 {
         format!(

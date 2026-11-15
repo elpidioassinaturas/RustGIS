@@ -11895,7 +11895,7 @@ fn terrain_block_walls_follow_a_polygon_layer() {
         {"type": "Feature", "properties": {"unidade": "granito"}, "geometry": {"type": "Polygon", "coordinates": [[[10.0, 45.0], [10.02, 45.0], [10.02, 45.04], [10.0, 45.04], [10.0, 45.0]]]}},
     ]});
     let data = base64::engine::general_purpose::STANDARD.encode(units.to_string().as_bytes());
-    s.run("layer.addDataBytes", &json!({"fileName": "geologia.geojson", "data": data})).unwrap();
+    s.run("layer.addDataBytes", &json!({"fileName": "geologia.geojson", "data": data.clone()})).unwrap();
     let geo = s.map().layers.iter().find(|l| !l.is_raster()).map(|l| l.name.clone()).unwrap();
     for (walls, said) in [
         (json!({"layer": "Nowhere"}), "no layer"),
@@ -11929,6 +11929,14 @@ fn terrain_block_walls_follow_a_polygon_layer() {
     crate::cmd::project::reset_to(&mut opened, saved);
     assert!(opened.notices.iter().any(|n| n.text.contains("walls layer is missing")), "{:?}", opened.notices);
     assert_eq!(walls_layer(&opened).as_deref(), Some("litologia"));
+    // So does one whose walls layer's name two layers share: which one colours them can't be told.
+    let mut twice = s.project.clone();
+    let mut copy = twice.maps[0].layers.iter().find(|l| l.name == "litologia").cloned().unwrap();
+    copy.id = 9999;
+    twice.maps[0].layers.push(copy);
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, twice);
+    assert!(opened.notices.iter().any(|n| n.text.contains("of a name another layer shares")), "{:?}", opened.notices);
     let mut clean = Session::new(Project::default());
     crate::cmd::project::reset_to(&mut clean, s.project.clone());
     assert!(!clean.notices.iter().any(|n| n.text.contains("walls layer")), "{:?}", clean.notices);
@@ -11942,6 +11950,18 @@ fn terrain_block_walls_follow_a_polygon_layer() {
     let v = s.run("map.terrain", &json!({"block": {"walls": "#806040"}})).unwrap();
     assert_eq!(v["block"]["walls"], json!("#806040"));
     assert_eq!(walls_layer(&s), None);
+    // The DEM and the walls layer removed together: the terrain goes, said once; nothing is said
+    // of walls it no longer has.
+    s.run("layer.addDataBytes", &json!({"fileName": "geologia.geojson", "data": data})).unwrap();
+    let geo = s.map().layers.iter().find(|l| !l.is_raster()).map(|l| (l.id, l.name.clone())).unwrap();
+    s.run("map.terrain", &json!({"block": {"walls": {"layer": geo.1}}})).unwrap();
+    let dem_id = s.map().layer_by_name(&dem).map(|l| l.id).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.remove", &json!({"layer": [dem_id, geo.0]})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.starts_with("Terrain turned off")), "{said:?}");
+    assert!(!said.iter().any(|t| t.contains("walls layer")), "{said:?}");
+    assert!(s.map().view.terrain.is_none());
 }
 
 /// A 40×40 lon/lat DEM near (10°E, 45°N): a hill in the middle, with a wall to its east.

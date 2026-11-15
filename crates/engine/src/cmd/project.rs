@@ -390,27 +390,28 @@ fn reset(s: &mut Session, p: Project) {
             );
         }
     }
-    // A block whose walls layer (#1914) is missing or holds no polygons draws its walls in their
-    // own colour: said, and kept, so a polygon layer of that name colours them again.
+    // A block whose walls layer (#1914) is missing, holds no polygons, is read a view at a time or
+    // shares its name with another layer draws its walls in their own colour (`block::runs`, as
+    // the terrain command refuses such a layer): said, and kept, so a polygon layer of that name
+    // colours them again.
     let plain: Vec<String> = s
         .project
         .maps
         .iter()
         .filter_map(|m| {
             let l = m.view.terrain.as_ref()?.block.as_ref()?.walls_layer.as_ref()?;
-            let polygons = m.layer_by_name(l).is_some_and(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon);
-            (!polygons).then(|| format!("{} ('{l}')", m.name))
+            rustgis_render::terrain::walls_layer(m, l).is_none().then(|| format!("{} ('{l}')", m.name))
         })
         .collect();
     match plain.as_slice() {
         [] => {}
         [one] => s.notify(
-            format!("{one}: the block diagram's walls layer is missing or not a polygon layer, so its walls are one colour"),
+            format!("{one}: the block diagram's walls layer is missing, not a polygon layer, read a view at a time or of a name another layer shares, so its walls are one colour"),
             false,
         ),
         _ => s.notify(
             format!(
-                "{} block diagrams have a walls layer missing or not a polygon layer, so their walls are one colour: {}",
+                "{} block diagrams have a walls layer missing, not a polygon layer, read a view at a time or of a name another layer shares, so their walls are one colour: {}",
                 plain.len(),
                 plain.join(", ")
             ),

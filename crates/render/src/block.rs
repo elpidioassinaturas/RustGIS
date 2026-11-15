@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex, Weak};
 
 use rustgis_data::{Feature, Geometry};
-use rustgis_geom::{Coord, lonlat_to_merc};
+use rustgis_geom::{Coord, Extent, lonlat_to_merc, merc_to_lonlat};
 use rustgis_map::fills::{FillLayer, FillPattern};
 use rustgis_map::{Map, Rgba};
 use tiny_skia::{FillRule, GradientStop, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Point, SpreadMode, Stroke, Transform};
@@ -164,10 +164,17 @@ static LAST: Mutex<Vec<(Key, Arc<Units>)>> = Mutex::new(Vec::new());
 const KEPT: usize = 4;
 
 /// The colours along the walls of block `b` on `map`. With a walls layer
-/// (`TerrainBlock::walls_layer`, a polygon layer there): the colour its symbology gives the
-/// polygon under each stretch of the box's edge (the topmost where polygons overlap, among the
-/// rows its definition query keeps), and the walls' own colour off every polygon. Else the walls'
-/// colour all along.
+/// (`TerrainBlock::walls_layer`, as [`crate::terrain::walls_layer`] takes it): the colour its
+/// symbology gives the polygon under each stretch of the box's edge (the topmost where polygons
+/// overlap, among the rows its definition query keeps), and the walls' own colour off every
+/// polygon. Else the walls' colour all along.
+///
+/// Runs on the thread drawing the frame. The pieces the polygons cut the sides into
+/// ([`units`]) are kept in [`LAST`], so they are read again only after an edit of the layer, a
+/// new definition query or a new box: that read looks at each vertex once (a box test in
+/// longitude and latitude, then the rings reaching the box only, put in Web Mercator) and
+/// tests each piece's middle against the parts whose box holds it. The colours are read each
+/// frame, a few pieces a side.
 pub(crate) fn runs(map: &Map, b: &Block) -> Runs {
     let whole = |i: usize| {
         let (lo, hi) = if SIDES[i] & (SOUTH | NORTH) != 0 { (b.x0, b.x1) } else { (b.y0, b.y1) };
@@ -179,8 +186,7 @@ pub(crate) fn runs(map: &Map, b: &Block) -> Runs {
         .as_ref()
         .and_then(|t| t.block.as_ref())
         .and_then(|t| t.walls_layer.as_deref())
-        .and_then(|n| map.layer_by_name(n))
-        .filter(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon);
+        .and_then(|n| crate::terrain::walls_layer(map, n));
     let Some(layer) = layer else { return [0, 1, 2, 3].map(whole) };
     let key = Key {
         rows: layer.dataset.features.allocation_key(),
@@ -237,19 +243,27 @@ fn unit_color(fill: Rgba, fills: &[FillLayer], walls: Rgba) -> Rgba {
 /// topmost polygon over each piece, found at its middle: the contacts go straight down.
 fn units(layer: &rustgis_map::Layer, b: &Block) -> Units {
     let keep = layer.query_rows(&layer.dataset);
-    // The polygons reaching the box (Web Mercator rings), each part on its own, in row order.
-    let mut parts: Vec<(usize, Vec<Vec<Coord>>)> = Vec::new();
+    // The box in longitude and latitude (Web Mercator keeps north-up boxes north-up), so a part
+    // off it is left before its rings are put in Web Mercator.
+    let (lo, hi) = (merc_to_lonlat(Coord::new(b.x0, b.y0)), merc_to_lonlat(Coord::new(b.x1, b.y1)));
+    // The polygons reaching the box (Web Mercator rings, and their box), each part on its own, in
+    // row order.
+    let mut parts: Vec<(usize, Vec<Vec<Coord>>, Extent)> = Vec::new();
     for (row, ft) in layer.dataset.features.iter().enumerate() {
         if keep.as_ref().is_some_and(|k| !k.get(row).copied().unwrap_or(false)) {
             continue;
         }
         let Some(Geometry::Polygon(polys)) = &ft.geometry else { continue };
         for rings in polys {
-            let rings: Vec<Vec<Coord>> = rings.iter().map(|r| r.iter().map(|c| lonlat_to_merc(*c)).collect()).collect();
-            let pts = || rings.iter().flatten();
-            if pts().any(|c| c.x >= b.x0) && pts().any(|c| c.x <= b.x1) && pts().any(|c| c.y >= b.y0) && pts().any(|c| c.y <= b.y1) {
-                parts.push((row, rings));
+            let mut e = Extent::EMPTY;
+            rings.iter().flatten().for_each(|c| e.expand(*c));
+            if e.is_empty() || e.max_x < lo.x || e.min_x > hi.x || e.max_y < lo.y || e.min_y > hi.y {
+                continue;
             }
+            let rings: Vec<Vec<Coord>> = rings.iter().map(|r| r.iter().map(|c| lonlat_to_merc(*c)).collect()).collect();
+            let mut e = Extent::EMPTY;
+            rings.iter().flatten().for_each(|c| e.expand(*c));
+            parts.push((row, rings, e));
         }
     }
     [0, 1, 2, 3].map(|i| {
@@ -264,7 +278,7 @@ fn units(layer: &rustgis_map::Layer, b: &Block) -> Units {
         let across = |c: Coord| if side & (SOUTH | NORTH) != 0 { c.y } else { c.x };
         let point = |t: f64| if side & (SOUTH | NORTH) != 0 { Coord::new(t, at) } else { Coord::new(at, t) };
         let mut cuts = vec![lo, hi];
-        for r in parts.iter().flat_map(|(_, rings)| rings) {
+        for r in parts.iter().flat_map(|(_, rings, _)| rings) {
             for (j, a) in r.iter().enumerate() {
                 let Some(&q) = r.get((j + 1) % r.len()) else { continue };
                 let (da, dq) = (across(*a) - at, across(q) - at);
@@ -281,7 +295,7 @@ fn units(layer: &rustgis_map::Layer, b: &Block) -> Units {
         let mut out: Vec<(f64, f64, Option<usize>)> = Vec::new();
         for w in cuts.windows(2) {
             let mid = point((w[0] + w[1]) / 2.0);
-            let row = parts.iter().rev().find(|(_, rings)| inside(rings, mid)).map(|(row, _)| *row);
+            let row = parts.iter().rev().find(|(_, rings, e)| e.contains(mid) && inside(rings, mid)).map(|(row, _, _)| *row);
             match out.last_mut() {
                 Some(last) if last.2 == row => last.1 = w[1],
                 _ => out.push((w[0], w[1], row)),
@@ -588,6 +602,14 @@ mod tests {
         // A definition query leaves its rows out: without A, the west wall is the walls' colour.
         m.layers[0].definition_query = Some("unit <> 'A'".into());
         assert_eq!(cuts(&m)[3], vec![(-1000.0, 1000.0, None)]);
+        // Two layers of its name: which one colours the walls can't be told, so neither does.
+        m.layers[0].definition_query = None;
+        let mut copy = m.layers[0].clone();
+        copy.id = 99;
+        m.layers.push(copy);
+        assert!(runs(&m, &b).iter().all(|side| side.len() == 1 && side[0].color == b.walls));
+        m.layers.pop();
+        assert_eq!(runs(&m, &b)[0].len(), 2);
         // No such layer: the walls' colour all along.
         m.view.terrain.as_mut().unwrap().block.as_mut().unwrap().walls_layer = Some("none".into());
         assert!(runs(&m, &b).iter().all(|side| side.len() == 1 && side[0].color == b.walls));
