@@ -326,10 +326,12 @@ pub fn renewal_done(r: &Renewal, answer: Result<(u16, &[u8]), String>) {
     let mut st = state();
     let Some(s) = st.session.as_mut().filter(|s| s.refresh.as_deref() == Some(r.refresh.as_str())) else { return };
     let now = now_secs();
-    // Keycloak refuses an expired or revoked refresh token with 400 `invalid_grant` (401 for a
-    // refused client). Any other answer (a rate limit, a malformed-request 400, a proxy's page)
-    // says nothing of the refresh token: the sign-in is kept and renewed again later.
-    let refused = |status: u16, body: &[u8]| status == 401 || (status == 400 && grant_error(body).as_deref() == Some("invalid_grant"));
+    // Keycloak refuses an expired or revoked refresh token with 400 `invalid_grant`, and a refused
+    // client with 401 and its own `error` (`invalid_client`…). Any other answer (a rate limit, a
+    // malformed-request 400, a proxy's page, even a 401 one) says nothing of the refresh token: the
+    // sign-in is kept and renewed again later.
+    let refused =
+        |status: u16, body: &[u8]| matches!((status, grant_error(body).as_deref()), (400, Some("invalid_grant")) | (401, Some(_)));
     match answer.map(|(status, body)| (status, refused(status, body), parse_grant(status, body, now))) {
         Ok((_, _, Ok(g))) => {
             s.access = g.access;

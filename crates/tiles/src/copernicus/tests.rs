@@ -214,6 +214,7 @@ fn a_refused_renewal_ends_the_sign_in_and_an_unreachable_host_keeps_it() {
         (403, b"<html>busy</html>"),
         (400, b"<html>bad</html>"),
         (400, malformed),
+        (401, b"<html>sign in</html>"),
     ] {
         state().session.as_mut().unwrap().retry_at = 0;
         let answer = authorization_fresh_using(DATA, None, move |_, _, _| Ok((status, body.to_vec())));
