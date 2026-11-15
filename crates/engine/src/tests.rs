@@ -10449,6 +10449,11 @@ fn a_veil_panel_groups_the_surrounds_by_the_bands_shape() {
     let (_, locator, a, b) = veil_panel((0.0, 0.0, 160.0, 70.0), legend, Some(40.0), None, scale, 3.0).unwrap();
     assert!(a.is_none(), "no place for an arrow there isn't: {a:?}");
     assert_eq!(locator.unwrap().0, b.0, "the locator over the scale bar: {locator:?} {b:?}");
+    // With neither, the scale bar heads its group, with no gap over it: a band just as tall as the
+    // legend and the bar one over the other takes them.
+    let (l, locator, a, b) = veil_panel((0.0, 0.0, 80.0, 63.0), legend, None, None, scale, 3.0).unwrap();
+    assert!(locator.is_none() && a.is_none(), "{locator:?} {a:?}");
+    assert_eq!((b.1, l.1), (0.0, 13.0), "the bar at the band's top, the legend under it: {b:?} {l:?}");
 }
 
 /// With no room for any shape of the legend on either side of a centred map, the map moves towards

@@ -712,7 +712,9 @@ pub(crate) fn veil_panel(
     // The locator and the arrow side by side, with a gap between them only when both are there.
     let between = if locator.is_some() && arrow.is_some() { gap } else { 0.0 };
     let top = (locator.map_or(0.0, |side| side + between) + aw, locator.unwrap_or(0.0).max(ah));
-    let group = (top.0.max(scale.0), top.1 + gap + scale.1);
+    // The gap over the scale bar only when something sits above it.
+    let lead = if top.1 > 0.0 { gap } else { 0.0 };
+    let group = (top.0.max(scale.0), top.1 + lead + scale.1);
     let beside = legend.0 + gap + group.0 <= bw && legend.1.max(group.1) <= bh;
     let over = legend.0.max(group.0) <= bw && legend.1 + gap + group.1 <= bh;
     if !beside && !over {
@@ -729,7 +731,7 @@ pub(crate) fn veil_panel(
         (legend_at.0, legend_at.1, legend.0, legend.1),
         locator.map(|side| (group_at.0, group_at.1, side, side)),
         arrow.map(|(aw, ah)| (group_at.0 + group.0 - aw, group_at.1, aw, ah)),
-        (group_at.0, group_at.1 + top.1 + gap, scale.0, scale.1),
+        (group_at.0, group_at.1 + top.1 + lead, scale.0, scale.1),
     ))
 }
 
@@ -2042,8 +2044,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         surrounds.push((Surround::Locator, side, side));
     }
     // At a continental span the graticule's lines give north, and one arrow can't point north
-    // across the whole frame: none, unless "northArrow": "always" (#1379). Said, as any surround
-    // left out is.
+    // across the whole frame: none, unless "northArrow": "always" (#1379). Left out so, it is said;
+    // "northArrow": "none" asks for it, so isn't.
     let arrow = north_arrow.unwrap_or(extent_span_deg(&extent) < CONTINENTAL_DEG);
     if arrow {
         surrounds.push((Surround::Arrow, aw, ah));
