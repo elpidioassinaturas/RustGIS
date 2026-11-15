@@ -480,9 +480,10 @@ pub fn parse_store(docs: &[(String, Vec<u8>)]) -> Result<Store> {
         ));
     }
     // Each group's part made once, so a large group attribute isn't copied for every array.
+    let groups = georeferencing_groups(&json);
     let mut parts = HashMap::new();
-    for a in &mut arrays {
-        inherit_georeferencing(a, &json, &mut parts);
+    for a in arrays.iter_mut().filter(|_| !groups.is_empty()) {
+        inherit_georeferencing(a, &groups, &mut parts);
     }
     Ok(Store { arrays })
 }
@@ -493,9 +494,14 @@ const TRANSFORM_KEYS: [&str; 4] = ["spatial:transform", "spatial:transform_type"
 /// The `proj:` keys that give a coordinate system, which come together from one place too.
 const PROJ_KEYS: [&str; 3] = ["proj:wkt2", "proj:code", "proj:epsg"];
 
-/// Gives `a` (in [`Array::inherited`]) the georeferencing its groups set with the zarr-conventions
-/// `spatial:` and `proj:` attributes (Zarr 3 `zarr.json`, Zarr 2 `.zattrs`), each part from the
-/// nearest group that sets it, and only where the array doesn't set it itself:
+/// How many levels of groups above an array are looked at for its georeferencing: far more than
+/// stores nest, and it bounds the walk on a store of very deep paths.
+const MAX_GROUP_DEPTH: usize = 64;
+
+/// Gives `a` (in [`Array::inherited`]) the georeferencing the groups above it set with the
+/// zarr-conventions `spatial:` and `proj:` attributes ([`georeferencing_groups`]), each part from
+/// the nearest group that sets it (within [`MAX_GROUP_DEPTH`] levels), and only where the array
+/// doesn't set it itself:
 /// - the transform with its type, registration and shape, from the nearest group giving a
 ///   transform. [`spatial_grid`] applies it only with that group's own `spatial:shape`, checked
 ///   against the array's map. A shape from another group never vouches for it, so a coarser level
@@ -503,25 +509,26 @@ const PROJ_KEYS: [&str; 3] = ["proj:wkt2", "proj:code", "proj:epsg"];
 /// - the coordinate system (`proj:wkt2`, `proj:code`, `proj:epsg`), from the nearest group giving
 ///   one, unless the array gives any of them;
 /// - `spatial:dimensions`.
-fn inherit_georeferencing(a: &mut Array, json: &HashMap<String, Value>, parts: &mut HashMap<(String, usize), Arc<Map<String, Value>>>) {
+fn inherit_georeferencing(
+    a: &mut Array,
+    groups: &HashMap<&str, &Map<String, Value>>,
+    parts: &mut HashMap<(String, usize), Arc<Map<String, Value>>>,
+) {
     let has = |keys: &[&str], m: &Map<String, Value>| keys.iter().any(|k| m.contains_key(*k));
     let mut transform = a.attrs.contains_key("spatial:transform");
     let mut proj = has(&PROJ_KEYS, &a.attrs);
     let mut dims = a.attrs.contains_key("spatial:dimensions");
-    let mut dir = a.path.clone();
-    while !a.path.is_empty() && !(transform && proj && dims) {
-        dir = dir.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
-        let at = |f: &str| if dir.is_empty() { f.to_string() } else { format!("{dir}/{f}") };
-        let v3 = json.get(&at("zarr.json")).filter(|z| z.get("node_type").and_then(Value::as_str) == Some("group"));
-        let attrs = match v3 {
-            Some(z) => z.get("attributes"),
-            None if !json.contains_key(&at(".zarray")) => json.get(&at(".zattrs")),
-            None => None,
-        };
-        if let Some(g) = attrs.and_then(Value::as_object) {
+    let path = a.path.clone();
+    let mut dir = path.as_str();
+    for _ in 0..MAX_GROUP_DEPTH {
+        if path.is_empty() || (transform && proj && dims) {
+            break;
+        }
+        dir = dir.rsplit_once('/').map_or("", |(d, _)| d);
+        if let Some(g) = groups.get(dir) {
             let mut take = |part: usize, keys: &[&str]| {
                 let made = parts
-                    .entry((dir.clone(), part))
+                    .entry((dir.to_string(), part))
                     .or_insert_with(|| Arc::new(keys.iter().filter_map(|k| g.get(*k).map(|v| (k.to_string(), v.clone()))).collect()));
                 a.inherited.push(made.clone());
             };
@@ -544,6 +551,29 @@ fn inherit_georeferencing(a: &mut Array, json: &HashMap<String, Value>, parts: &
             break;
         }
     }
+}
+
+/// The groups of a store's metadata (`json`, by key) that set georeferencing (`spatial:` or `proj:`
+/// attributes, Zarr 3 `zarr.json` or Zarr 2 `.zattrs`), by folder: found once, so each array
+/// looks only these up, and a store with none is passed by.
+fn georeferencing_groups(json: &HashMap<String, Value>) -> HashMap<&str, &Map<String, Value>> {
+    let mut groups = HashMap::new();
+    for (k, v) in json {
+        let (dir, file) = k.rsplit_once('/').unwrap_or(("", k.as_str()));
+        let attrs = match file {
+            "zarr.json" if v.get("node_type").and_then(Value::as_str) == Some("group") => v.get("attributes"),
+            ".zattrs" if !json.contains_key(&if dir.is_empty() { ".zarray".to_string() } else { format!("{dir}/.zarray") }) => Some(v),
+            _ => None,
+        };
+        if let Some(m) = attrs.and_then(Value::as_object).filter(|m| m.keys().any(|k| k.starts_with("spatial:") || k.starts_with("proj:")))
+        {
+            // A Zarr 3 group's zarr.json comes before a stray .zattrs beside it.
+            if file == "zarr.json" || !groups.contains_key(dir) {
+                groups.insert(dir, m);
+            }
+        }
+    }
+    groups
 }
 
 /// The attributes `a`'s transform is read from: its own when it gives one, else the part it
@@ -3405,6 +3435,18 @@ mod tests {
         let first = &store.array("w0").unwrap().inherited;
         assert_eq!(first.len(), 1);
         assert!((1..200).all(|i| Arc::ptr_eq(&store.array(&format!("w{i}")).unwrap().inherited[0], &first[0])));
+        // Groups are looked for up to MAX_GROUP_DEPTH levels above an array, so a store of very deep
+        // paths can't make the walk long: an array 3 levels down takes the root's coordinate system,
+        // one 70 levels down doesn't.
+        let mut deep = root.clone();
+        deep["attributes"] = serde_json::json!({"proj:code": "EPSG:3857"});
+        let v = deep["consolidated_metadata"]["metadata"]["v"].clone();
+        for depth in [3, 70] {
+            deep["consolidated_metadata"]["metadata"][format!("{}v", "g/".repeat(depth))] = v.clone();
+        }
+        let store = read(&deep);
+        assert_eq!(store.array(&format!("{}v", "g/".repeat(3))).unwrap().inherited.len(), 1);
+        assert!(store.array(&format!("{}v", "g/".repeat(70))).unwrap().inherited.is_empty());
         // A transform that isn't applied, beside coordinates that place the grid, is said; a store
         // with no transform says nothing of one.
         let mut placed: Value = serde_json::from_slice(&files[0].1).unwrap();

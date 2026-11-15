@@ -1457,8 +1457,8 @@ longitude/latitude grids of 0–360° are turned to -180–180°, and projected 
 coordinate system from the variable's grid mapping (`crs_wkt`, `spatial_ref`, an EPSG code) or
 `"crs"`. A grid placed by the zarr-conventions `spatial:transform` (an affine transform with no
 rotation, pixel- or node-registered) reads no coordinates, and the transform wins over coordinates
-the store also holds. It is the variable's own, or that of the nearest group above it that gives
-one, taken with that group's `spatial:shape`, which must be the variable's map's. Its map
+the store also holds. It is the variable's own, or that of the nearest group above it (up to 64
+levels up) that gives one, taken with that group's `spatial:shape`, which must be the variable's map's. Its map
 dimensions are those `spatial:dimensions` names. `proj:code`, `proj:wkt2` or `proj:epsg` give
 the coordinate system, after the variable's own attributes and its grid mapping.
 Blosclz-compressed and transposed chunks and shards inside shards aren't read yet, and say so. A
