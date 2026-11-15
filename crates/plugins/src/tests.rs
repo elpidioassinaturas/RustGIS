@@ -599,6 +599,20 @@ fn versions_and_translations() {
     m.i18n.insert("zh-CN".into(), [("Hello".to_string(), "你好".to_string())].into());
     assert_eq!(m.translate("zh", "Hello"), "你好");
     assert_eq!(m.translate("zh-TW", "Hello"), "哈囉");
+    // The interface's `zh-tw` matches `zh-TW`, and a Hong Kong or `zh-Hant` interface finds
+    // the plugin's Traditional text.
+    assert_eq!(m.translate("zh-tw", "Hello"), "哈囉");
+    assert_eq!(m.translate("zh-Hant", "Hello"), "哈囉");
+    // Chinese falls back only within its script: English, never the other script's text.
+    let mut simplified_only = Manifest::parse(&testing::manifest("tr", &[])).unwrap();
+    simplified_only.i18n.insert("zh".into(), [("Hello".to_string(), "你好".to_string())].into());
+    simplified_only.i18n.insert("zh-CN".into(), [("Bye".to_string(), "再见".to_string())].into());
+    assert_eq!(simplified_only.translate("zh-tw", "Hello"), "Hello");
+    assert_eq!(simplified_only.translate("zh-tw", "Bye"), "Bye");
+    assert_eq!(simplified_only.translate("zh-Hans-TW", "Hello"), "你好");
+    let mut traditional_only = Manifest::parse(&testing::manifest("tr", &[])).unwrap();
+    traditional_only.i18n.insert("zh-TW".into(), [("Hello".to_string(), "哈囉".to_string())].into());
+    assert_eq!(traditional_only.translate("zh", "Hello"), "Hello");
     // Loaded plugins translate for the interface (tool names, parameters), by language.
     load("unit-i18n", &[]);
     assert_eq!(crate::translate("de", "Hello").as_deref(), Some("Hallo"));
@@ -1842,6 +1856,63 @@ fn cached_blocklist_survives_refused_refreshes() {
     assert!(crate::store::load_installed().iter().any(|e| e.contains("blocklist.json")));
     std::fs::remove_file(&cache).unwrap();
     assert!(crate::store::load_installed().is_empty());
+    let _ = std::fs::remove_dir_all(&plugins);
+}
+
+/// `state.json` keeps what a newer RustGIS added through a change here, and one that can't be
+/// read is said at start and never written over.
+#[test]
+fn plugin_state_keeps_what_this_version_cannot_read() {
+    let plugins = std::env::temp_dir().join(format!("rustgis-test-plugin-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&plugins);
+    let _store = store_lock();
+    crate::store::set_dir(Some(plugins.clone()));
+    std::fs::create_dir_all(&plugins).unwrap();
+    let state = plugins.join("state.json");
+    std::fs::write(&state, r#"{"disabled": [], "folders": [], "pinned": ["kept"]}"#).unwrap();
+    crate::store::install_bytes(&testing::package("state-test", &[])).unwrap();
+    crate::store::set_enabled("state-test", false).unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    assert_eq!((&saved["disabled"], &saved["pinned"]), (&json!(["state-test"]), &json!(["kept"])));
+    for unreadable in ["not json", r#"{"disabled": [{"id": "state-test", "until": 2}]}"#] {
+        std::fs::write(&state, unreadable).unwrap();
+        assert!(crate::store::load_installed().iter().any(|e| e.contains("state.json")), "{unreadable}");
+        let e = crate::store::set_enabled("state-test", true).unwrap_err();
+        assert!(e.contains("kept as it is"), "{e}");
+        // A refused change leaves the plugin as it was, not changed for this session only.
+        assert!(crate::get("state-test").is_some_and(|p| !p.enabled));
+        let folder = plugins.join("folder-plugin");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("plugin.json"), crate::testing::manifest("folder-test", &[])).unwrap();
+        std::fs::write(folder.join("plugin.wasm"), testing::wasm()).unwrap();
+        assert!(crate::store::install_path(&folder).is_err() && crate::get("folder-test").is_none());
+        assert!(crate::store::install_bytes(&testing::package("state-test", &[])).is_err_and(|e| e.contains("kept as it is")));
+        assert!(crate::store::uninstall("state-test").is_err());
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), unreadable);
+        // At start none is loaded (it may have been disabled, and be a native program), and it is said.
+        crate::unload("state-test");
+        let errors = crate::store::load_installed();
+        assert!(errors.len() == 1 && errors[0].contains("state.json") && errors[0].contains("plugins are off"), "{errors:?}");
+        assert!(crate::get("state-test").is_none());
+        std::fs::write(&state, r#"{"disabled": ["state-test"]}"#).unwrap();
+        assert!(crate::store::load_installed().is_empty());
+    }
+    // No file, or an empty one, is nothing disabled, with no notice.
+    for empty in [None, Some("  \n"), Some("\u{feff}")] {
+        match empty {
+            Some(text) => std::fs::write(&state, text).unwrap(),
+            None => std::fs::remove_file(&state).unwrap(),
+        }
+        crate::unload("state-test");
+        assert!(crate::store::load_installed().is_empty(), "{empty:?}");
+        assert!(crate::get("state-test").is_some_and(|p| p.enabled), "{empty:?}");
+    }
+    // An editor's byte-order mark isn't part of the JSON.
+    std::fs::write(&state, "\u{feff}{\"disabled\": [\"state-test\"]}").unwrap();
+    crate::unload("state-test");
+    assert!(crate::store::load_installed().is_empty());
+    assert!(crate::get("state-test").is_some_and(|p| !p.enabled));
+    crate::store::uninstall("state-test").unwrap();
     let _ = std::fs::remove_dir_all(&plugins);
 }
 
