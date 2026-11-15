@@ -37,6 +37,8 @@ const MAX_FEATURES: usize = 200_000;
 const MAX_PAGE_PICTURES: usize = 64 << 20;
 /// Largest glTF geometry buffer of a web scene.
 const MAX_SCENE_BYTES: usize = 128 << 20;
+/// Highest an extrusion reaches in a web scene (metres): its base and height together stay within it.
+const SCENE_TOP: f64 = 1e6;
 /// Most nodes in a link chart.
 const MAX_NODES: usize = 3000;
 /// Most links in a link chart (its page lays them all out every frame).
@@ -205,12 +207,33 @@ pub fn commands() -> Vec<C> {
 /// The shared item bytes of a kind: its name, bytes and source. Rasters drawn into it without
 /// their cast shadows are said (see [`super::share::saying_shadows`]).
 pub fn share_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>, String), String> {
+    let (name, bytes, source, notes) = share_output(s, kind, p)?;
+    for note in notes {
+        s.notify(note, false);
+    }
+    Ok((name, bytes, source))
+}
+
+/// Shared-item construction notes are deferred when a front end still needs to deliver bytes.
+pub(crate) fn share_output(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>, String, Vec<String>), String> {
     let what = match kind {
         "webMap" => "The web map",
         "webLayer" => "The web layer",
         _ => "The shared item",
     };
-    super::share::saying_shadows(s, what, |s| share_bytes_inner(s, kind, p))
+    let notes = match kind {
+        "webMap" | "geodataService" | "webScene" if s.constructions.len > 0 => {
+            let m = map_of(s, p)?;
+            s.constructions.output_notes(m.layers.iter().filter(|l| shared_layer(kind, l)).map(|l| (m.instance_id(), l)))?
+        }
+        "webLayer" | "locator" => {
+            let l = layer_of(s, p)?;
+            s.constructions.export_notes(s.map().instance_id(), &l)?
+        }
+        _ => Vec::new(),
+    };
+    let (name, bytes, source) = super::share::saying_shadows(s, what, |s| share_bytes_inner(s, kind, p))?;
+    Ok((name, bytes, source, notes))
 }
 
 fn share_bytes_inner(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>, String), String> {
@@ -345,6 +368,7 @@ fn target(input: &impl super::InputSource, p: &Value, name: &str, ext: &str) -> 
 }
 
 fn share(s: &mut Session, p: &Value, kind: &str) -> CmdResult {
+    let written = s.notice_mark();
     let ((name, bytes, source), chart_note) = if kind == "linkChart" { link_chart_item(s, p)? } else { (share_bytes(s, kind, p)?, None) };
     let ext = KINDS.iter().find(|k| k.0 == kind).map_or("bin", |k| k.1);
     let path = target(s, p, &name, ext)?;
@@ -353,6 +377,7 @@ fn share(s: &mut Session, p: &Value, kind: &str) -> CmdResult {
         return Err(format!("{path} already holds the shared {} '{}'; choose another name or path", other.kind, other.name));
     }
     rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
+    s.retain_written_notices(written);
     let t = now();
     let shared = &mut s.project.shared;
     let id = match shared.iter_mut().find(|i| i.path == path) {
@@ -379,7 +404,8 @@ fn share(s: &mut Session, p: &Value, kind: &str) -> CmdResult {
             id
         }
     };
-    s.notify(format!("Shared {name} to {path}"), false);
+    let written = s.notice_mark();
+    s.notify_written(format!("Shared {name} to {path}"), false);
     // After it, so the status bar, which shows the last notice, keeps saying it.
     note_label_classes(s, kind, p);
     note_export(s, kind, p, &path);
@@ -387,6 +413,7 @@ fn share(s: &mut Session, p: &Value, kind: &str) -> CmdResult {
     if let Some(note) = chart_note {
         s.notify(note, false);
     }
+    s.retain_written_notices(written);
     Ok(json!({"item": id, "path": path, "bytes": bytes.len()}))
 }
 
@@ -974,6 +1001,9 @@ struct SceneBytes {
     skipped_outer: usize,
     holes_dropped: usize,
     single_vertex_lines: usize,
+    /// Per layer, in scene order: its name and how many features had their base or height held
+    /// to [`SCENE_TOP`].
+    held: Vec<(String, usize)>,
 }
 
 impl SceneBytes {
@@ -997,6 +1027,11 @@ impl SceneBytes {
         }
         if self.single_vertex_lines > 0 {
             notes.push(format!("Skipped {} line part(s) with a single vertex", self.single_vertex_lines));
+        }
+        for (layer, n) in &self.held {
+            notes.push(format!(
+                "{n} feature(s) of '{layer}' had their extrusion base or height held to the web scene's limit: base plus height stays within 1,000 km"
+            ));
         }
         notes
     }
@@ -1037,6 +1072,7 @@ fn gltf(m: &Map, view: (f64, f64)) -> Result<SceneBytes, String> {
             tri.get(k).map_or(0, |(p, i)| p.len() * 12 + i.len() * 4) + lines.get(k).map_or(0, |v| v.len() * 12)
         };
         let (mut built, mut last): (usize, Option<([u8; 4], usize)>) = (0, None);
+        let mut held = 0usize;
         for (row, ft) in l.dataset.features.iter().enumerate() {
             if let Some((k, before)) = last.take() {
                 built += size(&tri, &lines, &k).saturating_sub(before);
@@ -1079,10 +1115,15 @@ fn gltf(m: &Map, view: (f64, f64)) -> Result<SceneBytes, String> {
             }
             let sym = styler.symbol(row);
             // A layer without an extrusion stands flat on the ground; the base and the height
-            // together stay within 1e6 m (the base is never NaN, so the height's cap is a number).
-            let (h, foot) = ex.map_or((0.0, 0.0), |e| {
-                let foot = e.base_metres_at(&l.dataset, row, columns).clamp(0.0, 1e6);
-                ((e.metres_at(&l.dataset, row, columns).clamp(0.0, 1e6 - foot)) as f32, foot as f32)
+            // together stay within SCENE_TOP (the base is never NaN, so the height's cap is a
+            // number); a feature held to it is counted once it draws something.
+            let (h, foot, clipped) = ex.map_or((0.0, 0.0, false), |e| {
+                let (base, height) = (e.base_metres_at(&l.dataset, row, columns), e.metres_at(&l.dataset, row, columns));
+                let foot = base.clamp(0.0, SCENE_TOP);
+                let h = height.clamp(0.0, SCENE_TOP - foot);
+                // Held when the sum passes the top: `SCENE_TOP - foot` can round below a height
+                // that, added to the base, reaches the top exactly.
+                (h as f32, foot as f32, base > foot || base + height > SCENE_TOP)
             });
             // The walls stand from the base, the cap sits on them.
             let top = foot + h;
@@ -1192,6 +1233,11 @@ fn gltf(m: &Map, view: (f64, f64)) -> Result<SceneBytes, String> {
                     }
                 }
             }
+            // A feature adds only to its own colour: it drew something when that grew.
+            held += usize::from(clipped && last.is_some_and(|(k, before)| size(&tri, &lines, &k) > before));
+        }
+        if held > 0 {
+            scene.held.push((l.name.clone(), held));
         }
         let mut primitives = Vec::new();
         let material = |key: [u8; 4], materials: &mut Vec<Value>| -> usize {
@@ -1367,14 +1413,29 @@ fn link_chart(s: &Session, rel: Option<&str>) -> Result<(String, Option<String>)
             if links.len() >= MAX_LINKS {
                 continue;
             }
-            let Some(a) = node(&mut index, &mut nodes, om, o, orow, gi) else { continue };
-            for &drow in drows.iter().take(MAX_FEATURE_LINKS) {
-                if links.len() >= MAX_LINKS {
+            // The feature is drawn with its first link, never alone: each link needs room for
+            // whichever of its ends the chart doesn't hold yet. A feature without room is left
+            // out; one already in the chart may still be linked.
+            // Up to 200 links drawn from it: destinations the chart has no room for don't count
+            // toward them, so a later one it can draw still is.
+            let mut a = index.get(&(om, o.id, orow)).copied();
+            let mut drawn_here = 0;
+            for &drow in drows {
+                if drawn_here >= MAX_FEATURE_LINKS || links.len() >= MAX_LINKS {
                     break;
                 }
-                // A feature the chart has no room for: one already in it may still be linked.
-                let Some(b) = node(&mut index, &mut nodes, dm, d, drow, gi) else { continue };
-                links.push(json!({"source": a, "target": b, "relationship": r.name}));
+                let new = usize::from(a.is_none()) + usize::from(!index.contains_key(&(dm, d.id, drow)));
+                if nodes.len() + new > MAX_NODES {
+                    continue;
+                }
+                let (Some(from), Some(to)) =
+                    (a.or_else(|| node(&mut index, &mut nodes, om, o, orow, gi)), node(&mut index, &mut nodes, dm, d, drow, gi))
+                else {
+                    continue;
+                };
+                a = Some(from);
+                links.push(json!({"source": from, "target": to, "relationship": r.name}));
+                drawn_here += 1;
             }
         }
     }
@@ -1428,7 +1489,7 @@ const moving=N.reduce((m,a)=>Math.max(m,Math.abs(a.vx),Math.abs(a.vy)),0);if(mov
     );
     let said = left.map(|left| {
         format!(
-            "the link chart shows {left}; a link chart takes at most {MAX_NODES} features, {MAX_LINKS} links and {MAX_FEATURE_LINKS} links from one feature"
+            "the link chart shows {left}; a link chart takes at most {MAX_NODES} features, {MAX_LINKS} links and {MAX_FEATURE_LINKS} links from one feature in each relationship"
         )
     });
     Ok((html, said))

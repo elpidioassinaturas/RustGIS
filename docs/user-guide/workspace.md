@@ -369,6 +369,19 @@ RustGIS works out a map's scale with the OGC's 0.28 mm screen pixel, QGIS at 96 
 inch, so the same view is a larger scale in QGIS; scales from QGIS (reference scales, visibility
 ranges) are multiplied by 0.945 on the way in, so a layer shows at the same zoom in both.
 
+## Layers pane terminology
+
+- **Active layer**: the one layer that commands needing a layer act on, including the
+  Style and Data tabs, attribute table and Zoom To Layer. It is always part of the layer
+  selection. Use "active layer" rather than "current layer" or "selected layer" for this role.
+- **Layer selection**: the layers picked together in the Layers pane for an action on all
+  of them, such as removing, showing or hiding, moving or grouping. It is kept with the open
+  project's state and is not saved in the project file. Use "layer selection" rather than
+  "multi-select" or "layer set".
+- **Feature selection**: the features picked in a layer, shown by its count badge and the
+  Selection view. A bare "selection" always means feature selection. Layer selection picks
+  layers, so it is a separate concept.
+
 ## Panes and command search
 
 The left pane has tabs for **Layers**, **Browser** and **Data Sources**. Right-hand panes
@@ -543,7 +556,9 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
   Sync sends changed, new and deleted features back and refreshes it. A feature changed in the
   map since the last sync and also edited or deleted offline takes the offline version, with a
   warning naming it (Undo reverts the whole sync, restoring the map's version); an offline edit
-  to a feature since deleted from the map is dropped, with a warning too. **Feature Cache** prepares
+  to a feature since deleted from the map is dropped, with a warning too. **Package for the Field**
+  and **Bring Back** carry an area to a phone and its edits back (see [Field Work](field-work.md)).
+  **Feature Cache** prepares
   every layer's geometry for the current projection (Fill, Empty, Cancel, Auto Cache).
 - **Settings › Customize** chooses the ribbon's tabs and the Quick Access Toolbar's extra
   buttons. Settings and Help always remain visible. **Help** opens the user guide and the

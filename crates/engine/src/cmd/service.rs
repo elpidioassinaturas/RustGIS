@@ -34,7 +34,7 @@ pub fn commands() -> Vec<C> {
             r#"{"url": "a WMS, WMTS or WFS address (GetCapabilities is added), an OGC API collections address or landing page (its dataset tiles, supported styles and linked collections), or an ArcGIS FeatureServer, MapServer, ImageServer or VectorTileServer, or an ArcGIS services directory or folder (its folders and services, each listed by its own url)", "type"?: "wms"|"wmts"|"wfs"|"ogcapi"|"arcgis" (guessed from the address), "text"?: "the capabilities document, when already fetched", "documents"?: [{"url": "a discovered document address", "text": "its fetched JSON"}], "connection"?: "the saved web-service connection id whose login the requests use", "filter"?: "words a layer's title or name must all contain, in any case: every layer read is searched, not only those a listing shows, and the first 2000 that match are listed; what a listing says in a notice, a search says only in its notes"} → layers with source_url (with filter, total: the layers read, and matched: how many match), and next when supplied documents need another fetch"#,
         ),
         C::new("service.add", "Add Service Layer", "Home › Add", add).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
-            r#"{"url": "as service.layers", "type"?, "layer": "the layer's name (service.layers lists them)", "name"?: text, "time"?: "a time-enabled WMS or WMTS layer: by default (or \"slider\", true) it follows the time slider, turned on with the layer's times when it is off; or one of its dates (2024-06-01), or \"default\" (false): its service's default", "text"?: "the capabilities document, when already fetched", "documents"?: "additional fetched documents, as service.layers", "source_url"?: "the listed layer's source_url", "describe"?: "a WCS coverage's DescribeCoverage document, when already fetched", "tiles"?: "an OGC API layer's tile template, when already read from its tileset (the app's)", "bbox"?: [west, south, east, north] | "view" | "full": a WCS coverage's area (the view by default); for a WFS, OGC API or ArcGIS feature layer, only the features that cross it (the whole layer, "full", by default), "connection"?: "the id of the saved web-service connection it comes from (connection.browse gives it): the layer records it, and is read with its login"}"#,
+            r#"{"url": "as service.layers", "type"?, "layer": "the layer's name (service.layers lists them)", "name"?: text, "time"?: "a time-enabled WMS or WMTS layer: by default (or \"slider\", true) it follows the time slider, turned on with the layer's times when it is off; or one of its dates (2024-06-01), or \"default\" (false): its service's default", "text"?: "the capabilities document, when already fetched", "documents"?: "additional fetched documents, as service.layers", "source_url"?: "the listed layer's source_url", "describe"?: "a WCS coverage's DescribeCoverage document, when already fetched", "tiles"?: "an OGC API layer's tile template, when already read from its tileset (the app's)", "bbox"?: [west, south, east, north] | "view" | "full": a WCS coverage's area (the view by default); for a WFS, OGC API or ArcGIS feature layer, only the features that cross it (the whole layer, "full", by default), "where"?: "an ArcGIS feature layer's SQL where clause (1=1 when absent); combined with bbox and kept by every page; rejected clauses give an error", "connection"?: "the id of the saved web-service connection it comes from (connection.browse gives it): the layer records it, and is read with its login"}"#,
         ),
         C::new("service.coverage", "WCS Coverage Request", "Home › Add", coverage).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).view().params(
             r#"{"url": "a WCS address", "type"?: "wcs", "layer": "the coverage's name", "text"?: "the capabilities document, when already fetched", "documents"?: "additional fetched documents, as service.layers", "source_url"?: "the listed coverage's source_url", "describe"?: "its DescribeCoverage answer, when already fetched", "bbox"?: [west, south, east, north] | "view" (the default) | "full", "connection"?: "the saved web-service connection id whose login the request uses", "anonymous"?: boolean (never use a saved login for the coverage or its description)} → the GetCoverage address of a GeoTIFF (layer.addUrl adds it)"#,
@@ -507,6 +507,8 @@ pub(crate) fn bounds_of(v: Option<&Value>) -> Result<Option<[f64; 4]>, String> {
 /// (75 s at most). A page is fetched only where the page before it may point.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn download_features(s: &mut Session, name: &str, url: &str, max: usize) -> Result<Vec<u8>, String> {
+    // Its features alone: what they are used for (a task's input, an export) has no layer to draw
+    // with the service's symbology, so how the description says it is drawn (`.1`) is dropped.
     match download_layer(s, name, url, max, false)?.0 {
         Downloaded::Bytes(bytes) => Ok(bytes),
         // Not given without protocol buffer pages.
@@ -529,12 +531,33 @@ pub(crate) enum Downloaded {
 /// ArcGIS layer's description says it is drawn (its `drawingInfo`), when it says.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn download_layer(s: &mut Session, name: &str, url: &str, max: usize, pbf: bool) -> Result<(Downloaded, Option<Value>), String> {
+    download_layer_with(s, name, url, max, pbf, |url, max, timeout, ceiling| {
+        crate::render::rustgis_tiles::cache::download_blocking_with_origin_within(url, max, timeout, &[], ceiling)
+    })
+}
+
+/// Drives pagination with an origin-aware transport; kept separate to test DNS provenance.
+#[cfg(not(target_arch = "wasm32"))]
+fn download_layer_with(
+    s: &mut Session,
+    name: &str,
+    url: &str,
+    max: usize,
+    pbf: bool,
+    mut fetch: impl FnMut(
+        &str,
+        usize,
+        std::time::Duration,
+        crate::render::rustgis_tiles::address::Reach,
+    ) -> Result<crate::render::rustgis_tiles::cache::Fetched, String>,
+) -> Result<(Downloaded, Option<Value>), String> {
     use crate::render::rustgis_tiles::{address, cache};
     use rustgis_data::ogc::{DESCRIPTION_MAX, DESCRIPTION_TIMEOUT, Step, begin, begin_with_pbf, max_paged_features};
     let mut until = std::time::Instant::now() + cache::BLOCKING_TIMEOUT;
     let mut left = max;
     let mut step = if pbf { begin_with_pbf(url, max_paged_features()) } else { begin(url, max_paged_features()) };
     let mut drawing = None;
+    let mut previous: Option<address::Origin> = None;
     let (downloaded, note) = loop {
         let pages = match step {
             Step::Done(bytes, note) => break (Downloaded::Bytes(bytes), note),
@@ -544,18 +567,23 @@ pub(crate) fn download_layer(s: &mut Session, name: &str, url: &str, max: usize,
             Step::Fetch(pages) => pages,
         };
         let describing = pages.describing();
-        let answer = address::check(pages.next_url(), Some(pages.referrer())).and_then(|()| {
+        let allowed = previous.as_ref().map_or_else(|| address::check(pages.next_url(), None), |origin| origin.check(pages.next_url()));
+        let answer = allowed.and_then(|()| {
             let wait = until.saturating_duration_since(std::time::Instant::now());
             // A layer's description is small: one that hangs is given up on, and its features
             // asked for as they are.
-            let wait = if describing { wait.min(DESCRIPTION_TIMEOUT) } else { wait };
+            let wait =
+                if describing { wait.min(DESCRIPTION_TIMEOUT) } else { pages.page_timeout().map_or(wait, |timeout| wait.min(timeout)) };
             // Said as a timeout, so its error says how to add the layer instead.
             if wait.is_zero() {
                 return Err("the pages timed out".to_string());
             }
             // A description has a small budget of its own.
             let budget = if describing { left.min(DESCRIPTION_MAX) } else { left };
-            let page = cache::download_blocking_within(pages.next_url(), budget, wait)?;
+            let ceiling = previous.as_ref().map_or(address::Reach::Local, |origin| origin.reach()).min(cache::ceiling_for(url));
+            let fetched = fetch(pages.next_url(), budget, wait, ceiling)?;
+            previous = Some(fetched.origin);
+            let page = fetched.bytes;
             if page.len() > left {
                 return Err("the pages are larger than RustGIS downloads".into());
             }
@@ -1131,6 +1159,14 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
             false,
         );
     }
+    let where_clause = match p.get("where") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(clause)) if !clause.trim().is_empty() => Some(clause.as_str()),
+        Some(_) => return Err("where must be a non-empty service SQL clause".into()),
+    };
+    if where_clause.is_some() && !matches!(layer.offer, Offer::Features { .. }) {
+        return Err("where is only supported for ArcGIS feature layers".into());
+    }
     let title = match (&time, asked) {
         (Some(t), Some(_)) => format!("{} {t}", layer.title),
         _ => layer.title.clone(),
@@ -1318,6 +1354,10 @@ fn add_discovered(s: &mut Session, p: &Value, url: &str, want: &str, found: &Dis
             }
         }
         Offer::Features { url: items } => {
+            let filtered = where_clause
+                .map(|clause| rustgis_data::ogc::features_where(items, clause).ok_or("where is only supported for ArcGIS feature layers"))
+                .transpose()?;
+            let items = filtered.as_deref().unwrap_or(items);
             let area = features_area(s, p)?;
             let asked = area.and_then(|a| rustgis_data::ogc::features_in_area(items, a));
             #[cfg(target_arch = "wasm32")]
@@ -1802,5 +1842,36 @@ mod tests {
         let url = r["url"].as_str().unwrap();
         assert!(url.starts_with("https://x.org/wfs") && !url.contains("hunter2"), "{r}");
         assert_eq!(r["pending"], true);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn service_pages_follow_observed_reach_instead_of_hostname_spelling() {
+        use crate::render::rustgis_tiles::{
+            address::{Origin, Reach},
+            cache::Fetched,
+        };
+        let root = "https://gis.corp.example/collections/a/items?limit=1";
+        for (peer, succeeds) in [("10.0.0.5", true), ("93.184.216.34", false)] {
+            let mut s = Session::new(crate::Project::default());
+            let mut seen = Vec::new();
+            let result = download_layer_with(&mut s, "test", root, 65536, false, |url, _, _, ceiling| {
+                seen.push(ceiling);
+                let links = if seen.len() == 1 { json!([{"rel":"next","href":"http://10.0.0.5/page2"}]) } else { json!([]) };
+                let body = json!({"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{}}],"links":links});
+                Ok(Fetched {
+                    bytes: body.to_string().into_bytes(),
+                    origin: Origin::connected(url, peer.parse().unwrap()).unwrap().narrow_reach(ceiling),
+                })
+            });
+            let (Downloaded::Bytes(bytes), _) = result.unwrap() else { panic!("GeoJSON pages") };
+            let result: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(result["features"].as_array().unwrap().len(), if succeeds { 2 } else { 1 });
+            assert_eq!(seen, if succeeds { vec![Reach::Local, Reach::Local] } else { vec![Reach::Local] });
+            if succeeds {
+                assert!(s.notices_since(0).is_empty());
+            } else {
+                assert!(s.notices_since(0).iter().any(|notice| notice.text.contains("local network")));
+            }
+        }
     }
 }

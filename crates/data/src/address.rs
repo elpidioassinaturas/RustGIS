@@ -24,15 +24,27 @@ fn hex(bytes: &[u8]) -> Option<u32> {
     bytes.iter().try_fold(0, |n, b| Some(n * 16 + char::from(*b).to_digit(16)?))
 }
 
+/// How [`decode_pass`] reads `+` and `\uXXXX`. Names being classified decode `\u` too, so an
+/// escaped spelling can't hide a credential name; values never do, as a backslash in a path or a
+/// password (`C:\users\uabcd`) is itself.
 #[derive(Clone, Copy)]
 enum DecodeMode {
+    /// A name in a query: `+` is a space.
     Form,
+    /// A name where `+` is itself.
     LiteralPlus,
+    /// A query string's or form body's value: `+` is a space.
+    FormValue,
+    /// A path, connection string or token: `+` is itself.
+    Value,
 }
 
 /// One byte-preserving pass. Lossy UTF-8 is applied only after all passes, so percent-encoded
-/// bytes and literal Unicode take the same route. Invalid escapes remain literal.
+/// bytes and literal Unicode take the same route. An escape is `%` and exactly two hex digits
+/// ([`hex`] takes no sign); invalid escapes remain literal.
 fn decode_pass(bytes: &[u8], mode: DecodeMode) -> Vec<u8> {
+    let unicode = matches!(mode, DecodeMode::Form | DecodeMode::LiteralPlus);
+    let plus = matches!(mode, DecodeMode::Form | DecodeMode::FormValue);
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while let Some(&b) = bytes.get(i) {
@@ -41,18 +53,42 @@ fn decode_pass(bytes: &[u8], mode: DecodeMode) -> Vec<u8> {
         {
             out.push(n as u8);
             i += 3;
-        } else if b == b'\\'
+        } else if unicode
+            && b == b'\\'
             && bytes.get(i + 1) == Some(&b'u')
             && let Some(c) = bytes.get(i + 2..i + 6).and_then(hex).and_then(char::from_u32)
         {
             out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
             i += 6;
         } else {
-            out.push(if b == b'+' && matches!(mode, DecodeMode::Form) { b' ' } else { b });
+            out.push(if b == b'+' && plus { b' ' } else { b });
             i += 1;
         }
     }
     out
+}
+
+/// Text with its `%XX` escapes decoded, for paths, connection strings and tokens, where `+` is
+/// itself. An escape without two hex digits (`%zz`, `%+1`) stays as it is; bytes that aren't UTF-8
+/// become U+FFFD.
+pub fn percent_decode(s: &str) -> String {
+    String::from_utf8_lossy(&decode_pass(s.as_bytes(), DecodeMode::Value)).into_owned()
+}
+
+/// [`percent_decode`] for a query string or form body, where `+` is a space.
+pub fn form_decode(s: &str) -> String {
+    String::from_utf8_lossy(&decode_pass(s.as_bytes(), DecodeMode::FormValue)).into_owned()
+}
+
+/// A query string's or form body's parameters, decoded ([`form_decode`]); a parameter without `=`
+/// has an empty value.
+pub fn query_params(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|p| p.split_once('=').unwrap_or((p, "")))
+        .map(|(k, v)| (form_decode(k), form_decode(v)))
+        .collect()
 }
 
 /// Repeated decoding stops at a fixed point; a fifth changing pass is unresolved.
@@ -115,7 +151,14 @@ pub fn query_name_matches(raw: &str, name: &str) -> bool {
 /// one is read as holding a credential, though the name alone doesn't say so (`?layer=…` isn't
 /// one until a login names it). Held for this run; saved connections register theirs when they
 /// are read, added or changed.
-static LOGIN_NAMES: std::sync::RwLock<std::collections::BTreeSet<String>> = std::sync::RwLock::new(std::collections::BTreeSet::new());
+static LOGIN_NAMES: std::sync::RwLock<std::collections::BTreeMap<String, LoginName>> =
+    std::sync::RwLock::new(std::collections::BTreeMap::new());
+
+#[derive(Default)]
+struct LoginName {
+    committed: bool,
+    pending: usize,
+}
 
 /// How many names [`note_login_query_name`] holds.
 pub const MAX_LOGIN_NAMES: usize = 256;
@@ -130,10 +173,58 @@ pub fn note_login_query_name(name: &str) -> bool {
         return false;
     }
     let mut names = LOGIN_NAMES.write().unwrap_or_else(|e| e.into_inner());
-    if names.contains(&name) {
+    if let Some(entry) = names.get_mut(&name) {
+        entry.committed = true;
         return true;
     }
-    names.len() < MAX_LOGIN_NAMES && names.insert(name)
+    if names.len() >= MAX_LOGIN_NAMES {
+        return false;
+    }
+    names.insert(name, LoginName { committed: true, pending: 0 });
+    true
+}
+
+/// A provisional name occupying capacity without holding the registry lock across store I/O.
+/// Dropping it releases only this reservation; a name accepted elsewhere remains registered.
+pub struct LoginQueryNameReservation {
+    name: String,
+}
+
+impl LoginQueryNameReservation {
+    /// Makes the name permanent before committing the corresponding connection definition.
+    pub fn commit(self) {
+        if let Some(entry) = LOGIN_NAMES.write().unwrap_or_else(|e| e.into_inner()).get_mut(&self.name) {
+            entry.committed = true;
+        }
+    }
+}
+
+impl Drop for LoginQueryNameReservation {
+    fn drop(&mut self) {
+        let mut names = LOGIN_NAMES.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = names.get_mut(&self.name) {
+            entry.pending = entry.pending.saturating_sub(1);
+            if entry.pending == 0 && !entry.committed {
+                names.remove(&self.name);
+            }
+        }
+    }
+}
+
+/// Reserves capacity through a fallible connection edit. The caller commits on success;
+/// dropping on failure releases the slot unless another caller accepted or still reserves it.
+pub fn reserve_login_query_name(name: &str) -> Option<LoginQueryNameReservation> {
+    let name = name.to_ascii_lowercase();
+    if !name.bytes().any(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let mut names = LOGIN_NAMES.write().unwrap_or_else(|e| e.into_inner());
+    if !names.contains_key(&name) && names.len() >= MAX_LOGIN_NAMES {
+        return None;
+    }
+    let entry = names.entry(name.clone()).or_default();
+    entry.pending = entry.pending.checked_add(1)?;
+    Some(LoginQueryNameReservation { name })
 }
 
 /// Context is collected from decoded query names, including legacy semicolon-separated pairs.
@@ -159,7 +250,7 @@ impl QueryNames {
                 names.sv |= k == "sv";
                 names.state |= k == "state";
                 let exact = String::from_utf8_lossy(before).to_ascii_lowercase();
-                if login.contains(&exact) && !names.login.contains(&exact) {
+                if login.get(&exact).is_some_and(|entry| entry.committed) && !names.login.contains(&exact) {
                     names.login.push(exact);
                 }
             }
@@ -611,6 +702,22 @@ fn inherit_reviewed(from: &str, to: &str, relation: Relation, skip: &[&str], rev
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An escape needs two hex digits: `%+1` and `%-1` stay as typed rather than decoding as the
+    /// byte 1 (a sign is not a digit). `+` is a space in form data only, so there `%+1` is `% 1`.
+    /// Values keep `\uXXXX` as typed; only names being classified decode it.
+    #[test]
+    fn percent_escapes_need_two_hex_digits() {
+        assert_eq!(percent_decode("a%+1b%-1c%zz%4"), "a%+1b%-1c%zz%4");
+        assert_eq!(percent_decode("My%20Data+1.gpkg"), "My Data+1.gpkg");
+        assert_eq!(form_decode("x+y%2By"), "x y+y");
+        assert_eq!(percent_decode(r"C:\users\u0041%20b"), r"C:\users\u0041 b", "a value keeps its backslashes");
+        assert_eq!(percent_decode("%C3%A9%FF"), "é\u{FFFD}");
+        assert_eq!(
+            query_params("code=a%2Fb&state=%+1&flag"),
+            [("code", "a/b"), ("state", "% 1"), ("flag", "")].map(|(k, v)| (k.to_string(), v.to_string()))
+        );
+    }
 
     #[test]
     fn explicit_query_names_preserve_plus_and_other_punctuation_through_decoding() {

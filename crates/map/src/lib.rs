@@ -29,7 +29,7 @@ pub mod report;
 pub mod shadow;
 pub mod slots;
 pub mod source;
-pub use slots::{LayerRole, Slot, SlotAt, SlotPos, TileRole};
+pub use slots::{LayerRole, Slot, SlotPos, TileRole};
 pub mod symbol_by;
 pub mod symbology;
 pub mod tiles;
@@ -3024,7 +3024,7 @@ impl Map {
             navigator: _,
             first_person: _,
         } = view;
-        if let Some(view::Terrain { source, exaggeration: _, water: _ }) = terrain {
+        if let Some(view::Terrain { source, exaggeration: _, block: _, water: _ }) = terrain {
             match source {
                 view::TerrainSource::Tiles { url, encoding: _ } => {
                     out.push(Slot { at: SlotPos::Terrain, value: url, address: true, local_path: false })
@@ -3164,27 +3164,6 @@ impl Layer {
             LayerRole::Raster | LayerRole::ZarrStore => self.raster.as_mut()?.output_slot_mut(role),
             LayerRole::GpkgPath => Some(&mut self.gpkg.as_mut()?.path),
             LayerRole::PostgisEditDatabase => Some(&mut self.postgis.as_mut()?.origin.database),
-        }
-    }
-}
-
-impl Map {
-    /// Bridge identity is independent of the address value; duplicate ids remain ambiguous.
-    pub fn slot_identity(&self, at: &SlotPos) -> Option<SlotAt> {
-        match at {
-            SlotPos::Group { group, child } => {
-                let g = self.service_groups.get(*group)?;
-                Some(SlotAt::Group {
-                    id: g.id,
-                    child: match child {
-                        Some(i) => Some(g.children.get(*i)?.layer),
-                        None => None,
-                    },
-                })
-            }
-            SlotPos::Tile { tile, role } => Some(SlotAt::Tile { id: self.tiles.get(*tile)?.id.clone(), role: *role }),
-            SlotPos::Terrain => Some(SlotAt::Terrain),
-            SlotPos::Layer { layer, role } => Some(SlotAt::Layer { id: self.layers.get(*layer)?.id, role: *role }),
         }
     }
 }
