@@ -1255,6 +1255,9 @@ struct Affine {
 /// (rotated, another `spatial:transform_type` or `spatial:registration`, a group's without its
 /// shape): the coordinate arrays place the grid then.
 fn spatial_grid(a: &Array) -> Option<Affine> {
+    if a.shape.len() < 2 {
+        return None;
+    }
     let attrs = transform_attrs(a)?;
     // A group's transform places only the arrays its own shape is that of.
     if !a.attrs.contains_key("spatial:transform") && !attrs.contains_key("spatial:shape") {
@@ -1542,6 +1545,14 @@ fn geographic(c: &Array) -> bool {
 /// The coordinate system a variable's attributes (or its grid mapping's, else its groups' `proj:`)
 /// say, and what reading its WKT said, as for a `.prj` ([`super::wkt::read_wkt`]).
 fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
+    let epsg = |v: &Value| {
+        let code = match v {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.trim_start_matches("EPSG:").parse().ok(),
+            _ => None,
+        };
+        code.and_then(|c| u32::try_from(c).ok()).and_then(Crs::from_epsg)
+    };
     let read = |t: &str| {
         let t = t.trim();
         if t.contains('[') { super::wkt::read_wkt(t).ok() } else { Crs::parse(t).ok().map(|c| (c, None)) }
@@ -1554,19 +1565,24 @@ fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
                 return Some(read);
             }
         }
-        for k in ["epsg_code", "epsg", "proj:epsg"] {
-            let code = match x.get(k) {
-                Some(Value::Number(n)) => n.as_u64(),
-                Some(Value::String(s)) => s.trim_start_matches("EPSG:").parse().ok(),
-                _ => None,
-            };
-            if let Some(c) = code.and_then(|c| u32::try_from(c).ok()).and_then(Crs::from_epsg) {
-                return Some((c, None));
-            }
-        }
-        None
+        ["epsg_code", "epsg", "proj:epsg"].iter().find_map(|k| x.get(*k).and_then(epsg)).map(|c| (c, None))
     };
-    from(&a.attrs)
+    // A `proj:` value given (the variable's own, else its groups') that isn't read is said, with
+    // the system used instead.
+    let has_proj = |m: &Map<String, Value>| PROJ_KEYS.iter().any(|k| m.contains_key(*k));
+    let proj = if has_proj(&a.attrs) { Some(&a.attrs) } else { a.inherited.iter().map(|m| &**m).find(|m| has_proj(m)) };
+    let unread: Vec<String> = proj
+        .into_iter()
+        .flat_map(|m| {
+            PROJ_KEYS.iter().filter_map(move |k| {
+                let v = m.get(*k)?;
+                let read = if *k == "proj:epsg" { epsg(v).is_some() } else { v.as_str().and_then(read).is_some() };
+                (!read).then(|| format!("{k} {v}"))
+            })
+        })
+        .collect();
+    let said = (!unread.is_empty()).then(|| format!("{} isn't a coordinate system that is read, so it isn't used", unread.join(", ")));
+    let crs = from(&a.attrs)
         .or_else(|| {
             attr_str(a, "grid_mapping").and_then(|g| store.coordinate(a, g).or_else(|| store.array(g))).and_then(|g| from(&g.attrs))
         })
@@ -1574,7 +1590,11 @@ fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
         .or_else(|| a.inherited.iter().find_map(|m| from(m)))
         // A store that doesn't name its grid mapping may still hold rioxarray's `spatial_ref` (or a
         // `crs`) array beside its variables.
-        .or_else(|| ["spatial_ref", "crs"].iter().filter_map(|n| store.array(n)).find_map(|x| from(&x.attrs)))
+        .or_else(|| ["spatial_ref", "crs"].iter().filter_map(|n| store.array(n)).find_map(|x| from(&x.attrs)));
+    crs.map(|(c, note)| match (note, said) {
+        (Some(n), Some(s)) => (c, Some(format!("{n}; {s}"))),
+        (n, s) => (c, n.or(s)),
+    })
 }
 
 /// One axis from its coordinates: the first cell's outer edge and the cell size, if the
@@ -3381,6 +3401,25 @@ mod tests {
         assert_eq!(crs(serde_json::json!({"proj:epsg": 3857})), Crs::WebMercator);
         assert_eq!(crs(serde_json::json!({"grid_mapping": "gm"})), Crs::WebMercator);
         assert_eq!(crs(serde_json::json!({})), Crs::LonLat);
+        // A proj: value that isn't read is said, with the system used instead.
+        let mut odd = root.clone();
+        odd["consolidated_metadata"]["metadata"]["v"]["attributes"] =
+            serde_json::json!({"proj:code": "EPSG:nonsense", "grid_mapping": "gm"});
+        odd["consolidated_metadata"]["metadata"]["gm"] = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [1],
+            "data_type": "int8", "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1]}},
+            "codecs": [{"name": "bytes"}], "attributes": {"epsg_code": 3857}});
+        let r = assemble(&read(&odd), &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert_eq!(r.crs, Crs::WebMercator);
+        assert!(r.lost.iter().any(|l| l.contains("proj:code \"EPSG:nonsense\" isn't a coordinate system that is read")), "{:?}", r.lost);
+        // A proj: value that is read says nothing.
+        let clean = read(&root);
+        assert_eq!(crs_of(&clean, clean.array("v").unwrap()), Some((Crs::LonLat, None)));
+        // A 1-D array isn't placed by a transform, whatever its shape says.
+        let line = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [4], "data_type": "int8",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4]}}, "codecs": [{"name": "bytes"}],
+            "attributes": {"spatial:transform": [1.0, 0.0, 0.0, 0.0, -1.0, 0.0], "spatial:shape": [4, 4]}});
+        let one = parse_store(&[("zarr.json".into(), line.to_string().into_bytes())]).unwrap();
+        assert!(spatial_grid(one.array("").unwrap()).is_none());
         // A rotated transform, another transform type, or a shape that isn't the map's isn't
         // applied: with no coordinates, the grid can't be placed.
         for (k, v) in [
