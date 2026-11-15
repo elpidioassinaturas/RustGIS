@@ -250,11 +250,14 @@ fn remember_after(known: &mut Known, username: &str, password: &str, totp: bool,
         return None;
     }
     let deleted = store.delete(ACCOUNT);
+    // Unread: an earlier run may have remembered one, unless there's no store at all.
+    let lingers = |e: &SecretError| was || (*known == Known::Unread && !matches!(e, SecretError::Unavailable(_)));
+    let left = deleted.as_ref().err().is_some_and(lingers);
     // One that couldn't be deleted is never signed in with again this session.
-    *known = if was && deleted.is_err() { Known::Kept { retry_at: i64::MAX } } else { Known::Nothing };
+    *known = if left { Known::Kept { retry_at: i64::MAX } } else { Known::Nothing };
     match deleted {
-        // Said first: a password remembered before is still there.
-        Err(_) if was => Some(NOT_FORGOTTEN),
+        // Said first: a password remembered before may still be there.
+        Err(_) if left => Some(NOT_FORGOTTEN),
         _ if remember && totp => Some(TWO_FACTOR),
         _ if remember => Some(NOT_REMEMBERED),
         // A system without a credential store had nowhere to keep one.

@@ -362,8 +362,15 @@ fn a_sign_in_not_to_be_remembered_deletes_the_one_before_and_two_factor_is_never
     let (refusing, _) = serve(|_| json_answer(401, r#"{"error":"invalid_grant","error_description":"Invalid user credentials"}"#));
     assert!(login_remembering_at(&refusing, USER, "wrong", None, false).is_err());
     assert!(store.kept().is_some());
-    // A store that refuses: kept for the session, with a warning.
-    set_secret_store(Some(Arc::new(rustgis_data::secrets::MemorySecrets::failing(rustgis_data::secrets::SecretError::Denied))));
+    // A store that refuses, not read yet: kept for the session, and a password an earlier run
+    // remembered may still be there, which is said first, even with a one-time code.
+    use rustgis_data::secrets::{MemorySecrets, SecretError};
+    for totp in [None, Some("123456")] {
+        set_secret_store(Some(Arc::new(MemorySecrets::failing(SecretError::Denied))));
+        assert_eq!(login_remembering_at(&base, USER, PASSWORD, totp, true).unwrap().1, Some(NOT_FORGOTTEN));
+    }
+    // No credential store on this system: nothing could have been kept.
+    set_secret_store(Some(Arc::new(MemorySecrets::failing(SecretError::Unavailable("none".into())))));
     assert_eq!(login_remembering_at(&base, USER, PASSWORD, None, true).unwrap().1, Some(NOT_REMEMBERED));
     assert!(signed_in().is_some());
 }
