@@ -239,7 +239,8 @@ fn keep(endpoint: &str, username: &str, status: u16, body: &[u8]) -> Result<Info
     st.expired = false;
     st.session = Some(Session {
         endpoint: endpoint.to_string(),
-        username: username.trim().chars().take(200).collect(),
+        // Whole: the form already caps it (`MAX_FIELD`).
+        username: username.trim().to_string(),
         access: g.access,
         expires_at: g.expires_at,
         refresh_expires_at: g.refresh_expires_at,

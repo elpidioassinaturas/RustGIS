@@ -35,6 +35,8 @@ fn status() -> Value {
     }
 }
 
+/// Runs on the UI thread: it is one request (a 30 s timeout), not work that grows with its input,
+/// and nothing can be read with the sign-in until it answers.
 #[cfg(not(target_arch = "wasm32"))]
 fn login(_s: &mut Session, p: &Value) -> CmdResult {
     // Text only: a number would lose a one-time code's leading zeros. Checked before anything is
