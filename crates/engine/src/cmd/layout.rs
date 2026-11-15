@@ -2187,7 +2187,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             let mut unknown_at: Option<f64> = None;
             // Moved frames drawn on their own (below), by scale and move: a pass with the veil
             // tries the same moves as the one before it.
-            let mut own_drawn: Vec<((f64, f64, f64), (u32, u32, Vec<bool>))> = Vec::new();
+            // With the legend's context judged there, and its sizes with that context.
+            type Own = ((f64, f64, f64), (u32, u32, Vec<bool>), Vec<String>, [(f64, f64); MAX_LEGEND_COLUMNS]);
+            let mut own_drawn: Vec<Own> = Vec::new();
             // A figure keeps its scale: its size is fixed, and a smaller scale costs it the most.
             for (factor, veil) in passes.into_iter().filter(|(factor, veil)| (!*veil || continuous) && (*factor == 1.0 || sheet)) {
                 let tried = if factor == 1.0 { asked_scale } else { round_scale(asked_scale * factor) };
@@ -2248,7 +2250,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     drawn = Some((tried, whole_frame, here, here_context));
                 }
                 let Some((_, Some(whole_frame), Some(here), here_context)) = &drawn else { continue };
-                let need = |room: (f64, f64)| here.iter().position(|size| whole(*size).0 <= room.0 && whole(*size).1 <= room.1);
+                let need = |sizes: &[(f64, f64); MAX_LEGEND_COLUMNS], room: (f64, f64)| {
+                    sizes.iter().position(|size| whole(*size).0 <= room.0 && whole(*size).1 <= room.1)
+                };
                 let mut found: Option<(usize, f64)> = None;
                 for (dx, dy) in [(0.0, 0.0), (to_right, 0.0), (-to_left, 0.0), (0.0, to_bottom), (0.0, -to_top)] {
                     // Centred with no veil at the asked scale is what has no room; a shift of nothing
@@ -2267,7 +2271,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     // by `dx` and south by `dy` is the wide one's part that far west and north of
                     // its middle while that scale moves a corner of it one cell of the coverage grid
                     // at most, which the cut is exact to anyway; past that, it is drawn on its own
-                    // (what is context then judged on itself), once.
+                    // (what is context then judged on itself, for the legend too), once.
                     let here_mm = mm * flat.ground_per_unit(Coord::new(cx, cy)) / flat.ground_per_unit(asked.center());
                     let clip = (
                         fx + fw / 2.0 + (asked.min_x - cx) * here_mm,
@@ -2283,14 +2287,29 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         continue;
                     }
                     let drift = (1.0 - flat.ground_per_unit(Coord::new(cx, cy)) / flat.ground_per_unit(at)).abs() * fw.hypot(fh) / 2.0;
-                    let mut moved = if drift <= fw.max(fh) / 384.0 {
-                        crop_cells(whole_frame, wide, (slack_x - dx, slack_y - dy), (fw, fh))
-                    } else if let Some((_, own)) = own_drawn.iter().find(|(key, _)| *key == (tried, dx, dy)) {
-                        own.clone()
+                    let (mut moved, legend_sizes, legend_context) = if drift <= fw.max(fh) / 384.0 {
+                        (crop_cells(whole_frame, wide, (slack_x - dx, slack_y - dy), (fw, fh)), *here, here_context.clone())
+                    } else if let Some((_, own, own_context, own_sizes)) = own_drawn.iter().find(|o| o.0 == (tried, dx, dy)) {
+                        (own.clone(), *own_sizes, own_context.clone())
                     } else {
                         let Some(own) = crate::render::layout::frame_coverage(s.map_mut(), there, tried, fw, fh, 384) else { continue };
-                        own_drawn.push(((tried, dx, dy), own.clone()));
-                        own
+                        let own_context = context_at(s, there, tried);
+                        let own_sizes = if own_context == *here_context {
+                            *here
+                        } else {
+                            let at_there = crate::render::layout::frame_render_scale(s.map(), there, tried);
+                            let measured = crate::render::layout::legend_sizes_mm(
+                                s.map_mut(),
+                                at_there,
+                                false,
+                                false,
+                                (&own_context, &Default::default()),
+                            );
+                            let Some(measured) = measured else { continue };
+                            measured
+                        };
+                        own_drawn.push(((tried, dx, dy), own.clone(), own_context.clone(), own_sizes));
+                        (own, own_sizes, own_context)
                     };
                     if veil {
                         let (gw, gh) = (moved.0 as usize, moved.1 as usize);
@@ -2301,16 +2320,16 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         }
                     }
                     let room = free_room(&moved);
-                    let Some(n) = need(room) else { continue };
+                    let Some(n) = need(&legend_sizes, room) else { continue };
                     // Under a veil the whole group has to fit, not the legend alone, the scale bar's box
                     // as drawn there.
-                    let in_group = |s: &Session| grouped(clip, n, here, scale_box(ground_per_pt(s, there, tried), tried));
+                    let in_group = |s: &Session| grouped(clip, n, &legend_sizes, scale_box(ground_per_pt(s, there, tried), tried));
                     let Some(n) = (if veil { in_group(s).map(|(i, _)| i) } else { Some(n) }) else { continue };
                     if found.is_none_or(|(fewest, most)| n < fewest || (n == fewest && room.0 * room.1 > most)) {
                         found = Some((n, room.0 * room.1));
                         (center, scale, coverage, map_shift) = (there, tried, Some(moved), (dx, dy));
                         veiled = veil.then_some(clip);
-                        (chosen, chosen_context) = (*here, here_context.clone());
+                        (chosen, chosen_context) = (legend_sizes, legend_context);
                     }
                 }
                 if found.is_some() {
@@ -2335,6 +2354,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
             }
             if scale != asked_scale {
                 warnings.push(format!("the map is drawn at 1:{scale:.0}, not 1:{asked_scale:.0}, to leave the legend room"));
+            }
+            // The legend as measured where the map settled: at another scale, or moved to where
+            // the context is judged apart.
+            if scale != asked_scale || chosen_context != context {
                 (sizes, context) = (Some(chosen), chosen_context);
                 (cw, ch) = chosen[0];
                 let (w, h) = whole(chosen[0]);
