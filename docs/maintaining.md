@@ -76,10 +76,23 @@ same files. New and changed code follows these rules; not every existing reader 
   `.rgis` format 2 before any writes it (`READ_FORMAT` and `CAPABILITIES` in
   `crates/engine/src/project.rs`), so what is added to format 2 after that comes with a capability
   name, added to `CAPABILITIES` where it is read.
+- `schema/project.schema.json` is the JSON Schema of the project file, generated from the types
+  it is saved from by `cargo xtask schema`. A pull request that changes what a project saves
+  regenerates it and commits it in the same pull request; CI's `cargo xtask schema --check` fails
+  otherwise. A pull request that changes how it is read adds or updates a fixture project in
+  `schema/fixtures/`, which must open and validate against the schema. A schema change alone
+  doesn't raise the format: the rules above say when that happens.
 - RustGIS releases, file formats, the plugin ABI and the GeoLibre runner protocol are versioned
   separately.
 - A program RustGIS installs from elsewhere, such as the native GeoLibre runner, is pinned to a
   known release and moved forward by a pull request.
+
+Keep historical projects and preferences in the
+[release fixtures](../crates/engine/testdata/releases/README.md). These are the original bytes
+written by the release named in each filename: never regenerate, reformat or resave them.
+Each release adds a small project and preferences file written by that release and extends
+`released_projects_and_preferences_still_open`. Record a skip in the fixtures' README when a
+release has no such file format. Current-writer examples do not replace these historical files.
 
 ## New dependencies
 

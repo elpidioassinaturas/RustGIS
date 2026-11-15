@@ -1449,13 +1449,23 @@ mod tests {
             }
             ds.features = rows.into();
             let published = shapefile(&ds, &path, &sync).unwrap();
-            if code == "EPSG:2274" {
-                assert_eq!(published.notes.len(), 1, "{:?}", published.notes);
+            // Whether the moved shape's round trip through the projection is exact depends on
+            // the platform's libm, so the note is checked against what the file reads back as.
+            let (back, _) = read(&path);
+            let off = differing(&ds, &back);
+            // Only the moved shape may differ; whether it does is up to the libm (the test that
+            // requires a publish giving the note on any platform:
+            // `a_publish_with_projection_round_off_says_so`).
+            assert!(off.is_empty() || off == [2], "{code}: unedited shapes changed: {off:?}");
+            if !off.is_empty() {
+                assert_eq!(published.notes.len(), 1, "{code}: {:?}", published.notes);
                 let note = &published.notes[0];
                 assert!(
-                    note.contains("shapes with projection round-off: 1") && note.contains("feature 2") && note.contains("degrees"),
-                    "{note}"
+                    note.contains("shapes with projection round-off: 1 (the first, feature 2)") && note.ends_with(" degrees"),
+                    "{code}: {note}"
                 );
+            } else {
+                assert!(published.notes.is_empty(), "{code}: {:?}", published.notes);
             }
             let shapes = |b: &[u8]| -> Vec<_> {
                 let mut r = shapefile::ShapeReader::new(std::io::Cursor::new(b.to_vec())).unwrap();
@@ -1465,5 +1475,107 @@ mod tests {
             assert_eq!(was[0], now[0], "{code}");
             assert_ne!(was[1], now[1], "{code}");
         }
+    }
+
+    /// The features of `back` whose shapes aren't those of `ds` to the bit, counted from 1. The
+    /// read-back must have every feature.
+    fn differing(ds: &Dataset, back: &Dataset) -> Vec<usize> {
+        assert_eq!(back.features.len(), ds.features.len());
+        ds.features
+            .iter()
+            .zip(back.features.iter())
+            .enumerate()
+            .filter(|(_, (f, g))| !same_coords(&geometry_parts(f.geometry.as_ref()), &geometry_parts(g.geometry.as_ref()), 0.0))
+            .map(|(k, _)| k + 1)
+            .collect()
+    }
+
+    /// Round-off in the read-back is counted, the first feature named and the largest difference
+    /// given; an exact read-back gives no note. Independent of any platform's libm.
+    #[test]
+    fn projection_round_off_is_counted_and_named() {
+        let mut ds = parcels();
+        // The two again after them, so exact and off features alternate.
+        let again: Vec<_> = ds.features.iter().cloned().collect();
+        for f in again {
+            ds.push(f.geometry, f.attrs);
+        }
+        assert_eq!(ds.features.len(), 4);
+        assert!(projection_note(&ds, &ds).unwrap().is_none());
+        // Features 1 and 3 exact, a y off in feature 2 and an x off in feature 4, each the larger
+        // once, so the count skips the exact ones and both axes count.
+        for (dy, dx) in [(3e-12, 1e-12), (1e-12, 3e-12)] {
+            let mut rows: Vec<_> = ds.features.iter().cloned().collect();
+            let (mut moved_y, mut moved_x) = (0.0, 0.0);
+            if let Some(Geometry::Polygon(polys)) = &mut rows[1].geometry {
+                let y = polys[0][0][1].y;
+                polys[0][0][1].y = y + dy;
+                // The steps as stored, which aren't exactly dy and dx.
+                moved_y = polys[0][0][1].y - y;
+            }
+            if let Some(Geometry::Polygon(polys)) = &mut rows[3].geometry {
+                let x = polys[0][0][2].x;
+                polys[0][0][2].x = x + dx;
+                moved_x = polys[0][0][2].x - x;
+            }
+            assert!(moved_y > 0.0 && moved_x > 0.0 && moved_y != moved_x);
+            let largest = f64::max(moved_y, moved_x);
+            let mut back = ds.clone();
+            back.features = rows.into();
+            let note = projection_note(&ds, &back).unwrap().unwrap();
+            assert_eq!(
+                note,
+                format!(
+                    "shapes with projection round-off: 2 (the first, feature 2); the largest coordinate difference is {largest:e} degrees"
+                )
+            );
+        }
+    }
+
+    /// A publish whose read-back has projection round-off says so through `shapefile()`, on any
+    /// platform. Whether a given move's round trip is exact is up to the libm, so several are
+    /// tried in each system: each gives the note exactly when its read-back differs, and at least
+    /// one must, or the noted publish went untested.
+    #[test]
+    fn a_publish_with_projection_round_off_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("parcels.shp");
+        let (mut noted, mut exact) = (Vec::new(), Vec::new());
+        for code in ["EPSG:32616", "EPSG:2274"] {
+            let crs = Crs::parse(code).unwrap();
+            for dy in [0.01, 0.013, 0.017, 0.019, 0.023, 0.029, 0.031, 0.037, 0.041, 0.043, 0.047, 0.053] {
+                let mut ds = parcels();
+                ds.crs = Some(crs);
+                crate::io::write_path_in(&ds, &path, crs).unwrap();
+                let (mut ds, sync) = read(&path);
+                let mut rows: Vec<_> = ds.features.iter().cloned().collect();
+                if let Some(Geometry::Polygon(polys)) = &mut rows[1].geometry {
+                    polys[0][0][1].y += dy;
+                }
+                ds.features = rows.into();
+                let published = shapefile(&ds, &path, &sync).unwrap();
+                let (back, _) = read(&path);
+                let off = differing(&ds, &back);
+                assert!(off.is_empty() || off == [2], "{code} {dy}: unedited shapes changed: {off:?}");
+                assert_eq!(published.notes.len(), usize::from(!off.is_empty()), "{code} {dy}: {:?}", published.notes);
+                if let Some(note) = published.notes.first() {
+                    assert!(
+                        note.contains("shapes with projection round-off: 1 (the first, feature 2)")
+                            && note.ends_with(" degrees")
+                            && !note.contains("difference is 0e0 "),
+                        "{code} {dy}: {note}"
+                    );
+                    noted.push((code, dy));
+                } else {
+                    exact.push((code, dy));
+                }
+            }
+        }
+        assert!(
+            !noted.is_empty(),
+            "no move left projection round-off in either system ({} exact), so the noted publish went \
+             untested; a more exact projection can do this: try other moves",
+            exact.len()
+        );
     }
 }

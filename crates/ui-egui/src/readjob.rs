@@ -80,14 +80,19 @@ pub fn run(app: &mut RustGisApp, command: &'static str, p: Value) -> Result<Valu
 /// [`run`], then `then` with what the command answered once it ran, here or as it lands, or why
 /// it never ran.
 pub fn run_then(app: &mut RustGisApp, command: &'static str, p: Value, then: Option<Then>) -> Result<Value, String> {
-    run_presented(app, command, p, then, None)
+    run_presented(app, command, p, then, None, None)
 }
 
 /// Keeps a service layer's title and connection display name outside recorded parameters
 /// until its admitted discovery lands. The ordinary read queue owns progress and Cancel.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn run_service(app: &mut RustGisApp, p: Value, name: &str, origin: Option<&str>) -> Result<Value, String> {
-    run_presented(app, "service.add", p, None, Some((name.to_string(), origin.map(str::to_string))))
+    run_presented(app, "service.add", p, None, Some((name.to_string(), origin.map(str::to_string))), None)
+}
+
+/// Converts only the rows whose date interpretation the user previewed.
+pub(crate) fn run_date_preview(app: &mut RustGisApp, p: Value, dataset: rustgis_engine::data::Dataset) -> Result<Value, String> {
+    run_presented(app, "edit.convertField", p, None, None, Some(dataset))
 }
 
 /// Queues the admitted read with optional presentation supplied by the service dialog/tree.
@@ -97,6 +102,7 @@ fn run_presented(
     mut p: Value,
     then: Option<Then>,
     presentation: Option<(String, Option<String>)>,
+    preview: Option<rustgis_engine::data::Dataset>,
 ) -> Result<Value, String> {
     if !app.reads_off_frame {
         // Read here and now: what its file holds now is what it reads.
@@ -123,7 +129,7 @@ fn run_presented(
         };
         params.insert("layer".into(), json!(id));
     }
-    let ahead = match reads::read_ahead(&mut app.session, command, &p) {
+    let mut ahead = match reads::read_ahead(&mut app.session, command, &p) {
         Ok(ahead) => ahead,
         Err(error) => {
             app.command_failed(command, &error, notice_mark);
@@ -131,6 +137,9 @@ fn run_presented(
             return Err(error);
         }
     };
+    if let Some(dataset) = preview {
+        ahead.keep_preview(dataset);
+    }
     // Load All asked again for a layer it is reading already.
     if command == "layer.loadAll"
         && let Some((instance, _)) = &layer
@@ -945,6 +954,27 @@ mod tests {
         stop(&mut app, std::time::Duration::from_secs(60));
         assert!(!busy(&app));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Scripted Delimited Text picks join the same background queue as ordinary file picks.
+    #[test]
+    fn scripted_delimited_picks_run_in_background() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let gzip = base64::engine::general_purpose::STANDARD.decode("H4sIAAAAAAAC/8tMqUlNLC6pycsvKsngcqwxNKgxMuACACT4xC0WAAAA").unwrap();
+        for (name, bytes) in [("scripted.dat", b"id|east|north\nA|10|20\n".as_slice()), ("scripted.csv.gz", gzip.as_slice())] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+            app.reads_off_frame = true;
+            crate::dialogs::PICKED.with(|p| *p.borrow_mut() = Some(path.display().to_string()));
+            let result = app.run("ui.addDelimited", json!({"x":"east", "y":"north", "delimiter":"|"})).unwrap();
+            assert_eq!(result["started"], "Add Data");
+            assert!(app.session.map().layers.is_empty());
+            landed(&mut app, 30);
+            let point = app.session.map().layers[0].dataset.features[0].geometry.as_ref().unwrap().label_point().unwrap();
+            assert_eq!((point.x, point.y), (10.0, 20.0));
+        }
     }
 
     /// The Error Inspector's check runs on a thread of its own (#1291), and its errors are kept as
@@ -1957,5 +1987,56 @@ mod tests {
             layer.dataset.features[0].geometry,
             Some(rustgis_engine::data::Geometry::Point(rustgis_engine::data::Coord::new(9.0, 47.0)))
         );
+    }
+    /// Direct layer conversions use the desktop worker too, and stale rows cannot be replaced.
+    #[test]
+    fn date_conversion_runs_off_frame_for_layers() {
+        let mut app = RustGisApp::with_sample();
+        app.run("edit.addField", json!({"layer":"Cities", "name":"opened", "type":"text"})).unwrap();
+        app.run("edit.setValue", json!({"layer":"Cities", "row":0, "field":"opened", "value":"03/05/2026"})).unwrap();
+        app.reads_off_frame = true;
+        let p = json!({"field":"opened", "type":"date", "format":"%d/%m/%Y"});
+        app.session.active_layer = app.session.map().layer_by_name("Cities").map(|l| l.id);
+        let depth = app.session.undo_depth();
+        assert_eq!(app.run_by_user("edit.convertField", p.clone()).unwrap()["started"], "Convert Field");
+        assert_eq!(app.session.undo_depth(), depth);
+        app.session.active_layer = app.session.map().layers.iter().find(|l| l.name != "Cities").map(|l| l.id);
+        landed(&mut app, 60);
+        let ds = &app.session.map().layer_by_name("Cities").unwrap().dataset;
+        assert_eq!(ds.value(0, ds.field_index("opened").unwrap()).to_string(), "2026-05-03");
+        assert_eq!(app.session.undo_depth(), depth + 1);
+        app.run("edit.undo", json!({})).unwrap();
+        app.session.active_layer = app.session.map().layer_by_name("Cities").map(|l| l.id);
+        app.run_by_user("edit.convertField", p).unwrap();
+        app.session.run("edit.setValue", &json!({"layer":"Cities", "row":0, "field":"opened", "value":"new text"})).unwrap();
+        let depth = app.session.undo_depth();
+        landed(&mut app, 60);
+        assert_eq!(app.session.undo_depth(), depth);
+        assert!(app.session.notices.iter().any(|n| n.text.contains("layer changed")));
+    }
+    /// A queued preview cannot silently read rows edited after the user's format choice.
+    #[test]
+    fn date_preview_rejects_changed_queued_rows() {
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        app.run("layer.addDataText", json!({"fileName":"dates.csv", "text":"opened\n03/05/2026\n04/06/2026\n"})).unwrap();
+        app.run("edit.enable", json!({"on":true})).unwrap();
+        app.reads_off_frame = true;
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocked.geojson");
+        std::fs::write(&blocker, b"not GeoJSON").unwrap();
+        assert_eq!(run(&mut app, "layer.addData", json!({"path":blocker})).unwrap()["started"], "Add Data");
+        let dataset = app.session.project.tables[0].dataset.clone();
+        assert_eq!(
+            run_date_preview(&mut app, json!({"table":"dates", "field":"opened", "type":"date", "format":"%d/%m/%Y"}), dataset).unwrap()["waiting"],
+            1
+        );
+        app.session.run("edit.setValue", &json!({"table":"dates", "row":1, "field":"opened", "value":"not a date"})).unwrap();
+        let depth = app.session.undo_depth();
+        landed(&mut app, 60);
+        let dataset = &app.session.project.tables[0].dataset;
+        assert_eq!(dataset.fields[0].ty, rustgis_engine::data::FieldType::Text);
+        assert_eq!(dataset.value(1, 0).to_string(), "not a date");
+        assert_eq!(app.session.undo_depth(), depth);
+        assert!(app.session.notices.iter().any(|n| n.text.contains("changed after its date preview")));
     }
 }
