@@ -32,7 +32,7 @@ pub fn commands() -> Vec<C> {
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
         C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).inputs(publication_inputs).roles(&[]).effects(crate::policy::Effects::NONE).params(
-            r#"{"profile"?: "a4" (the default) | "a3" | "a2" (a sheet turned to portrait or landscape, whichever the area's map comes out larger on: its extent east to west against north to south, on the map's projection) | "a4-portrait"|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "colorbar"?: "auto" (the default: the top visible raster with a colour scale, not drawn by classes, gets one, under the legend in its box; a raster drawn by classes has them in the legend's rows instead) | "none" (no colorbar, and the legend's box has no room for one), "veil"?: true (the default: when no shape of the legend fits, a map that runs on past the extent, with a long legend, has what is outside the extent veiled and its surrounds grouped there, at up to half the scale on a sheet) | false (never veiled, and drawn at its scale; the map may still move aside), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) | "modular" (cards on a light page: the map, the locator and the legend each in one, the sources and reference in tinted ones) | "poster" (the page in the accent colour, the title in light text, the map in a light card, the footer in darker blocks) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules, a poster's page), "arrangement"?: "best" (the default: the favourite, each arrangement by name and each saved with layout.arrangement laid out, the one moving the least area off its corners kept, then the one leaving the least over the data, the favourite on a tie) | "favourite" (layout.arrangement's) | an arrangement by name (built in or saved) or corner by corner, as layout.arrangement takes (the corners the locator, north arrow, legend and scale bar are at home in; one covering what the map draws there still moves), "coverage"?: "*.png" (writes the coverage grid the placement searched, as it settled on it, three pixels a cell: what the map draws dark, the free cells white, both tinted blue in the strips the graticule's labels keep, the surrounds placed over the map outlined in red; the answer gives its path)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+            r#"{"profile"?: "a4" (the default) | "a3" | "a2" (a sheet turned to portrait or landscape, whichever the area's map comes out larger on: its extent east to west against north to south, on the map's projection) | "a4-portrait"|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "colorbar"?: "auto" (the default: the top visible raster with a colour scale, not drawn by classes, gets one, under the legend in its box; a raster drawn by classes has them in the legend's rows instead) | "none" (no colorbar, and the legend's box has no room for one), "veil"?: true (the default: when no shape of the legend fits, a map that runs on past the extent, with a long legend, has what is outside the extent veiled and its surrounds grouped there, at up to half the scale on a sheet) | false (never veiled, and drawn at its scale; the map may still move aside), "contextInLegend"?: false (the default: layers the placement takes as context around the data, polygons only outlined or, beside a layer drawn by classes or a raster, in one colour and running on past the frame, are left out of the legend, which a warning names) | true (the legend lists them), "northArrow"?: "auto" (the default: none when the extent spans 20° or more on its longer side, where the graticule gives north, which a warning says) | "always" | "none", "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) | "modular" (cards on a light page: the map, the locator and the legend each in one, the sources and reference in tinted ones) | "poster" (the page in the accent colour, the title in light text, the map in a light card, the footer in darker blocks) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules, a poster's page), "arrangement"?: "best" (the default: the favourite, each arrangement by name and each saved with layout.arrangement laid out, the one moving the least area off its corners kept, then the one leaving the least over the data, the favourite on a tie) | "favourite" (layout.arrangement's) | an arrangement by name (built in or saved) or corner by corner, as layout.arrangement takes (the corners the locator, north arrow, legend and scale bar are at home in; one covering what the map draws there still moves), "coverage"?: "*.png" (writes the coverage grid the placement searched, as it settled on it, three pixels a cell: what the map draws dark, the free cells white, both tinted blue in the strips the graticule's labels keep, the surrounds placed over the map outlined in red; the answer gives its path)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.arrangement", "Favourite Arrangement", "Publish › Layout", arrangement).roles(&[]).effects(crate::policy::Effects::NONE).view().params(
             r#"{"favourite"?: "classic" (the locator top left, the north arrow top right, the legend bottom left, the scale bar bottom right) | "mirrored" | "legendRight" | "legendTop" | {"locator", "northArrow", "legend", "scaleBar": "top-left"|"top-right"|"bottom-left"|"bottom-right", each a corner of its own} | a saved arrangement's name, "save"?: a name (1 to 40 characters, not a built-in one nor "best", "favourite", "custom" or "veil"; one saved under it already, case aside, is replaced) to save "arrangement" under (at most 20 saved), "arrangement"?: what "save" saves: an arrangement by name, or a corner for each surround as "favourite" takes them (refused without "save"), "remove"?: a saved arrangement's name (a favourite named after it keeps its corners, unless "favourite" gives another)} → the favourite arrangement of publication layouts and those saved by name (kept with the app's preferences), the favourite's corners, the arrangements by name and the saved ones' corners; a removal, then a save, then the favourite; with none of them given, they are only shown"#,
@@ -697,18 +697,21 @@ pub(crate) fn crop_cells(
 
 /// The surrounds of a veiled map grouped in a band of its veil: the locator with the north arrow at
 /// its right and the scale bar under them, beside the legend or over it, whichever the band's shape
-/// suits, centred in it. Gives the legend's, locator's, arrow's and scale bar's places; `None` when
-/// they don't fit either way.
+/// suits, centred in it. Gives the legend's, locator's, arrow's and scale bar's places (the locator's
+/// and the arrow's when there is one); `None` when they don't fit either way.
 pub(crate) fn veil_panel(
     band: Rect,
     legend: (f64, f64),
     locator: Option<f64>,
-    arrow: (f64, f64),
+    arrow: Option<(f64, f64)>,
     scale: (f64, f64),
     gap: f64,
-) -> Option<(Rect, Option<Rect>, Rect, Rect)> {
+) -> Option<(Rect, Option<Rect>, Option<Rect>, Rect)> {
     let (bx, by, bw, bh) = band;
-    let top = (locator.map_or(0.0, |side| side + gap) + arrow.0, locator.unwrap_or(0.0).max(arrow.1));
+    let (aw, ah) = arrow.unwrap_or((0.0, 0.0));
+    // The locator and the arrow side by side, with a gap between them only when both are there.
+    let between = if locator.is_some() && arrow.is_some() { gap } else { 0.0 };
+    let top = (locator.map_or(0.0, |side| side + between) + aw, locator.unwrap_or(0.0).max(ah));
     let group = (top.0.max(scale.0), top.1 + gap + scale.1);
     let beside = legend.0 + gap + group.0 <= bw && legend.1.max(group.1) <= bh;
     let over = legend.0.max(group.0) <= bw && legend.1 + gap + group.1 <= bh;
@@ -725,7 +728,7 @@ pub(crate) fn veil_panel(
     Some((
         (legend_at.0, legend_at.1, legend.0, legend.1),
         locator.map(|side| (group_at.0, group_at.1, side, side)),
-        (group_at.0 + group.0 - arrow.0, group_at.1, arrow.0, arrow.1),
+        arrow.map(|(aw, ah)| (group_at.0 + group.0 - aw, group_at.1, aw, ah)),
         (group_at.0, group_at.1 + top.1 + gap, scale.0, scale.1),
     ))
 }
@@ -1180,6 +1183,8 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let locator = publication_locator(p, sheet)?;
     let colorbar = publication_colorbar(p)?;
     let may_veil = publication_veil(p)?;
+    let context_in_legend = publication_flag(p, "contextInLegend")?.unwrap_or(false);
+    let north_arrow = publication_north_arrow(p)?;
     // A style or an accent that isn't text is refused, as an unknown one is, rather than left out.
     for k in ["style", "accent"] {
         if p.get(k).is_some_and(|v| !v.is_null() && !v.is_string()) {
@@ -1984,7 +1989,36 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     };
     let lonlat = crate::render::view_lonlat(s.map(), &view);
     let reading = s.map_mut().sync_sources(&lonlat, render_scale, true);
-    let mut sizes = crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, (&[], &Default::default()));
+    // Context around the data (neighbouring borders, the states around in one colour), which the
+    // placement already sets aside, is left out of the legend too, unless "contextInLegend" (#1379).
+    // A name is left out only when every shown layer under it is context: the legend leaves layers
+    // out by name.
+    let context: Vec<String> = if context_in_legend {
+        Vec::new()
+    } else {
+        let ids = crate::render::layout::context_layers(s.map(), center, scale, (fw, fh));
+        let map = s.map();
+        let shown: Vec<&rustgis_map::Layer> =
+            map.layers.iter().filter(|l| map.shows(l) && crate::render::layout::legend_lists(l)).collect();
+        let mut names: Vec<String> = Vec::new();
+        for l in shown.iter().filter(|l| ids.contains(&l.id)) {
+            let all = shown.iter().filter(|o| o.name.eq_ignore_ascii_case(&l.name)).all(|o| ids.contains(&o.id));
+            if all && !names.iter().any(|n| n.eq_ignore_ascii_case(&l.name)) {
+                names.push(l.name.clone());
+            }
+        }
+        names
+    };
+    if !context.is_empty() {
+        warnings.push(format!(
+            "the legend leaves out {} context layer{} around the data ({}): \"contextInLegend\": true lists {}",
+            context.len(),
+            if context.len() == 1 { "" } else { "s" },
+            context.join(", "),
+            if context.len() == 1 { "it" } else { "them" }
+        ));
+    }
+    let mut sizes = crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, (&context, &Default::default()));
     let (mut cw, mut ch) = match sizes {
         Some(sizes) => sizes[0],
         None => {
@@ -2028,7 +2062,17 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     if locator_map.is_some() && column.is_none() {
         surrounds.push((Surround::Locator, side, side));
     }
-    surrounds.push((Surround::Arrow, aw, ah));
+    // At a continental span the graticule's lines give north, and one arrow can't point north
+    // across the whole frame: none, unless "northArrow": "always" (#1379). Said, as any surround
+    // left out is.
+    let arrow = north_arrow.unwrap_or(extent_span_deg(&extent) < CONTINENTAL_DEG);
+    if arrow {
+        surrounds.push((Surround::Arrow, aw, ah));
+    } else if north_arrow.is_none() {
+        warnings.push(format!(
+            "no north arrow: the extent spans {CONTINENTAL_DEG:.0}° or more, where the graticule gives north; \"northArrow\": \"always\" draws one"
+        ));
+    }
     // The topmost visible raster with a colour scale that the legend doesn't list by its classes
     // gets a colorbar, under the legend in its box (a map whose theme is a raster on a ramp has its
     // key there, which the legend's rows don't give): an RGB composite over a DEM leaves it to the
@@ -2114,11 +2158,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // The fewest columns from `from` up in which the surrounds group in a band around `clip`, with
     // their places; the scale bar's box `scale_bar` is the one at the scale tried.
     let grouped = |clip: Rect, from: usize, known: &[(f64, f64); MAX_LEGEND_COLUMNS], scale_bar: (f64, f64)| {
-        let arrow = arrow_size?;
         (from..known.len()).find_map(|i| {
             bands_around(clip)
                 .iter()
-                .find_map(|band| veil_panel(*band, whole(known[i]), locator_side, arrow, scale_bar, GROUP_GAP))
+                .find_map(|band| veil_panel(*band, whole(known[i]), locator_side, arrow_size, scale_bar, GROUP_GAP))
                 .map(|places| (i, places))
         })
     };
@@ -2202,8 +2245,13 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                         } else {
                             // A legend that can't be measured there (a source that can't be read
                             // through) leaves that scale untried too, which is said.
-                            let measured =
-                                crate::render::layout::legend_sizes_mm(s.map_mut(), render_scale, false, false, (&[], &Default::default()));
+                            let measured = crate::render::layout::legend_sizes_mm(
+                                s.map_mut(),
+                                render_scale,
+                                false,
+                                false,
+                                (&context, &Default::default()),
+                            );
                             if measured.is_none() {
                                 unknown_at.get_or_insert(tried);
                             }
@@ -2473,7 +2521,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         for (kind, place) in [
             (Surround::Legend, Some(legend_place)),
             (Surround::Locator, locator_place),
-            (Surround::Arrow, Some(arrow_place)),
+            (Surround::Arrow, arrow_place),
             (Surround::Scale, Some(scale_place)),
         ] {
             let Some(place) = place.filter(|_| surrounds.iter().any(|x| x.0 == kind)) else { continue };
@@ -2610,7 +2658,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     title: String::new(),
                     all_classes: false,
                     hide_other: false,
-                    exclude: Vec::new(),
+                    exclude: context.clone(),
                     columns: legend_cols,
                     labels: Default::default(),
                 },
@@ -5298,6 +5346,39 @@ fn publication_colorbar(p: &Value) -> Result<bool, String> {
             _ => Err("colorbar is \"auto\" or \"none\"".into()),
         },
     }
+}
+
+/// A publication's `key` given as `true` or `false`; `None` when it isn't given.
+fn publication_flag(p: &Value, key: &str) -> Result<Option<bool>, String> {
+    match p.get(key).filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(v) => v.as_bool().map(Some).ok_or_else(|| format!("{key} is true or false")),
+    }
+}
+
+/// A publication's north arrow: `Some(true)` always drawn ("always"), `Some(false)` never ("none"),
+/// `None` left to the extent ("auto", the default: none at a continental span, #1379).
+fn publication_north_arrow(p: &Value) -> Result<Option<bool>, String> {
+    match p.get("northArrow").filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some("auto") => Ok(None),
+            Some("always") => Ok(Some(true)),
+            Some("none") => Ok(Some(false)),
+            _ => Err("northArrow is \"auto\", \"always\" or \"none\"".into()),
+        },
+    }
+}
+
+/// The span in degrees, on its longer side, from which a publication's extent is continental: its
+/// graticule's meridians then turn too far across the frame for one north arrow to point north
+/// everywhere, and they give north themselves (#1379).
+pub(crate) const CONTINENTAL_DEG: f64 = 20.0;
+
+/// An extent's span in degrees on its longer side, its width as long at its middle latitude.
+pub(crate) fn extent_span_deg(e: &Extent) -> f64 {
+    let mid = ((e.min_y + e.max_y) / 2.0).to_radians();
+    e.height().max(e.width() * mid.cos())
 }
 
 /// Whether the publication may veil what lies outside the extent when nothing else leaves its
