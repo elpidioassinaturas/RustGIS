@@ -2313,7 +2313,12 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                                 false,
                                 (&own_context, &Default::default()),
                             );
-                            let Some(measured) = measured else { continue };
+                            // A legend that can't be measured there leaves that move untried, which is
+                            // said, as at a scale.
+                            let Some(measured) = measured else {
+                                unknown_at.get_or_insert(tried);
+                                continue;
+                            };
                             measured
                         };
                         own_drawn.push(((tried, dx, dy), own.clone(), own_context.clone(), own_sizes));
