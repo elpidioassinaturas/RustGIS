@@ -497,7 +497,7 @@ const PROJ_KEYS: [&str; 3] = ["proj:wkt2", "proj:code", "proj:epsg"];
 /// `spatial:` and `proj:` attributes (Zarr 3 `zarr.json`, Zarr 2 `.zattrs`), each part from the
 /// nearest group that sets it, and only where the array doesn't set it itself:
 /// - the transform with its type, registration and shape, from the nearest group giving a
-///   transform, and only with that group's own `spatial:shape`, which [`spatial_grid`] checks
+///   transform. [`spatial_grid`] applies it only with that group's own `spatial:shape`, checked
 ///   against the array's map. A shape from another group never vouches for it, so a coarser level
 ///   of a pyramid isn't placed by the full-resolution transform;
 /// - the coordinate system (`proj:wkt2`, `proj:code`, `proj:epsg`), from the nearest group giving
@@ -525,11 +525,11 @@ fn inherit_georeferencing(a: &mut Array, json: &HashMap<String, Value>, parts: &
                     .or_insert_with(|| Arc::new(keys.iter().filter_map(|k| g.get(*k).map(|v| (k.to_string(), v.clone()))).collect()));
                 a.inherited.push(made.clone());
             };
+            // Taken without its shape too, so a transform left unread is said ([`spatial_grid`]
+            // doesn't apply a group's without its shape).
             if !transform && g.contains_key("spatial:transform") {
                 transform = true;
-                if g.contains_key("spatial:shape") {
-                    take(0, &TRANSFORM_KEYS);
-                }
+                take(0, &TRANSFORM_KEYS);
             }
             if !proj && has(&PROJ_KEYS, g) {
                 proj = true;
@@ -1220,9 +1220,14 @@ struct Affine {
 /// `[a, b, c, d, e, f]` (x = a·col + b·row + c, y = d·col + e·row + f) with no rotation, of a
 /// grid whose `spatial:shape`, when given, is its map's. A node-registered grid's transform gives
 /// its first cell's centre. `None` when there is none, or it is one this reader doesn't apply
-/// (rotated, another `spatial:transform_type`): the coordinate arrays place the grid then.
+/// (rotated, another `spatial:transform_type` or `spatial:registration`, a group's without its
+/// shape): the coordinate arrays place the grid then.
 fn spatial_grid(a: &Array) -> Option<Affine> {
     let attrs = transform_attrs(a)?;
+    // A group's transform places only the arrays its own shape is that of.
+    if !a.attrs.contains_key("spatial:transform") && !attrs.contains_key("spatial:shape") {
+        return None;
+    }
     if attrs.get("spatial:transform_type").is_some_and(|t| t.as_str() != Some("affine")) {
         return None;
     }
@@ -1237,13 +1242,17 @@ fn spatial_grid(a: &Array) -> Option<Affine> {
     {
         return None;
     }
-    let node = attrs.get("spatial:registration").and_then(Value::as_str) == Some("node");
-    let half = if node { 0.5 } else { 0.0 };
+    let half = match attrs.get("spatial:registration").map(Value::as_str) {
+        None | Some(Some("pixel")) => 0.0,
+        Some(Some("node")) => 0.5,
+        // A registration the convention doesn't define isn't guessed.
+        Some(_) => return None,
+    };
     Some(Affine { x0: x0 - dx * half, dx, y0: y0 - dy * half, dy })
 }
 
 /// What a `spatial:transform` that [`spatial_grid`] doesn't apply is said to be.
-const TRANSFORM_UNREAD: &str = "its spatial:transform isn't one that is read (rotated, of another spatial:transform_type, or with a spatial:shape that isn't its map's)";
+const TRANSFORM_UNREAD: &str = "its spatial:transform isn't one that is read (rotated, of another spatial:transform_type or spatial:registration, with a spatial:shape that isn't its map's, or a group's without its spatial:shape)";
 
 /// Why `a`'s map can't be placed when its y and x have no coordinates: said with its
 /// `spatial:transform` when it has one [`spatial_grid`] doesn't apply.
@@ -3338,6 +3347,7 @@ mod tests {
             ("spatial:transform", serde_json::json!([0.5, 0.1, -50.0, 0.0, -0.25, 10.0])),
             ("spatial:transform_type", serde_json::json!("rpc")),
             ("spatial:shape", serde_json::json!([12, 8])),
+            ("spatial:registration", serde_json::json!("corner")),
         ] {
             let mut odd = root.clone();
             odd["attributes"][k] = v;
@@ -3346,12 +3356,14 @@ mod tests {
             let e = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap_err().to_string();
             assert!(e.contains("have no coordinates, and its spatial:transform isn't one that is read"), "{k}: {e}");
         }
-        // A group's transform without its shape isn't taken: it may be another level's.
+        // A group's transform without its shape isn't applied (it may be another level's), and
+        // that is said.
         let mut unshaped = root.clone();
         unshaped["attributes"].as_object_mut().unwrap().remove("spatial:shape");
         let store = read(&unshaped);
         assert!(spatial_grid(store.array("v").unwrap()).is_none());
-        assert!(plan(&store, &sel).and_then(|p| assemble(&store, &p, &read_plan(&files, &p), "v", None)).is_err());
+        let e = plan(&store, &sel).and_then(|p| assemble(&store, &p, &read_plan(&files, &p), "v", None)).unwrap_err().to_string();
+        assert!(e.contains("its spatial:transform isn't one that is read"), "{e}");
         // Nor is a coarser level's (`lvl1/v`, 4 × 6) placed by the root's transform (8 × 12) when
         // its own group gives only a shape: a transform comes with its own group's shape.
         let mut pyramid = root.clone();
