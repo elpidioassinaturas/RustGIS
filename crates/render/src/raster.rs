@@ -7,13 +7,14 @@
 //! optionally re-stretched from the pixels in view (DRA), and coloured.
 
 use rustgis_data::raster::{BandStats, ColorHint, Raster};
-use rustgis_geom::{Coord, Extent, extent_to_merc};
+use rustgis_geom::{Coord, Extent, extent_to_merc, lonlat_to_merc};
 use rustgis_map::Globe;
 use rustgis_map::projection::Flat;
 use rustgis_map::raster::{Colorizer, RasterMask, RasterRenderer, RasterStyle, Resampling, Rock, hillshade, slope};
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 
 use crate::View;
+use crate::terrain::Water;
 
 /// Screen pixels between exactly transformed points.
 const STEP: usize = 8;
@@ -87,11 +88,13 @@ fn place_is_flat(p: &Place) -> bool {
 
 /// The grids a Shaded Relief layer is lit with, worked out off the frame, one value per cell: the
 /// light its cast shadows leave (see [`rustgis_map::raster::RasterLayer::cast_shadows`]) and the
-/// share of the sky it sees ([`rustgis_map::raster::RasterLayer::sky_view`]).
+/// share of the sky it sees ([`rustgis_map::raster::RasterLayer::sky_view`]); and the terrain's
+/// water (#1915), whose cells are drawn at their level with the even light of flat ground.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Lights<'a> {
     pub shadow: Option<&'a [u8]>,
     pub sky: Option<&'a [u8]>,
+    pub water: Option<&'a Water>,
 }
 
 /// Draws a raster layer onto `pm` at `opacity`. `stats` are the renderer bands' statistics
@@ -530,6 +533,7 @@ fn draw_with(
         sky,
         fill,
         rock,
+        water: light.water.filter(|_| relief.is_some()),
         resampling,
         alpha_band,
         alpha_max: rustgis_data::raster::alpha_max(&r.data_type),
@@ -675,6 +679,8 @@ struct Pass1<'a> {
     fill: f64,
     /// Shaded Relief's rock on steep slopes, when it has one.
     rock: Option<Rock>,
+    /// The terrain's water, for Shaded Relief: its cells take its level and flat ground's light.
+    water: Option<&'a Water>,
     resampling: Resampling,
     alpha_band: Option<usize>,
     /// The alpha band's opaque value (its pixel type's: 65535 for 16 bits).
@@ -802,6 +808,13 @@ impl Pass1<'_> {
                         }
                     }
                 }
+                // On the water the relief's colour is the lake's level's, as even as its light.
+                if let Some(level) = self.water_level(c, row)
+                    && let Some(slot) = row_vals.get_mut(dx * nb)
+                    && !slot.is_nan()
+                {
+                    *slot = level as f32;
+                }
                 if let (Some(relief), Some(&b)) = (self.relief, self.bands.first()) {
                     // Bilinear: the light blended between the four cells around the point, as the
                     // band values are (#1880). Nearest, or no cell around it lit: its own cell's.
@@ -848,6 +861,14 @@ impl Pass1<'_> {
         }
     }
 
+    /// The level (metres) of the terrain's water at the grid position `(c, row)` (column and row,
+    /// cell centres at +0.5), when a lake holds it.
+    fn water_level(&self, c: f64, row: f64) -> Option<f64> {
+        let water = self.water?;
+        let lonlat = self.r.transformer().to_lonlat(self.r.transform.to_world(c, row))?;
+        water.level(lonlat_to_merc(lonlat))
+    }
+
     /// The lights on the relief's cell `(ci, ri)`, from 0 to 255 and not rounded: the direct
     /// light, the hillshade of its 3 × 3 window times what the cast shadows leave on it; and the
     /// ambient light, scaled by the sky the cell sees; the fill light (see [`FILL_ALTITUDE`]), which
@@ -857,6 +878,12 @@ impl Pass1<'_> {
     /// [`blend`] smooths each of them.
     fn light(&self, band: usize, (az, alt, zf): (f64, f64, f64), (ci, ri): (i64, i64), centre: f64) -> Lit {
         let r = self.r;
+        // A water cell (#1915): flat ground's own light, with no cast shadow, the whole sky and no
+        // fill or rock (both are nothing on flat ground).
+        if self.water_level(ci as f64 + 0.5, ri as f64 + 0.5).is_some() {
+            let direct = f64::from(hillshade(&[0.0; 9], self.cell.0, self.cell.1, az, alt, zf));
+            return Lit { direct, ambient: 255.0, fill: 0.0, rock: 0.0 };
+        }
         let mut z = [centre; 9];
         for (k, (dx, dy)) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)].into_iter().enumerate() {
             let (dx, dy) = (dx * self.east_north.0, dy * self.east_north.1);
@@ -1179,7 +1206,7 @@ mod tests {
                 1.0,
                 false,
                 Place::Flat(&Flat::Mercator, "mercator"),
-                Lights { shadow: light, sky: None },
+                Lights { shadow: light, sky: None, water: None },
             );
             let p = pm.pixel(0, 0).unwrap();
             let want = |shade: u8| Colorizer::new(&style, &r, None).color(&[0.0], Some(shade)).unwrap();
@@ -1227,7 +1254,7 @@ mod tests {
             [p.red(), p.green(), p.blue(), p.alpha()]
         };
         let today = drawn(0.0, 0.0, Lights::default());
-        let hidden = Lights { shadow: None, sky: Some(&none) };
+        let hidden = Lights { shadow: None, sky: Some(&none), water: None };
         assert_eq!(drawn(0.0, 0.0, hidden), today, "a sky of 0");
         assert_eq!(drawn(0.0, 1.0, Lights::default()), today, "no grid");
         // No sky at all: the direct light alone.
@@ -1240,7 +1267,7 @@ mod tests {
         // sky by its strength.
         let half_seen = vec![128u8; 4 * 18];
         for (sky, grid, want) in [(1.0, &dark, 0), (0.5, &dark, 32), (1.0, &half_seen, 32), (0.0, &dark, 64)] {
-            let light = Lights { shadow: Some(&dark), sky: Some(grid.as_slice()) };
+            let light = Lights { shadow: Some(&dark), sky: Some(grid.as_slice()), water: None };
             assert_eq!(drawn(1.0, sky, light), [want, want, want, 255], "sky {sky}, seen {}", grid[0]);
         }
     }
@@ -1721,8 +1748,8 @@ mod tests {
     fn bilinear_relief_blends_the_cast_shadows_too() {
         // Cell 2 in full shadow in every row, the others lit.
         let light: Vec<u8> = [255, 255, 0, 255, 255, 255].repeat(3);
-        let nearest = relief_row(Resampling::Nearest, None, &[], Lights { shadow: Some(&light), sky: None }, false);
-        let bilinear = relief_row(Resampling::Bilinear, None, &[], Lights { shadow: Some(&light), sky: None }, false);
+        let nearest = relief_row(Resampling::Nearest, None, &[], Lights { shadow: Some(&light), sky: None, water: None }, false);
+        let bilinear = relief_row(Resampling::Bilinear, None, &[], Lights { shadow: Some(&light), sky: None, water: None }, false);
         let (lit, dark) = (nearest[149].unwrap(), nearest[249].unwrap());
         assert!(dark < lit && nearest[198] == Some(lit) && nearest[199] == Some(dark), "{lit} {dark}");
         assert_eq!((bilinear[149], bilinear[249]), (Some(lit), Some(dark)));
@@ -1736,7 +1763,7 @@ mod tests {
     fn bilinear_relief_blends_the_sky_too() {
         // Cell 2 sees no sky in every row, the others all of it.
         let sky: Vec<u8> = [255, 255, 0, 255, 255, 255].repeat(3);
-        let light = Lights { shadow: None, sky: Some(&sky) };
+        let light = Lights { shadow: None, sky: Some(&sky), water: None };
         let nearest = relief_row(Resampling::Nearest, None, &[], light, false);
         let bilinear = relief_row(Resampling::Bilinear, None, &[], light, false);
         let (open, hidden) = (nearest[149].unwrap(), nearest[249].unwrap());
@@ -1808,7 +1835,7 @@ mod tests {
                 1.0,
                 false,
                 Place::Flat(&Flat::Mercator, "mercator"),
-                Lights { shadow: Some(&light), sky: None },
+                Lights { shadow: Some(&light), sky: None, water: None },
             );
             (0..80).map(|x| pm.pixel(x, 0).unwrap().red()).collect::<Vec<_>>()
         };

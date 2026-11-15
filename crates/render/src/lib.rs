@@ -3847,6 +3847,32 @@ fn render_turned(map: &mut Map, view: &View, full_res_rasters: bool, record: boo
     Some(Rendered { pixmap: pm.into_pixmap(), ..r })
 }
 
+thread_local! {
+    /// The terrain's water a tilted view's drape bands draw their Shaded Relief with (#1915), read
+    /// once for the whole view ([`render_tilt_drape`]): a band's own camera would read the shores
+    /// again over elevation tiles at its own zoom.
+    static DRAPE_WATER: std::cell::RefCell<Option<std::sync::Arc<terrain::Water>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The terrain's water a frame's Shaded Relief layers draw flat at its level with the even light
+/// of flat ground (#1915), read for the view the frame stands in for (its levels are the ones the
+/// tilted ground lies at). `None` without water or with no Shaded Relief layer shown.
+fn relief_water(map: &Map, view: &View, labels_to: &Labels) -> Option<std::sync::Arc<terrain::Water>> {
+    map.view.terrain.as_ref()?.water.as_ref()?;
+    let relief = map.layers.iter().any(|l| {
+        l.visible && l.raster.as_ref().is_some_and(|r| matches!(r.style.renderer, rustgis_map::RasterRenderer::ShadedRelief { .. }))
+    });
+    if !relief {
+        return None;
+    }
+    let camera = match labels_to {
+        Labels::Shared => return DRAPE_WATER.with(|w| w.borrow().clone()),
+        Labels::Turned(to) | Labels::Tilted(to, _) => &to.camera,
+        Labels::Own => &view.camera,
+    };
+    terrain::Ground::of(map, camera)?.water().cloned()
+}
+
 /// Draws one north-up frame. `labels_to` says where its labels go: a turned or tilted view the
 /// frame stands in for places them itself (and draws their icons). `full_res_rasters` marks an
 /// export, which draws everything as it will stay: rasters at full resolution, and labels in
@@ -4159,6 +4185,8 @@ fn render_frame(
     };
     // Extrusion heights are metres on the map's body.
     let body = map.body().ratio();
+    // The terrain's water, drawn flat by Shaded Relief.
+    let lake_light = relief_water(map, view, &labels_to);
     // The layer drawn last, whose tile layers go over it before the next.
     let mut below: Option<u32> = None;
     for li in order {
@@ -4242,7 +4270,11 @@ fn render_frame(
                     rustgis_map::raster::CastShadows::None => None,
                 };
                 let (shadow, sky) = (lit(rl.cast_shadows(false, owner, shadows_landed)), lit(rl.sky_view(false, owner, shadows_landed)));
-                let light = raster::Lights { shadow: shadow.as_deref().map(Vec::as_slice), sky: sky.as_deref().map(Vec::as_slice) };
+                let light = raster::Lights {
+                    shadow: shadow.as_deref().map(Vec::as_slice),
+                    sky: sky.as_deref().map(Vec::as_slice),
+                    water: lake_light.as_deref(),
+                };
                 // Read in place: the part in view, at the level the view needs.
                 let address = rl.path.as_deref().filter(|_| rl.in_place);
                 let mut draw_it = |pm: &mut Pixmap, opacity: f32| match address {
@@ -5885,6 +5917,9 @@ pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32)
     let anchors = std::mem::take(&mut map.label_lock_line_anchors);
     map.label_display.paused = true;
     let mut out = Vec::new();
+    // The bands' Shaded Relief draws the whole view's water (see `relief_water`).
+    let water = relief_water(map, view, &Labels::Own);
+    let kept = DRAPE_WATER.with(|w| w.replace(water));
     for b in bands {
         let (mut w, mut h) = (b.width * (1.0 + 2.0 * margin), b.height * (1.0 + 2.0 * margin));
         let mut camera = b.camera;
@@ -5900,6 +5935,7 @@ pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32)
             out.push(TiltPatch { pixmap: r.pixmap, band: rustgis_map::camera::Band { camera, width: w, height: h, depth: b.depth } });
         }
     }
+    DRAPE_WATER.with(|w| w.replace(kept));
     map.label_display = display;
     map.label_lock = lock;
     map.label_lock_line_anchors = anchors;
