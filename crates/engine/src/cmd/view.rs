@@ -481,9 +481,10 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
                 "Water: {n} polygons of '{name}' have no height along their shore (off the DEM) and no level, so stay on the ground"
             )),
         };
-        // Shores too long to read every half cell are read at wider steps: their lowest point
-        // may be missed, leaving the water a little high. Said over a DEM and over tiles alike
-        // (the steps follow the shores' length, not the heights read).
+        // When the layer's shores together are too long to read every half cell, all of them are
+        // read at one wider step: a lowest point may be missed, leaving the water a little high.
+        // Said over a DEM and over tiles alike (the step follows the shores' length, not the
+        // heights read).
         let coarse = match Ground::water_coarse_unread(s.map(), &s.map().camera) {
             0 => None,
             1 => Some(format!(

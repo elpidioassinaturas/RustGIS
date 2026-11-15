@@ -101,7 +101,8 @@ stepped over water (Copernicus GLO-30 is one). `"level": "field"` takes each pol
 (metres) from a numeric field instead; a row with no value there keeps its shore's. Each part of
 a multipolygon is a water body of its own. A polygon whose shore lies off the DEM, with no level
 given, stays on the ground, and a notice says how many. Shores are read every half DEM cell, up
-to about 4 million heights in all (and one a ring); longer shores are read at wider steps, and a notice says how
+to about 4 million heights in all (and one a ring); when the water layer's shores together are
+longer, all of them are read at one wider step, and a notice says how
 many polygons were. A layer read a view at a time (in chunks, by range) can't be the water. `{"water": false}` takes the water off;
 left out (or `null`), it stays as it was. The water layer is kept by name, follows its renames, and can stay
 hidden; its own symbology still draws it. Rivers stay lines. Over elevation tiles, the levels are

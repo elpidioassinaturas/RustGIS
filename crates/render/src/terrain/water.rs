@@ -15,8 +15,9 @@ use rustgis_tiles::cache;
 use super::{Ground, Heights};
 
 /// The most heights read along all the shores of a water layer for their levels, besides one at
-/// the start of each ring: a longer shore is read at wider steps (a national coastline at 30 m
-/// would take millions).
+/// the start of each ring. When the layer's shores together are longer than this many half cells,
+/// every shore of the layer is read at the one wider step that fits (a national coastline at 30 m
+/// would take millions, and makes a pond beside it read at that step too).
 const MAX_SHORE_SAMPLES: usize = 1 << 22;
 
 /// The most cells along each side of the grid that finds the lakes near a point.
@@ -26,8 +27,9 @@ const MAX_GRID: usize = 256;
 const EDGES_PER_STRIP_REF: usize = 16;
 
 /// How long a water read over elevation tiles with some along its shores still on their way is
-/// used before it is read again. One with a tile that failed is read again after the tile cache's
-/// own wait before asking for a failed tile again ([`cache::RETRY`]).
+/// used before it is read again. One with a tile that failed is read again after
+/// [`cache::RETRY`], the tile cache's usual wait before asking for a failed tile again (a
+/// server's longer Retry-After isn't followed: the read is then redone once a minute meanwhile).
 const RETRY_MISSING: web_time::Duration = web_time::Duration::from_secs(1);
 
 /// The strip of `n`, each `step` high from `y0`, that holds `y`.
