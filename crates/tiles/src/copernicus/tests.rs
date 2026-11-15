@@ -385,6 +385,12 @@ fn a_refused_remembered_sign_in_is_deleted_and_an_unreachable_host_is_tried_agai
     assert_eq!(restore(), Restored::Nothing);
     assert!(asked.recv_timeout(Duration::from_millis(200)).is_err(), "held off after an unreachable host");
     assert!(store.kept().is_some() && is_remembered() && !expired());
+    // A refused client says nothing of the password: kept, tried again later.
+    *lock(&REMEMBERED.known) = Known::Kept { retry_at: 0 };
+    *answer.lock().unwrap() = json_answer(401, r#"{"error":"invalid_client","error_description":"Invalid client credentials"}"#);
+    assert_eq!(restore(), Restored::Nothing);
+    let _ = asked.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(store.kept().is_some() && !expired());
     // Refused (the password was changed): deleted, and the user is told to sign in again.
     *lock(&REMEMBERED.known) = Known::Kept { retry_at: 0 };
     *answer.lock().unwrap() = json_answer(401, r#"{"error":"invalid_grant","error_description":"Invalid user credentials"}"#);

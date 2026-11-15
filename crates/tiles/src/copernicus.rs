@@ -253,11 +253,12 @@ fn remember_after(known: &mut Known, username: &str, password: &str, totp: bool,
     // One that couldn't be deleted is never signed in with again this session.
     *known = if was && deleted.is_err() { Known::Kept { retry_at: i64::MAX } } else { Known::Nothing };
     match deleted {
+        // Said first: a password remembered before is still there.
+        Err(_) if was => Some(NOT_FORGOTTEN),
         _ if remember && totp => Some(TWO_FACTOR),
         _ if remember => Some(NOT_REMEMBERED),
-        Ok(()) => None,
         // A system without a credential store had nowhere to keep one.
-        Err(SecretError::Unavailable(_)) if !was => None,
+        Ok(()) | Err(SecretError::Unavailable(_)) => None,
         Err(_) => Some(NOT_FORGOTTEN),
     }
 }
@@ -379,6 +380,13 @@ fn grant_error(body: &[u8]) -> Option<String> {
 /// even a 401 one) says nothing of the credentials.
 fn refused(status: u16, body: &[u8]) -> bool {
     matches!((status, grant_error(body).as_deref()), (400 | 401, Some("invalid_grant")) | (401, Some(_)))
+}
+
+/// Whether Keycloak refused the username and password themselves (`invalid_grant`): only that
+/// deletes a remembered sign-in. A refused client (`invalid_client`…) says nothing of them.
+#[cfg(not(target_arch = "wasm32"))]
+fn wrong_credentials(status: u16, body: &[u8]) -> bool {
+    matches!((status, grant_error(body).as_deref()), (400 | 401, Some("invalid_grant")))
 }
 
 /// Keeps a sign-in made at `endpoint` from its token answer; what the status tells of it.
@@ -593,14 +601,14 @@ mod native {
         sign_in(endpoint, username, password, totp).map_err(|(_, e)| e)
     }
 
-    /// Signs in; the error says whether Keycloak refused the credentials.
+    /// Signs in; the error says whether Keycloak refused the username and password.
     fn sign_in(endpoint: &str, username: &str, password: &str, totp: Option<&str>) -> Result<super::Info, (bool, String)> {
         let body = super::login_body(username, password, totp).map_err(|e| (true, e))?;
         let (status, answer) = post_form(endpoint, &body, &None).map_err(|e| (false, e))?;
         if status >= 500 {
             return Err((false, format!("Copernicus Data Space's sign-in answered HTTP {status}: try again later")));
         }
-        super::keep(endpoint, username, status, &answer).map_err(|e| (super::refused(status, &answer), e))
+        super::keep(endpoint, username, status, &answer).map_err(|e| (super::wrong_credentials(status, &answer), e))
     }
 
     /// The token endpoint: [`TOKEN_URL`](super::TOKEN_URL), or a test's fake one.
@@ -662,7 +670,8 @@ mod native {
             }
             Err((false, e)) => {
                 log::warn!("couldn't sign in to Copernicus Data Space with the sign-in remembered on this computer: {e}");
-                *known = Known::Kept { retry_at: now + super::RETRY_RENEWAL };
+                // From now: the request may have taken its whole timeout.
+                *known = Known::Kept { retry_at: super::now_secs() + super::RETRY_RENEWAL };
                 Restored::Nothing
             }
         }
