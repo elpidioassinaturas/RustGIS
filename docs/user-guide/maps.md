@@ -113,6 +113,19 @@ moves the ground is drawn whole, and labels, markers and extruded features outsi
 draw (hide those layers, or clip them to the box). The walls are schematic: say so in the
 figure's caption.
 
+`"walls": {"color": "#C8B89A", "layer": "Geology"}` colours the walls by a polygon layer, such as
+a geology or soil map: along each wall, the colour the layer's symbology gives the polygon under
+the box's edge at that point (its Unique Values or Graduated Colors classes, so the legend
+matches; the topmost polygon where they overlap, among the features its definition query keeps;
+a fill colour partly transparent is laid over `color`). The contacts go straight down to the base,
+outlined: only where they cross the box's edge comes from the map, and the walls show no dip or
+thickness. Off every polygon, and in a polygon with no solid fill (hatches and other patterns
+aren't drawn on walls yet), the walls are `color`. The layer may be hidden, so the walls can
+show geology while the ground shows soils. It must be a polygon layer that holds all its
+features (not one read a view at a time), with a name of its own; it follows the layer's renames,
+and when it is removed, or a project opens without it, the walls are `color` (said) until a
+polygon layer of that name comes back. A plain `"walls": "#RRGGBB"` takes the layer off.
+
 **Water** on the terrain lies flat: `map.terrain` with `{"water": {"layer": "Lakes"}}` names a
 polygon layer of water bodies, and inside each polygon the ground is level, at the lowest height
 of the DEM along its shore, instead of rising and falling with a surface model that is noisy or
@@ -125,7 +138,10 @@ longer, all of them are read at one wider step, and a notice says how
 many polygons were. A layer read a view at a time (in chunks, by range) can't be the water. `{"water": false}` takes the water off;
 left out (or `null`), it stays as it was. The water layer is kept by name, follows its renames, and can stay
 hidden; its own symbology still draws it. Rivers stay lines. Over elevation tiles, the levels are
-read again until the tiles along the shores have come.
+read again until the tiles along the shores have come. A Shaded Relief layer draws the water's
+cells at their level with the even light of flat ground, flat or tilted: no hillshade, cast
+shadow, sky, fill light or rock on the water, so a semi-transparent water fill over it shows one
+tone. The relief's ramp colours them at the water's level.
 
 <figure markdown="span">
   ![Mount Rainier in USGS imagery draped over Terrarium elevation tiles, tilted 65°](https://assets.rustgis.app/images/terrain.webp)

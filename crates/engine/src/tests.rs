@@ -5051,6 +5051,9 @@ fn hostile_params_never_panic(shard: usize) {
         json!({"id": "c1", "remember": true, "source": "rustgis-s3:junk", "node": 5}),
         json!({"source": "rustgis-s3::0::s3://bucket/key", "id": "c1", "remember": {"a": 1}}),
         json!({"source": 7, "id": ["c1"]}),
+        // A sign-in past its username: a password of the wrong type is refused before any request.
+        json!({"username": "junk@example.invalid", "password": 7, "totp": []}),
+        json!({"username": "junk@example.invalid", "password": "", "totp": "x"}),
     ];
     let ids: Vec<&str> = Session::new(Project::default())
         .registry
@@ -6555,6 +6558,38 @@ fn styles_refuse_or_say_what_they_cut() {
     assert_eq!(said(&s, mark, "Import Styles"), ["Import Styles: 1 style(s) replaced by a later one of the same name in the file"]);
 }
 
+/// A label class's name given past 100 characters is cut to them, as since #640, and the cut is
+/// said with how much (#2122), when a class is added or renamed. At 100, trimmed, it's taken
+/// whole, and nothing is said.
+#[test]
+fn a_label_class_name_over_100_characters_is_cut_and_said() {
+    let mut s = world();
+    let id = s.map().layer_by_name("Cities").unwrap().id;
+    let at = |n: usize| "é".repeat(n);
+    let cut = |s: &Session, mark: u64| {
+        s.notices_since(mark).iter().filter(|n| n.text.starts_with("Label Classes:")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let mark = s.notice_mark();
+    assert_eq!(s.run("labels.class.add", &json!({"layer": id, "name": at(101)})).unwrap()["class"], at(100));
+    let want = format!(
+        "Label Classes: Cities: a label class's name takes at most 100 characters, so the name given (101) is cut to 100, kept as '{}'",
+        at(100)
+    );
+    assert_eq!(cut(&s, mark), [want]);
+    let b = "b".repeat(100);
+    let mark = s.notice_mark();
+    assert_eq!(s.run("labels.class.add", &json!({"layer": id, "name": format!("  {b}  ")})).unwrap()["class"], b);
+    assert!(cut(&s, mark).is_empty(), "100 characters, trimmed, are taken whole");
+    let mark = s.notice_mark();
+    s.run("labels.class.rename", &json!({"layer": id, "class": at(100), "name": "c".repeat(101)})).unwrap();
+    assert_eq!(cut(&s, mark).len(), 1, "a rename's cut is said too");
+    let mark = s.notice_mark();
+    s.run("labels.class.rename", &json!({"layer": id, "class": "c".repeat(100), "name": "Short"})).unwrap();
+    assert!(cut(&s, mark).is_empty());
+    let names: Vec<String> = s.map().layer(id).unwrap().labels.classes.iter().map(|c| c.name.clone()).collect();
+    assert!(names.contains(&"Short".to_string()) && names.contains(&b), "{names:?}");
+}
+
 /// A project template keeps no features, so no saved label moves either, and says so.
 #[test]
 fn a_project_template_leaves_out_label_moves() {
@@ -7686,7 +7721,7 @@ fn terrain_block_is_checked_kept_and_taken_off() {
         json!({"extent": [0, 0, 1000, 500]}),
         json!({"depth": -5}),
         json!({"walls": "#C8B89A80"}),
-        json!({"walls": {"layer": "Countries"}}),
+        json!({"walls": {"layer": "Nowhere"}}),
         json!({"base": 3}),
     ] {
         assert!(s.run("map.terrain", &json!({"layer": dem, "block": bad})).is_err(), "{bad}");
@@ -7724,6 +7759,7 @@ fn terrain_block_is_checked_kept_and_taken_off() {
             extent: Some([0.0, 0.0, 1000.0, 1000.0]),
             depth: None,
             walls: rustgis_map::view::BLOCK_WALLS,
+            walls_layer: None,
         }),
         water: None,
     });
@@ -7833,6 +7869,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 extent: Some([1116000.0, 5625000.0, 1114000.0, 5622000.0]),
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
+                walls_layer: None,
             }),
             water: None,
         });
@@ -7852,6 +7889,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 extent: Some([1114000.0, 5622000.0, 1116000.0, 5625000.0]),
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
+                walls_layer: None,
             }),
             water: None,
         });
@@ -7871,7 +7909,12 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 encoding: rustgis_map::view::TerrainEncoding::Terrarium,
             },
             exaggeration: 1.0,
-            block: Some(rustgis_map::view::TerrainBlock { extent: None, depth: None, walls: rustgis_map::view::BLOCK_WALLS }),
+            block: Some(rustgis_map::view::TerrainBlock {
+                extent: None,
+                depth: None,
+                walls: rustgis_map::view::BLOCK_WALLS,
+                walls_layer: None,
+            }),
             water: None,
         });
         let mut opened = Session::new(Project::default());
@@ -11854,7 +11897,7 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
 }
 
 /// A saved project's block is read back (the schema fixture `terrain_block.rgis`), its walls left
-/// to the default.
+/// to the default, and one whose walls a polygon layer colours (`terrain_block_walls.rgis`).
 #[test]
 fn terrain_block_is_read_back_from_a_saved_project() {
     let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_block.rgis")).unwrap();
@@ -11865,8 +11908,95 @@ fn terrain_block_is_read_back_from_a_saved_project() {
             extent: Some([-500_000.0, 1_500_000.0, 500_000.0, 2_500_000.0]),
             depth: Some(150.0),
             walls: rustgis_map::view::BLOCK_WALLS,
+            walls_layer: None,
         })
     );
+    // Its walls coloured by a polygon layer (`terrain_block_walls.rgis`), the layer kept by name.
+    let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_block_walls.rgis")).unwrap();
+    let block = saved.maps[0].view.terrain.as_ref().and_then(|t| t.block.clone()).unwrap();
+    assert_eq!((block.walls, block.walls_layer.as_deref()), (rustgis_map::Rgba::rgb(128, 96, 64), Some("geologia")));
+}
+
+/// A block's walls coloured by a polygon layer (#1914): the layer checked before anything changes,
+/// reported and saved with the walls' colour, following its renames, and said when it is removed
+/// or a saved project's is missing.
+#[test]
+fn terrain_block_walls_follow_a_polygon_layer() {
+    use base64::Engine;
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+    let units = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"unidade": "granito"}, "geometry": {"type": "Polygon", "coordinates": [[[10.0, 45.0], [10.02, 45.0], [10.02, 45.04], [10.0, 45.04], [10.0, 45.0]]]}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(units.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "geologia.geojson", "data": data.clone()})).unwrap();
+    let geo = s.map().layers.iter().find(|l| !l.is_raster()).map(|l| l.name.clone()).unwrap();
+    for (walls, said) in [
+        (json!({"layer": "Nowhere"}), "no layer"),
+        (json!({"layer": dem}), "isn't a polygon layer"),
+        (json!({"layer": 3}), "polygon layer's name"),
+        (json!({"layer": geo, "pattern": "x"}), "has no 'pattern'"),
+        (json!({"color": "#C8B89A80", "layer": geo}), "opaque colour"),
+        (json!(3), "is a colour"),
+    ] {
+        let e = s.run("map.terrain", &json!({"layer": dem, "block": {"walls": walls}})).unwrap_err();
+        assert!(e.contains(said), "{walls}: {e}");
+    }
+    assert!(s.map().view.terrain.is_none());
+    // Set: reported with the colour off its polygons, and saved with the project.
+    let v = s.run("map.terrain", &json!({"layer": dem, "block": {"walls": {"layer": geo}}})).unwrap();
+    assert_eq!(v["block"]["walls"], json!({"color": "#C8B89A", "layer": geo}));
+    let v = s.run("map.terrain", &json!({"block": {"walls": {"color": "#806040", "layer": geo}}})).unwrap();
+    assert_eq!(v["block"]["walls"], json!({"color": "#806040", "layer": geo}));
+    let saved = serde_json::to_string(&s.map().view).unwrap_or_default();
+    let back: rustgis_map::view::ViewSettings = serde_json::from_str(&saved).unwrap_or_default();
+    assert_eq!(back.terrain, s.map().view.terrain);
+    let walls_layer = |s: &Session| s.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).and_then(|b| b.walls_layer.clone());
+    // The walls follow their layer's renames.
+    let id = s.map().layer_by_name(&geo).map(|l| l.id).unwrap();
+    s.run("layer.rename", &json!({"layer": id, "name": "litologia"})).unwrap();
+    assert_eq!(walls_layer(&s).as_deref(), Some("litologia"));
+    // A saved project whose walls layer is missing opens with plain walls, said; the name kept.
+    let mut saved = s.project.clone();
+    saved.maps[0].layers.retain(|l| l.is_raster());
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, saved);
+    assert!(opened.notices.iter().any(|n| n.text.contains("walls layer is missing")), "{:?}", opened.notices);
+    assert_eq!(walls_layer(&opened).as_deref(), Some("litologia"));
+    // So does one whose walls layer's name two layers share: which one colours them can't be told.
+    let mut twice = s.project.clone();
+    let mut copy = twice.maps[0].layers.iter().find(|l| l.name == "litologia").cloned().unwrap();
+    copy.id = 9999;
+    twice.maps[0].layers.push(copy);
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, twice);
+    assert!(opened.notices.iter().any(|n| n.text.contains("of a name another layer shares")), "{:?}", opened.notices);
+    let mut clean = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut clean, s.project.clone());
+    assert!(!clean.notices.iter().any(|n| n.text.contains("walls layer")), "{:?}", clean.notices);
+    // Removed: said, and the name kept, so a layer of that name colours the walls again.
+    let mark = s.notice_mark();
+    s.run("layer.remove", &json!({"layer": id})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("walls layer 'litologia' was removed")), "{said:?}");
+    assert_eq!(walls_layer(&s).as_deref(), Some("litologia"));
+    // A plain colour takes the layer off.
+    let v = s.run("map.terrain", &json!({"block": {"walls": "#806040"}})).unwrap();
+    assert_eq!(v["block"]["walls"], json!("#806040"));
+    assert_eq!(walls_layer(&s), None);
+    // The DEM and the walls layer removed together: the terrain goes, said once; nothing is said
+    // of walls it no longer has.
+    s.run("layer.addDataBytes", &json!({"fileName": "geologia.geojson", "data": data})).unwrap();
+    let geo = s.map().layers.iter().find(|l| !l.is_raster()).map(|l| (l.id, l.name.clone())).unwrap();
+    s.run("map.terrain", &json!({"block": {"walls": {"layer": geo.1}}})).unwrap();
+    let dem_id = s.map().layer_by_name(&dem).map(|l| l.id).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.remove", &json!({"layer": [dem_id, geo.0]})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.starts_with("Terrain turned off")), "{said:?}");
+    assert!(!said.iter().any(|t| t.contains("walls layer")), "{said:?}");
+    assert!(s.map().view.terrain.is_none());
 }
 
 /// A 40×40 lon/lat DEM near (10°E, 45°N): a hill in the middle, with a wall to its east.
@@ -20507,7 +20637,8 @@ fn arcgis_layer_read_in_protocol_buffer_pages() {
 
 /// An ArcGIS layer added through service.add is drawn as its description's `drawingInfo` says:
 /// its symbol and transparency, with a notice of what RustGIS draws otherwise; a layer whose
-/// description says nothing keeps RustGIS's own symbol (#2080).
+/// description says nothing keeps RustGIS's own symbol (#2080), and one whose description couldn't
+/// be read keeps it too, said (#2152).
 #[test]
 fn an_arcgis_layer_comes_in_with_its_services_symbology() {
     use ogc_server::{Route, Server, arcgis_page};
@@ -20526,8 +20657,11 @@ fn an_arcgis_layer_comes_in_with_its_services_symbology() {
         Route::new(&page(0), &arcgis_page(&[0, 1], false)),
         Route::new(&layer(1), &described(Value::Null)),
         Route::new(&page(1), &arcgis_page(&[0, 1], false)),
+        // No description: its features alone, as they are asked for.
+        Route::new(&format!("{}/query", layer(2)), &arcgis_page(&[0, 1], false)),
     ]);
-    let service = r#"{"currentVersion": 11.5, "layers": [{"id": 0, "name": "Schools"}, {"id": 1, "name": "Plain"}]}"#;
+    let service =
+        r#"{"currentVersion": 11.5, "layers": [{"id": 0, "name": "Schools"}, {"id": 1, "name": "Plain"}, {"id": 2, "name": "Broken"}]}"#;
     let url = format!("{}/arcgis/rest/services/S/MapServer", server.base);
     let mut s = Session::new(Project::default());
     s.run("service.add", &json!({"url": url, "layer": "Schools", "text": service})).unwrap();
@@ -20547,6 +20681,12 @@ fn an_arcgis_layer_comes_in_with_its_services_symbology() {
     let rustgis_map::Renderer::Single(sym) = &plain.renderer else { panic!("{:?}", plain.renderer) };
     assert!(sym.default_seed(plain.geometry_type()).is_some(), "RustGIS's own symbol: {sym:?}");
     assert!(!s.notices.iter().any(|n| n.text.starts_with("Plain")));
+    s.run("service.add", &json!({"url": url, "layer": "Broken", "text": service})).unwrap();
+    let broken = s.map().layer_by_name("Broken").unwrap();
+    assert!(matches!(&broken.renderer, rustgis_map::Renderer::Single(_)), "{:?}", broken.renderer);
+    let texts: Vec<_> = s.notices.iter().map(|n| n.text.as_str()).filter(|t| t.starts_with("Broken")).collect();
+    let (failed, drawn) = ("Broken: its service's symbology, which RustGIS couldn't read (", "), drawn with RustGIS's single symbol");
+    assert!(texts.iter().any(|t| t.starts_with(failed) && t.contains("404") && t.ends_with(drawn)), "{texts:?}");
 }
 
 /// A service download the app read off the frame is drawn as its ArcGIS description's
@@ -21728,6 +21868,101 @@ fn repair_source_checks_the_extrusion_base_field() {
         assert!(error.contains(expected), "{name}: {error}");
     }
     std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn deleting_a_field_clears_the_label_expressions_reading_it() {
+    // #2147: a label class's expressions by feature stopped reading a deleted field without a
+    // word, the saved project kept them, and Default starting again lost the ones left.
+    let mut s = world();
+    let about = |s: &Session, mark: u64, word: &str| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains(word)).map(|n| n.text.clone()).collect()
+    };
+    let labels = |s: &Session| s.map().layer_by_name("Countries").map(|l| l.labels.clone()).unwrap();
+    for f in ["tag", "aside"] {
+        s.run("edit.addField", &json!({"layer": "Countries", "name": f, "type": "double"})).unwrap();
+    }
+    s.run("labels.by", &json!({"layer": "Countries", "size": "tag / 10 + 8", "color": "'red'"})).unwrap();
+    s.run("labels.class.add", &json!({"layer": "Countries", "name": "Big", "where": "name = 'x'"})).unwrap();
+    s.run("labels.by", &json!({"layer": "Countries", "class": "Big", "text": "name || tag", "angle": "TAG"})).unwrap();
+    // A field no expression reads goes without a word about the labels.
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Countries", "field": "aside"})).unwrap();
+    assert_eq!(about(&s, mark, "label"), Vec::<String>::new());
+    // Those reading the field go, in every class, the others stay; said once, naming each.
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Countries", "field": "tag"})).unwrap();
+    let got = labels(&s);
+    assert_eq!((got.default.by.size.as_deref(), got.default.by.color.as_deref()), (None, Some("'red'")));
+    let big = &got.classes[0].by;
+    assert_eq!((big.text.as_ref(), big.size.as_ref(), big.angle.as_ref(), big.color.as_deref()), (None, None, None, Some("'red'")));
+    assert_eq!(
+        about(&s, mark, "label"),
+        ["Countries: its label expressions read the deleted field tag, so they are removed: Default's size; Big's text, size and angle"]
+    );
+    let saved = serde_json::to_string(&got).unwrap();
+    assert!(!saved.contains("tag"), "{saved}");
+    // Undo brings the field and the expressions back.
+    s.run("edit.undo", &Value::Null).unwrap();
+    let got = labels(&s);
+    assert_eq!((got.default.by.size.as_deref(), got.classes[0].by.angle.as_deref()), (Some("tag / 10 + 8"), Some("TAG")));
+    // One part of one class.
+    s.run("labels.class.remove", &json!({"layer": "Countries", "class": "Big"})).unwrap();
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Countries", "field": "tag"})).unwrap();
+    assert_eq!(
+        about(&s, mark, "label"),
+        ["Countries: its label class Default's size expression read the deleted field tag, so it is removed"]
+    );
+    // Default on the field, its text reading it too: the text goes, Default starts again on a
+    // name-like field keeping the expressions left, and the labels are turned off, said.
+    s.run("edit.addField", &json!({"layer": "Countries", "name": "label", "type": "text"})).unwrap();
+    s.run("labels.field", &json!({"layer": "Countries", "field": "label"})).unwrap();
+    s.run("labels.by", &json!({"layer": "Countries", "text": "upper(label)"})).unwrap();
+    assert!(labels(&s).enabled);
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Countries", "field": "label"})).unwrap();
+    let got = labels(&s);
+    assert!(!got.enabled);
+    assert_eq!((got.default.by.text, got.default.by.color.as_deref()), (None, Some("'red'")));
+    let said = about(&s, mark, "label");
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert_eq!(said[0], "Countries: its label class Default's text expression read the deleted field label, so it is removed");
+    let start =
+        format!("Countries: its label class Default labelled the deleted field label, so it starts again on field {}", got.default.field);
+    assert_eq!(said[1], format!("{start} with the default text symbol, and the labels are turned off"));
+    s.run("edit.undo", &Value::Null).unwrap();
+    let got = labels(&s);
+    assert!(got.enabled);
+    assert_eq!((got.default.field.as_str(), got.default.by.text.as_deref()), ("label", Some("upper(label)")));
+    // Labels off: a class set up is still said to start again, with nothing turned off.
+    s.run("labels.enable", &json!({"layer": "Countries", "on": false})).unwrap();
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": "Countries", "field": "label"})).unwrap();
+    let field = labels(&s).default.field;
+    assert_eq!(
+        about(&s, mark, "starts again"),
+        [format!(
+            "Countries: its label class Default labelled the deleted field label, so it starts again on field {field} with the default text symbol"
+        )]
+    );
+}
+
+#[test]
+fn deleting_a_field_is_refused_while_the_time_slider_reads_it() {
+    // #2147: without its field the time slider showed every row, whatever its window.
+    let mut s = timed_events();
+    s.run("time.bind", &json!({"field": "when"})).unwrap();
+    let depth = s.undo_depth();
+    let err = s.run("edit.deleteField", &json!({"layer": "Events", "field": "WHEN"})).unwrap_err();
+    assert!(err.contains("the layer is bound to the time slider by 'when': unbind it first"), "{err}");
+    assert_eq!(s.undo_depth(), depth);
+    assert!(s.map().layer_by_name("Events").and_then(|l| l.dataset.field_index("when")).is_some());
+    assert_eq!(shown(&s), ["e0"]);
+    // Another field goes; once unbound, the slider's field goes too.
+    s.run("edit.deleteField", &json!({"layer": "Events", "field": "ms"})).unwrap();
+    s.run("time.unbind", &Value::Null).unwrap();
+    s.run("edit.deleteField", &json!({"layer": "Events", "field": "when"})).unwrap();
 }
 
 #[test]
@@ -36673,8 +36908,17 @@ fn time_slider_survives_saving_cumulative_edits_and_bad_parameters() {
         l.dataset.features[0].attrs[fi] = rustgis_data::Value::Text("2015-12-01".into());
     }
     assert_eq!(shown(&t), ["e1", "e2", "e3", "e7"]);
-    // A field that is gone filters nothing.
-    t.run("edit.deleteField", &json!({"field": "when"})).unwrap();
+    // Deleting the slider's field is refused (#2147); a field gone otherwise (a source's fields
+    // changed outside a command) filters nothing.
+    assert!(t.run("edit.deleteField", &json!({"field": "when"})).unwrap_err().contains("time slider"));
+    {
+        let l = t.map_mut().layers.iter_mut().find(|l| l.name == "Events").unwrap();
+        let fi = l.dataset.field_index("when").unwrap();
+        l.dataset.fields.remove(fi);
+        for f in &mut l.dataset.features {
+            f.attrs.remove(fi);
+        }
+    }
     assert_eq!(shown(&t).len(), 8);
 }
 
@@ -50250,6 +50494,80 @@ fn layout_no_data_legend_is_optional_and_saved() {
     ));
     let old: rustgis_map::layout::Layout = serde_json::from_value(old).unwrap();
     assert!(matches!(old.element(3).unwrap().kind, ElementKind::Legend { show_no_data: false, .. }));
+}
+
+/// Over the map, a legend with nothing under it but the blank paper (no layer, no graticule line)
+/// has a clear box; one over data or a graticule line, or with "legendBox": "always", a white one
+/// (#1379).
+#[test]
+fn a_publication_legend_over_plain_paper_has_no_box() {
+    let dir = std::env::temp_dir().join(format!("rustgis-legend-box-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a_layer_name.geojson");
+    let json = json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry":
+        {"type": "Polygon", "coordinates": [[[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 10.0], [0.0, 0.0]]]}}]});
+    std::fs::write(&path, json.to_string()).unwrap();
+    let laid = |profile: &str, extent: Value, legend_box: Value| {
+        let mut s = Session::new(Project::default());
+        s.run("map.basemap", &json!({"name": "blank"})).unwrap();
+        for _ in 0..2 {
+            s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+        }
+        let p = json!({"profile": profile, "extent": extent, "author": "", "locator": "none", "legendBox": legend_box});
+        let r = s.run("layout.publication", &p).unwrap();
+        let l = s.project.layouts.last().unwrap();
+        let fill = l.elements.iter().find(|e| e.name == "Legend Box").map(|e| match &e.kind {
+            rustgis_map::layout::ElementKind::Rectangle { fill, .. } => fill.0[3],
+            _ => panic!("the legend's box is a rectangle"),
+        });
+        (r["legendBox"].as_bool().unwrap(), fill.expect("the box is kept as an element, clear or not"))
+    };
+    assert_eq!(laid("figure-2col", json!([-8, -6, 23, 16]), Value::Null), (false, 0), "clear over the paper");
+    assert_eq!(laid("figure-2col", json!([-8, -6, 23, 16]), json!("auto")), (false, 0), "\"auto\" is the default");
+    let (boxed, alpha) = laid("figure-2col", json!([-8, -6, 23, 16]), json!("always"));
+    assert!(boxed && alpha > 0, "\"always\" keeps it white");
+    // At this extent a graticule line runs under the legend's corner.
+    let (boxed, alpha) = laid("a4-landscape", json!([-5, -5, 20, 15]), Value::Null);
+    assert!(boxed && alpha > 0, "a line under it keeps the box");
+    // In a side column (panel) or on a card (modular), the legend keeps its box, by default too.
+    for style in ["panel", "modular"] {
+        let mut s = Session::new(Project::default());
+        s.run("map.basemap", &json!({"name": "blank"})).unwrap();
+        s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+        let p = json!({"profile": "a4-landscape", "extent": [-8, -6, 23, 16], "author": "", "style": style});
+        let r = s.run("layout.publication", &p).unwrap();
+        let l = s.project.layouts.last().unwrap();
+        let filled = l.elements.iter().any(|e| {
+            e.name == "Legend Box" && matches!(&e.kind, rustgis_map::layout::ElementKind::Rectangle { fill, .. } if fill.0[3] > 0)
+        });
+        assert!(r["legendBox"] == json!(true) && filled, "{style}: {r}");
+    }
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    let bad = s.run("layout.publication", &json!({"legendBox": "never"})).unwrap_err();
+    assert!(bad.contains("legendBox is"), "{bad}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A map moved aside for its legend stays nearest the page's visual centre: moved away from it (down,
+/// here, the frame's centre being under the page's), it goes less than all of the way the extent
+/// can go when part of it is enough (#1379).
+#[test]
+fn a_publication_map_moved_aside_stays_nearest_the_visual_centre() {
+    let mut s = Session::new(Project::default());
+    for name in ["Other countries", "Area"] {
+        s.run("layer.addSample", &json!({"name": "countries"})).unwrap();
+        s.run("layer.rename", &json!({"layer": "Countries", "name": name})).unwrap();
+    }
+    s.run("layer.definitionQuery", &json!({"layer": "Area", "where": "continent = 'Europe'"})).unwrap();
+    s.run("layer.symbology", &json!({"layer": "Area", "type": "unique", "field": "name"})).unwrap();
+    let p = json!({"profile": "a4-portrait", "extent": [-25, 34, 45, 72], "author": "", "title": "Europe"});
+    let r = s.run("layout.publication", &p).unwrap();
+    let dy = r["mapShift"][1].as_f64().unwrap();
+    // All of the way down is 36 mm here (what the move was before #1379's item 8).
+    assert!(dy > 1.0 && dy < 35.0, "moved down, less than all the way: {r}");
+    let said = r["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).any(|w| w.contains(&format!("{:.0} mm down", dy)));
+    assert!(said, "{r}");
 }
 
 /// #2139: a name or text over its limit is refused with its length and the limit, and nothing

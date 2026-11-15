@@ -15,6 +15,8 @@ use rustgis_tiles::template::{self, TileId};
 
 mod water;
 
+pub(crate) use water::Water;
+
 /// Cells along each side of a tilted view's band laid over the relief while the map moves (the
 /// drape, `tilt_drape` in the app): few enough to lay out every frame.
 pub const CELLS: usize = 40;
@@ -210,6 +212,12 @@ impl Ground {
         }
     }
 
+    /// The terrain's water (#1915), when it names a water layer: what Shaded Relief draws with
+    /// the even light of flat ground.
+    pub(crate) fn water(&self) -> Option<&Arc<Water>> {
+        self.water.as_ref()
+    }
+
     /// How many polygons of the terrain's water layer have no level, so stay on the ground: no
     /// height known along their shore and no level given (#1915). 0 without water.
     pub fn water_unlevelled(&self) -> usize {
@@ -381,6 +389,16 @@ impl Ground {
             Heights::Tiles { pending, .. } => *pending.borrow(),
         }
     }
+}
+
+/// The layer called `name` on `map` that a block diagram's walls are coloured by (#1914), when it
+/// can be: the only layer of that name, of polygons, holding them all (not read a view at a
+/// time), as `map.terrain` checks it. Otherwise the walls are their own colour.
+pub fn walls_layer<'a>(map: &'a Map, name: &str) -> Option<&'a rustgis_map::Layer> {
+    let mut named = map.layers.iter().filter(|l| l.name.eq_ignore_ascii_case(name));
+    let l = named.next()?;
+    let polygons = l.geometry_type() == rustgis_data::GeometryType::Polygon;
+    (named.next().is_none() && polygons && !l.is_streamed()).then_some(l)
 }
 
 /// The largest north-up Web Mercator box inside a DEM's corners, near enough (the second
@@ -567,6 +585,7 @@ mod tests {
             extent: Some([0.0, 0.0, 200.0, 100.0]),
             depth: Some(1000.0),
             walls: rustgis_map::view::BLOCK_WALLS,
+            walls_layer: None,
         };
         m.view.terrain = Some(rustgis_map::view::Terrain {
             source: rustgis_map::view::TerrainSource::Layer("dem".into()),
@@ -609,6 +628,7 @@ mod tests {
             extent: Some([0.0, 0.0, 5000.0, 5000.0]),
             depth: Some(300.0),
             walls: rustgis_map::view::BLOCK_WALLS,
+            walls_layer: None,
         };
         m.view.terrain = Some(rustgis_map::view::Terrain {
             source: rustgis_map::view::TerrainSource::Tiles {
