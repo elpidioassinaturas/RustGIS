@@ -9390,7 +9390,12 @@ mod tests {
         m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
         let block = |extent| rustgis_map::view::TerrainBlock { extent, depth: Some(1000.0), walls: rustgis_map::view::BLOCK_WALLS };
         let terrain = |block: Option<rustgis_map::view::TerrainBlock>| {
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer("dem".into()), exaggeration: 1.0, block, water: None })
+            Some(rustgis_map::view::Terrain {
+                source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+                exaggeration: 1.0,
+                block,
+                water: None,
+            })
         };
         // With no box, the DEM's extent.
         m.view.terrain = terrain(Some(block(None)));

@@ -256,7 +256,9 @@ impl TerrainBlock {
                 ));
             }
         }
-        if let Some(d) = self.depth && !(d.is_finite() && (0.0..=BLOCK_MAX_DEPTH).contains(&d)) {
+        if let Some(d) = self.depth
+            && !(d.is_finite() && (0.0..=BLOCK_MAX_DEPTH).contains(&d))
+        {
             return Err(format!("block's depth is metres, 0 to {BLOCK_MAX_DEPTH:.0}"));
         }
         if self.walls.a() != 255 {

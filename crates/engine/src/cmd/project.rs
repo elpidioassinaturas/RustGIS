@@ -286,7 +286,7 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
 fn off_dem(extent: Option<[f64; 4]>, dem: Option<&(String, Option<[f64; 4]>, Option<[f64; 4]>)>) -> Option<String> {
     let (n, bbox, footprint) = dem?;
     match (*bbox, extent) {
-        (None, None) => Some(format!("no box fits inside '{n}''s extent on the map: give the block an extent [xmin, ymin, xmax, ymax]")),
+        (None, None) => Some(format!("no box fits inside '{n}'s extent on the map: give the block an extent [xmin, ymin, xmax, ymax]")),
         (_, Some(e)) => {
             let d = (*footprint)?;
             (e[2] <= d[0] || e[0] >= d[2] || e[3] <= d[1] || e[1] >= d[3]).then(|| {

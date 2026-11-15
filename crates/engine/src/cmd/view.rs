@@ -451,13 +451,11 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     let mut block_cut = false;
     let t = match (source, m.view.terrain.take()) {
         (Some(source), old) => {
-            let (old_exaggeration, old_block, old_water) =
-                old.map_or((None, None, None), |t| (Some(t.exaggeration), t.block, t.water));
+            let (old_exaggeration, old_block, old_water) = old.map_or((None, None, None), |t| (Some(t.exaggeration), t.block, t.water));
             // A block cut to the old DEM's extent doesn't carry over to elevation tiles, which
             // have none (the result shows it gone); one with its own box does.
-            block_cut = block.is_none()
-                && old_block.as_ref().is_some_and(|b| b.extent.is_none())
-                && matches!(source, TerrainSource::Tiles { .. });
+            block_cut =
+                block.is_none() && old_block.as_ref().is_some_and(|b| b.extent.is_none()) && matches!(source, TerrainSource::Tiles { .. });
             let old_block = old_block.filter(|b| b.extent.is_some() || matches!(source, TerrainSource::Layer(_)));
             Terrain {
                 source,
@@ -510,7 +508,7 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     let refused = match (&dem_box, t.block.as_ref().and_then(|b| b.extent)) {
         // A DEM whose corners give no box (one off the map's world, say) would draw no block.
         (Some((n, None, _)), None) => Some(format!(
-            "no box fits inside '{n}''s extent on the map: give the block an extent [xmin, ymin, xmax, ymax]{kept} (Terrain stays as it was)"
+            "no box fits inside '{n}'s extent on the map: give the block an extent [xmin, ymin, xmax, ymax]{kept} (Terrain stays as it was)"
         )),
         // A box off the DEM would draw nothing. A box inside its footprint but off its inner box
         // still draws the ground it reaches (a DEM turned by its projection has corners beyond it).
@@ -571,7 +569,8 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     m.view.terrain = Some(t);
     if block_cut {
         s.notify(
-            "Terrain's block was cut to the DEM's extent and is off with the switch to elevation tiles: give it an extent to keep it".to_string(),
+            "Terrain's block was cut to the DEM's extent and is off with the switch to elevation tiles: give it an extent to keep it"
+                .to_string(),
             false,
         );
     }
