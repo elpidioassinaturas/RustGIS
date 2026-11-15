@@ -204,6 +204,19 @@ fn a_refused_renewal_ends_the_sign_in_and_an_unreachable_host_keeps_it() {
     assert!(renewal_due().is_none(), "held off after an unreachable host");
     state().session.as_mut().unwrap().retry_at = 0;
     assert_eq!(authorization_fresh_using(DATA, None, |_, _, _| Ok((502, b"<html>".to_vec()))).as_deref(), Some("Bearer access-old"));
+    // A rate limit, a timeout or a proxy's 403 page says nothing of the refresh token: kept too,
+    // and the account is the same one (a renewal that failed doesn't change it).
+    let identity = account_identity().unwrap();
+    for status in [429, 408, 403] {
+        state().session.as_mut().unwrap().retry_at = 0;
+        let answer = authorization_fresh_using(DATA, None, move |_, _, _| Ok((status, b"<html>busy</html>".to_vec())));
+        assert_eq!(answer.as_deref(), Some("Bearer access-old"), "HTTP {status}");
+        assert!(signed_in().is_some() && !expired(), "HTTP {status}");
+    }
+    assert!(identity.is_current(), "a failed renewal keeps the identity");
+    // Its token expired while the sign-in host didn't answer: the message says to try again.
+    state().session.as_mut().unwrap().expires_at = now_secs() - 1;
+    assert!(refused_message(DATA).contains("expired and couldn't be renewed yet"), "{}", refused_message(DATA));
     state().session.as_mut().unwrap().retry_at = 0;
     // Refused: ended, and the message says so.
     assert_eq!(authorization_fresh(DATA), None);

@@ -80,11 +80,21 @@ fn drop_if_expired(st: &mut State, now: i64) -> bool {
 }
 
 /// An immutable, exact snapshot of the sign-in, for binding approvals to it. It holds tokens and
-/// deliberately has no formatting, serialization or raw-value accessors. A renewal changes it.
-#[derive(Clone, PartialEq, Eq)]
+/// deliberately has no formatting, serialization or raw-value accessors. A renewal changes it; a
+/// renewal that failed (and only holds off the next try) doesn't.
+#[derive(Clone)]
 pub struct AccountIdentity {
     session: Option<Session>,
 }
+
+impl PartialEq for AccountIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        let key = |s: &Session| (s.endpoint.clone(), s.username.clone(), s.access.clone(), s.refresh.clone());
+        self.session.as_ref().map(key) == other.session.as_ref().map(key)
+    }
+}
+
+impl Eq for AccountIdentity {}
 
 impl AccountIdentity {
     /// Whether the sign-in is still the one snapshotted. Never renews or performs I/O.
@@ -215,6 +225,7 @@ fn parse_grant(status: u16, body: &[u8], now: i64) -> Result<Grant, String> {
 }
 
 /// Keeps a sign-in made at `endpoint` from its token answer; what the status tells of it.
+#[cfg(not(target_arch = "wasm32"))]
 fn keep(endpoint: &str, username: &str, status: u16, body: &[u8]) -> Result<Info, String> {
     let now = now_secs();
     let g = parse_grant(status, body, now)?;
@@ -317,8 +328,10 @@ pub fn renewal_done(r: &Renewal, answer: Result<(u16, &[u8]), String>) {
                 s.refresh_expires_at = g.refresh_expires_at;
             }
         }
-        // Keycloak refuses an expired or revoked refresh token with 400 `invalid_grant`.
-        Ok((status, Err(e))) if (400..500).contains(&status) => {
+        // Keycloak refuses an expired or revoked refresh token with 400 `invalid_grant` (401 for a
+        // refused client). Any other 4xx (a rate limit, a timeout, a proxy's 403 page) says
+        // nothing of the refresh token: the sign-in is kept and renewed again later.
+        Ok((400 | 401, Err(e))) => {
             log::warn!("the Copernicus Data Space sign-in ended: {e}");
             st.session = None;
             st.expired = true;
@@ -339,8 +352,15 @@ pub fn refused_message(url: &str) -> String {
     // An OData address names its file in its last node: `…/Nodes(f.tif)/$value`.
     let last = url.split(['?', '#']).next().unwrap_or(url).trim_end_matches("/$value").rsplit('/').next().unwrap_or("");
     let file = last.strip_prefix("Nodes(").and_then(|n| n.strip_suffix(')')).unwrap_or(last);
-    if signed_in().is_some() {
-        format!("{file}: Copernicus Data Space didn't accept the sign-in's token: sign in again (copernicus.login)")
+    if let Some(info) = signed_in() {
+        // Kept, but its token expired and the sign-in host didn't renew it (it holds off a while).
+        if info.expires_at <= now_secs() {
+            format!(
+                "{file}: the Copernicus Data Space sign-in's token expired and couldn't be renewed yet: try again in a minute, or sign in again (copernicus.login)"
+            )
+        } else {
+            format!("{file}: Copernicus Data Space didn't accept the sign-in's token: sign in again (copernicus.login)")
+        }
     } else if expired() {
         format!("{file}: the Copernicus Data Space sign-in expired: sign in again (copernicus.login)")
     } else {

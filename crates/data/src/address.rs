@@ -173,15 +173,15 @@ const SAS_KEYS: &[&str] =
 
 /// Exact and containment rules over canonical names, plus query-wide context.
 fn credential(k: &str, query: &QueryNames) -> bool {
-    matches!(k, "key" | "appid" | "subscriptionkey" | "clientkey" | "saskey" | "pwd" | "sig" | "signature" | "sas" | "authorization" | "proxyauthorization" | "cookie" | "setcookie" | "bearer")
+    matches!(k, "key" | "appid" | "subscriptionkey" | "clientkey" | "saskey" | "pwd" | "sig" | "signature" | "sas" | "authorization" | "proxyauthorization" | "cookie" | "setcookie" | "bearer"
+        // A one-time code, as CDSE's sign-in takes it: exact, so no other name is cut.
+        | "totp")
         // These public refusal and tracing headers share the signing family's prefix.
         || (k.starts_with("xamz") && !matches!(k, "xamznrequestid" | "xamznwafaction" | "xamzcfid"))
         || k.starts_with("xgoog")
         || [
             "password",
             "passwd",
-            // A one-time code (`totp`), as CDSE's sign-in takes it.
-            "totp",
             "secret",
             "token",
             "credential",

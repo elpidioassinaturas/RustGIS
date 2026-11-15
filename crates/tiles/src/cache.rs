@@ -2940,10 +2940,12 @@ mod native {
                     req = req.header("Authorization", &auth);
                 }
                 // A Copernicus Data Space sign-in's token goes to its data hosts only, asked for at
-                // each hop like Earthdata's (and renewed first when it is about to expire).
+                // each hop like Earthdata's (and renewed first when it is about to expire). A hop
+                // carrying it makes a refusal status-only: a server may echo the token back.
                 if !prepared.signed
                     && let Some(auth) = crate::copernicus::authorization_fresh(&at)
                 {
+                    carried_login = true;
                     req = req.header("Authorization", &auth);
                 }
                 // An ArcGIS sign-in's token goes to the portal and the servers it covers, asked for at
@@ -4486,7 +4488,19 @@ mod tests {
             b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/100\r\nContent-Length: 4\r\nConnection: close\r\n\r\nII*\0".to_vec();
         let away =
             format!("HTTP/1.1 302 Found\r\nLocation: {elsewhere}/copy.tif\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes();
-        let (data, data_asked) = serve_recorded(vec![unauthorized, partial, away]);
+        // A refusal that echoes the token back, in a header and in its body.
+        let echoed = "echo synthetic-cdse-access";
+        let forbidden = format!(
+            "HTTP/1.1 403 Forbidden
+x-request-id: synthetic-cdse-access
+Content-Length: {}
+Connection: close
+
+{echoed}",
+            echoed.len()
+        )
+        .into_bytes();
+        let (data, data_asked) = serve_recorded(vec![unauthorized, partial, away, forbidden]);
         copernicus::TEST_HOSTS.lock().unwrap_or_else(|e| e.into_inner()).push(data.clone());
         let agent = native::agent();
         let file = format!("{data}/odata/v1/Products(abc)/Nodes(p)/Nodes(f.tif)/$value");
@@ -4511,6 +4525,11 @@ mod tests {
         let followed = elsewhere_asked.recv_timeout(Duration::from_secs(5)).unwrap().to_ascii_lowercase();
         assert!(followed.starts_with("get /copy.tif http/1.1\r\n"), "{followed}");
         assert!(!followed.contains("authorization") && !followed.contains("synthetic-cdse"), "{followed}");
+
+        // A detailed download's refusal keeps no header or body from a hop that carried the token.
+        let failure = native::get_detailed(&agent, &format!("{data}/echo")).unwrap_err();
+        assert!(failure.answer.is_none(), "{failure:?}");
+        assert!(!format!("{failure:?}").contains("synthetic-cdse"), "{failure:?}");
 
         copernicus::TEST_HOSTS.lock().unwrap_or_else(|e| e.into_inner()).retain(|h| *h != data);
         copernicus::logout();

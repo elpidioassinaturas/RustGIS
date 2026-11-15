@@ -37,7 +37,13 @@ fn status() -> Value {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn login(_s: &mut Session, p: &Value) -> CmdResult {
-    // A missing or non-text one is blank. Checked before anything is sent, and never quoted back.
+    // Text only: a number would lose a one-time code's leading zeros. Checked before anything is
+    // sent, and never quoted back; a missing one is blank (and refused if it is required).
+    for k in ["username", "password", "totp"] {
+        if p.get(k).is_some_and(|v| !v.is_string() && !v.is_null()) {
+            return Err(format!("{k} is text, in quotes (\"{k}\": \"…\")"));
+        }
+    }
     let text = |k: &str| super::ps(p, k).unwrap_or("");
     copernicus::login(text("username"), text("password"), super::ps(p, "totp"))?;
     // Files refused before the sign-in are asked for again.
