@@ -340,6 +340,12 @@ fn terrain_water(s: &Session, w: &serde_json::Map<String, Value>) -> Result<rust
 
 /// Sets the map's terrain: the relief a tilted view drapes the map over, from a DEM raster layer
 /// or elevation tiles, or turns it off. Parameters are checked before anything changes.
+///
+/// Runs on the UI thread: it changes the map's view settings, which the frames read. With water
+/// (#1915) it reads the water's shores over a DEM layer for its notices, bounded by the render
+/// crate's `MAX_SHORE_SAMPLES` heights, with no progress or Cancel; the read is kept, so the
+/// frames that follow draw from it instead of reading the shores again. Over elevation tiles it
+/// reads no height (the coarse count comes from the shapes).
 fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     use rustgis_map::view::{MAX_EXAGGERATION, Terrain, TerrainEncoding, TerrainSource};
     if p.get("off").and_then(Value::as_bool) == Some(true) {

@@ -82,13 +82,18 @@ impl Slabs {
         let cap = edges.len().saturating_mul(EDGES_PER_STRIP_REF).max(4096);
         let mut n = (edges.len() / 4).clamp(1, 4096);
         let mut step = (extent.height() / n as f64).max(f64::MIN_POSITIVE);
-        while n > 1
-            && edges
+        // Counting stops once past the cap, so the count can't overflow (a 32-bit `usize` in the
+        // browser).
+        let fits = |n: usize, step: f64| {
+            edges
                 .iter()
-                .map(|(a, b)| strip(a.y.max(b.y), extent.min_y, step, n) - strip(a.y.min(b.y), extent.min_y, step, n) + 1)
-                .sum::<usize>()
-                > cap
-        {
+                .try_fold(0usize, |t, (a, b)| {
+                    let refs = strip(a.y.max(b.y), extent.min_y, step, n) - strip(a.y.min(b.y), extent.min_y, step, n) + 1;
+                    Some(t.saturating_add(refs)).filter(|t| *t <= cap)
+                })
+                .is_some()
+        };
+        while n > 1 && !fits(n, step) {
             n /= 2;
             step = (extent.height() / n as f64).max(f64::MIN_POSITIVE);
         }
