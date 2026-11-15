@@ -1254,7 +1254,10 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         let chunks =
             if chunks.is_empty() && is_web(&root) { fetch(&root, &zarr::coordinate_keys(&store, &sel.variable))?.0 } else { chunks };
         let (dim, dates) = zarr::time_axis(&store, &sel.variable, &chunks).ok_or_else(|| {
-            format!("{} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\", or of whole years, such as 2017)", sel.variable)
+            format!(
+                "{} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\", or of whole years, such as 2017)",
+                sel.variable
+            )
         })?;
         // Each date is a step: an axis out of order or with a date twice (stores joined end to end)
         // can't be followed step by step.
@@ -1736,8 +1739,11 @@ pub fn zarr_cube(s: &Session, p: &Value) -> Result<ZarrCube, String> {
     pick_variable(&store, &mut src.sel)?;
     let var = src.sel.variable.clone();
     let coords = store_files(&src.root, &zarr::coordinate_keys(&store, &var))?;
-    let (dim, dates) = zarr::time_axis(&store, &var, &coords)
-        .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\", or of whole years, such as 2017)"))?;
+    let (dim, dates) = zarr::time_axis(&store, &var, &coords).ok_or_else(|| {
+        format!(
+            "{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\", or of whole years, such as 2017)"
+        )
+    })?;
     // Every step a date, so a period and months pick the steps they say (a summary takes them
     // in any order; a trend asks for time order itself, in `cube_from`).
     if !dates.iter().all(|d| d.is_finite()) {

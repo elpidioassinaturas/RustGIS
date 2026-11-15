@@ -4002,7 +4002,10 @@ mod tests {
         let nested = unlisted_store("g/", years.clone(), "int32", serde_json::json!({}));
         let (docs, rounds) = discover(&nested, "g/emb");
         assert_eq!(rounds[0], ["g/zarr.json", "g/emb/zarr.json", "y/zarr.json", "x/zarr.json"]);
-        assert_eq!(rounds[1], ["g/time/zarr.json", "time/zarr.json", "g/band/zarr.json", "band/zarr.json", "g/y/zarr.json", "g/x/zarr.json"]);
+        assert_eq!(
+            rounds[1],
+            ["g/time/zarr.json", "time/zarr.json", "g/band/zarr.json", "band/zarr.json", "g/y/zarr.json", "g/x/zarr.json"]
+        );
         let store = parse_store(&docs).unwrap();
         assert!(time_axis(&store, "g/emb", &time_chunk(&nested, "g/")).is_some());
         // A name that would lead out of the store isn't asked for.
@@ -4013,7 +4016,8 @@ mod tests {
         assert!(member_keys(&[zgroup(".zgroup"), (".zmetadata".into(), br#"{"metadata": {}}"#.to_vec())], "v").is_empty());
         // Zarr 2 with no .zmetadata: an array's .zarray and .zattrs, then its _ARRAY_DIMENSIONS.
         assert_eq!(member_keys(&[zgroup(".zgroup")], "v"), ["v/.zarray", "v/.zattrs"]);
-        let v2 = [zgroup(".zgroup"), zgroup("v/.zarray"), ("v/.zattrs".into(), br#"{"_ARRAY_DIMENSIONS": ["year", "lat", "lon"]}"#.to_vec())];
+        let v2 =
+            [zgroup(".zgroup"), zgroup("v/.zarray"), ("v/.zattrs".into(), br#"{"_ARRAY_DIMENSIONS": ["year", "lat", "lon"]}"#.to_vec())];
         assert_eq!(member_keys(&v2, "v"), ["year/.zarray", "year/.zattrs", "lat/.zarray", "lat/.zattrs", "lon/.zarray", "lon/.zattrs"]);
 
         // Not years: step numbers, units that aren't years, a float axis.
