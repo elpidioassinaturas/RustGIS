@@ -815,4 +815,75 @@ mod tests {
         let dry = colours(&mut m);
         assert!(dry.iter().any(|c| *c != wet[0]), "{dry:?}");
     }
+
+    /// A DEM cell the shore crosses is water or land whole, by its centre, for its colour as for
+    /// its light: with nearest resampling every pixel in it is drawn alike (#1915 part 2).
+    #[test]
+    fn a_cell_the_shore_crosses_is_drawn_whole_by_its_centre() {
+        let (mut m, _) = hill_with_water(None);
+        let lagos = m.layers.iter().find(|l| l.name == "lagos").map(|l| l.id).unwrap();
+        m.layer_mut(lagos).unwrap().visible = false;
+        let dem = m.layers.iter().find(|l| l.raster.is_some()).map(|l| l.id).unwrap();
+        let l = m.layer_mut(dem).unwrap();
+        l.visible = true;
+        let style = &mut l.raster.as_mut().unwrap().style;
+        style.resampling = rustgis_map::raster::Resampling::Nearest;
+        style.renderer = rustgis_map::RasterRenderer::ShadedRelief {
+            band: 0,
+            ramp: Some(rustgis_map::Ramp::Terrain),
+            azimuth: 315.0,
+            altitude: 45.0,
+            z_factor: 1.0,
+            shadow: 0.0,
+            sky: 0.0,
+            fill: 0.0,
+            rock: None,
+        };
+        let camera = rustgis_map::Camera { center: lonlat_to_merc(Coord::new(0.25, -0.1)), res: 300.0, bearing: 0.0, pitch: 0.0 };
+        let view = crate::View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        let drawn = crate::render_complete(&mut m, &view).unwrap();
+        let px = |lon: f64, lat: f64| {
+            let (x, y) = view.to_screen(lonlat_to_merc(Coord::new(lon, lat)));
+            drawn.pixmap.pixel(x as u32, y as u32).map(|c| [c.red(), c.green(), c.blue()]).unwrap()
+        };
+        // The lake's west shore is at 0.2°; the DEM's cell from 0.1875° to 0.21875° has its centre
+        // in the lake, so its land west of the shore is drawn as the lake.
+        assert_eq!(px(0.19, -0.11), px(0.215, -0.11), "one cell, one colour");
+        assert_eq!(px(0.19, -0.11), px(0.3, -0.1), "the lake's");
+    }
+
+    /// Over elevation tiles not read yet, the water Shaded Relief draws is read from shores still
+    /// on their way: the frame says so, so an export waits for them (#1915 part 2).
+    #[test]
+    fn relief_water_over_tiles_on_their_way_leaves_the_frame_pending() {
+        let (mut m, _) = hill_with_water(None);
+        let dem = m.layers.iter().find(|l| l.raster.is_some()).map(|l| l.id).unwrap();
+        let l = m.layer_mut(dem).unwrap();
+        l.visible = true;
+        l.raster.as_mut().unwrap().style.renderer = rustgis_map::RasterRenderer::ShadedRelief {
+            band: 0,
+            ramp: None,
+            azimuth: 315.0,
+            altitude: 45.0,
+            z_factor: 1.0,
+            shadow: 0.0,
+            sky: 0.0,
+            fill: 0.0,
+            rock: None,
+        };
+        let camera = rustgis_map::Camera { center: lonlat_to_merc(Coord::new(0.35, -0.05)), res: 300.0, bearing: 0.0, pitch: 0.0 };
+        let view = crate::View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        let scale = m.ground_res_at(&camera) / rustgis_geom::PIXEL_M;
+        let (_, pending) = crate::relief_water(&m, &view, &crate::Labels::Own, scale).expect("water over the DEM");
+        assert!(!pending, "a DEM layer waits for nothing");
+        m.view.terrain.as_mut().unwrap().source = rustgis_map::view::TerrainSource::Tiles {
+            url: "https://relief-water.invalid/{z}/{x}/{y}.png".into(),
+            encoding: TerrainEncoding::Terrarium,
+        };
+        let (_, pending) = crate::relief_water(&m, &view, &crate::Labels::Own, scale).expect("water over tiles");
+        assert!(pending, "shore tiles on their way");
+        // Without a Shaded Relief drawn, nothing is read.
+        m.layer_mut(dem).unwrap().visible = false;
+        assert!(crate::relief_water(&m, &view, &crate::Labels::Own, scale).is_none());
+    }
 }

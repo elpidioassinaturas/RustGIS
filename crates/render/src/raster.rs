@@ -533,7 +533,7 @@ fn draw_with(
         sky,
         fill,
         rock,
-        water: light.water.filter(|_| relief.is_some()),
+        water: light.water.filter(|_| relief.is_some()).map(|w| WaterCells::new(w, r, &grid)),
         resampling,
         alpha_band,
         alpha_max: rustgis_data::raster::alpha_max(&r.data_type),
@@ -647,6 +647,66 @@ fn draw_scaled(pm: &mut Pixmap, src: &Pixmap, paint: &PixmapPaint, at: Transform
     });
 }
 
+/// The most relief cells in view whose water levels a draw keeps (16 MB): past that a cell is
+/// smaller than a pixel, so few pixels share one and each is looked up as it comes.
+const MAX_WATER_CELLS: usize = 1 << 22;
+
+/// A cell's water level not looked up yet ([`WaterCells`]).
+const UNREAD: u32 = u32::MAX;
+
+/// The terrain's water over a Shaded Relief's cells for one draw (#1915): each cell's level is
+/// looked up once, at its centre, however many pixels and lights read it (on a projected DEM each
+/// lookup projects the centre to Web Mercator).
+struct WaterCells<'a> {
+    water: &'a Water,
+    /// The first column and row of the cells kept, and how many columns a row.
+    origin: (i64, i64),
+    cols: i64,
+    /// Each kept cell's level (`f32` bits), NaN where it is dry, [`UNREAD`] until looked up.
+    levels: Vec<std::sync::atomic::AtomicU32>,
+}
+
+impl<'a> WaterCells<'a> {
+    /// The water over the cells of `r` that the source positions in `grid` reach, with a margin of
+    /// two cells (a light's neighbours); none kept when they are more than [`MAX_WATER_CELLS`].
+    fn new(water: &'a Water, r: &Raster, grid: &[Option<(f64, f64)>]) -> WaterCells<'a> {
+        let (mut c0, mut r0, mut c1, mut r1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for (c, row) in grid.iter().flatten() {
+            (c0, r0, c1, r1) = (c0.min(*c), r0.min(*row), c1.max(*c), r1.max(*row));
+        }
+        let clamp = |v: f64, n: u32| if v.is_finite() { (v.floor() as i64).clamp(0, i64::from(n)) } else { 0 };
+        let (c0, c1) = (clamp(c0 - 2.0, r.width), clamp(c1 + 3.0, r.width));
+        let (r0, r1) = (clamp(r0 - 2.0, r.height), clamp(r1 + 3.0, r.height));
+        let (cols, rows) = ((c1 - c0).max(0), (r1 - r0).max(0));
+        let n = usize::try_from(cols.saturating_mul(rows)).unwrap_or(usize::MAX);
+        let levels = if n <= MAX_WATER_CELLS { (0..n).map(|_| std::sync::atomic::AtomicU32::new(UNREAD)).collect() } else { Vec::new() };
+        WaterCells { water, origin: (c0, r0), cols: if levels.is_empty() { 0 } else { cols }, levels }
+    }
+
+    /// The level (metres) of the water at the centre of the cell `(ci, ri)` of `r`, when a lake
+    /// holds it; as an `f32`, kept or not.
+    fn level(&self, r: &Raster, (ci, ri): (i64, i64)) -> Option<f64> {
+        let (dc, dr) = (ci - self.origin.0, ri - self.origin.1);
+        let slot = (dc >= 0 && dr >= 0 && dc < self.cols)
+            .then(|| usize::try_from(dr * self.cols + dc).ok())
+            .flatten()
+            .and_then(|i| self.levels.get(i));
+        let read = |slot: Option<&std::sync::atomic::AtomicU32>| {
+            let lonlat = r.transformer().to_lonlat(r.transform.to_world(ci as f64 + 0.5, ri as f64 + 0.5));
+            let level = lonlat.and_then(|ll| self.water.level(lonlat_to_merc(ll))).map_or(f32::NAN, |l| l as f32);
+            if let Some(slot) = slot {
+                slot.store(level.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            }
+            level
+        };
+        let level = match slot.map(|s| s.load(std::sync::atomic::Ordering::Relaxed)) {
+            Some(bits) if bits != UNREAD => f32::from_bits(bits),
+            _ => read(slot),
+        };
+        (!level.is_nan()).then_some(f64::from(level))
+    }
+}
+
 /// What pass 1 of [`draw`] reads: where each screen pixel falls in the raster, and how to
 /// sample it there.
 struct Pass1<'a> {
@@ -680,7 +740,7 @@ struct Pass1<'a> {
     /// Shaded Relief's rock on steep slopes, when it has one.
     rock: Option<Rock>,
     /// The terrain's water, for Shaded Relief: its cells take its level and flat ground's light.
-    water: Option<&'a Water>,
+    water: Option<WaterCells<'a>>,
     resampling: Resampling,
     alpha_band: Option<usize>,
     /// The alpha band's opaque value (its pixel type's: 65535 for 16 bits).
@@ -808,8 +868,9 @@ impl Pass1<'_> {
                         }
                     }
                 }
-                // On the water the relief's colour is the lake's level's, as even as its light.
-                if let Some(level) = self.water_level(c, row)
+                // On the water the relief's colour is the lake's level's, as even as its light: a
+                // cell whose centre is in a lake, as `light` has it.
+                if let Some(level) = self.water_level(cell)
                     && let Some(slot) = row_vals.get_mut(dx * nb)
                     && !slot.is_nan()
                 {
@@ -861,12 +922,10 @@ impl Pass1<'_> {
         }
     }
 
-    /// The level (metres) of the terrain's water at the grid position `(c, row)` (column and row,
-    /// cell centres at +0.5), when a lake holds it.
-    fn water_level(&self, c: f64, row: f64) -> Option<f64> {
-        let water = self.water?;
-        let lonlat = self.r.transformer().to_lonlat(self.r.transform.to_world(c, row))?;
-        water.level(lonlat_to_merc(lonlat))
+    /// The level (metres) of the terrain's water at the centre of the cell `(ci, ri)`, when a
+    /// lake holds it.
+    fn water_level(&self, cell: (i64, i64)) -> Option<f64> {
+        self.water.as_ref()?.level(self.r, cell)
     }
 
     /// The lights on the relief's cell `(ci, ri)`, from 0 to 255 and not rounded: the direct
@@ -880,7 +939,7 @@ impl Pass1<'_> {
         let r = self.r;
         // A water cell (#1915): flat ground's own light, with no cast shadow, the whole sky and no
         // fill or rock (both are nothing on flat ground).
-        if self.water_level(ci as f64 + 0.5, ri as f64 + 0.5).is_some() {
+        if self.water_level((ci, ri)).is_some() {
             let direct = f64::from(hillshade(&[0.0; 9], self.cell.0, self.cell.1, az, alt, zf));
             return Lit { direct, ambient: 255.0, fill: 0.0, rock: 0.0 };
         }
