@@ -90,6 +90,8 @@ pub struct Item {
     /// `self` link, which it could point anywhere); `None` for an item given whole, whose assets
     /// may then only be public web addresses.
     pub origin: Option<String>,
+    /// Observed network reach of the document this item was read from.
+    pub origin_reach: crate::address::Reach,
     /// Its properties, to show: the first hundred plain values (not objects or arrays), long
     /// text cut.
     pub properties: Option<Value>,
@@ -368,11 +370,73 @@ pub fn parse_collections(bytes: &[u8]) -> Result<Vec<Collection>, String> {
 /// The items of a search's answer (an ItemCollection), and the address of its next page. `from`
 /// is the address the answer came from, which relative addresses are resolved against.
 pub fn parse_items(bytes: &[u8], from: &str) -> Result<(Vec<Item>, Option<String>), String> {
+    parse_items_from_origin(bytes, &crate::address::Origin::named(from))
+}
+
+/// Like [`parse_items`], carrying the observed post-redirect [`crate::address::Origin`] and reach.
+pub fn parse_items_from_origin(bytes: &[u8], origin: &crate::address::Origin) -> Result<(Vec<Item>, Option<String>), String> {
+    parse_items_noted(bytes, origin).map(|listing| (listing.items.into_iter().map(|parsed| parsed.item).collect(), listing.next))
+}
+
+/// Counts bounded-parser omissions separately from invalid input entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ParseLosses {
+    pub skipped_items: usize,
+    pub omitted_items: usize,
+    pub skipped_assets: usize,
+    pub omitted_assets: usize,
+}
+
+impl ParseLosses {
+    /// Whether every item and asset entry was retained.
+    pub fn is_empty(&self) -> bool {
+        self.skipped_items == 0 && self.omitted_items == 0 && self.skipped_assets == 0 && self.omitted_assets == 0
+    }
+}
+
+/// An item and the asset entries its bounded parser could not retain.
+#[derive(Debug)]
+pub struct ParsedItem {
+    pub item: Item,
+    pub losses: ParseLosses,
+}
+
+/// Search results with both aggregate and per-item losses, preserving observed provenance.
+#[derive(Debug)]
+pub struct ItemListing {
+    pub items: Vec<ParsedItem>,
+    pub next: Option<String>,
+    pub next_refused: bool,
+    pub matched: Option<u64>,
+    pub losses: ParseLosses,
+}
+
+/// Like [`parse_items_from_origin`], retaining counts of invalid and capped items and assets.
+pub fn parse_items_noted(bytes: &[u8], origin: &crate::address::Origin) -> Result<ItemListing, String> {
     let v = json(bytes)?;
     let features = v.get("features").and_then(Value::as_array).ok_or("the answer isn't a list of STAC items")?;
-    let items = features.iter().take(MAX_ITEMS).filter_map(|f| item(f, Some(from))).collect();
-    let next = link(&v, "next", from);
-    Ok((items, next))
+    let mut losses = ParseLosses { omitted_items: features.len().saturating_sub(MAX_ITEMS), ..Default::default() };
+    let mut items = Vec::new();
+    for feature in features.iter().take(MAX_ITEMS) {
+        if let Some(parsed) = item_noted(feature, origin) {
+            losses.skipped_assets += parsed.losses.skipped_assets;
+            losses.omitted_assets += parsed.losses.omitted_assets;
+            items.push(parsed);
+        } else {
+            losses.skipped_items += 1;
+        }
+    }
+    let next = link(&v, "next", origin.url());
+    let next_refused = next.as_ref().is_some_and(|url| origin.check(url).is_err());
+    let next = next.filter(|_| !next_refused);
+    let matched = v.get("numberMatched").or_else(|| v.get("context").and_then(|c| c.get("matched"))).and_then(Value::as_u64);
+    Ok(ItemListing { items, next, next_refused, matched, losses })
+}
+
+/// Whether an answer's `next` link is one `origin`'s reach refuses. [`parse_items_from_origin`]
+/// drops such a link without saying so, so a caller that must say it asks here.
+pub fn next_refused(bytes: &[u8], origin: &crate::address::Origin) -> bool {
+    json(bytes).ok().and_then(|v| link(&v, "next", origin.url())).is_some_and(|u| origin.check(&u).is_err())
 }
 
 /// Whether a search's answer has a `next` link of any method. [`parse_items`] gives none for a
@@ -414,7 +478,28 @@ pub fn api_of(bytes: &[u8], from: &str) -> Option<String> {
 }
 
 pub fn parse_item(bytes: &[u8], from: &str) -> Result<Item, String> {
-    item(&json(bytes)?, Some(from)).ok_or_else(|| "the answer isn't a STAC item".to_string())
+    parse_item_from_origin(bytes, &crate::address::Origin::named(from))
+}
+
+/// Like [`parse_item`], carrying the observed post-redirect [`crate::address::Origin`] and reach.
+pub fn parse_item_from_origin(bytes: &[u8], origin: &crate::address::Origin) -> Result<Item, String> {
+    parse_item_noted(bytes, origin).map(|parsed| parsed.item)
+}
+
+/// Like [`parse_item_from_origin`], retaining counts of invalid and capped asset entries.
+pub fn parse_item_noted(bytes: &[u8], origin: &crate::address::Origin) -> Result<ParsedItem, String> {
+    item_noted(&json(bytes)?, origin).ok_or_else(|| "the answer isn't a STAC item".to_string())
+}
+
+fn item_noted(value: &Value, origin: &crate::address::Origin) -> Option<ParsedItem> {
+    let item = item_with_reach(value, Some(origin.url()), Some(origin.reach()))?;
+    let assets = value.get("assets").and_then(Value::as_object).map_or(0, serde_json::Map::len);
+    let losses = ParseLosses {
+        skipped_assets: assets.min(MAX_ASSETS).saturating_sub(item.assets.len()),
+        omitted_assets: assets.saturating_sub(MAX_ASSETS),
+        ..Default::default()
+    };
+    Some(ParsedItem { item, losses })
 }
 
 /// An item from its JSON (as STAC gives it, or as [`item_json`] wrote it).
@@ -434,6 +519,10 @@ fn link(v: &Value, rel: &str, from: &str) -> Option<String> {
 }
 
 fn item(f: &Value, from: Option<&str>) -> Option<Item> {
+    item_with_reach(f, from, None)
+}
+
+pub(crate) fn item_with_reach(f: &Value, from: Option<&str>, reach: Option<crate::address::Reach>) -> Option<Item> {
     if f.get("type").and_then(Value::as_str) != Some("Feature") {
         return None;
     }
@@ -532,6 +621,8 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
             .collect();
         Value::Object(kept)
     });
+    let origin_reach =
+        reach.unwrap_or_else(|| from.map_or(crate::address::Reach::Public, |u| crate::address::reach(crate::logins::inner(u))));
     Some(Item {
         id,
         collection: text(f.get("collection")),
@@ -543,6 +634,7 @@ fn item(f: &Value, from: Option<&str>) -> Option<Item> {
         assets,
         url,
         origin: from.map(str::to_string),
+        origin_reach,
         properties,
         tile: props.and_then(tile_of),
     })
@@ -709,6 +801,12 @@ impl Item {
             .or_else(|| self.assets.iter().filter(picture).find(|a| a.roles.iter().any(|r| r == "overview")))
     }
 
+    /// Checks `href` against the document origin and observed reach this item was read from.
+    pub fn check_href(&self, href: &str) -> Result<(), String> {
+        let origin = crate::address::Origin { url: self.origin.clone().unwrap_or_else(|| UNTRUSTED.to_string()), reach: self.origin_reach };
+        origin.check(href)
+    }
+
     /// The address of the asset to add (see [`Item::pick`]), checked: a plain web address the item
     /// may point to, not one that needs signing or a cloud store's own protocol.
     pub fn asset_href(&self, key: Option<&str>) -> Result<(String, String), String> {
@@ -724,7 +822,7 @@ impl Item {
         // Judged by where the item came from; an item given whole may only point at public
         // addresses (as a document on the web may). A Planetary Computer asset is signed by the
         // caller ([`needs_signing`]).
-        crate::address::check(&a.href, Some(self.origin.as_deref().unwrap_or(UNTRUSTED)))?;
+        self.check_href(&a.href)?;
         Ok((a.key.clone(), a.href.clone()))
     }
 }
@@ -891,6 +989,39 @@ pub fn footprints_geojson(items: &[Item]) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn noted_parsing_counts_capped_and_invalid_items_and_assets() {
+        use super::*;
+        let origin = crate::address::Origin::named("https://public.example/search");
+        let item = |id: usize| serde_json::json!({"type":"Feature","id":id.to_string(),"properties":{},"assets":{}});
+        let features: Vec<_> = (0..MAX_ITEMS + 1).map(item).collect();
+        let body = serde_json::json!({"features":features}).to_string();
+        let parsed = parse_items_noted(body.as_bytes(), &origin).unwrap();
+        assert_eq!(parsed.items.len(), MAX_ITEMS);
+        assert_eq!(parsed.losses, ParseLosses { omitted_items: 1, ..Default::default() });
+        let body = serde_json::json!({"features":[item(0),{"type":"Feature"},item(2)]}).to_string();
+        let parsed = parse_items_noted(body.as_bytes(), &origin).unwrap();
+        assert_eq!(parsed.items.len(), 2);
+        assert_eq!(parsed.losses, ParseLosses { skipped_items: 1, ..Default::default() });
+        let body = serde_json::json!({"features":[item(0),item(1),item(2)]}).to_string();
+        assert!(parse_items_noted(body.as_bytes(), &origin).unwrap().losses.is_empty());
+
+        let mut assets = serde_json::Map::new();
+        assets.insert("000_bad".into(), serde_json::json!({"href":42}));
+        for i in 0..MAX_ASSETS + 1 {
+            assets.insert(format!("a{i:03}"), serde_json::json!({"href":format!("https://public.example/{i}.tif")}));
+        }
+        let mut feature = item(0);
+        feature["assets"] = serde_json::Value::Object(assets);
+        let parsed = parse_item_noted(feature.to_string().as_bytes(), &origin).unwrap();
+        assert_eq!(parsed.item.assets.len(), MAX_ASSETS - 1);
+        assert_eq!(parsed.losses, ParseLosses { skipped_assets: 1, omitted_assets: 2, ..Default::default() });
+        let body = serde_json::json!({"features":[feature]}).to_string();
+        let listed = parse_items_noted(body.as_bytes(), &origin).unwrap();
+        assert_eq!(listed.losses, parsed.losses);
+        assert_eq!(listed.items[0].losses, parsed.losses);
+    }
+
     use super::*;
 
     #[test]
@@ -919,6 +1050,21 @@ mod tests {
             assert_eq!(resolve(&base, foreign).as_deref(), Some(foreign));
         }
         crate::logins::deactivate(&token);
+    }
+
+    #[test]
+    fn a_next_link_the_reach_refuses_is_reported_as_refused() {
+        let page = br#"{"type":"FeatureCollection","features":[],"links":[{"rel":"next","href":"http://10.0.0.5/v1/search?page=2"}]}"#;
+        // A public document's next page on the local network is refused: dropped, and said so.
+        let public = crate::address::Origin::named("https://x.org/v1/search");
+        assert!(next_refused(page, &public));
+        assert_eq!(parse_items_from_origin(page, &public).unwrap().1, None);
+        // The same link from a local API is followed, and nothing is refused.
+        let local = crate::address::Origin::named("http://10.0.0.5/v1/search");
+        assert!(!next_refused(page, &local));
+        assert!(parse_items_from_origin(page, &local).unwrap().1.is_some());
+        // No next link, nothing refused.
+        assert!(!next_refused(b"{\"features\":[]}", &public));
     }
 
     #[test]

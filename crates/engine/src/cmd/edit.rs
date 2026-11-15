@@ -41,6 +41,14 @@ pub fn commands() -> Vec<C> {
             .when(crate::cmd::design::need_editable).params(r#"{"layer"?:name|id,"row":number,"featureId"?:number}"#),
         C::new("edit.boxInfo", "Box Construction", "Edit › Features", crate::box_edit::info).roles(&[]).effects(crate::policy::Effects::NONE).view()
             .params(r#"{"layer"?:name|id,"row":number}"#),
+        C::new("edit.addCircle", "Add Circle", "Edit › Features", crate::circle_edit::add).inputs(crate::circle_edit::new_circle_inputs).roles(&[crate::ParamRole { key: "circle", role: crate::Role::Opaque }, crate::ParamRole { key: "attributes", role: crate::Role::Opaque }]).effects(crate::policy::Effects::NONE)
+            .when(crate::cmd::design::need_editable).params(r#"{"layer"?: name|id, "circle": {"center":[x,y],"radius":number,"tolerance"?:number (default 0.25 grid units),"frame"?:{"epsg":number,"width":pixels,"height":pixels,"affine":[x0,xc,xr,y0,yc,yr]}},"attributes"?:{field:value},"template"?:string}"#),
+        C::new("edit.updateCircle", "Update Circle", "Edit › Features", crate::circle_edit::update).roles(&[crate::ParamRole { key: "circle", role: crate::Role::Opaque }]).effects(crate::policy::Effects::NONE)
+            .when(crate::cmd::design::need_editable).params(r#"{"layer"?:name|id,"row":number,"featureId"?:number,"circle":as edit.addCircle}"#),
+        C::new("edit.deleteCircle", "Delete Circle", "Edit › Features", crate::circle_edit::delete_circle).roles(&[]).effects(crate::policy::Effects::NONE)
+            .when(crate::cmd::design::need_editable).params(r#"{"layer"?:name|id,"row":number,"featureId"?:number}"#),
+        C::new("edit.circleInfo", "Circle Construction", "Edit › Features", crate::circle_edit::info).roles(&[]).effects(crate::policy::Effects::NONE).view()
+            .params(r#"{"layer"?:name|id,"row":number}"#),
     ]
 }
 
@@ -839,8 +847,9 @@ fn to_dates(ds: &mut Dataset, fi: usize, ty: FieldType, reader: &rustgis_data::d
     Ok(out)
 }
 
-/// `edit.deleteField`: removes a field and every reference to it (symbology, labels, the data
-/// design), or refuses while the definition query or a display filter reads it.
+/// `edit.deleteField`: removes a field and the references to it (symbology and its expressions
+/// by feature, labels, the data design, diagrams, the extrusion's height and base, the marker
+/// rotation), or refuses while the definition query or a display filter reads it.
 /// A standalone table's field just goes: nothing refers to it. Its rows are changed on the
 /// desktop worker ([`table_ahead`]), with progress and Cancel.
 fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
@@ -877,6 +886,9 @@ fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
         return Err(format!("display filter '{}' uses '{name}': change or remove it first", f.name));
     }
     let read_before = l.renderer.expression().is_some_and(|e| rustgis_data::query::parse_fields(e, &l.dataset).is_ok());
+    // The symbol's expressions by feature that read the field, found while it is there (#2081).
+    let by = &l.symbol_by;
+    let by_read = [&by.size, &by.fill, &by.stroke, &by.stroke_width, &by.angle].map(|t| t.as_deref().is_some_and(needs));
     let removed = l.dataset.fields.remove(fi).name;
     for f in &mut l.dataset.features {
         if fi < f.attrs.len() {
@@ -947,11 +959,77 @@ fn delete_field(s: &mut Session, p: &Json) -> CmdResult {
             diagram_note = Some(format!("{}: its diagram drew the deleted field {removed}, so that slice or bar is removed", l.name));
         }
     }
+    // Nor its extrusion (#2081): a height or base read from the field goes back to its constant,
+    // said once for both. Nor its marker rotation, which goes: the markers stop turning.
+    let mut extrusion_note = None;
+    if let Some(x) = &mut l.extrusion {
+        let mut what = Vec::new();
+        for (read, name) in [(&mut x.field, "height"), (&mut x.base_field, "base")] {
+            if read.as_deref().is_some_and(|f| f.eq_ignore_ascii_case(&removed)) {
+                *read = None;
+                what.push(name);
+            }
+        }
+        if !what.is_empty() {
+            let what = what.join(" and ");
+            extrusion_note =
+                Some(format!("{}: its extrusion's {what} read the deleted field {removed}, so it uses its constant {what}", l.name));
+        }
+    }
+    let mut rotation_note = None;
+    if l.marker_rotation.as_ref().is_some_and(|r| r.field.eq_ignore_ascii_case(&removed)) {
+        l.marker_rotation = None;
+        rotation_note = Some(format!("{}: its markers turned by the deleted field {removed}, so they are no longer turned", l.name));
+    }
+    // Nor its expressions by feature: one that read the field is removed, and the symbol draws as
+    // without it. Judged by the field it read, not by whether its text still parses: a field
+    // named like a keyword (`null = 'x'`) would parse again as the keyword, and a name matching
+    // another field but for case would read that one. Said once for all of them.
+    let by = &mut l.symbol_by;
+    let parts = [
+        (&mut by.size, "size"),
+        (&mut by.fill, "fill colour"),
+        (&mut by.stroke, "outline colour"),
+        (&mut by.stroke_width, "outline width"),
+        (&mut by.angle, "angle"),
+    ];
+    let mut gone = Vec::new();
+    for ((text, part), read) in parts.into_iter().zip(by_read) {
+        if read {
+            *text = None;
+            gone.push(part);
+        }
+    }
+    let by_note = match gone.split_last() {
+        None => None,
+        Some((part, [])) => Some(format!("{}: its symbol's {part} expression read the deleted field {removed}, so it is removed", l.name)),
+        Some((last, rest)) => Some(format!(
+            "{}: its symbol's {} and {last} expressions read the deleted field {removed}, so they are removed",
+            l.name,
+            rest.join(", ")
+        )),
+    };
+    for note in [extrusion_note, rotation_note, by_note].into_iter().flatten() {
+        s.notify(note, false);
+    }
     if let Some(note) = diagram_note {
         s.notify(note, false);
     }
     if let Some(name) = single {
         s.notify(format!("{name}: its classes read the deleted field {removed}, so it is drawn with a single symbol"), false);
+    }
+    // Nor the terrain's water, when its levels came from the field (#1915): its lakes go back to
+    // their shores' lowest heights, said.
+    let layer_name = s.map().layer(id).map(|l| l.name.clone()).unwrap_or_default();
+    if let Some(w) = s.map_mut().view.terrain.as_mut().and_then(|t| t.water.as_mut())
+        && w.layer.eq_ignore_ascii_case(&layer_name)
+        && w.level.as_deref().is_some_and(|f| f.eq_ignore_ascii_case(&removed))
+    {
+        w.level = None;
+        s.notify(
+            format!("Water: its levels came from the deleted field {removed}, so its lakes lie at their shores' lowest heights"),
+            false,
+        );
     }
     Ok(json!({"rulesRemoved": removed_rules}))
 }
@@ -1192,7 +1270,8 @@ fn calculate_field(s: &mut Session, p: &Json) -> CmdResult {
         return result;
     }
     let t = write_target(s, p)?;
-    let fi = field_of(s, t, ps(p, "field").ok_or("field is required")?)?;
+    let field = ps(p, "field").ok_or("field is required")?;
+    let fi = data(s, t)?.field_index(field).ok_or_else(|| format!("no field named '{field}'; use Add Field (edit.addField) first"))?;
     let expr = ps(p, "expression").map(str::trim).filter(|e| !e.is_empty()).ok_or("expression is required")?.to_string();
     let Target::Layer(id) = t else {
         editing_on(s)?;
@@ -1393,6 +1472,38 @@ fn split_op(e: &str) -> (&str, Option<char>, Option<&str>) {
 mod tests {
     use super::*;
     use rustgis_data::{Dataset, Field};
+
+    /// Calculate Field never adds fields: layer and table callers get the same next step.
+    #[test]
+    fn missing_calculation_field_points_to_add_field() {
+        for table in [false, true] {
+            let mut s = Session::new(crate::Project::default());
+            let mut ds = Dataset::new("calc", GeometryType::None, vec![Field::new("n", FieldType::Double)]);
+            ds.push(None, vec![Value::Float(7.0)]);
+            let target = if table {
+                json!({"table": s.project.add_table(ds)})
+            } else {
+                let id = s.map_mut().add_dataset(ds);
+                s.active_layer = Some(id);
+                json!({"layer": id})
+            };
+            let mut p = target.clone();
+            p["field"] = json!("T2");
+            p["expression"] = json!("n * 2");
+            let error = s.run("edit.calculateField", &p).unwrap_err();
+            assert_eq!(error, "no field named 'T2'; use Add Field (edit.addField) first");
+            let t = super::target(&s, &target).unwrap();
+            assert!(data(&s, t).unwrap().field_index("T2").is_none());
+            assert_eq!(data(&s, t).unwrap().value(0, 0), &Value::Float(7.0));
+            let mut add = target;
+            add["name"] = json!("T2");
+            add["type"] = json!("double");
+            s.run("edit.addField", &add).unwrap();
+            s.run("edit.calculateField", &p).unwrap();
+            let ds = data(&s, t).unwrap();
+            assert_eq!(ds.value(0, ds.field_index("T2").unwrap()), &Value::Float(14.0));
+        }
+    }
 
     /// Not a number is null in a whole-number field, said as such, not past its range; a number
     /// past the range is null where it's said, and at the range's end elsewhere, as before.

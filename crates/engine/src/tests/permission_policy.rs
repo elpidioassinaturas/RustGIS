@@ -1079,6 +1079,9 @@ fn permission_policy_download_refinements_rollback_and_abandonment() {
     assert_eq!(s.map().layer_by_name("Frozen").unwrap().dataset.features.len(), 1);
     assert!(s.complete_download(id, &json!({"id":id})).is_err());
     assert!(s.run("layer.addUrl", &json!({"url":"https://example.invalid/project.json","geolibreProject":true})).is_err());
+    // Nor how an ArcGIS service draws a layer, which only the app reads (#2080).
+    let drawing = json!({"url":"https://example.invalid/MapServer/0/query","service":true,"drawingInfo":{"renderer":{"type":"simple"}}});
+    assert!(s.request_url(&drawing).unwrap_err().contains("drawingInfo is internal"));
     for i in 0..32 {
         let failed = format!("layer.addUrl {{\"url\":\"https://example.invalid/rollback-{i}.csv\"}}\nmissing.command {{}}");
         assert!(s.run("script.run", &json!({"script":failed})).is_err());
@@ -1541,7 +1544,7 @@ fn permission_policy_plugin_tools_follow_the_callers_control_while_running() {
         });
         let start = Instant::now();
         while !ready.is_file() && !worker.is_finished() && start.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5)); // test-wait: legacy polling for the plugin readiness file
         }
         let entered = ready.is_file();
         control.cancel();

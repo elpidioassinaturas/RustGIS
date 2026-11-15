@@ -947,7 +947,7 @@ fn source_name(src: &str) -> SourceName {
         // a path, its %-escapes decoded.
         if scheme == "file" || host.is_empty() {
             let path = if host.eq_ignore_ascii_case("localhost") { rest.find('/').and_then(|i| rest.get(i..)).unwrap_or("") } else { rest };
-            return path_name(&percent_decoded(path));
+            return path_name(&rustgis_engine::data::address::percent_decode(path));
         }
         // Only the host ignores case: a database's name doesn't.
         let db = DATABASE_SCHEMES
@@ -959,30 +959,6 @@ fn source_name(src: &str) -> SourceName {
         return SourceName { key, label: name.clone(), hover: name };
     }
     path_name(src)
-}
-
-/// `%XX` escapes in a `file://` path decoded (`My%20Data.gpkg` is `My Data.gpkg`); a `%` not
-/// followed by two hex digits stays as it is.
-fn percent_decoded(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while let Some(&c) = b.get(i) {
-        // Two hex digits exactly (`from_str_radix` alone would take a sign).
-        let digits = b.get(i + 1..i + 3).filter(|h| h.iter().all(u8::is_ascii_hexdigit));
-        let hex = digits.and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
-        match (c, hex) {
-            (b'%', Some(v)) => {
-                out.push(v);
-                i += 3;
-            }
-            _ => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A path as a source group: its last part, with the whole path as hover text.
@@ -7351,7 +7327,7 @@ mod tests {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while h.state().gp.tool_run.is_some() {
             assert!(std::time::Instant::now() < end, "the run never landed");
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: legacy polling for the background tool
             h.step();
         }
         let app = h.state();
@@ -7588,7 +7564,7 @@ mod tests {
                 let ctx = ui.ctx().clone();
                 app.logic(&ctx);
                 if frame.get() {
-                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    std::thread::sleep(std::time::Duration::from_millis(300)); // test-wait: simulate a slow frame between double-clicks
                 }
                 app.ui(ui);
             },
@@ -7680,7 +7656,7 @@ mod tests {
             if rustgis_engine::render::tile_source_layers(&app.session.map().tiles[0]).is_some() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: legacy polling for archive source layers
         }
         let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).with_max_steps(64).build_ui_state(
             |ui, app: &mut RustGisApp| {

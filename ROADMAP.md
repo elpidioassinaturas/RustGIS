@@ -4,8 +4,8 @@ _Last reviewed: 2026-11-10 (v0.6.0). Reviewed at each release; if this date is o
 linked issues over this page._
 
 This page lists the work planned for RustGIS and where help is most useful; details of each item
-live in its linked issue. Gaps nobody has planned are listed in
-[GEOLIBRE_PARITY.md](GEOLIBRE_PARITY.md) without a theme.
+live in its linked issue. Gaps nobody has planned are listed in the
+[GeoLibre parity checklist](docs/geolibre-parity.md) without a theme.
 
 ## Goals
 - **What exists works.** A feature that crashes, misreads data or is undocumented costs more
@@ -48,7 +48,7 @@ Before proposing something, check that RustGIS doesn't already do it: the
 live lists of commands and geoprocessing tools (`rustgis-cli commands`, `rustgis-cli tools`; over
 MCP, `search_commands` and `search_tools`).
 
-[GEOLIBRE_PARITY.md](GEOLIBRE_PARITY.md) compares RustGIS with GeoLibre feature by feature: a
+The [GeoLibre parity checklist](docs/geolibre-parity.md) compares RustGIS with GeoLibre feature by feature: a
 source of ideas, not a plan ([#951](https://github.com/opengeos/RustGIS/discussions/951)). Issues
 labelled [good first issue](https://github.com/opengeos/RustGIS/labels/good%20first%20issue) are a
 place to start.
@@ -70,14 +70,16 @@ The shared pieces the everyday workflow stands on.
 A result is right, or RustGIS says what it lost or assumed
 ([AGENTS.md](AGENTS.md#never-silent)).
 - Known silent losses: a polygon looping round a pole drops out of Clip and Spatial Join
-  ([#1354](https://github.com/opengeos/RustGIS/issues/1354)); DuckDB queries (`ST_Force2D`) and
-  the TopoJSON reader drop Z without a notice, and the DXF reader keeps one `elevation` per entity
-  but not each vertex's Z (other readers, GDAL and SQL Server among them, say so since
-  [#1214](https://github.com/opengeos/RustGIS/pull/1214)); the KML and OSM readers leave out
-  unreadable coordinates, holes and parts without one, and GeoRSS its unreadable holes (GML says
-  so since [#1686](https://github.com/opengeos/RustGIS/pull/1686)) _(open)_.
-- A test that runs lossy sample files through every reader and writer and fails on any loss
-  without a notice, beside `hostile_params_never_panic` in `crates/engine/src/tests.rs` _(open)_.
+  ([#1354](https://github.com/opengeos/RustGIS/issues/1354)); DuckDB queries (`ST_Force2D`) drop Z
+  without a notice; the OSM reader leaves out rings that don't close, rings and member ways with
+  nodes or ways the file doesn't hold, and inner rings outside every outer one; and the text
+  readers' losses listed as `Silent` in `crates/engine/tests/never_silent_reading.rs`, among them
+  each vertex's Z in DXF and unreadable coordinates, holes and parts in KML, GeoRSS, MapInfo and
+  DXF. A fix makes its case `Said` _(open)_.
+- Lossy sample files in `never_silent_reading.rs` for the readers it doesn't cover yet: CityJSON,
+  CityGML and the binary formats (Shapefile, GeoPackage, FlatGeobuf, GeoParquet, OSM PBF, KMZ,
+  spreadsheets). It covers GeoJSON, TopoJSON, CSV, KML, GPX, GML, GeoRSS, DXF, LandXML and MapInfo;
+  exports are checked by `never_silent_roundtrip.rs` _(open)_.
 - A `--strict` option for `rustgis-cli run` that exits non-zero when a loss is reported, for
   scheduled jobs. Notices carry a severity but not a kind today (`Notice` in
   `crates/engine/src/lib.rs`): start with an issue on which notices count as a loss.
@@ -157,9 +159,8 @@ Big layers work, or say plainly where they stop
 - Autosave and crash recovery in the browser, as the desktop app has since
   [#873](https://github.com/opengeos/RustGIS/issues/873) (`apps/rustgis-web/src/web.rs`; the
   browser half needs an issue of its own).
-- The OS keychain for the remaining secrets: web-service basic-auth and API-key logins (for the
-  session today), and a plugin `secrets` permission bound to one origin
-  ([#760](https://github.com/opengeos/RustGIS/issues/760)); testing on each platform
+- A plugin `secrets` permission backed by the OS keychain and bound to one origin
+  ([#760](https://github.com/opengeos/RustGIS/issues/760)); testing the secret store on each platform
   ([#891](https://github.com/opengeos/RustGIS/issues/891)).
 - Waiting on upstream releases: Control-click menus on macOS
   ([#707](https://github.com/opengeos/RustGIS/issues/707)) and asking to save on ⌘Q

@@ -1104,16 +1104,8 @@ fn calendar_button(ui: &mut Ui, on: bool, t: &Tokens) -> egui::Response {
 /// Today's year and month, for a calendar with no date to open on (UTC is near enough).
 fn today() -> (i32, u32) {
     let days = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400) as i64;
-    // Civil-from-days (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = (yoe + era * 400 + i64::from(m <= 2)) as i32;
-    (y, m)
+    let (y, m, _) = rustgis_engine::data::date::civil_from_days(days);
+    (y as i32, m as u32)
 }
 
 /// A range: a slider with two handles, low and high, on one track. It runs its command when a
@@ -1416,7 +1408,7 @@ mod tests {
         while h.state().session.map().layer_by_name("Places").is_none() {
             assert!(std::time::Instant::now() < deadline, "timed out waiting");
             h.step();
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for plugin-added data
         }
         let places = h.state().session.map().layer_by_name("Places").unwrap();
         let e = places.dataset.extent();
@@ -1535,7 +1527,7 @@ mod tests {
         while h.state().session.map().layer_by_name("Scan").is_none() {
             assert!(std::time::Instant::now() < deadline, "timed out waiting");
             h.step();
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the downloaded scan
         }
         assert!(h.state().session.map().layer_by_name("Scan").is_some_and(|l| l.is_raster()));
         assert!(h.state().ui.cog_probes.is_empty());
@@ -1575,7 +1567,7 @@ mod tests {
             let frame = std::time::Instant::now();
             h.step();
             assert!(frame.elapsed() < std::time::Duration::from_secs(5), "the read held the frame");
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy pacing while the plugin window read is held
         }
         assert!(h.state().session.map().layer_by_name("Window").is_none(), "nothing waited");
         assert!(h.state().session.plugin_retries_waiting());
@@ -1585,7 +1577,7 @@ mod tests {
         while !landed(h.state()) {
             assert!(std::time::Instant::now() < deadline, "timed out waiting: {:?}", h.state().session.notices);
             h.step();
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: legacy polling for the plugin window result
         }
         let app = h.state();
         assert!(app.session.map().layer_by_name("Window").is_some_and(|l| l.is_raster()));
@@ -1656,7 +1648,7 @@ mod tests {
                 if !ran.is_empty() {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: legacy polling for the failed download continuation
             }
             assert_eq!(ran.len(), 1, "{params}: {ran:?}");
             assert!(ran[0].1.as_ref().is_err_and(|e| e.contains("404")), "{params}: {ran:?}");

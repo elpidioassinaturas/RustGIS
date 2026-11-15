@@ -20,9 +20,9 @@ Formats](data-formats.md).
 | Geotagged photos (JPEG with EXIF GPS): points with their thumbnails | Yes | No |
 | Esri File Geodatabase (`.gdb` folder; 3D multipatches as footprints) | Yes (desktop) | No |
 | Through GDAL: AutoCAD DWG, MapInfo TAB, OpenStreetMap XML, File Geodatabases RustGIS can't read itself… | Yes (desktop, when GDAL is installed) | No |
-| PostgreSQL/PostGIS databases, read live (large tables a view at a time) | Yes (desktop) | No |
-| MySQL and MariaDB databases, read live (large tables a view at a time) | Yes (desktop) | No |
-| SQL Server and Azure SQL databases, read live (large tables a view at a time) | Yes (desktop) | No |
+| PostgreSQL/PostGIS databases, read live (large tables a view at a time) | Yes (desktop and phones) | No |
+| MySQL and MariaDB databases, read live (large tables a view at a time) | Yes (desktop and phones) | No |
+| SQL Server and Azure SQL databases, read live (large tables a view at a time) | Yes (desktop and phones) | No |
 | DuckDB databases (`.duckdb`, `.ddb`) and SQL queries | Yes (desktop, when DuckDB is installed) | No |
 | GeoTIFF and cloud-optimised GeoTIFF (`.tif`, `.tiff`) | Yes | Yes |
 | ASCII grid (`.asc`, with an optional `.prj`) | Yes | No |
@@ -94,8 +94,18 @@ A zipped File Geodatabase must be unzipped first: on the desktop, add the
 **Home › Add › Add Data › Delimited Text…** asks for a CSV or a spreadsheet first, then lists its columns to pick the x and y (or WKT)
 ones from, with the coordinate system (such as `EPSG:2263`) and the separator (changing it reads
 the columns again); `info.fileColumns` lists them for scripts. Add Data finds them itself
-(columns named like longitude/latitude, easting/northing or geometry, and EWKT's `SRID=`) and
-says when coordinates aren't longitude/latitude. A CSV without coordinate columns, or a layer without geometry, opens as a
+(columns named like longitude/latitude, including GTFS `stop_lon`/`stop_lat`, easting/northing or
+geometry, and EWKT's `SRID=`). With no projected coordinate system or explicit column choices,
+if the first pair contains coordinates outside ±180° longitude or ±90° latitude and a more
+specific longitude/latitude pair gives in-range, non-0,0 positions on at least as many rows as
+the first pair gives finite positions, that pair is used for the whole file.
+The published aliases `Longitude Decimal Degrees`/`Latitude Decimal Degrees` and
+`Longitutde`/`Lattitude` are recognised too. The dialog checks its first 1,000 rows to pick
+defaults, and recomputes unchanged defaults when you leave the coordinate-system box or press
+Enter; columns you picked stay picked. A projected system keeps the columns found by name.
+Add Data checks all rows. Coordinates still outside degree ranges are counted in a
+notice. Points placed at exactly 0,0 are also counted in a notice: these often mean missing
+coordinates, but the points are kept. A CSV without coordinate columns, or a layer without geometry, opens as a
 standalone table, listed under the map in Layers; right-click it to open or remove it. Tables
 can share a name: commands and tools take a table's id (`info.project` lists them) as well as its
 name, which stands for the first table of that name. An id given as a number is never taken for
@@ -268,14 +278,19 @@ and more. RustGIS doesn't link to GDAL: each layer is converted once, by `ogr2og
 FlatGeobuf with a spatial index in WGS 84 (GDAL reprojects it), kept in the cache folder
 (`~/.cache/rustgis/gdal` on Linux, `~/Library/Caches/RustGIS/gdal` on macOS,
 `%LOCALAPPDATA%\RustGIS\cache\gdal` on Windows, or `RUSTGIS_GDAL_CACHE`). Adding the file again
-reuses the conversion until the file changes, and large layers stream like any large FlatGeobuf
-(below). Every layer of the file is added; a layer mixing geometry types is added as one layer
-per type, its points on top and its polygons at the bottom. Curves become straight segments, and
+reuses the conversion and its layer listing until the file's path, size or modification time
+changes (for a File Geodatabase folder, RustGIS checks its files too). Missing or unreadable
+cached listings are rebuilt; **Reload** always reads the source afresh. The first listing skips
+spatial extents but keeps feature counts to check for conversion losses. Large layers stream
+like any large FlatGeobuf (below). Every layer of the file is added; a layer mixing geometry
+types is added as one layer per type, its points on top and its polygons at the bottom. Curves become straight segments, and
 3D surfaces (an Esri multipatch, such as the buildings of swissBUILDINGS3D, is read as a TIN)
 become flat polygons, one part per face, without their heights. The conversion leaves out a
 feature it can't index, such as a polygon with no coordinates; when GDAL gives the layer's feature
 count, adding the file says how many were left out, also when it reuses a conversion. Projects
-remember the original file and convert it again if the cached copy is gone.
+remember the original file and convert it again if the cached copy is gone. A listing that runs
+past five minutes, or a conversion past thirty minutes, stops with an error naming the source
+file and the operation that exceeded its limit.
 
 ## SQL queries and DuckDB databases
 
@@ -634,8 +649,16 @@ page of their own: [Web Data](web-data.md).
 layer's addresses into points: a CSV of addresses without coordinates is added as a standalone table, then each row's address
 fields (`"address"`: a field, or several such as street, city and country, joined with commas)
 are looked up, each distinct address once. The result is a new point layer holding every field
-plus `geocoded`, what the geocoder called the place; rows that weren't found stay in its table
-without a point.
+plus `geocoded`, what the geocoder called the place, and a text field `match_status`:
+
+- `matched`: the geocoder returned a usable point for the row's address.
+- `unmatched`: the row has no usable point, including an empty address or a failed lookup.
+
+Rows that weren't found stay in its table without a point, and a notice counts them; filter
+`match_status = 'unmatched'` to review them. A field of the same name in the input is kept, and
+the new one gets an underscore appended (`match_status_`; filter that one then). `matched` means the geocoder returned a point, not that
+it is the exact address: it may be placed along the street or at a broader place. The geocoders
+don't give a match score, so there is none in the output.
 
 The geocoder is OpenStreetMap's public [Nominatim](https://nominatim.org) by default, or
 [Photon](https://photon.komoot.io) (`"provider": "photon"`). Their usage policies allow light
@@ -874,7 +897,7 @@ database tests run synchronously on desktop. The web app doesn't offer database 
 connections; saved database rows remain visible but cannot be opened or tested there. Earth
 Search and Planetary Computer remain available under **Library**.
 
-For a new web-service connection, enter its Basic password or header API key to test it before
+For a new web-service connection, enter its Basic password or header/query API key to test it before
 saving. The test uses only the entered login, not a saved service login or an S3 session login
 at the same address.
 For an `http://` address, tick the confirmation before sending the login unencrypted. After a test
@@ -1049,11 +1072,42 @@ header** (the header's name, such as `X-API-Key`, and the key) or **API key in t
 parameter's name, such as `api_key`, and the key). The connection keeps only the method, the user
 name and the header or parameter name, never the password or key.
 The password or key goes to `connection.login {"id":"c1","password":"…"}` (basic) or
-`{"id":"c1","apiKey":"…"}` and lasts only for this session. Web-service logins never access the
-computer's credential store. Editing the origin, method, user or header or parameter name ends
-the login (a connection's kind doesn't change: make a new one); renaming the connection or
-changing its path at the same origin does not. **Log Out**
-(`connection.logout`) removes the session login. Log in again when a new session needs it.
+`{"id":"c1","apiKey":"…"}` and lasts only for this session by default.
+On desktop, **Remember on this computer** is unchecked initially. Checking it
+(`"remember": true` in `connection.login`) saves the Basic password, header key or query key in
+the operating system's credential store: macOS Keychain, Windows Credential Manager or Secret
+Service. **Test** never remembers a login. If the store is absent, unavailable or refuses access,
+the entered login still works for this session and a warning says it was not remembered.
+An unchecked replacement stays session-only and leaves any previously saved login unchanged.
+The web app has no OS-store hook and remains session-only.
+
+A remembered login is read only when needed, for the same connection ID, exact origin (scheme,
+host and port), method, user and header or query parameter name. It is never borrowed by another
+connection. A missing or unavailable saved login leaves the connection waiting for an entered
+login; it does not prevent session-only sign-in. The credential envelope is versioned; unknown
+versions are refused without rewriting the saved value. A failed store read is not retried merely
+by opening the source again: choose **Log In** or run `connection.login` explicitly to retry.
+Deleting or replacing a saved login, by **Remember**, **Forget Saved Login**, or an edit or
+removal, first checks whose it is. Connection IDs are numbered per computer, so another
+connection, or a newer RustGIS, can have saved a login under the same ID. A login saved for this
+connection's origin, method, user and header or parameter name is replaced or deleted, and so is
+a damaged value that no version can read. A login saved for another connection or by a newer
+RustGIS is left unchanged: **Remember** then keeps the entered login for the session only, with a
+warning, and **Forget Saved Login** says the entry was left.
+Editing the origin, method, user or header or
+parameter name ends the login and deletes the saved one (a connection's kind doesn't change:
+make a new one); renaming or changing its path at the same origin keeps it. Removing a connection
+also deletes its saved login; duplicating it copies neither its session nor its saved login.
+If the store refuses the deletion for a connection marked remembered, the edit or removal does
+not happen. A connection that isn't marked can still have a login saved by another session, so a
+store is checked for it too; if that fails, the change goes on with a warning that a saved login
+may remain. This check can ask to unlock the credential store even for a connection that isn't
+marked.
+
+**Forget Saved Login** (`connection.forgetLogin {"id":"c1"}`) deletes only the stored login,
+leaving the session's login usable. **Log Out** (`connection.logout`) ends the session login,
+but keeps the stored one. Logout prevents automatic reuse for the rest of that session until
+an explicit login, including `connection.login {"id":"c1"}` to use the saved login again.
 
 An API key in the query suits services such as Planet's basemaps, whose address is
 `https://api.planet.com/basemaps/v1/mosaics/wmts?api_key=…`: save the connection as
@@ -1117,8 +1171,11 @@ to make one for its address. `connection.list` reports these as `loginRequests` 
 Logging in retries waiting remote rasters without changing their style. A dated layer also asks
 for the login covering dates at its recorded connection's origin, even when it reopens on a date
 hosted elsewhere. Those foreign-origin dates stay anonymous.
-CLI and Python use the same session-only `connection.login` commands. ArcGIS sign-in and tokens
-keep their own [ArcGIS sign-in](#web-data). A login ends with the session that made it.
+CLI and Python remain session-only unless `--use-saved-secrets` / `use_saved_secrets=True`
+opts into remembered logins, as for database passwords and S3 keys. An active login still ends
+with its session; only an explicitly remembered one can be loaded again.
+Earthdata Login and ArcGIS OAuth sign-in and tokens keep their own
+[sign-in rules](web-data.md); these web-service login controls do not change them.
 Unbound fetches never adopt another session's service login.
 Layers added by plugins stay anonymous, including after saving and reopening a project or adding
 a saved connection later. To use a connection's login, add the layer yourself through that connection.

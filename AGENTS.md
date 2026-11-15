@@ -54,6 +54,9 @@ is out of scope.
   whose work grows with its input is added to that list. Passing shows the work looks
   at Cancel, not that it looks often: a long step without a check (one union, one read) is said in
   its doc comment.
+  `cancelling_at_each_check_leaves_nothing_behind` reads the same lists and cancels each command at
+  its 1st, 2nd, 3rd… check and its last, then looks at what Cancel leaves: the project and undo steps,
+  the files, and that the command runs again.
 
 ## Architecture
 | Layer | Crate | Job |
@@ -114,6 +117,7 @@ is out of scope.
 
 ## Quality gates
 `cargo xtask ci` (fmt, clippy -D warnings, tests, layers) before every commit.
+`cargo xtask test-hygiene` (also in CI) requires `// test-wait: reason` on timer waits in tests and `#[ignore = "reason"]` on ignored tests; prefer completion or progress signals.
 While you work, `cargo xtask changed` runs the same checks on only the packages your branch changes
 and those that depend on them, or on the whole workspace when a changed file such as `Cargo.lock` is
 outside every package and nothing includes it.
