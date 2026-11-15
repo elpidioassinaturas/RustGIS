@@ -1772,7 +1772,7 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         }
     };
     let (((mut y0, mut dy), (mut x0, mut dx)), lonlat) = match spatial_grid(a) {
-        Some(g) => (((g.y0 + g.dy * win.y0 as f64, g.dy), (g.x0 + g.dx * win.x0 as f64, g.dx)), false),
+        Some(g) => (((g.y0 + g.dy * win.y0 as f64, g.dy), (g.x0 + g.dx * win.x0 as f64, g.dx)), lonlat_by_coordinates(store, a)),
         None => {
             let (ys, xs) = (coords(&plan.ycoord, win.y0, win.y1)?, coords(&plan.xcoord, win.x0, win.x1)?);
             let (Some((ys, yc)), Some((xs, xc))) = (ys, xs) else {
@@ -1954,9 +1954,13 @@ pub fn map_coordinate_keys(store: &Store, variable: &str) -> Vec<String> {
 /// coordinate system [`grid_crs`] gives (or the one a caller is told).
 pub fn is_lonlat_grid(store: &Store, variable: &str) -> bool {
     let Some(a) = store.array(variable) else { return false };
-    if spatial_grid(a).is_some() {
-        return crs_of(store, a).is_some_and(|(c, _)| c == Crs::LonLat);
-    }
+    lonlat_by_coordinates(store, a) || (spatial_grid(a).is_some() && crs_of(store, a).is_some_and(|(c, _)| c == Crs::LonLat))
+}
+
+/// Whether `a`'s map coordinates are longitude and latitude, by their names, units or standard
+/// names ([`geographic`]): read from their metadata only, so a grid its `spatial:transform` places
+/// is known as one too.
+fn lonlat_by_coordinates(store: &Store, a: &Array) -> bool {
     let names = a.dim_names();
     let (y, x) = map_dims(a);
     let geo = |d: usize| names.get(d).and_then(|n| store.coordinate(a, n)).is_some_and(geographic);
@@ -2006,7 +2010,7 @@ fn grid_axes(store: &Store, a: &Array, chunks: &HashMap<String, Vec<u8>>) -> Res
     let (yd, xd) = map_dims(a);
     let len = |d: usize| a.shape.get(d).copied().unwrap_or(0);
     if let Some(g) = spatial_grid(a) {
-        let geo = crs_of(store, a).is_some_and(|(c, _)| c == Crs::LonLat);
+        let geo = lonlat_by_coordinates(store, a) || crs_of(store, a).is_some_and(|(c, _)| c == Crs::LonLat);
         return Ok(((g.y0, g.dy, len(yd)), (g.x0, g.dx, len(xd)), geo));
     }
     let names = a.dim_names();
@@ -3420,6 +3424,28 @@ mod tests {
             "attributes": {"spatial:transform": [1.0, 0.0, 0.0, 0.0, -1.0, 0.0], "spatial:shape": [4, 4]}});
         let one = parse_store(&[("zarr.json".into(), line.to_string().into_bytes())]).unwrap();
         assert!(spatial_grid(one.array("").unwrap()).is_none());
+        // A transform-placed grid whose coordinates are named lat and lon, with no coordinate
+        // system said, is longitude/latitude, as a grid its coordinates place.
+        let mut named = root.clone();
+        named["attributes"].as_object_mut().unwrap().remove("proj:code");
+        named["attributes"].as_object_mut().unwrap().remove("spatial:registration");
+        named["attributes"]["spatial:dimensions"] = serde_json::json!(["lat", "lon"]);
+        let meta = named.pointer_mut("/consolidated_metadata/metadata").and_then(Value::as_object_mut).unwrap();
+        meta["v"]["dimension_names"] = serde_json::json!(["time", "lat", "lon"]);
+        for (k, n) in [("lat", 8), ("lon", 12)] {
+            meta.insert(
+                k.into(),
+                serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [n], "data_type": "float64",
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [n]}}, "codecs": [{"name": "bytes"}]}),
+            );
+        }
+        let store = read(&named);
+        let p = plan(&store, &sel).unwrap();
+        assert!(p.ycoord.is_none(), "placed by the transform, no coordinates read");
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert_eq!(r.crs, Crs::LonLat);
+        assert!(is_lonlat_grid(&store, "v"));
+        assert_eq!(locate(&store, "v", &none, 311.8, 9.3).unwrap(), Some((2, 3)));
         // A rotated transform, another transform type, or a shape that isn't the map's isn't
         // applied: with no coordinates, the grid can't be placed.
         for (k, v) in [
