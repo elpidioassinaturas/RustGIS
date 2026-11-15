@@ -118,7 +118,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     it but its plain paper or water: no layer, label, context layer, basemap shape or graticule
     line, no web tiles, and no veil. Its text then sits on the page as on open sea. The answer's
     `legendBox` says whether it has one; the clear box is still an element, to fill by hand, and
-    `"legendBox": "always"` keeps it white. A legend in a side column or a card keeps its box.
+    `"legendBox": "always"` keeps it white. A legend in a side column or on a card keeps its box
+    (`legendBox` is `true`).
   - **Decimal comma**: `"decimal": ","` prints the graticule, scale bar and colorbar numbers and
     `{scale}` with a decimal comma and points between thousands (`0,05`, `1:6.300.000`).
     `layout.page={"decimal": ","}` sets it on any layout; `"."` restores decimal points.

@@ -2278,11 +2278,26 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                 // page's visual centre (a little above its middle) is kept, so the least move, on
                 // the side nearer that centre; on a tie (within a millimetre), the one with the most
                 // room (#1379).
-                let mut found: Option<(usize, f64, f64)> = None;
+                // Each place that fits: its columns, its distance from that centre, its room, and the
+                // map's centre, coverage, move, veil and legend there.
+                type Fit = (
+                    usize,
+                    f64,
+                    f64,
+                    Coord,
+                    (u32, u32, Vec<bool>),
+                    (f64, f64),
+                    Option<Rect>,
+                    [(f64, f64); MAX_LEGEND_COLUMNS],
+                    Vec<String>,
+                );
+                let mut fits: Vec<Fit> = Vec::new();
                 // Each way a quarter, half, three quarters and all of the way the extent can go: the
-                // least move that makes room keeps the map nearest the middle.
+                // least move that makes room keeps the map nearest the middle. A way with no room to
+                // go is left out (its moves are the centred place, tried first).
                 let moves = [(to_right, 0.0), (-to_left, 0.0), (0.0, to_bottom), (0.0, -to_top)]
                     .into_iter()
+                    .filter(|&(x, y)| x != 0.0 || y != 0.0)
                     .flat_map(|(x, y)| [0.25, 0.5, 0.75, 1.0].map(|f| (x * f, y * f)));
                 for (dx, dy) in std::iter::once((0.0, 0.0)).chain(moves) {
                     // Centred with no veil at the asked scale is what has no room; a shift of nothing
@@ -2361,17 +2376,20 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
                     let in_group = |s: &Session| grouped(clip, n, &legend_sizes, scale_box(ground_per_pt(s, there, tried), tried));
                     let Some(n) = (if veil { in_group(s).map(|(i, _)| i) } else { Some(n) }) else { continue };
                     let off = visual_centre_offset((clip.0 + clip.2 / 2.0, clip.1 + clip.3 / 2.0), (w, h));
-                    let better = |(fewest, nearest, most): (usize, f64, f64)| {
-                        n < fewest || (n == fewest && (off < nearest - 1.0 || (off <= nearest + 1.0 && room.0 * room.1 > most)))
-                    };
-                    if found.is_none_or(better) {
-                        found = Some((n, off, room.0 * room.1));
-                        (center, scale, coverage, map_shift) = (there, tried, Some(moved), (dx, dy));
-                        veiled = veil.then_some(clip);
-                        (chosen, chosen_context) = (legend_sizes, legend_context);
-                    }
+                    fits.push((n, off, room.0 * room.1, there, moved, (dx, dy), veil.then_some(clip), legend_sizes, legend_context));
                 }
-                if found.is_some() {
+                // The fewest columns; of those, the nearest that centre, and within a millimetre of
+                // the nearest, the most room (the first tried on a tie).
+                let Some(fewest) = fits.iter().map(|f| f.0).min() else { continue };
+                let nearest = fits.iter().filter(|f| f.0 == fewest).map(|f| f.1).fold(f64::INFINITY, f64::min);
+                let best = fits
+                    .into_iter()
+                    .filter(|f| f.0 == fewest && f.1 <= nearest + 1.0)
+                    .reduce(|kept, f| if f.2 > kept.2 { f } else { kept });
+                if let Some((_, _, _, there, moved, shift, clip, legend_sizes, legend_context)) = best {
+                    (center, scale, coverage, map_shift) = (there, tried, Some(moved), shift);
+                    veiled = clip;
+                    (chosen, chosen_context) = (legend_sizes, legend_context);
                     break;
                 }
             }

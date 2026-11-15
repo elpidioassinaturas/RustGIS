@@ -2565,8 +2565,18 @@ pub fn frame_plain_under(
         }
     }
     let lock = Lock { lock: map.label_lock.take(), anchors: std::mem::take(&mut map.label_lock_line_anchors), map };
-    let Some(pm) = crate::render(&mut *lock.map, &view).map(|r| r.pixmap) else { return false };
+    let Some(img) = crate::render(&mut *lock.map, &view) else { return false };
     drop(lock);
+    // A streamed layer still reading, or a raster read in place whose tiles are on their way or
+    // were drawn from less than the view needs: what lies under the rectangle isn't known yet.
+    if img.data_pending || !img.pending_in_place.is_empty() || !img.partial.is_empty() {
+        return false;
+    }
+    // The labels are drawn apart from the features, as the frame draws them over its map.
+    let crate::Rendered { pixmap, labels, unplaced, label_layers, .. } = img;
+    let mut canvas = Canvas::from_pixmap(pixmap);
+    crate::draw_labels(&mut canvas, (&unplaced, &labels, &label_layers), ppp as f32);
+    let pm = canvas.into_pixmap();
     let (gw, gh) = (pm.width() as usize, pm.height() as usize);
     // Every cell the rectangle touches, partly too.
     let cell = |v: f64, size: f64, n: usize, round: fn(f64) -> f64| (round(v / size * n as f64).max(0.0) as usize).min(n);
@@ -3378,10 +3388,9 @@ mod tests {
         assert_eq!(red(&map, 300.0, &[], 1e6).0, 0, "hidden");
     }
 
-    /// A layer that only outlines its polygons isn't counted as drawn, unless nothing else is shown,
-    /// and it is shown again after; one with labels is more than an outline.
     /// Plain under a rectangle is nothing drawn there but the background: the basemap's paper, not a
-    /// layer, not an outline that coverage takes as context, and never with web tiles (#1379).
+    /// layer or its label, not an outline that coverage takes as context, and never with web tiles
+    /// (#1379).
     #[test]
     fn frame_plain_under_counts_everything_drawn_but_the_background() {
         use rustgis_data::{Dataset, Geometry};
@@ -3409,10 +3418,22 @@ mod tests {
         }
         assert!(plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "the outline (17 to 83 mm) runs clear of that corner");
         assert!(!plain(&mut map, (2.0, 2.0, 96.0, 96.0)), "an outline coverage leaves out still counts here");
+        // A point left of the rectangle, its label running into it: the label counts.
+        let mut d = Dataset::new("named", GeometryType::Point, vec![rustgis_data::Field::new("name", rustgis_data::FieldType::Text)]);
+        d.push(Some(Geometry::Point(Coord::new(-0.2, -0.25))), vec![rustgis_data::Value::Text("A long place name".into())]);
+        let named = map.add_dataset(d);
+        let right_of_it = (31.0, 63.0, 67.0, 33.0);
+        map.layer_mut(border).unwrap().visible = false;
+        assert!(plain(&mut map, right_of_it), "the point itself lies outside it");
+        map.layer_mut(named).unwrap().labels.enabled = true;
+        assert!(!plain(&mut map, right_of_it), "its label lies inside it");
+        map.layer_mut(named).unwrap().labels.enabled = false;
         map.tiles.push(rustgis_map::TileLayer::new("tiles", rustgis_map::TileKind::Raster, "https://example.invalid/{z}/{x}/{y}.png"));
         assert!(!plain(&mut map, (2.0, 86.0, 12.0, 12.0)), "web tiles aren't fetched for it, so nothing is plain");
     }
 
+    /// A layer that only outlines its polygons isn't counted as drawn, unless nothing else is shown,
+    /// and it is shown again after; one with labels is more than an outline.
     #[test]
     fn frame_coverage_leaves_out_layers_that_only_outline() {
         use rustgis_data::{Dataset, Geometry};

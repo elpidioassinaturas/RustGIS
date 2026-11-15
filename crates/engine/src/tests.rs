@@ -50203,6 +50203,19 @@ fn a_publication_legend_over_plain_paper_has_no_box() {
     // At this extent a graticule line runs under the legend's corner.
     let (boxed, alpha) = laid("a4-landscape", json!([-5, -5, 20, 15]), Value::Null);
     assert!(boxed && alpha > 0, "a line under it keeps the box");
+    // In a side column (panel) or on a card (modular), the legend keeps its box, by default too.
+    for style in ["panel", "modular"] {
+        let mut s = Session::new(Project::default());
+        s.run("map.basemap", &json!({"name": "blank"})).unwrap();
+        s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+        let p = json!({"profile": "a4-landscape", "extent": [-8, -6, 23, 16], "author": "", "style": style});
+        let r = s.run("layout.publication", &p).unwrap();
+        let l = s.project.layouts.last().unwrap();
+        let filled = l.elements.iter().any(|e| {
+            e.name == "Legend Box" && matches!(&e.kind, rustgis_map::layout::ElementKind::Rectangle { fill, .. } if fill.0[3] > 0)
+        });
+        assert!(r["legendBox"] == json!(true) && filled, "{style}: {r}");
+    }
     let mut s = Session::new(Project::default());
     s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
     let bad = s.run("layout.publication", &json!({"legendBox": "never"})).unwrap_err();
