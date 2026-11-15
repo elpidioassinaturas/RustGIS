@@ -432,5 +432,5 @@ mod native {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) use native::{authorization_fresh_using, login_at};
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests;

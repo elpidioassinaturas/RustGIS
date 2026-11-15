@@ -1,5 +1,6 @@
 //! Tested against a fake Keycloak on this computer: no request leaves it, and no real account
 //! or password is used.
+#![cfg(not(target_arch = "wasm32"))]
 
 use super::*;
 use std::io::{Read, Write};
