@@ -2751,7 +2751,8 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
     // Walls once the base is settled: over elevation tiles still on their way it would move with
     // each tile (the frame is drawn again when they arrive, `Ground::pending`).
     if let Some(b) = block.as_ref().filter(|b| b.walls_stand(ground)) {
-        block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b), fog, far);
+        let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
+        block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale), fog, far);
     }
     true
 }

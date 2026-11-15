@@ -169,7 +169,9 @@ const KEPT: usize = 4;
 /// (`TerrainBlock::walls_layer`, as [`crate::terrain::walls_layer`] takes it): the colour its
 /// symbology gives the polygon under each stretch of the box's edge (the topmost where polygons
 /// overlap, among the rows its definition query keeps), and the walls' own colour off every
-/// polygon. Else the walls' colour all along.
+/// polygon, with the patterns over it grown or shrunk as the layer's reference scale asks at the
+/// map scale 1:`scale` (`Layer::size_factor`), as the ground's are. Else the walls' colour all
+/// along.
 ///
 /// Runs on the thread drawing the frame. The pieces the polygons cut the sides into
 /// ([`units`]) are kept in [`LAST`], so they are read again only after an edit of the layer, a
@@ -177,7 +179,7 @@ const KEPT: usize = 4;
 /// longitude and latitude, then the rings reaching the box only, put in Web Mercator) and
 /// tests each piece's middle against the parts whose box holds it. The colours are read each
 /// frame, a few pieces a side.
-pub(crate) fn runs(map: &Map, b: &Block) -> Runs {
+pub(crate) fn runs(map: &Map, b: &Block, scale: f64) -> Runs {
     let whole = |i: usize| {
         let (lo, hi) = if SIDES[i] & (SOUTH | NORTH) != 0 { (b.x0, b.x1) } else { (b.y0, b.y1) };
         vec![Run { lo, hi, color: b.walls, patterns: Vec::new() }]
@@ -209,11 +211,16 @@ pub(crate) fn runs(map: &Map, b: &Block) -> Runs {
         u
     });
     let styler = layer.styler(None);
+    let grow = layer.size_factor(scale);
     let look = |row: Option<usize>| match row {
         None => (b.walls, Vec::new()),
         Some(r) => {
             let (sym, _, fills) = styler.style_and_fills(r);
-            unit_paint(sym.fill, fills, b.walls)
+            let (color, mut patterns) = unit_paint(sym.fill, fills, b.walls);
+            if grow != 1.0 {
+                patterns.iter_mut().for_each(|(p, _)| *p = grown(*p, grow));
+            }
+            (color, patterns)
         }
     };
     [0, 1, 2, 3].map(|i| {
@@ -245,6 +252,25 @@ fn unit_paint(fill: Rgba, fills: &[FillLayer], walls: Rgba) -> (Rgba, Vec<(FillP
         .map(|f| (f.pattern, f.color.unwrap_or(fill)))
         .collect();
     (color, patterns)
+}
+
+/// `pattern` with its sizes, spacings and shifts `k` times as large.
+fn grown(pattern: FillPattern, k: f32) -> FillPattern {
+    match pattern {
+        FillPattern::Hatch { angle, spacing, width, offset } => {
+            FillPattern::Hatch { angle, spacing: spacing * k, width: width * k, offset: offset * k }
+        }
+        FillPattern::Dots { marker, size, outline, outline_width, spacing, displacement, offset } => FillPattern::Dots {
+            marker,
+            size: size * k,
+            outline,
+            outline_width: outline_width * k,
+            spacing: spacing.map(|v| v * k),
+            displacement: displacement.map(|v| v * k),
+            offset: offset.map(|v| v * k),
+        },
+        other => other,
+    }
 }
 
 /// Each side of block `b`'s box cut where `layer`'s polygons cross it, with the row of the
@@ -328,7 +354,8 @@ fn inside(rings: &[Vec<Coord>], p: Coord) -> bool {
 }
 
 /// The most hatch lines or markers a pattern draws on one stretch of wall: past it (a pattern far
-/// finer than the wall on screen), it is left off.
+/// finer than the wall on screen), the stretch takes the pattern's ink as one colour instead, as a
+/// polygon under a pixel does on the map (`pattern_fill::tint`).
 const MAX_MARKS: f64 = 20_000.0;
 
 /// Draws `patterns` (hatch lines, markers on a grid; `tone` gives each colour its light and fog)
@@ -351,12 +378,24 @@ fn draw_patterns(
     let pt = |p: (f64, f64)| (p.0 as f32, p.1 as f32);
     for &(pattern, c) in patterns {
         let c = tone(c);
+        // Too many lines or markers: the pattern's ink over the stretch as one colour.
+        let tint = |pm: &mut Pixmap| {
+            let ink = crate::pattern_fill::tint(&[FillLayer { color: Some(c), pattern }], c);
+            let all = tiny_skia::Rect::from_xywh(0.0, 0.0, pm.width() as f32, pm.height() as f32);
+            if let Some(r) = all {
+                pm.fill_rect(r, &paint(ink, 1.0), Transform::identity(), Some(mask));
+            }
+        };
         match pattern {
             FillPattern::Hatch { angle, spacing, width, offset } => {
                 let sp = f64::from(spacing);
                 if sp <= 0.0 || width <= 0.0 || !sp.is_finite() {
                     continue;
                 }
+                // Lines whose stroke reaches into the stretch from just outside it are drawn too
+                // (the mask keeps them to the stretch), so a slanted hatch runs on to the contact.
+                let pad = f64::from(width) / 2.0 + 1.0;
+                let (across, up) = ((across.0 - pad, across.1 + pad), (up.0 - pad, up.1 + pad));
                 // Lines along (cos, sin) a spacing apart across them, through the origin shifted
                 // by the offset; each cut to the stretch's box, which stays a straight line in
                 // perspective.
@@ -367,6 +406,7 @@ fn draw_patterns(
                 let off = f64::from(offset);
                 let (first, last) = (((lo - off) / sp).ceil(), ((hi - off) / sp).floor());
                 if !(last - first).is_finite() || last - first >= MAX_MARKS {
+                    tint(pm);
                     continue;
                 }
                 let mut pb = PathBuilder::new();
@@ -376,13 +416,13 @@ fn draw_patterns(
                     j += 1.0;
                     let o = (d * n.0, d * n.1);
                     let (mut t0, mut t1) = (f64::NEG_INFINITY, f64::INFINITY);
-                    for (p, q, (lo, hi)) in [(o.0, co, across), (o.1, s, up)] {
+                    for (p, q, (from, to)) in [(o.0, co, across), (o.1, s, up)] {
                         if q.abs() < 1e-12 {
-                            if p < lo || p > hi {
+                            if p < from || p > to {
                                 t1 = t0;
                             }
                         } else {
-                            let (a, b) = ((lo - p) / q, (hi - p) / q);
+                            let (a, b) = ((from - p) / q, (to - p) / q);
                             t0 = t0.max(a.min(b));
                             t1 = t1.min(a.max(b));
                         }
@@ -391,8 +431,9 @@ fn draw_patterns(
                         continue;
                     }
                     let (Some(a), Some(b)) = (at(o.0 + co * t0, o.1 + s * t0), at(o.0 + co * t1, o.1 + s * t1)) else { continue };
-                    pb.move_to(pt(a).0, pt(a).1);
-                    pb.line_to(pt(b).0, pt(b).1);
+                    let (a, b) = (pt(a), pt(b));
+                    pb.move_to(a.0, a.1);
+                    pb.line_to(b.0, b.1);
                 }
                 if let Some(path) = pb.finish() {
                     let stroke = Stroke { width: (f64::from(width) * scale) as f32, ..Stroke::default() };
@@ -414,6 +455,7 @@ fn draw_patterns(
                 let (j0, j1) = (((down0 - f64::from(offset[1])) / dy).floor(), ((down1 - f64::from(offset[1])) / dy).ceil());
                 let marks = (i1 - i0 + 1.0) * (j1 - j0 + 1.0);
                 if !marks.is_finite() || marks >= MAX_MARKS {
+                    tint(pm);
                     continue;
                 }
                 let r = (f64::from(size.max(1.0)) * scale / 2.0) as f32;
@@ -553,7 +595,7 @@ pub(crate) fn draw_walls(pm: &mut Pixmap, view: &View, ground: &Ground, b: &Bloc
         };
         let (mut up_lo, mut up_hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for m in quads.iter().flat_map(|(ends, _, _)| ends) {
-            up_lo = up_lo.min(b.base / ground.per_unit(*m) / res);
+            up_lo = up_lo.min((b.base / ground.per_unit(*m) / res).clamp(-1e7, 1e7));
             up_hi = up_hi.max(ground.up_px(*m, &cam));
         }
         let pad = (up_hi - up_lo).abs() * 0.05 + 1.0;
@@ -771,7 +813,7 @@ mod tests {
         assert_eq!(west, vec![(-1000.0, 1000.0, Some(0))]);
         // In one symbol, the polygons merge into one colour; off them, the walls' colour.
         let fill = unit_paint(m.layer_by_name("geo").unwrap().symbol(0).fill, &[], b.walls).0;
-        let r = runs(&m, &b);
+        let r = runs(&m, &b, 10_000.0);
         assert_eq!(r[0].iter().map(|r| r.color).collect::<Vec<_>>(), vec![fill, b.walls]);
         assert_eq!(r[2].len(), 3, "{:?}", r[2]);
         // A definition query leaves its rows out: without A, the west wall is the walls' colour.
@@ -782,12 +824,47 @@ mod tests {
         let mut copy = m.layers[0].clone();
         copy.id = 99;
         m.layers.push(copy);
-        assert!(runs(&m, &b).iter().all(|side| side.len() == 1 && side[0].color == b.walls));
+        assert!(runs(&m, &b, 10_000.0).iter().all(|side| side.len() == 1 && side[0].color == b.walls));
         m.layers.pop();
-        assert_eq!(runs(&m, &b)[0].len(), 2);
+        assert_eq!(runs(&m, &b, 10_000.0)[0].len(), 2);
+        // A hatch over the layer's fill is in every run under a polygon; with a reference scale
+        // twice the map's, at twice its size, as on the ground.
+        let hatch = FillPattern::Hatch { angle: 0.0, spacing: 4.0, width: 1.0, offset: 0.5 };
+        m.layers[0].fill_layers = vec![FillLayer { color: None, pattern: FillPattern::Solid }, FillLayer { color: None, pattern: hatch }];
+        let ink = m.layer_by_name("geo").unwrap().symbol(0).fill;
+        assert_eq!(runs(&m, &b, 10_000.0)[0][0].patterns, vec![(hatch, ink)]);
+        assert!(runs(&m, &b, 10_000.0)[0][1].patterns.is_empty(), "off every polygon, none");
+        m.layers[0].reference_scale = Some(20_000.0);
+        let big = FillPattern::Hatch { angle: 0.0, spacing: 8.0, width: 2.0, offset: 1.0 };
+        assert_eq!(runs(&m, &b, 10_000.0)[0][0].patterns, vec![(big, ink)]);
+        m.layers[0].reference_scale = None;
+        m.layers[0].fill_layers.clear();
         // No such layer: the walls' colour all along.
         m.view.terrain.as_mut().unwrap().block.as_mut().unwrap().walls_layer = Some("none".into());
-        assert!(runs(&m, &b).iter().all(|side| side.len() == 1 && side[0].color == b.walls));
+        assert!(runs(&m, &b, 10_000.0).iter().all(|side| side.len() == 1 && side[0].color == b.walls));
+    }
+
+    #[test]
+    fn a_walls_hatch_reaches_its_contacts_and_one_too_fine_shows_as_its_ink() {
+        // A 20 px square stretch of wall, its plane straight on the screen (up is up).
+        let mut pm = Pixmap::new(20, 20).unwrap();
+        let mut mask = Mask::new(20, 20).unwrap();
+        let square = PathBuilder::from_rect(tiny_skia::Rect::from_xywh(0.0, 0.0, 20.0, 20.0).unwrap());
+        mask.fill_path(&square, FillRule::Winding, false, Transform::identity());
+        let at = |x: f64, up: f64| Some((x, 20.0 - up));
+        let blue = Rgba::rgb(0, 0, 255);
+        let ink = |pm: &Pixmap, x: u32| pm.pixel(x, 10).unwrap().alpha();
+        // A line 10 px wide centred at x 0, outside the stretch at 1–4 across: its stroke still
+        // covers the stretch.
+        let wide = FillPattern::Hatch { angle: 90.0, spacing: 20.0, width: 10.0, offset: 0.0 };
+        draw_patterns(&mut pm, &mask, &[(wide, blue)], ((1.0, 4.0), (0.0, 20.0)), 1.0, |c| c, at);
+        assert!(ink(&pm, 2) > 200 && ink(&pm, 8) == 0);
+        // Lines 1 px apart over a stretch a million wide: too many; the ink as one colour, a
+        // quarter of blue for lines a quarter as wide as their spacing.
+        let mut pm = Pixmap::new(20, 20).unwrap();
+        let fine = FillPattern::Hatch { angle: 0.0, spacing: 1.0, width: 0.25, offset: 0.0 };
+        draw_patterns(&mut pm, &mask, &[(fine, blue)], ((0.0, 1e6), (0.0, 1e6)), 1.0, |c| c, at);
+        assert!((i32::from(ink(&pm, 10)) - 64).abs() <= 2, "{}", ink(&pm, 10));
     }
 
     #[test]
