@@ -11537,6 +11537,10 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
     let v = s.run("map.terrain", &json!({"water": false})).unwrap();
     assert_eq!(v["water"], Value::Null);
     assert!(s.map().view.terrain.is_some());
+    // A saved project's water is read back (the schema fixture `terrain_water.rgis`).
+    let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_water.rgis")).unwrap();
+    let water = saved.maps[0].view.terrain.as_ref().and_then(|t| t.water.clone());
+    assert_eq!(water, Some(rustgis_map::view::TerrainWater { layer: "lagos".into(), level: Some("nivel".into()) }));
 }
 
 /// A 40×40 lon/lat DEM near (10°E, 45°N): a hill in the middle, with a wall to its east.
