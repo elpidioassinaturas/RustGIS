@@ -243,11 +243,18 @@ mod transport_tests {
 #[cfg(not(target_arch = "wasm32"))]
 const MEMBER_ROUNDS: usize = 3;
 
-/// A store's metadata from its web address. A root group that lists no arrays (no consolidated
-/// metadata, [`zarr::lists_no_arrays`]) has them found by name from `variable`
-/// ([`zarr::member_keys`]), in up to [`MEMBER_ROUNDS`] rounds; with no `variable`, that is refused.
+/// A store's metadata from its web address ([`read_store`]).
 #[cfg(not(target_arch = "wasm32"))]
 fn store_at(url: &str, variable: &str) -> Result<zarr::Store, String> {
+    read_store(url, variable).map(|(store, _)| store)
+}
+
+/// A store's metadata from its web address, and whether it holds only what was found from
+/// `variable`. A root group that lists no arrays (no consolidated metadata,
+/// [`zarr::lists_no_arrays`]) has them found by name from `variable` ([`zarr::member_keys`]), in up
+/// to [`MEMBER_ROUNDS`] rounds; with no `variable`, that is refused.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_store(url: &str, variable: &str) -> Result<(zarr::Store, bool), String> {
     let keys: Vec<String> = zarr::METADATA_KEYS.iter().map(|k| k.to_string()).collect();
     let (got, forbidden) = fetch(url, &keys)?;
     // Every metadata file refused: access is denied, not a store without metadata.
@@ -255,7 +262,8 @@ fn store_at(url: &str, variable: &str) -> Result<zarr::Store, String> {
         return Err(crate::sources::message_with_address(url, "access denied (HTTP 403)"));
     }
     let mut docs: Vec<(String, Vec<u8>)> = got.into_iter().collect();
-    if zarr::lists_no_arrays(&docs) {
+    let partial = zarr::lists_no_arrays(&docs);
+    if partial {
         if variable.trim().is_empty() {
             return Err(crate::sources::message_with_address(
                 url,
@@ -277,7 +285,8 @@ fn store_at(url: &str, variable: &str) -> Result<zarr::Store, String> {
             docs.extend(found);
         }
     }
-    zarr::parse_store(&docs).map_err(|e| crate::sources::message_with_address(url, &e.to_string()))
+    let store = zarr::parse_store(&docs).map_err(|e| crate::sources::message_with_address(url, &e.to_string()))?;
+    Ok((store, partial))
 }
 
 /// `raster.zarrInfo`. It reads the store's metadata and coordinates on the UI thread, with no
@@ -556,8 +565,8 @@ fn slices() -> &'static std::sync::Mutex<Vec<(String, std::sync::Arc<raster::Ras
 
 /// Web stores' metadata, read once per run (the last few stores).
 #[cfg(not(target_arch = "wasm32"))]
-fn stores() -> &'static std::sync::Mutex<Vec<(String, std::sync::Arc<zarr::Store>)>> {
-    static S: std::sync::OnceLock<std::sync::Mutex<Vec<(String, std::sync::Arc<zarr::Store>)>>> = std::sync::OnceLock::new();
+fn stores() -> &'static std::sync::Mutex<Vec<CachedStore>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<Vec<CachedStore>>> = std::sync::OnceLock::new();
     S.get_or_init(Default::default)
 }
 
@@ -567,18 +576,26 @@ fn is_web(store: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
-/// A web store's metadata, from the run's cache when it was read before and holds `variable`
-/// (a store whose root lists no arrays holds only those found from the variable it was read for,
-/// so each variable read of it is kept beside the others, among the last four kept).
+/// A web store kept by [`cached_store`]: its address, the variable its arrays were found from (for
+/// a store whose root lists no arrays; `None` for one that lists them all), and its metadata.
+#[cfg(not(target_arch = "wasm32"))]
+type CachedStore = (String, Option<String>, std::sync::Arc<zarr::Store>);
+
+/// A web store's metadata, from the run's cache when it was read before. A store whose root lists
+/// no arrays holds only those found from the variable it was read for, so it is taken from the
+/// cache only for that same variable, and each variable read of it is kept beside the others
+/// (among the last four kept): a nested `g/v` read first doesn't stand in for the root's `v`.
 #[cfg(not(target_arch = "wasm32"))]
 fn cached_store(url: &str, variable: &str) -> Result<std::sync::Arc<zarr::Store>, String> {
-    let holds = |st: &zarr::Store| variable.trim().is_empty() || st.array(variable.trim()).is_some();
-    if let Some((_, st)) = stores().lock().ok().and_then(|c| c.iter().find(|(u, st)| u == url && holds(st)).cloned()) {
+    let wanted = variable.trim().trim_matches('/');
+    let fits = |(u, found_from, _): &&CachedStore| u == url && found_from.as_deref().is_none_or(|v| v == wanted);
+    if let Some((_, _, st)) = stores().lock().ok().and_then(|c| c.iter().find(fits).cloned()) {
         return Ok(st);
     }
-    let st = std::sync::Arc::new(store_at(url, variable)?);
+    let (st, partial) = read_store(url, variable)?;
+    let st = std::sync::Arc::new(st);
     if let Ok(mut c) = stores().lock() {
-        c.push((url.to_string(), st.clone()));
+        c.push((url.to_string(), partial.then(|| wanted.to_string()), st.clone()));
         let excess = c.len().saturating_sub(4);
         c.drain(..excess);
     }

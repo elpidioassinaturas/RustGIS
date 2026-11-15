@@ -49289,15 +49289,35 @@ fn a_zarr_store_without_consolidated_metadata_is_read_by_its_variables_name() {
     let asked: Vec<String> = log.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
     assert_eq!(asked.iter().filter(|p| p.as_str() == "/s.zarr/y/zarr.json").count(), 2, "one store read per command: {asked:?}");
 
+    // A nested g/emb (50 + 10·step + row) read first doesn't stand in for the root's emb in the
+    // run's store cache.
+    let mut nested = files.clone();
+    nested.push(("/s.zarr/g/emb/zarr.json".to_string(), emb.to_string().into_bytes()));
+    for t in 0..3u8 {
+        nested.push((format!("/s.zarr/g/emb/c/{t}/0/0"), (0..4u8).flat_map(|r| [50 + 10 * t + r; 6]).collect()));
+    }
+    let (base, _) = serve_ranged_files(nested);
+    let at = |v: &str| json!({"url": format!("{base}/s.zarr"), "variable": v, "lon": -42.2, "lat": -20.8});
+    assert_eq!(s.run("zarr.series", &at("g/emb")).unwrap()["values"], json!([51.0, 61.0, 71.0]));
+    assert_eq!(s.run("zarr.series", &at("emb")).unwrap()["values"], json!([1.0, 11.0, 21.0]));
+
     // A host answering 403 for files that don't exist (S3 without listing): the missing
     // coordinates aren't taken for access denied, but a missing variable is.
     files.push(("/!403".to_string(), Vec::new()));
-    let (base, _) = serve_ranged_files(files);
+    let (base, _) = serve_ranged_files(files.clone());
     let url = format!("{base}/s.zarr");
     let info = s.run("raster.zarrInfo", &json!({"url": url, "variable": "emb"})).unwrap();
     assert_eq!(info["variables"][0]["dims"][0]["labels"], json!(["2017", "2018", "2025"]), "{info}");
     let e = s.run("raster.zarrInfo", &json!({"url": url, "variable": "nothing"})).unwrap_err();
     assert!(e.contains("access denied"), "{e}");
+    // With no coordinate stored at all, every round after the variable's gets only 403s: the
+    // variable is still read, with no labels.
+    files.retain(|(p, _)| !p.starts_with("/s.zarr/time/"));
+    let (base, _) = serve_ranged_files(files);
+    let url = format!("{base}/s.zarr");
+    let info = s.run("raster.zarrInfo", &json!({"url": url, "variable": "emb"})).unwrap();
+    assert_eq!(info["variables"][0]["name"], "emb", "{info}");
+    assert!(info["variables"][0]["dims"][0].get("labels").is_none(), "{info}");
 }
 
 /// `layer.rename` refuses a name over 200 characters (once trimmed) rather than cutting it
