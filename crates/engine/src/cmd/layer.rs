@@ -5604,6 +5604,10 @@ fn references_follow_layer(s: &mut Session, old: &str, new: &str) {
     if let Some(water) = s.map_mut().view.terrain.as_mut().and_then(|t| t.water.as_mut()) {
         replace(&mut water.layer);
     }
+    // And its block's walls layer (#1914).
+    if let Some(walls) = s.map_mut().view.terrain.as_mut().and_then(|t| t.block.as_mut()).and_then(|b| b.walls_layer.as_mut()) {
+        replace(walls);
+    }
     // Elevation and Map Series selectors compare spellings exactly, even though lookup does not.
     if case_only {
         if s.map().layers.iter().filter(|l| l.name.eq_ignore_ascii_case(old)).count() == 1 {
@@ -5752,12 +5756,23 @@ pub(crate) fn drop_layers(s: &mut Session, ids: &[u32]) {
 /// After layers called `names` are removed: a terrain drawn from one of them would lose its
 /// relief, or take another layer's heights by that name, so it is turned off, and said. Its water
 /// layer removed (#1915), the water keeps the name, so a layer of that name brings it back, and
-/// its lakes lie on the ground meanwhile: said.
+/// its lakes lie on the ground meanwhile: said. So for its block's walls layer (#1914), the walls
+/// one colour meanwhile.
 fn terrain_follows_removal(s: &mut Session, names: &[String]) {
     let water = s.map().view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.layer.clone());
     if let Some(w) = water.filter(|w| names.iter().any(|n| n.eq_ignore_ascii_case(w)) && named_layers(s, w) == 0) {
         s.notify(
             format!("Water: its layer '{w}' was removed, so its lakes lie on the ground until a layer of that name comes back"),
+            false,
+        );
+    }
+    // So does the block's walls layer (#1914): its walls are their own colour meanwhile.
+    let walls = s.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).and_then(|b| b.walls_layer.clone());
+    if let Some(w) = walls.filter(|w| names.iter().any(|n| n.eq_ignore_ascii_case(w)) && named_layers(s, w) == 0) {
+        s.notify(
+            format!(
+                "Terrain: the block's walls layer '{w}' was removed, so the walls are one colour until a layer of that name comes back"
+            ),
             false,
         );
     }

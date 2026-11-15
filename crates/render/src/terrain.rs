@@ -560,6 +560,7 @@ mod tests {
             extent: Some([0.0, 0.0, 200.0, 100.0]),
             depth: Some(1000.0),
             walls: rustgis_map::view::BLOCK_WALLS,
+            walls_layer: None,
         };
         m.view.terrain = Some(rustgis_map::view::Terrain {
             source: rustgis_map::view::TerrainSource::Layer("dem".into()),
@@ -602,6 +603,7 @@ mod tests {
             extent: Some([0.0, 0.0, 5000.0, 5000.0]),
             depth: Some(300.0),
             walls: rustgis_map::view::BLOCK_WALLS,
+            walls_layer: None,
         };
         m.view.terrain = Some(rustgis_map::view::Terrain {
             source: rustgis_map::view::TerrainSource::Tiles {

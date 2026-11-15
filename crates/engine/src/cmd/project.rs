@@ -390,6 +390,33 @@ fn reset(s: &mut Session, p: Project) {
             );
         }
     }
+    // A block whose walls layer (#1914) is missing or holds no polygons draws its walls in their
+    // own colour: said, and kept, so a polygon layer of that name colours them again.
+    let plain: Vec<String> = s
+        .project
+        .maps
+        .iter()
+        .filter_map(|m| {
+            let l = m.view.terrain.as_ref()?.block.as_ref()?.walls_layer.as_ref()?;
+            let polygons = m.layer_by_name(l).is_some_and(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon);
+            (!polygons).then(|| format!("{} ('{l}')", m.name))
+        })
+        .collect();
+    match plain.as_slice() {
+        [] => {}
+        [one] => s.notify(
+            format!("{one}: the block diagram's walls layer is missing or not a polygon layer, so its walls are one colour"),
+            false,
+        ),
+        _ => s.notify(
+            format!(
+                "{} block diagrams have a walls layer missing or not a polygon layer, so their walls are one colour: {}",
+                plain.len(),
+                plain.join(", ")
+            ),
+            false,
+        ),
+    }
     // A terrain saved on a DEM name two layers share draws the first of them: said, as the
     // project opens (its layers keep their names).
     let shared: Vec<(String, String)> = s
