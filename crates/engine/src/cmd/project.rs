@@ -280,6 +280,26 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
     }
 }
 
+/// Why a block with `extent` can't be drawn on the DEM `dem` (its name, its box and its footprint,
+/// as `cmd/view.rs` refuses it): no box fits the DEM and the block has none, or its box lies off the
+/// DEM's footprint. None when it can be drawn.
+fn off_dem(extent: Option<[f64; 4]>, dem: Option<&(String, Option<[f64; 4]>, Option<[f64; 4]>)>) -> Option<String> {
+    let (n, bbox, footprint) = dem?;
+    match (*bbox, extent) {
+        (None, None) => Some(format!("no box fits inside '{n}''s extent on the map: give the block an extent [xmin, ymin, xmax, ymax]")),
+        (_, Some(e)) => {
+            let d = (*footprint)?;
+            (e[2] <= d[0] || e[0] >= d[2] || e[3] <= d[1] || e[1] >= d[3]).then(|| {
+                format!(
+                    "block's extent doesn't overlap '{n}' (its corners are [{:.0}, {:.0}, {:.0}, {:.0}] in Web Mercator metres)",
+                    d[0], d[1], d[2], d[3]
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Replaces project authority, clearing the exchange record, item trust and active connections.
 fn reset(s: &mut Session, p: Project) {
     s.exchange = None;
@@ -329,18 +349,30 @@ fn reset(s: &mut Session, p: Project) {
     // as the project opens, and said: the terrain then draws the whole map.
     let mut dropped: Vec<(String, String)> = Vec::new();
     for m in s.project.maps.iter_mut() {
-        let Some(t) = m.view.terrain.as_mut() else { continue };
+        let Some(t) = m.view.terrain.as_ref() else { continue };
         // Over elevation tiles there is no layer's extent to cut the block to, so it needs a box.
         let over_tiles = matches!(t.source, rustgis_map::view::TerrainSource::Tiles { .. });
+        // The DEM's boxes, when its data is loaded (as the terrain command reads them).
+        let dem = match &t.source {
+            rustgis_map::view::TerrainSource::Layer(n) => m
+                .layer_by_name(n)
+                .and_then(|l| l.raster.as_ref())
+                .and_then(|r| r.data.clone())
+                .map(|r| (n.clone(), rustgis_render::terrain::raster_box(&r), rustgis_render::terrain::raster_footprint(&r))),
+            _ => None,
+        };
         let Some(e) = t.block.as_ref().and_then(|b| {
             b.check().err().or_else(|| {
                 (over_tiles && b.extent.is_none())
                     .then(|| "over elevation tiles a block needs an extent box [xmin, ymin, xmax, ymax]".to_string())
+                    .or_else(|| off_dem(b.extent, dem.as_ref()))
             })
         }) else {
             continue;
         };
-        t.block = None;
+        if let Some(t) = m.view.terrain.as_mut() {
+            t.block = None;
+        }
         dropped.push((m.name.clone(), e));
     }
     match dropped.as_slice() {

@@ -11700,6 +11700,22 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
     assert_eq!(water, Some(rustgis_map::view::TerrainWater { layer: "lagos".into(), level: Some("nivel".into()) }));
 }
 
+/// A saved project's block is read back (the schema fixture `terrain_block.rgis`), its walls left
+/// to the default.
+#[test]
+fn terrain_block_is_read_back_from_a_saved_project() {
+    let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_block.rgis")).unwrap();
+    let block = saved.maps[0].view.terrain.as_ref().and_then(|t| t.block.clone());
+    assert_eq!(
+        block,
+        Some(rustgis_map::view::TerrainBlock {
+            extent: Some([-500_000.0, 1_500_000.0, 500_000.0, 2_500_000.0]),
+            depth: Some(150.0),
+            walls: rustgis_map::view::BLOCK_WALLS,
+        })
+    );
+}
+
 /// A 40×40 lon/lat DEM near (10°E, 45°N): a hill in the middle, with a wall to its east.
 fn dem_b64() -> String {
     use base64::Engine;

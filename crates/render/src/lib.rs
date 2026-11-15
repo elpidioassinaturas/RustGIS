@@ -2679,8 +2679,13 @@ fn drape_terrain(pm: &mut Pixmap, view: &View, map: &Map, bands: &[(View, (f64, 
                 let ys = [p.0.1, q.0.1, r.0.1];
                 let off =
                     xs.iter().all(|x| *x < 0.0) || xs.iter().all(|x| *x > pw) || ys.iter().all(|y| *y < 0.0) || ys.iter().all(|y| *y > ph);
+                // A triangle wholly inside the block's box with an edge on one of its sides still gives
+                // that side's wall its stretch (see below), so it is kept off the picture too.
                 if off && code == [0; 3] {
-                    continue;
+                    let m = [p, q, r].map(|c| v.camera.to_map(c.1.0 / kb, c.1.1 / kb, v.width, v.height));
+                    if !block.as_ref().is_some_and(|b| block::on_side(m, b)) {
+                        continue;
+                    }
                 }
                 tris.push((depth, bi as u32, (cell * 2 + half) as u32));
             }
