@@ -1209,6 +1209,7 @@ fn an_export_says_what_its_whole_read_did_to_dates() {
         rows: 0,
         dates: Some("1 value isn't a date and was read as empty, in 'day'".into()),
         rounded: Some("1 date-time was rounded to the microsecond, as more digits than that aren't kept, in 'at'".into()),
+        ..Default::default()
     };
     assert_eq!(
         crate::cmd::share::read_date_notes("out.geojson", "Sites", &lost),
@@ -2553,6 +2554,11 @@ fn qgis_diagrams_import_on_the_fields_the_layer_has() {
     let r = s.run("style.importQgis", &json!({"layer": "Countries", "text": scaled(pair)})).unwrap();
     assert!(notes(&r).iter().any(|n| n == sized), "{:?}", notes(&r));
     assert!(!notes(&r).iter().any(|n| n.contains("not by")), "the sum QGIS sizes by is the categories': {:?}", notes(&r));
+    // A missing category excluded by QGIS's classification does not change the sizing sum.
+    let matching = scaled(pair).replace("&quot;pop_est&quot; + &quot;nosuch&quot;", "&quot;pop_est&quot;");
+    let r = s.run("style.importQgis", &json!({"layer": "Countries", "text": matching})).unwrap();
+    assert!(notes(&r).iter().any(|n| n.contains("fields the layer hasn't (nosuch)")), "{:?}", notes(&r));
+    assert!(!notes(&r).iter().any(|n| n.contains("not by") || n == sized), "the retained sum matches QGIS: {:?}", notes(&r));
     let r = s.run("style.importQgis", &json!({"layer": "Countries", "text": qml(pair)})).unwrap();
     assert!(!notes(&r).iter().any(|n| n == sized), "{:?}", notes(&r));
     let r = s
@@ -2564,6 +2570,59 @@ fn qgis_diagrams_import_on_the_fields_the_layer_has() {
     let r = s.run("style.importQgis", &json!({"layer": "Sketch", "text": qml(both)})).unwrap();
     assert!(notes(&r).iter().any(|n| n == "its diagrams (a graphics layer draws none)"), "{:?}", notes(&r));
     assert!(s.map().layer_by_name("Sketch").unwrap().diagram.is_none());
+}
+
+#[test]
+fn qgis_import_reports_reach_session_notices_without_clean_import_noise() {
+    let mut s = world();
+    for field in ["pop_est", "missing_category"] {
+        let mark = s.notice_mark();
+        let qml = format!(
+            r##"<qgis><SingleCategoryDiagramRenderer diagramType="Pie"><DiagramCategory enabled="1" width="2" sizeType="MM"><attribute field="{field}" color="#ff0000"/></DiagramCategory></SingleCategoryDiagramRenderer></qgis>"##
+        );
+        let result = s.run("style.importQgis", &json!({"layer":"Countries", "text":qml})).unwrap();
+        let notes = result["notes"].as_array().unwrap();
+        let said = s.notices_since(mark);
+        assert_eq!(said.len(), notes.len());
+        for note in notes {
+            assert!(said.iter().any(|n| n.text.contains(note["text"].as_str().unwrap()) && n.text.contains("count 1")));
+        }
+        assert_eq!(said.is_empty(), field == "pop_est");
+    }
+    // Project imports use the same delivery path, including notes for a layer left out.
+    for layers in [
+        "",
+        r#"<maplayer type="vector"><id>x</id><layername>Unsupported</layername><provider>not-a-provider</provider><datasource>x</datasource></maplayer>"#,
+    ] {
+        let mark = s.notice_mark();
+        let result = s.run("project.importQgis", &json!({"text":format!("<qgis><projectlayers>{layers}</projectlayers></qgis>")})).unwrap();
+        let said = s.notices_since(mark);
+        for note in result["notes"].as_array().unwrap() {
+            assert!(said.iter().any(|n| n.text.contains(note["text"].as_str().unwrap()) && n.text.contains("count 1")));
+        }
+        assert_eq!(said.is_empty(), layers.is_empty());
+    }
+}
+
+#[test]
+fn qgis_import_notices_group_layers_and_bound_the_sample_without_dropping_returned_notes() {
+    let mut s = world();
+    let layers = (0..10).map(|i| format!(r#"<maplayer type="vector"><id>{i}</id><layername>Unsupported{i}</layername><provider>not-a-provider</provider><datasource>x</datasource></maplayer>"#)).collect::<String>();
+    let mark = s.notice_mark();
+    let result = s.run("project.importQgis", &json!({"text":format!("<qgis><projectlayers>{layers}</projectlayers></qgis>")})).unwrap();
+    let notes = result["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 10, "the returned report remains complete");
+    assert!(notes.iter().all(|note| note["kind"] == "skipped"));
+    let said: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.starts_with("QGIS import")).collect();
+    assert_eq!(said.len(), 1, "one omission notice across all layers");
+    assert!(said[0].text.contains("10 omissions") && said[0].text.contains("affected layers: 10"));
+    assert!(
+        said[0].text.contains(notes[0]["layer"].as_str().unwrap()) && said[0].text.contains("2 additional notes not listed here"),
+        "{}",
+        said[0].text
+    );
+    assert!(!said[0].text.contains(notes[9]["layer"].as_str().unwrap()));
+    assert!(said[0].text.len() < 4096);
 }
 
 /// A QGIS categorized renderer by an expression classes by it where the expression reads on the
@@ -6413,6 +6472,7 @@ fn opening_projects_reports_moved_label_and_callout_adjustments() {
         transparency: 0.0,
     });
     project.offline_areas.push(crate::project::OfflineArea {
+        id: String::new(),
         name: "Field copy".into(),
         map: "Map".into(),
         extent: rustgis_geom::Extent::new(-1.0, -1.0, 1.0, 1.0),
@@ -12790,6 +12850,17 @@ fn a_link_chart_says_what_its_limits_leave_out() {
     let shows = "300 of the 301 related features and 20000 of the 20200 links";
     assert_eq!(said(&s, mark, "Mesh"), [format!("Mesh: the link chart shows {shows}; {limits}")]);
     assert!(html.contains(&format!("Shows {shows}.")));
+    // A self-link needs one node, including the last available slot. Counting its endpoints
+    // twice would stop at 2,999 even though all 3,000 features and links fit.
+    let keys: Vec<String> = (0..3000).map(|i| format!("self{i}")).collect();
+    add(&mut s, "self.csv", &keys);
+    s.run("data.relate", &json!({"name": "Self", "origin": "self", "originKey": "key", "destination": "self", "destinationKey": "key"}))
+        .unwrap();
+    let mark = s.notice_mark();
+    s.run("share.linkChart", &json!({"relationship": "Self"})).unwrap();
+    let (links, nodes, html) = drawn("Self");
+    assert_eq!((links, nodes), (3000, 3000));
+    assert!(said(&s, mark, "Self").is_empty() && !html.contains("Shows "));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -17492,7 +17563,12 @@ fn split_sources_keep_their_points_on_top() {
     let origin =
         |family| rustgis_map::source::DuckdbOrigin { sql: Some("SELECT 1".into()), database: None, table: None, crs: None, family };
     let parts = duckdb_parts(&mut s, "Trip", duckdb::Output { parts, skipped: 0, other_family: 0 }, origin);
-    add_converted(&mut s, &json!({}), "the query", "DuckDB query", parts).unwrap();
+    let requested = "Requested".repeat(500);
+    add_converted(&mut s, &json!({"name": requested}), "the query", "DuckDB query", parts).unwrap();
+    let warning: Vec<_> = s.notices.iter().filter(|n| n.text.contains("converted layer parts keep their generated names")).collect();
+    assert_eq!(warning.len(), 1);
+    assert!(warning[0].text.contains("3 converted layer parts") && warning[0].text.len() < 300);
+    assert!(!warning[0].text.contains(&requested));
     assert_eq!(names(&s), ["Trip (points)", "Trip (lines)", "Trip (polygons)"]);
 
     // A GDAL file with two mixed layers: each keeps its points on top, and the file's second layer
@@ -17512,6 +17588,18 @@ fn split_sources_keep_their_points_on_top() {
     let original = dir.join("file.gpx").display().to_string();
     add_converted(&mut s, &json!({}), &original, &original, gdal_parts(converted, &original, None)).unwrap();
     assert_eq!(names(&s), ["b (points)", "b (lines)", "b (polygons)", "a (points)", "a (lines)", "a (polygons)"]);
+
+    assert!(!s.notices.iter().any(|n| n.text.contains("converted layer parts keep their generated names")), "no ignored name was supplied");
+    let mut single = Session::new(Project::default());
+    let output = duckdb::Output {
+        parts: vec![duckdb::Part { path: write("single", Family::Points), family: Family::Points, count: 1 }],
+        skipped: 0,
+        other_family: 0,
+    };
+    let one = duckdb_parts(&mut single, "Generated", output, origin);
+    add_converted(&mut single, &json!({"name": "Requested"}), "the query", "DuckDB query", one).unwrap();
+    assert_eq!(names(&single), ["Requested"]);
+    assert!(!single.notices.iter().any(|n| n.text.contains("converted layer parts keep their generated names")));
 
     // A file the built-in readers split by type (a KML here, as GPX, OSM or DXF): the same order,
     // and the first layer added (the polygons, away from the rest) still frames an empty map on
@@ -21901,7 +21989,8 @@ fn deleting_a_field_clears_the_label_expressions_reading_it() {
         ["Countries: its label expressions read the deleted field tag, so they are removed: Default's size; Big's text, size and angle"]
     );
     let saved = serde_json::to_string(&got).unwrap();
-    assert!(!saved.contains("tag"), "{saved}");
+    let reopened: rustgis_map::Labeling = serde_json::from_str(&saved).unwrap();
+    assert_eq!(reopened, got, "the saved label expressions stay cleared");
     // Undo brings the field and the expressions back.
     s.run("edit.undo", &Value::Null).unwrap();
     let got = labels(&s);
@@ -21959,6 +22048,16 @@ fn deleting_a_field_is_refused_while_the_time_slider_reads_it() {
     assert_eq!(s.undo_depth(), depth);
     assert!(s.map().layer_by_name("Events").and_then(|l| l.dataset.field_index("when")).is_some());
     assert_eq!(shown(&s), ["e0"]);
+    // Turning off the map slider retains its layer binding; deletion still refuses without
+    // an undo step, even though every row is now shown.
+    s.run("time.set", &json!({"off": true})).unwrap();
+    let off_depth = s.undo_depth();
+    assert!(s.map().time.is_none());
+    assert!(s.map().layer_by_name("Events").and_then(|layer| layer.time.as_ref()).is_some());
+    let error = s.run("edit.deleteField", &json!({"layer": "Events", "field": "when"})).unwrap_err();
+    assert!(error.contains("unbind it first"), "{error}");
+    assert_eq!(s.undo_depth(), off_depth);
+    assert!(s.map().layer_by_name("Events").and_then(|layer| layer.dataset.field_index("when")).is_some());
     // Another field goes; once unbound, the slider's field goes too.
     s.run("edit.deleteField", &json!({"layer": "Events", "field": "ms"})).unwrap();
     s.run("time.unbind", &Value::Null).unwrap();
@@ -22150,6 +22249,124 @@ fn extrusion_base_sets_the_base_and_nothing_else() {
     assert_eq!(x(&s).unwrap().base, 0.0);
     let got = x(&s).unwrap();
     assert_eq!((got.field, got.height, got.factor), (None, 30.0, 2.0), "nothing else changed on the way");
+}
+
+/// A list of layers is raised, based and flattened alike, one undo step each (#2160). A list with
+/// a layer that lacks the field, isn't polygons or isn't raised yet is refused whole, naming them,
+/// and changes none; one layer works as before.
+#[test]
+fn extrusion_sets_several_layers_alike_or_none() {
+    let mut s = world();
+    let square = |props: &str| {
+        format!(
+            r#"{{"type":"FeatureCollection","features":[{{"type":"Feature","properties":{props},"geometry":{{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}}}}]}}"#
+        )
+    };
+    let well = r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"h":1},"geometry":{"type":"Point","coordinates":[0,0]}}]}"#;
+    for (name, text) in [
+        ("Blocks", square(r#"{"h": 10, "b": 2}"#)),
+        ("Towers", square(r#"{"H": 90, "b": 5, "label": "x"}"#)),
+        ("Park", square(r#"{"label": "x"}"#)),
+        ("Wells", well.to_string()),
+    ] {
+        s.run("layer.addDataText", &json!({"fileName": format!("{name}.geojson"), "text": text, "name": name})).unwrap();
+    }
+    let x = |s: &Session, n: &str| s.map().layer_by_name(n).unwrap().extrusion.clone();
+    let pair = json!(["Blocks", "Towers"]);
+    // Raised by a field each layer spells its own way, in one undo step.
+    let depth = s.undo_depth();
+    s.run("layer.extrusion", &json!({"layer": pair, "type": "field", "field": "h", "factor": 2})).unwrap();
+    assert_eq!(s.undo_depth(), depth + 1, "one undo step");
+    assert_eq!(x(&s, "Blocks").unwrap().field.as_deref(), Some("h"));
+    assert_eq!(x(&s, "Towers").unwrap().field.as_deref(), Some("H"), "the layer's own spelling");
+    assert_eq!(x(&s, "Towers").unwrap().factor, 2.0);
+    // Based alike on a field, then back on the ground.
+    s.run("layer.extrusionBase", &json!({"layer": pair, "field": "b"})).unwrap();
+    for n in ["Blocks", "Towers"] {
+        assert_eq!(x(&s, n).unwrap().base_field.as_deref(), Some("b"), "{n}");
+    }
+    s.run("layer.extrusionBase", &json!({"layer": pair, "field": null, "base": 0})).unwrap();
+    for n in ["Blocks", "Towers"] {
+        let got = x(&s, n).unwrap();
+        assert_eq!((got.base_field, got.base, got.factor), (None, 0.0, 2.0), "{n}: the base only");
+    }
+    // Refused whole, naming the layers, and nothing changes.
+    let all = |s: &Session| ["Blocks", "Towers", "Park", "Wells"].map(|n| x(s, n));
+    let was = all(&s);
+    let refused = [
+        (
+            "layer.extrusion",
+            json!({"layer": ["Blocks", "Towers", "Park"], "type": "field", "field": "h"}),
+            "no numeric field 'h' in 'Park'",
+        ),
+        ("layer.extrusion", json!({"layer": ["Blocks", "Wells"], "type": "none"}), "these aren't: 'Wells'"),
+        ("layer.extrusionBase", json!({"layer": ["Blocks", "Park"], "base": 3}), "turn extrusion on first (Layer Extrusion) in 'Park'"),
+        ("layer.extrusionBase", json!({"layer": pair, "field": "label"}), "no numeric field 'label' in 'Blocks', 'Towers'"),
+        // The command's conditions read the list's first layer, as for every command taking one.
+        ("layer.extrusion", json!({"layer": ["Wells", "Blocks"], "type": "none"}), "this works on polygon layers"),
+    ];
+    for (id, p, why) in refused {
+        let e = s.run(id, &p).unwrap_err();
+        assert!(e.contains(why), "{p}: {e}");
+    }
+    assert_eq!(all(&s), was, "no layer changed");
+    // Flattened together, and one undo raises both again.
+    s.run("layer.extrusion", &json!({"layer": pair, "type": "none"})).unwrap();
+    assert!(x(&s, "Blocks").is_none() && x(&s, "Towers").is_none());
+    s.undo();
+    assert!(x(&s, "Blocks").is_some() && x(&s, "Towers").is_some(), "one undo brings both back");
+    // One layer as before: its own message, and on the globe the note that it draws them flat.
+    let e = s.run("layer.extrusion", &json!({"layer": "Park", "type": "field", "field": "h"})).unwrap_err();
+    assert!(e.contains("no numeric field 'h'") && !e.contains("no layer changed"), "{e}");
+    s.run("map.projection", &json!({"type": "globe"})).unwrap();
+    let r = s.run("layer.extrusion", &json!({"layer": "Park", "type": "height", "height": 4})).unwrap();
+    assert!(r["note"].as_str().is_some_and(|n| n.contains("the globe draws the polygons flat")), "{r}");
+    assert_eq!(x(&s, "Park").unwrap().height, 4.0);
+    // A call that doesn't give the height keeps each layer's own, also below the 1,000 m a new
+    // extrusion starts at: the factor alone, or a field over a constant height.
+    s.run("layer.extrusion", &json!({"layer": "Park", "type": "height", "factor": 3})).unwrap();
+    assert_eq!((x(&s, "Park").unwrap().height, x(&s, "Park").unwrap().factor), (4.0, 3.0));
+    s.run("layer.extrusion", &json!({"layer": pair, "type": "height", "height": 30})).unwrap();
+    s.run("layer.extrusion", &json!({"layer": pair, "type": "field", "field": "h"})).unwrap();
+    for n in ["Blocks", "Towers"] {
+        assert_eq!(x(&s, n).unwrap().height, 30.0, "{n}: the fallback height stays");
+    }
+}
+
+/// Extruding several layers whose diagrams the extrusion hides says so once, with how many more
+/// layers it holds for; layers without a diagram say nothing (#2160).
+#[test]
+fn extruding_several_layers_gives_one_notice_for_their_hidden_diagrams() {
+    let mut s = world();
+    let square = r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"h": 10, "k": 2},"geometry":{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}}]}"#;
+    for name in ["A", "B", "C"] {
+        s.run("layer.addDataText", &json!({"fileName": format!("{name}.geojson"), "text": square, "name": name})).unwrap();
+    }
+    let hidden = |s: &Session, mark| {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("its diagram doesn't show")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    // No diagram: nothing to say.
+    let mark = s.notice_mark();
+    s.run("layer.extrusion", &json!({"layer": ["A", "B", "C"], "type": "field", "field": "h"})).unwrap();
+    assert!(hidden(&s, mark).is_empty(), "{:?}", hidden(&s, mark));
+    for (name, n) in [("A", 0), ("B", 1), ("C", 2)] {
+        s.run("layer.diagram", &json!({"layer": name, "kind": "pie", "fields": ["h", "k"]})).unwrap();
+        let mark = s.notice_mark();
+        let layers: Vec<&str> = ["A", "B", "C"][..=n].to_vec();
+        s.run("layer.extrusion", &json!({"layer": layers, "type": "field", "field": "h"})).unwrap();
+        let said = hidden(&s, mark);
+        assert_eq!(said.len(), 1, "one notice: {said:?}");
+        let more = match n {
+            0 => None,
+            1 => Some("(and 1 more layer like it)"),
+            _ => Some("(and 2 more layers like it)"),
+        };
+        assert!(said[0].starts_with("Layer 'A'"), "{said:?}");
+        match more {
+            Some(m) => assert!(said[0].ends_with(m), "{said:?}"),
+            None => assert!(!said[0].contains("more layer"), "{said:?}"),
+        }
+    }
 }
 
 #[test]
@@ -22900,15 +23117,28 @@ fn dropped_z_values_are_said_on_import_and_export() {
         let mark = s.notice_mark();
         let id = s.run("layer.addData", &json!({"path": src, "stream": stream})).unwrap()["layer"].as_u64().unwrap();
         assert!(s.notices_since(mark).iter().any(|n| n.text.contains("Z or M values")), "stream {stream}: {:?}", s.notices_since(mark));
-        let out = dir.join(format!("out-{stream}.geojson"));
+        let said = |s: &Session, mark, path: &std::path::Path| {
+            let notes: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.contains("Z or M")).map(|n| &n.text).collect();
+            let loss = if stream {
+                format!("wells: {}", rustgis_data::zm_note(Some(1)))
+            } else {
+                "its geometry has no Z or M values, which were dropped when wells was read".into()
+            };
+            assert_eq!(notes, [&format!("{}: {loss}", path.display())], "stream {stream}");
+        };
+        // Every output describes its loss, even after import or an earlier export said it.
+        // A counted reader diagnostic replaces the generic export warning, rather than adding one.
+        for repeat in 0..2 {
+            let out = dir.join(format!("out-{stream}-{repeat}.geojson"));
+            let mark = s.notice_mark();
+            s.run("share.exportLayer", &json!({"layer": id, "path": out})).unwrap();
+            said(&s, mark, &out);
+            assert!(std::fs::read_to_string(&out).unwrap().contains("[1.0,2.0]"));
+        }
+        let converted = dir.join(format!("converted-{stream}.csv"));
         let mark = s.notice_mark();
-        s.run("share.exportLayer", &json!({"layer": id, "path": out})).unwrap();
-        let said = |s: &Session, mark| s.notices_since(mark).iter().any(|n| n.text.contains("its geometry has no Z or M values"));
-        assert!(said(&s, mark), "stream {stream}: {:?}", s.notices_since(mark));
-        assert!(std::fs::read_to_string(&out).unwrap().contains("[1.0,2.0]"));
-        let mark = s.notice_mark();
-        s.run("data.convert", &json!({"layer": id, "format": "wkt", "path": dir.join(format!("converted-{stream}.csv"))})).unwrap();
-        assert!(said(&s, mark), "stream {stream}");
+        s.run("data.convert", &json!({"layer": id, "format": "wkt", "path": converted})).unwrap();
+        said(&s, mark, &converted);
     }
     let mut s = world();
     let mark = s.notice_mark();
@@ -30624,7 +30854,7 @@ fn keys_read_by_commands() -> Vec<(String, std::collections::BTreeSet<String>)> 
                             let call = if *m == module { name.as_str() } else { qualified.as_str() };
                             let key = format!("{m}::{name}");
                             // A dispatcher by kind: its arms read keys for other commands.
-                            if key == "items::item_bytes" {
+                            if matches!(key.as_str(), "items::item_bytes" | "items::item_output") {
                                 continue;
                             }
                             if !seen.contains(&key) && args.iter().any(|a| calls(&body, call, a)) {
@@ -34206,6 +34436,9 @@ fn a_new_renderer_from_a_style_or_subtypes_ends_no_fill() {
     assert!(said.iter().any(|t| t.contains("turning No Fill off drops")), "{said:?}");
     let l = s.map().layer(id).unwrap();
     assert!(l.no_fill.is_none() && l.hidden_fills.is_none());
+    let rustgis_map::Renderer::Unique { classes, other, .. } = &l.renderer else { panic!("subtype classes") };
+    assert!(classes.iter().all(|(_, symbol)| symbol.fill.a() > 0));
+    assert!(other.fill.a() > 0, "the new renderer's fills are drawn after No Fill ends");
 }
 
 /// A class's fill colour chosen while No Fill is on is recorded for Restore Fill only while the
@@ -35784,6 +36017,59 @@ fn model_graph_drops_are_noticed() {
     assert_eq!(said(&s, mark, "model graph"), 0, "{:?}", s.notices_since(mark));
     let saved = s.project.models.iter().find(|m| m.name == "Lossy").and_then(|m| m.graph.as_ref()).map(|g| g.edges.len());
     assert_eq!(saved, Some(2), "the connection naming \" i2 \" follows its trimmed id");
+}
+
+#[test]
+fn imported_history_with_null_steps_does_not_make_a_trusted_model() {
+    let mut s = world();
+    s.run("gp.run", &json!({"tool": "buffer", "params": {"input": "Cities", "distance": 100}})).unwrap();
+    s.history_from_file = 1;
+    for (name, null_steps) in [("Omitted steps", false), ("Null steps", true)] {
+        let mut params = json!({"name": name, "fromHistory": true});
+        if null_steps {
+            params["steps"] = Value::Null;
+        }
+        s.run("model.new", &params).unwrap();
+        assert!(!s.item_trusted("model", name), "a history model remains imported with null_steps={null_steps}");
+    }
+    s.history_from_file = 0;
+    s.run("model.new", &json!({"name": "Local history", "fromHistory": true, "steps": null})).unwrap();
+    assert!(s.item_trusted("model", "Local history"));
+}
+
+#[test]
+fn unreadable_model_nodes_do_not_redirect_their_connections() {
+    for unreadable_first in [false, true] {
+        let kept = json!({"id": " A ", "kind": "input", "layer": "Cities"});
+        let unreadable = json!({"id": "A", "kind": "unknown"});
+        let mut nodes = if unreadable_first { vec![unreadable, kept] } else { vec![kept, unreadable] };
+        nodes.push(json!({"id": "out", "kind": "output", "name": "Result"}));
+        let (graph, dropped) = crate::model::graph_from_json_counted(&json!({
+            "nodes": nodes,
+            "edges": [
+                {"from": "A", "fromPort": "out", "to": "out", "toPort": "in"},
+                {"from": " A ", "fromPort": "out", "to": "out", "toPort": "in"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(dropped.nodes, 1);
+        assert_eq!(dropped.edges, 1, "the unreadable node's connection must be omitted");
+        assert_eq!(graph.edges.len(), 1, "the valid node's original ID still resolves");
+        assert_eq!(graph.edges[0].from, "A");
+    }
+    // A readable node with the exact same original ID still owns its connections.
+    let (graph, dropped) = crate::model::graph_from_json_counted(&json!({
+        "nodes": [
+            {"id": "A", "kind": "unknown"},
+            {"id": "A", "kind": "input", "layer": "Cities"},
+            {"id": "out", "kind": "output", "name": "Result"}
+        ],
+        "edges": [{"from": "A", "fromPort": "out", "to": "out", "toPort": "in"}]
+    }))
+    .unwrap();
+    assert_eq!(dropped.nodes, 1);
+    assert_eq!(dropped.edges, 0);
+    assert_eq!(graph.edges.len(), 1);
 }
 
 /// ModelBuilder graphs: validated, run in flow order, intermediate results dropped, outputs named.
@@ -43492,6 +43778,37 @@ fn plugin_rasters_with_a_null_path_need_no_files() {
     rustgis_plugins::unload("eng-null-path");
 }
 
+/// A disabled command rejects foreign completions without consuming the rightful owner's raster.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn disabled_extensions_do_not_release_another_callers_raster() {
+    use crate::cmd::workflows::{raster_land, raster_start};
+    use crate::policy::{AgentAccess, Effects, Revocation, Scope};
+    use rustgis_analysis::control::Control;
+    struct Live;
+    impl Revocation for Live {
+        fn allows(&self, _: Effects) -> bool {
+            true
+        }
+    }
+    let mut s = world();
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let p = json!({"layer": "dem", "function": "hillshade"});
+    let run = raster_start(&mut s, "raster.function", &p).unwrap();
+    let id = run.id;
+    let made = run.run(&Control::new()).unwrap();
+    assert_eq!(raster_land(&mut s, id, made), Ok(true));
+    s.run("extension.disable", &json!({"id": "imagery"})).unwrap();
+    let foreign = Scope::agent(AgentAccess::Refuse, true, "foreign-raster", None, std::sync::Arc::new(Live));
+    assert!(s.with_scope(foreign, |s| s.run("raster.function", &json!({"ran": id}))).unwrap().is_err());
+    assert!(s.raster_results.iter().any(|(n, _)| *n == id), "foreign rejection preserves the result");
+    assert!(s.run("dl.remove", &json!({"ran": id, "name": "unrelated"})).is_err());
+    assert!(s.raster_results.iter().any(|(n, _)| *n == id), "another command cannot consume it");
+    s.run("extension.enable", &json!({"id": "imagery"})).unwrap();
+    assert!(s.finish_raster("raster.function", id, &p).is_ok());
+    assert!(!s.raster_results.iter().any(|(n, _)| *n == id));
+}
+
 /// The Analysis pane's single-pass raster tools made on another thread (#1291 step 3): each raster
 /// handed over (`ran`) is the one its command makes here, bit for bit and with what the command
 /// says of it besides, and a cancelled run is an error saying so.
@@ -45591,9 +45908,8 @@ fn importing_a_file_that_is_neither_map_nor_project_says_so() {
     assert!(e.contains("Update RustGIS"), "{e}");
 }
 
-/// Format 2 is read a release before anything writes it (#1853 piece 1): a project of format 2
-/// opens, and is saved again in the format this RustGIS writes; one needing a capability this
-/// RustGIS doesn't know is refused naming it; a newer format is refused as before.
+/// A project of format 2 opens and is saved again in the format this RustGIS writes; one needing
+/// an unknown capability is refused naming it, and a newer format is refused as before.
 #[test]
 fn format_2_is_read_unless_it_needs_what_this_rustgis_cannot_read() {
     let s = world();
@@ -45605,8 +45921,8 @@ fn format_2_is_read_unless_it_needs_what_this_rustgis_cannot_read() {
         }
         v.to_string()
     };
-    // Format 2, with no capabilities, an empty list or none: read whole, and written back as
-    // format 1, the format this RustGIS writes.
+    // Format 2, with no capabilities, an empty list or none: read whole, and written back in
+    // the current format without inventing required capabilities.
     for requires in [None, Some(json!([])), Some(Value::Null)] {
         let p = Project::from_json(&as_format(2, requires.clone())).unwrap();
         assert_eq!(p.format, 2);
@@ -46527,6 +46843,7 @@ fn opening_a_diagram_that_wont_show_says_why() {
     let mut offline = Session::new(Project::from_json(&clean).unwrap());
     let snapshot = s.map().clone();
     offline.project.offline_areas.push(crate::project::OfflineArea {
+        id: String::new(),
         name: "Trip".into(),
         map: snapshot.name.clone(),
         extent: rustgis_geom::Extent::new(-10.0, -10.0, 10.0, 10.0),
