@@ -505,7 +505,7 @@ mod tests {
         let raster = Arc::new(
             Raster::new("heights", 400, 400, vec![vec![0.0; 160_000]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap(),
         );
-        let ground = Ground { heights: Heights::Raster { raster, wrap_width: None }, exaggeration: 1.0, body: 1.0 };
+        let ground = Ground { heights: Heights::Raster { raster, wrap_width: None }, exaggeration: 1.0, body: 1.0, water: None };
         let band = |deg: f64| {
             let (s, c) = deg.to_radians().sin_cos();
             [(-20_000.0, 5_000.0), (20_000.0, 5_000.0), (-20_000.0, -5_000.0), (20_000.0, -5_000.0)]
@@ -535,7 +535,7 @@ mod tests {
         let raster = Arc::new(
             Raster::new("heights", 400, 400, vec![vec![0.0; 160_000]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap(),
         );
-        let tall = Ground { heights: Heights::Raster { raster, wrap_width: None }, exaggeration: 1.0, body: 1.0 };
+        let tall = Ground { heights: Heights::Raster { raster, wrap_width: None }, exaggeration: 1.0, body: 1.0, water: None };
         let (cols, rows) = tall.cells_across(&band(45.0)).unwrap();
         let (x, y) = tall.cells_along(&band(45.0)).unwrap();
         // Across: direction (28.3, -2.83) on the grid; down: (7.07, 0.71), each normalised.
