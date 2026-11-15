@@ -7664,6 +7664,90 @@ fn layout_frames_turn_and_tilt() {
 }
 
 #[test]
+fn terrain_block_is_checked_kept_and_taken_off() {
+    let mut s = world();
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+    // The DEM covers 10–10.04° E, 45–45.04° N: about x 1113195–1117648, y 5621521–5627821.
+    let inside = json!([1114000, 5622000, 1116000, 5625000]);
+    // Wrong settings are refused before anything changes: a box in degrees, off the Web
+    // Mercator world, or off the DEM among them.
+    for bad in [
+        json!("box"),
+        json!({"extent": [10, 0, 0, 10]}),
+        json!({"extent": [0, 0, 10]}),
+        json!({"extent": "view"}),
+        json!({"extent": [10.0, 45.0, 10.04, 45.04]}),
+        json!({"extent": [0, 0, 1000, 3e7]}),
+        json!({"extent": [0, 0, 1000, 500]}),
+        json!({"depth": -5}),
+        json!({"walls": "#C8B89A80"}),
+        json!({"walls": {"layer": "Countries"}}),
+        json!({"base": 3}),
+    ] {
+        assert!(s.run("map.terrain", &json!({"layer": dem, "block": bad})).is_err(), "{bad}");
+    }
+    let e = s.run("map.terrain", &json!({"layer": dem, "block": {"extent": [10.0, 45.0, 10.04, 45.04]}})).unwrap_err();
+    assert!(e.contains("degrees"), "{e}");
+    assert!(s.map().view.terrain.is_none());
+    // The DEM's extent by default, reported as the box it is cut to, and the default walls.
+    let v = s.run("map.terrain", &json!({"layer": dem, "block": {}})).unwrap();
+    assert_eq!((v["block"]["extent_from"].as_str(), v["block"]["walls"].as_str()), (Some("layer"), Some("#C8B89A")));
+    let cut: Vec<f64> = v["block"]["extent"].as_array().unwrap().iter().filter_map(Value::as_f64).collect();
+    let want = [1_113_195.0, 5_621_521.0, 1_117_648.0, 5_627_821.0];
+    assert!(cut.len() == 4 && cut.iter().zip(want).all(|(c, w)| (c - w).abs() < 2.0), "{cut:?}");
+    // Kept when only the exaggeration changes, and saved with the project.
+    let v = s.run("map.terrain", &json!({"exaggeration": 2, "block": {"extent": inside, "depth": 300, "walls": "#806040"}})).unwrap();
+    assert_eq!(
+        (&v["block"]["extent"], v["block"]["extent_from"].as_str()),
+        (&json!([1114000.0, 5622000.0, 1116000.0, 5625000.0]), Some("box"))
+    );
+    let v = s.run("map.terrain", &json!({"exaggeration": 3})).unwrap();
+    assert_eq!(v["block"]["depth"], 300.0);
+    let saved = serde_json::to_string(&s.map().view).unwrap_or_default();
+    let back: rustgis_map::view::ViewSettings = serde_json::from_str(&saved).unwrap_or_default();
+    assert_eq!(back.terrain, s.map().view.terrain);
+    // false takes it off; a terrain saved without one reads back with none.
+    let v = s.run("map.terrain", &json!({"block": false})).unwrap();
+    assert!(v["block"].is_null());
+    assert!(!serde_json::to_string(&s.map().view).unwrap_or_default().contains("block"));
+    // A block kept from before that a DEM off its box can't take is refused, and the refusal says
+    // it was kept and that "block": false takes it off (a block given in the call isn't said so).
+    s.map_mut().view.terrain = Some(rustgis_map::view::Terrain {
+        source: rustgis_map::view::TerrainSource::Layer(dem.clone()),
+        exaggeration: 1.0,
+        block: Some(rustgis_map::view::TerrainBlock {
+            extent: Some([0.0, 0.0, 1000.0, 1000.0]),
+            depth: None,
+            walls: rustgis_map::view::BLOCK_WALLS,
+        }),
+        water: None,
+    });
+    let e = s.run("map.terrain", &json!({"exaggeration": 2})).unwrap_err();
+    assert!(e.contains("the block is the one kept from before"), "{e}");
+    assert!(s.map().view.terrain.as_ref().is_some_and(|t| t.block.is_some()), "the terrain stays as it was");
+    let e = s.run("map.terrain", &json!({"exaggeration": 2, "block": {"extent": [0, 0, 1000, 1000]}})).unwrap_err();
+    assert!(!e.contains("kept from before"), "{e}");
+    s.run("map.terrain", &json!({"block": false})).unwrap();
+    // Over elevation tiles there's no layer extent: a box is needed, and the terrain stays.
+    let e = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {}})).unwrap_err();
+    assert!(e.contains("needs an extent box"), "{e}");
+    assert!(matches!(&s.map().view.terrain, Some(t) if matches!(t.source, rustgis_map::view::TerrainSource::Layer(_))));
+    // A box in whole degrees over tiles (no DEM to miss) is refused as degrees too.
+    let e =
+        s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {"extent": [-50, -25, -40, -15]}})).unwrap_err();
+    assert!(e.contains("degrees"), "{e}");
+    s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png", "block": {"extent": [0, 0, 1000, 1000]}})).unwrap();
+    // A block on the DEM's extent left behind on a switch to tiles; one with a box kept.
+    s.run("map.terrain", &json!({"layer": dem, "block": {}})).unwrap();
+    let v = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png"})).unwrap();
+    assert!(v["block"].is_null(), "{v}");
+    s.run("map.terrain", &json!({"layer": dem, "block": {"extent": inside}})).unwrap();
+    let v = s.run("map.terrain", &json!({"tiles": "https://e.com/{z}/{x}/{y}.png"})).unwrap();
+    assert_eq!(v["block"]["extent"], json!([1114000.0, 5622000.0, 1116000.0, 5625000.0]));
+}
+
+#[test]
 fn terrain_is_set_from_a_dem_or_tiles() {
     let mut s = world();
     // A source is required, and must be a raster layer or an XYZ URL.
@@ -7724,11 +7808,73 @@ fn terrain_is_set_from_a_dem_or_tiles() {
         if let Some(l) = m.layers.iter_mut().filter(|l| l.is_raster()).nth(1) {
             l.name = first.clone();
         }
-        m.view.terrain =
-            Some(rustgis_map::view::Terrain { source: rustgis_map::view::TerrainSource::Layer(first), exaggeration: 1.0, water: None });
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer(first),
+            exaggeration: 1.0,
+            block: None,
+            water: None,
+        });
         let mut opened = Session::new(Project::default());
         crate::cmd::project::reset_to(&mut opened, saved);
         assert!(opened.notices.iter().any(|n| n.text.contains("is shared by two layers")), "{:?}", opened.notices);
+    }
+    // A saved block the terrain command would refuse (a box turned inside out) is dropped as the
+    // project opens, and said: the terrain keeps its DEM and draws the whole map.
+    {
+        let mut saved = s.project.clone();
+        saved.maps[0].view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer(name.clone()),
+            exaggeration: 1.0,
+            block: Some(rustgis_map::view::TerrainBlock {
+                extent: Some([1116000.0, 5625000.0, 1114000.0, 5622000.0]),
+                depth: None,
+                walls: rustgis_map::view::BLOCK_WALLS,
+            }),
+            water: None,
+        });
+        let mut opened = Session::new(Project::default());
+        crate::cmd::project::reset_to(&mut opened, saved);
+        let t = opened.project.maps[0].view.terrain.clone();
+        assert!(t.as_ref().is_some_and(|t| t.block.is_none()), "{t:?}");
+        assert!(opened.notices.iter().any(|n| n.text.contains("block's extent is")), "{:?}", opened.notices);
+    }
+    // A valid saved block survives the open with its box, and nothing is said of it.
+    {
+        let mut clean = s.project.clone();
+        clean.maps[0].view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer(name.clone()),
+            exaggeration: 1.0,
+            block: Some(rustgis_map::view::TerrainBlock {
+                extent: Some([1114000.0, 5622000.0, 1116000.0, 5625000.0]),
+                depth: None,
+                walls: rustgis_map::view::BLOCK_WALLS,
+            }),
+            water: None,
+        });
+        let mut opened = Session::new(Project::default());
+        crate::cmd::project::reset_to(&mut opened, clean);
+        let t = opened.project.maps[0].view.terrain.clone();
+        assert!(t.as_ref().is_some_and(|t| t.block.as_ref().is_some_and(|b| b.extent.is_some())), "{t:?}");
+        assert!(!opened.notices.iter().any(|n| n.text.contains("block diagram")), "{:?}", opened.notices);
+    }
+    // A saved block over elevation tiles with no box (the terrain command refuses one) is dropped as
+    // the project opens, and said with the reason.
+    {
+        let mut saved = s.project.clone();
+        saved.maps[0].view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Tiles {
+                url: "https://e.com/{z}/{x}/{y}.png".into(),
+                encoding: rustgis_map::view::TerrainEncoding::Terrarium,
+            },
+            exaggeration: 1.0,
+            block: Some(rustgis_map::view::TerrainBlock { extent: None, depth: None, walls: rustgis_map::view::BLOCK_WALLS }),
+            water: None,
+        });
+        let mut opened = Session::new(Project::default());
+        crate::cmd::project::reset_to(&mut opened, saved);
+        let t = opened.project.maps[0].view.terrain.clone();
+        assert!(t.as_ref().is_some_and(|t| t.block.is_none()), "{t:?}");
+        assert!(opened.notices.iter().any(|n| n.text.contains("needs an extent box")), "{:?}", opened.notices);
     }
     // Renaming another layer leaves the terrain as it is.
     s.run("layer.rename", &json!({"layer": "Countries", "name": "Paises"})).unwrap();
@@ -11666,6 +11812,22 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
     let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_water.rgis")).unwrap();
     let water = saved.maps[0].view.terrain.as_ref().and_then(|t| t.water.clone());
     assert_eq!(water, Some(rustgis_map::view::TerrainWater { layer: "lagos".into(), level: Some("nivel".into()) }));
+}
+
+/// A saved project's block is read back (the schema fixture `terrain_block.rgis`), its walls left
+/// to the default.
+#[test]
+fn terrain_block_is_read_back_from_a_saved_project() {
+    let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_block.rgis")).unwrap();
+    let block = saved.maps[0].view.terrain.as_ref().and_then(|t| t.block.clone());
+    assert_eq!(
+        block,
+        Some(rustgis_map::view::TerrainBlock {
+            extent: Some([-500_000.0, 1_500_000.0, 500_000.0, 2_500_000.0]),
+            depth: Some(150.0),
+            walls: rustgis_map::view::BLOCK_WALLS,
+        })
+    );
 }
 
 /// A 40×40 lon/lat DEM near (10°E, 45°N): a hill in the middle, with a wall to its east.
@@ -48690,6 +48852,20 @@ fn a_command_says_once_that_it_couldnt_zoom() {
     assert_eq!(s.map().camera.center, view.center);
 }
 
+/// A request from a page on the user's own machine (an origin that isn't public) leaves a
+/// document's restriction on its URL in place; only a request the user named directly clears it.
+/// The UI's add goes through the same helper, so it can't lift the restriction either.
+#[test]
+fn a_local_request_with_an_origin_keeps_a_document_restriction() {
+    use crate::render::rustgis_tiles::{address::Reach, cache};
+    let url = "https://restriction-keep.example/scene.tif";
+    cache::restrict_to_public(url);
+    crate::cmd::layer::mark_url_reach(url, Some("http://localhost:8080/"), false);
+    assert_eq!(cache::ceiling_for(url), Reach::Public);
+    crate::cmd::layer::mark_url_reach(url, None, false);
+    assert_eq!(cache::ceiling_for(url), Reach::Local);
+}
+
 /// A save never writes a file it couldn't open again (#1985): a feature with a coordinate that
 /// isn't a number would be held as null, so saving the project, packaging it and packaging the
 /// map are refused, saying where, and the files already there are kept as they were. With the
@@ -48989,4 +49165,89 @@ fn convert_field_workers_refuse_stale_rows() {
         let after = ds(&s);
         assert_eq!(after.value(0, after.field_index("day").unwrap()).to_string(), "04/06/2026");
     }
+}
+
+/// The template's element list is additive; scripts can use its IDs without reading a project.
+#[test]
+fn layout_creation_and_info_return_element_addresses() {
+    isolate_plugins();
+    let mut s = Session::new(Project::default());
+    let made = s.run("layout.new", &json!({"name": "Addressable"})).unwrap();
+    assert_eq!(made["layout"], 0);
+    assert_eq!(made["name"], "Addressable");
+    let elements = made["elements"].as_array().unwrap();
+    assert_eq!(elements.len(), 6);
+    let title = elements.iter().find(|e| e["name"] == "Title").unwrap();
+    assert_eq!(title["kind"], "text");
+    s.run("layout.update", &json!({"element": title["element"], "text": "Addressed"})).unwrap();
+    let info = s.run("info.project", &Value::Null).unwrap();
+    assert_eq!(info["layouts"][0]["elements"], made["elements"]);
+    assert_eq!(info["layouts"][0]["mapFrames"][0]["id"], 1);
+    let blank = s.run("layout.new", &json!({"template": "blank"})).unwrap();
+    assert_eq!(blank["elements"], json!([]));
+}
+
+/// All export formats deliver a counted notice through the real Session command path; a long
+/// line inside the page is kept even outside its box, and clean exports produce no such notice.
+#[test]
+fn layout_exports_report_cut_text_and_clean_exports_do_not() {
+    isolate_plugins();
+    let dir = std::env::temp_dir().join(format!("rustgis-layout-clipping-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layout.new", &json!({"template": "blank", "width": 120, "height": 90})).unwrap();
+    let a = s.run("layout.addElement", &json!({"kind":"text", "text":"Long title on the page", "x":110, "y":10, "w":5, "h":12})).unwrap()["element"].clone();
+    let b = s
+        .run("layout.addElement", &json!({"kind":"text", "text":"one\ntwo\nthree\nfour\nfive", "x":10, "y":30, "w":60, "h":2}))
+        .unwrap()["element"]
+        .clone();
+    s.run("layout.update", &json!({"element":a, "name":"Heading"})).unwrap();
+    s.run("layout.update", &json!({"element":b, "name":"Sources"})).unwrap();
+    for clean in [false, true] {
+        if clean {
+            s.run("layout.update", &json!({"element":a, "x":10})).unwrap();
+            s.run("layout.update", &json!({"element":b, "h":50})).unwrap();
+        }
+        for ext in ["png", "pdf", "svg"] {
+            s.notices.clear();
+            s.run("layout.export", &json!({"path":dir.join(format!("page.{ext}")), "dpi":48})).unwrap();
+            let notes: Vec<_> = s.notices.iter().filter(|n| n.text.contains("Text is cut off")).collect();
+            if clean {
+                assert!(notes.is_empty(), "{ext}: {notes:?}");
+            } else {
+                assert_eq!(notes.len(), 1, "{ext}: {notes:?}");
+                let note = &notes[0].text;
+                assert!(note.contains("2 layout element(s)") && note.contains("Heading (1)") && note.contains("Sources (2)"), "{note}");
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The optional legend flag survives serialization and undo, while old layouts omit it and
+/// retain their appearance. Creation and updates use the same command parameter.
+#[test]
+fn layout_no_data_legend_is_optional_and_saved() {
+    isolate_plugins();
+    use rustgis_map::layout::ElementKind;
+    let mut s = Session::new(Project::default());
+    s.run("layout.new", &Value::Null).unwrap();
+    let old = serde_json::to_value(&s.project.layouts[0]).unwrap();
+    assert!(old["elements"][2]["kind"]["Legend"].get("show_no_data").is_none());
+    assert!(s.run("layout.addElement", &json!({"kind":"text", "showNoData":true})).unwrap_err().contains("only legends"));
+    assert!(s.run("layout.update", &json!({"element":2, "showNoData":true})).unwrap_err().contains("only legends"));
+    s.run("layout.update", &json!({"element":3, "showNoData":true})).unwrap();
+    assert!(matches!(s.project.layouts[0].element(3).unwrap().kind, ElementKind::Legend { show_no_data: true, .. }));
+    let saved = serde_json::to_string(&s.project.layouts[0]).unwrap();
+    let loaded: rustgis_map::layout::Layout = serde_json::from_str(&saved).unwrap();
+    assert!(matches!(loaded.element(3).unwrap().kind, ElementKind::Legend { show_no_data: true, .. }));
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(serde_json::to_value(&s.project.layouts[0]).unwrap(), old);
+    let made = s.run("layout.addElement", &json!({"kind":"legend", "showNoData":true})).unwrap();
+    assert!(matches!(
+        s.project.layouts[0].element(made["element"].as_u64().unwrap() as u32).unwrap().kind,
+        ElementKind::Legend { show_no_data: true, .. }
+    ));
+    let old: rustgis_map::layout::Layout = serde_json::from_value(old).unwrap();
+    assert!(matches!(old.element(3).unwrap().kind, ElementKind::Legend { show_no_data: false, .. }));
 }
