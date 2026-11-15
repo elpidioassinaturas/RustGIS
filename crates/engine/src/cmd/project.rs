@@ -28,7 +28,7 @@ pub fn commands() -> Vec<C> {
             .when(|s| if s.can_redo() { None } else { Some("nothing to redo") }),
         C::new("tool.set", "Set Map Tool", "Home › Navigate", set_tool).roles(&[]).effects(crate::policy::Effects::NONE)
             .view()
-            .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"rotatedBox"|"cutPolygon"|"reshape"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
+            .params(r#"{"tool": "explore"|"select"|"selectPolygon"|"selectLasso"|"selectRadius"|"zoomIn"|"measure"|"measureArea"|"createPoint"|"createLine"|"createPolygon"|"editVertices"|"rotatedBox"|"circle"|"cutPolygon"|"reshape"|"graphicPoint"|"graphicText"|"graphicLine"|"graphicCurve"|"graphicFreehand"|"graphicPolygon"|"graphicLasso"|"graphicRectangle"|"graphicCircle"|"graphicEllipse"|"graphicPicture"}"#),
         C::new("info.project", "Project Info", "Project", info).inputs(super::tiles::listing_inputs).roles(&[]).effects(crate::policy::Effects::NONE).view().params(r#"{"nameFilter"?: string, "includeFields"?: bool}"#),
         C::new("info.commands", "List Commands", "Help", list).roles(&[]).effects(crate::policy::Effects::NONE).view(),
         // The session log (#797): read, written out, emptied, turned on or off. It sits outside
@@ -533,6 +533,7 @@ fn write(s: &mut Session, path: PathBuf) -> CmdResult {
             format!("a project saves to a .rgis file, not a .{ext} one")
         });
     }
+    let construction_notes = s.construction_output_notes()?;
     let report = s.project.save(&destination)?;
     let stripped = report.layer_addresses();
     s.mark_saved();
@@ -540,16 +541,23 @@ fn write(s: &mut Session, path: PathBuf) -> CmdResult {
     let written = s.notice_mark();
     s.notify_written(format!("Saved {}", path.display()), false);
     crate::durable::notify(s, &report);
+    for note in construction_notes {
+        s.notify(note, false);
+    }
     s.retain_written_notices(written);
     s.path = Some(destination);
     Ok(json!({"path": path.display().to_string(), "stripped": stripped}))
 }
 
 /// Names the project after its file, as Save As does, so a renamed or copied file opens under
-/// its own name.
+/// its own name. A file name over 200 characters is cut to 200, and that is said.
 fn name_from_file(s: &mut Session, file: &std::path::Path) {
     if let Some(stem) = file.file_stem().and_then(|x| x.to_str()).map(str::trim).filter(|x| !x.is_empty()) {
         s.project.name = stem.chars().take(200).collect();
+        let n = stem.chars().count();
+        if n > 200 {
+            s.notify(format!("Open Project: the file's name is {n} characters, so the project's name is its first 200 characters"), false);
+        }
     }
 }
 
@@ -574,7 +582,7 @@ fn save_as(s: &mut Session, p: &Value) -> CmdResult {
 
 fn rename(s: &mut Session, p: &Value) -> CmdResult {
     let n = super::ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).ok_or("name is required")?;
-    s.project.name = n.chars().take(200).collect();
+    s.project.name = super::within("name", "a project's name", n, 200)?;
     Ok(Value::Null)
 }
 
@@ -600,6 +608,9 @@ fn set_tool(s: &mut Session, p: &Value) -> CmdResult {
     }
     if t == Tool::RotatedBox {
         crate::box_edit::check_tool(s, s.layer_id(&Value::Null)?)?;
+    }
+    if t == Tool::Circle {
+        crate::circle_edit::check_tool(s, s.layer_id(&Value::Null)?)?;
     }
     s.tool = t;
     Ok(Value::Null)
