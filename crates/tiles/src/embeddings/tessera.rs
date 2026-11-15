@@ -279,7 +279,8 @@ pub(super) fn read_chunks(
 }
 
 /// A shard index's entry at byte `at`: the chunk's offset and length, `None` for a chunk the
-/// shard leaves out (both all ones), an error for a length of 0 or past `most` (a damaged store).
+/// shard leaves out (both all ones), an error for a length of 0 or past `most`, or an all-ones
+/// offset alone (a damaged store).
 fn index_entry(store: &Store, index: &[u8], at: u64, most: u64) -> rustgis_data::Result<Option<(u64, u64)>> {
     let bad = || rustgis_data::DataError::Format(format!("{}: a shard's index is damaged", store.name));
     let b = usize::try_from(at).ok().and_then(|at| index.get(at..at.checked_add(16)?)).ok_or_else(bad)?;
@@ -288,7 +289,7 @@ fn index_entry(store: &Store, index: &[u8], at: u64, most: u64) -> rustgis_data:
     if off == u64::MAX && len == u64::MAX {
         return Ok(None);
     }
-    if len == 0 || len > most {
+    if off == u64::MAX || len == 0 || len > most {
         return Err(bad());
     }
     Ok(Some((off, len)))
@@ -493,12 +494,13 @@ mod tests {
     #[test]
     fn index_entries() {
         let e = |off: u64, len: u64| [off.to_le_bytes(), len.to_le_bytes()].concat();
-        let index = [e(100, 50), e(u64::MAX, u64::MAX), e(7, 0), e(7, 5000)].concat();
+        let index = [e(100, 50), e(u64::MAX, u64::MAX), e(7, 0), e(7, 5000), e(u64::MAX, 50)].concat();
         assert_eq!(index_entry(&TESSERA, &index, 0, 4096).unwrap(), Some((100, 50)));
         // A chunk the shard leaves out, then damaged entries: an error, not a blank.
         assert_eq!(index_entry(&TESSERA, &index, 16, 4096).unwrap(), None);
         assert!(index_entry(&TESSERA, &index, 32, 4096).is_err());
         assert!(index_entry(&TESSERA, &index, 48, 4096).is_err());
-        assert!(index_entry(&TESSERA, &index, 60, 4096).is_err());
+        assert!(index_entry(&TESSERA, &index, 64, 4096).is_err());
+        assert!(index_entry(&TESSERA, &index, 76, 4096).is_err());
     }
 }

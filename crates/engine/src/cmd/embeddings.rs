@@ -501,6 +501,12 @@ pub(crate) fn style_points(s: &mut Session, id: u32) {
 }
 
 /// Three bands of the view from a store of UTM zones (Tessera's, OlmoEarth's), as a raster.
+///
+/// Without `ran` it reads on the caller's thread. The app's routes (the pane) read off the frame
+/// and hand the file over (`ran`); a plugin's command in the app (`leave_downloads`) is refused.
+/// The app's assistant runs its tools on the frame without `leave_downloads`, so there it waits,
+/// as `embeddings.addCube` does (see its note): moving the assistant's tools off the frame is a
+/// change for all of them, not for this one.
 fn add_zones(s: &mut Session, p: &Value, d: &emb::EmbeddingDataset, name: Option<String>) -> CmdResult {
     let z = tessera::store(d.id).ok_or_else(|| format!("{} can't be added", d.name))?;
     let year = year(d, p)?;
