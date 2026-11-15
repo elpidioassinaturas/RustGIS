@@ -11375,6 +11375,9 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
     s.run("map.terrain", &json!({"water": {"layer": mar}})).unwrap();
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
     assert!(said.iter().any(|t| t.contains(&format!("the shore of 1 polygon of '{mar}' was read at wider steps"))), "{said:?}");
+    // Null is left out, as for the exaggeration (a script's default None): the water stays.
+    let v = s.run("map.terrain", &json!({"water": null, "exaggeration": null})).unwrap();
+    assert_eq!(v["water"]["layer"], json!(mar));
     // False takes it off; the terrain stays.
     let v = s.run("map.terrain", &json!({"water": false})).unwrap();
     assert_eq!(v["water"], Value::Null);

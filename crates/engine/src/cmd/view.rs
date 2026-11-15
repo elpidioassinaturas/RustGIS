@@ -346,10 +346,11 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         s.map_mut().view.terrain = None;
         return Ok(json!({"terrain": null}));
     }
-    // Left out, the water stays as it was; false or null takes it off (#1915).
+    // Left out (or null, as for the exaggeration), the water stays as it was; false takes it off
+    // (#1915).
     let water = match p.get("water") {
-        None => None,
-        Some(Value::Null | Value::Bool(false)) => Some(None),
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(false)) => Some(None),
         Some(Value::Object(w)) => Some(Some(terrain_water(s, w)?)),
         Some(_) => return Err("water is an object {\"layer\", \"level\"?}, or false to take it off".into()),
     };
