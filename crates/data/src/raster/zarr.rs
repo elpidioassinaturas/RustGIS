@@ -1214,26 +1214,28 @@ fn is_x(d: &str) -> bool {
 /// The dimensions that make the map: those `spatial:dimensions` names (y first), else those named
 /// like y and x, else the last two.
 fn map_dims(a: &Array) -> (usize, usize) {
-    let names = a.dim_names();
-    let named = |i: usize| {
-        a.attrs
-            .get("spatial:dimensions")
-            .or_else(|| a.inherited.iter().find_map(|m| m.get("spatial:dimensions")))?
-            .get(i)?
-            .as_str()
-            .and_then(|n| names.iter().position(|d| d == n))
-    };
-    if let (Some(y), Some(x)) = (named(0), named(1))
-        && y != x
-    {
-        return (y, x);
+    if let Some(Some(yx)) = spatial_dims(a) {
+        return yx;
     }
+    let names = a.dim_names();
     let y = names.iter().rposition(|d| is_y(d));
     let x = names.iter().rposition(|d| is_x(d));
     match (y, x) {
         (Some(y), Some(x)) if y != x => (y, x),
         _ => (a.shape.len().saturating_sub(2), a.shape.len().saturating_sub(1)),
     }
+}
+
+/// The map's dimensions (y, x) `a`'s `spatial:dimensions` (its own or a group's) names: `None`
+/// when it has none, `Some(None)` when it doesn't name two distinct dimensions of `a`.
+fn spatial_dims(a: &Array) -> Option<Option<(usize, usize)>> {
+    let dims = a.attrs.get("spatial:dimensions").or_else(|| a.inherited.iter().find_map(|m| m.get("spatial:dimensions")))?;
+    let names = a.dim_names();
+    let named = |i: usize| dims.get(i)?.as_str().and_then(|n| names.iter().position(|d| d == n));
+    Some(match (named(0), named(1)) {
+        (Some(y), Some(x)) if y != x => Some((y, x)),
+        _ => None,
+    })
 }
 
 /// A grid placed by `spatial:transform` (zarr-conventions `spatial:`): the outer edge of its first
@@ -1831,6 +1833,14 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     // A transform the coordinates stood in for is said, not dropped without a word.
     if has_transform(a) && spatial_grid(a).is_none() {
         r.lost.push(format!("{}: {TRANSFORM_UNREAD}: its coordinates place it", a.path));
+    }
+    if spatial_dims(a) == Some(None) {
+        r.lost.push(format!(
+            "{}: its spatial:dimensions don't name two of its dimensions, so its map's are taken by their names ({} and {})",
+            a.path,
+            a.dim_names().get(plan.y).map_or("", String::as_str),
+            a.dim_names().get(plan.x).map_or("", String::as_str)
+        ));
     }
     Ok(r)
 }
@@ -3469,6 +3479,19 @@ mod tests {
             "dimension_names": ["row", "band", "col"], "attributes": {"spatial:dimensions": ["row", "col"]}});
         let store = parse_store(&[("zarr.json".into(), a.to_string().into_bytes())]).unwrap();
         assert_eq!(map_dims(store.array("").unwrap()), (0, 2));
+        // A spatial:dimensions that doesn't name the array's dimensions is said, and the map is
+        // taken by the names instead.
+        let mut misnamed: Value = serde_json::from_slice(&files[0].1).unwrap();
+        misnamed["consolidated_metadata"]["metadata"]["v"]["attributes"]["spatial:dimensions"] = serde_json::json!(["lat", "lon"]);
+        let store = read(&misnamed);
+        assert_eq!(spatial_dims(store.array("v").unwrap()), Some(None));
+        let p = plan(&store, &sel).unwrap();
+        let r = assemble(&store, &p, &read_plan(&files, &p), "v", None).unwrap();
+        assert!(
+            r.lost.iter().any(|l| l.contains("spatial:dimensions don't name two of its dimensions") && l.contains("(y and x)")),
+            "{:?}",
+            r.lost
+        );
     }
 
     /// A window reads only the chunks it touches, a plain coordinate's own bytes and a compressed
