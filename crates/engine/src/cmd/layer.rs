@@ -50,7 +50,7 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"layer"?: name|id, "crs": "EPSG:… or WKT; reinterpret native coordinates, without rewriting the source file"}"#),
         C::new("layer.loadAll", "Load All Features", "Layers", load_all).roles(&[]).effects(crate::policy::Effects::NONE).when(need_streamed).params(r#"{"layer"?: name|id}"#),
         C::new("layer.addUrl", "Add Data From URL", "Home › Add › Add Data", add_url).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
-            r#"{"url": "https://…/data.geojson|.csv|.parquet|.fgb|.gpkg|.zip|.shp (its .dbf fetched beside it, and its .shx, .prj and .cpg when there)|.kml|.kmz|.gpx|.tif|.jp2 (JPEG 2000: desktop, through GDAL) (the format from the address, else the contents) | a .pmtiles archive", "name"?: text, "layer"?: "one layer of a zip, KML or GPX", "zoom"?: "bool: true frames everything added; false keeps the view, even on an empty map; omitted, the first content on an empty map is framed (a GeoParquet, FlatGeobuf or cloud-optimised GeoTIFF read in place likewise; a PMTiles or MBTiles archive ignores zoom and is framed on its bounds unless it covers the whole world)", "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "blocks"?, "stream"?, "as"? (as layer.addData), "whole"?: "bool: download a cloud-optimised GeoTIFF whole (as a raster layer) instead of reading it in place (an address without a file name is read in place when its first bytes are a cloud-optimised GeoTIFF)", "cog"?: "bool: the address is a cloud-optimised GeoTIFF whatever its name says (the app's probe found it so)", "bbox"?: "[west, south, east, north] in degrees | "view": a cloud-optimised GeoTIFF's window as a raster layer (desktop and command line), read by range at full resolution, in the file's coordinate system, with its colour table and class names; at most 64 million values (all bands)", "cellSize"?: "with bbox: the coarsest overview whose cells are at most this size is read (the file's units; metres for longitude/latitude, a degree taken as 111.32 km)", "cube"?: "bool: a data cube's file: a tile layer that follows the time slider (stac.addCube adds them), kept one when the project opens again", "start"?, "end"?, "unit"?, "interval"?, "dates"?: "a GeoTIFF address with date placeholders ({date:YYYY}, {YYYY}{MM}{DD}), one file per date: the dates it spans and steps through (as time.set), turning the time slider on", "connection"?: "the id of the saved web-service connection it comes from (as service.add)", "from"?: "the web document address that named url (internal: enforces public-address reach)", "fromDocument"?: bool, "anonymous"?: bool (internal: a plugin-origin download must never adopt a saved login), "request"?: "number (internal: the download a plugin command left to the app, #1202)"}"#,
+            r#"{"url": "https://…/data.geojson|.csv|.parquet|.fgb|.gpkg|.zip|.shp (its .dbf fetched beside it, and its .shx, .prj and .cpg when there)|.kml|.kmz|.gpx|.tif|.jp2 (JPEG 2000: desktop, through GDAL) (the format from the address, else the contents) | a .pmtiles archive", "name"?: text, "layer"?: "one layer of a zip, KML or GPX", "zoom"?: "bool: true frames everything added; false keeps the view, even on an empty map; omitted, the first content on an empty map is framed (a GeoParquet, FlatGeobuf or cloud-optimised GeoTIFF read in place likewise; a PMTiles or MBTiles archive ignores zoom and is framed on its bounds unless it covers the whole world)", "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "blocks"?, "stream"?, "as"? (as layer.addData), "whole"?: "bool: download a cloud-optimised GeoTIFF whole (as a raster layer) instead of reading it in place (an address without a file name is read in place when its first bytes are a cloud-optimised GeoTIFF)", "cog"?: "bool: the address is a cloud-optimised GeoTIFF whatever its name says (the app's probe found it so)", "bbox"?: "[west, south, east, north] in degrees | "view": a cloud-optimised GeoTIFF's window as a raster layer (desktop and command line), read by range at full resolution, in the file's coordinate system, with its colour table and class names; at most 64 million values (all bands)", "cellSize"?: "with bbox: the coarsest overview whose cells are at most this size is read (the file's units; metres for longitude/latitude, a degree taken as 111.32 km)", "cube"?: "bool: a data cube's file: a tile layer that follows the time slider (stac.addCube adds them), kept one when the project opens again", "start"?, "end"?, "unit"?, "interval"?, "dates"?: "a GeoTIFF address with date placeholders ({date:YYYY}, {YYYY}{MM}{DD}), one file per date: the dates it spans and steps through (as time.set), turning the time slider on", "connection"?: "the id of the saved web-service connection it comes from (as service.add)", "service"?: "bool: a web service's features (an ArcGIS query, OGC API Features items): read in pages as service.add reads them, known by the address as its layers are, and an ArcGIS layer drawn as its description says", "bounds"?: "with service: [west, south, east, north], the layer's longitude/latitude bounds its axes are checked against", "from"?: "the web document address that named url (internal: enforces public-address reach)", "fromDocument"?: bool, "anonymous"?: bool (internal: a plugin-origin download must never adopt a saved login), "request"?: "number (internal: the download a plugin command left to the app, #1202)"}"#,
         ),
         C::new("layer.addDownload", "Add Downloaded Data", "Home › Add", add_download).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Reserved).with(crate::policy::Effect::Files))
             .params(r#"{"id": a download the app finished (Home › Add › Add Data › From URL), "url": its address, "name"?: text, "layer"?: text, "zoom"?: bool, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "blocks"?, "stream"?, "as"? (as layer.addData), "service"?: bool (a service's features: their axes (when they came as GeoJSON) and paging are checked, and the address is kept as the layer's source), "bounds"?: [west, south, east, north] (with service: the layer's longitude/latitude bounds from its capabilities, which its axes are checked against; without bounds they are left as they come; ignored without service), "coverage"?: bool (a WCS coverage: a GeoTIFF, else the service's error, and its request kept as the layer's source), "drawingInfo"?: object (internal, with service: an ArcGIS layer's drawingInfo from its description, which the layer is drawn with), "geolibreProject"?: bool (internal: downloaded project JSON), "geolibreLayer"?: {"token", "record"} (internal: reserved imported layer and its saved style), "geolibreZarr"?: bool (internal: an imported Zarr slice as GeoTIFF), "connection"?: "as layer.addUrl", "anonymous"?: bool (internal: preserves a plugin-origin download's anonymous reads), "request"?: number (internal: the download a plugin command left to the app, #1202), "window"?: {"bbox", "cellSize"?, "cog"?} (internal: what a cloud-optimised GeoTIFF's window the app read off the frame asked for, for a task to read it again, #1330)}"#),
@@ -1548,7 +1548,7 @@ fn add_photos(s: &mut Session, p: &Value) -> CmdResult {
                         reader.leave_out(format!("{shown}: larger than {} MB", photo::MAX_BYTES >> 20))
                     }
                     // Read, parsed and thumbnailed, then the bytes are dropped before the next.
-                    Ok(_) => match std::fs::read(path) {
+                    Ok(_) => match rustgis_data::provenance::read(path) {
                         Ok(bytes) => reader.add(&shown, &bytes),
                         Err(e) => reader.leave_out(format!("{shown}: {e}")),
                     },
@@ -1630,8 +1630,26 @@ fn add_geodatabase(s: &mut Session, p: &Value, path: &str) -> CmdResult {
 
 /// Opens a file through its format's reader. A Shapefile CRS override is applied before any
 /// conversion in both whole-file and streamed paths; the source file is never rewritten.
+/// DBF picks with geometry follow the full Shapefile import path.
 fn add_data(s: &mut Session, p: &Value) -> CmdResult {
     let path = s_req(p, "path")?;
+    #[cfg(not(target_arch = "wasm32"))]
+    if Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("dbf")) {
+        if let Some(read) = super::reads::take::<WholeRead>(s, &dbf_shapefile_key(path)) {
+            if let Some(crs) = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty()) {
+                super::parse_crs(s, crs)?;
+            }
+            return add_read(s, p, read?, None);
+        }
+        // A standalone table already read stays a table if a companion appears meanwhile.
+        if !super::reads::placed_for(s, &whole_key(path))
+            && let Some(shp) = rustgis_data::io::shapefile_for_dbf(Path::new(path))
+        {
+            let mut q = p.clone();
+            q["path"] = json!(shp.display().to_string());
+            return add_data(s, &q);
+        }
+    }
     let path = &*gdb_path(path);
     // `"as": "scan"` opens a TIFF, PNG or JPEG as a picture with no coordinates, a photo too.
     let scan = super::raster::wants_scan(p, path)?;
@@ -1673,7 +1691,7 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
         && ["crs", "layer"].iter().any(|k| ps(p, k).is_some_and(|c| !c.trim().is_empty()))
         && std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= rustgis_data::io::MAX_BYTES)
     {
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
         if rustgis_data::io::is_cityjson(path, &bytes) {
             let full = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
             return add_layers(s, p, &full, &bytes, None, true);
@@ -1809,7 +1827,7 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
         if meta.len() > super::raster::MAX_UPLOAD_BYTES as u64 {
             return Err(format!("{path} is too large to open"));
         }
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
         let full = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
         return add_layers(s, p, &full, &bytes, None, true);
     }
@@ -1822,6 +1840,12 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
 
 /// A file Add Data reads whole: the features, and what reading them said.
 type WholeRead = Result<(rustgis_data::Dataset, rustgis_data::ReadReport), String>;
+
+/// A companion Shapefile read belongs to the initiating DBF pick even if the files go away.
+#[cfg(not(target_arch = "wasm32"))]
+fn dbf_shapefile_key(path: &str) -> String {
+    format!("dbf-shapefile:{path}")
+}
 
 /// The key Add Data's whole read of `path` is taken by (see [`super::reads`]).
 fn whole_key(path: &str) -> String {
@@ -1862,7 +1886,7 @@ fn is_city_model_path(path: &str) -> bool {
         return false;
     }
     let mut head = Vec::new();
-    std::fs::File::open(path)
+    rustgis_data::provenance::open(path)
         .and_then(|f| f.take(rustgis_data::citygml::HEAD_BYTES as u64).read_to_end(&mut head))
         .is_ok_and(|_| rustgis_data::citygml::looks_like_citygml(&head))
 }
@@ -1876,7 +1900,7 @@ fn read_layers_file(p: &Value, path: &str) -> LayersRead {
     if meta.len() > super::raster::MAX_UPLOAD_BYTES as u64 {
         return Err(format!("{path} is too large to open"));
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
     let full = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
     let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty());
     let reads = match crs {
@@ -1899,9 +1923,12 @@ fn read_layers_file(p: &Value, path: &str) -> LayersRead {
 /// decoding and the bounded file read complete before cancellation can be observed.
 fn read_dxf_file(p: &Value, path: &str) -> LayersRead {
     use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let file = rustgis_data::provenance::open(path).map_err(|e| format!("{path}: {e}"))?;
     let mut bytes = Vec::new();
-    file.take(rustgis_data::io::MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| format!("{path}: {e}"))?;
+    (&file).take(rustgis_data::io::MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| format!("{path}: {e}"))?;
+    if bytes.len() as u64 <= rustgis_data::io::MAX_BYTES {
+        rustgis_data::provenance::buffer(Path::new(path), &file, &bytes);
+    }
     let full = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
     let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty()).map(rustgis_data::raster::Crs::parse).transpose()?;
     Ok((full.clone(), dxf_reads(p, &full, &bytes, crs)?))
@@ -1936,7 +1963,7 @@ fn read_sheet_file(p: &Value, path: &str) -> WholeRead {
     if meta.len() > super::raster::MAX_UPLOAD_BYTES as u64 {
         return Err(format!("{path} is too large to open"));
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
     // Read from disk: the table keeps the workbook's path, so an export can't replace it.
     let mut read = read_sheet(p, path, &bytes)?;
     read.0.source = Some(std::path::absolute(path).map_or_else(|_| path.to_string(), |a| a.display().to_string()));
@@ -1951,7 +1978,7 @@ fn read_whole(p: &Value, path: &str) -> WholeRead {
         if meta.len() > rustgis_data::io::MAX_BYTES {
             return Err(format!("{path} is too large to open"));
         }
-        std::fs::read(path).map_err(|e| format!("{path}: {e}"))
+        rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))
     })?;
     if let Some(read) = delimited {
         return Ok(read);
@@ -2015,8 +2042,8 @@ fn read_synced(path: &str, read: impl FnOnce() -> WholeRead) -> WholeRead {
 
 /// Add Data's read of the file `p` names, made before it runs ([`super::reads`]): a raster read
 /// whole or converted by GDAL, a GeoJSON read whole, delimited text, a spreadsheet or a city model
-/// (CityJSON or CityGML) or DXF drawing read into its layers, a Shapefile read whole. `None` for
-/// any other file, which [`add_data`] reads as it adds it. Each is picked only where `add_data`
+/// (CityJSON or CityGML) or DXF drawing read into its layers, a Shapefile read whole, or a
+/// standalone dBASE table. `None` for any other file, which [`add_data`] reads as it adds it. Each is picked only where `add_data`
 /// takes that read, so a read made is never wasted; a few it makes whole are left to it (a `.json`
 /// with a coordinate system or layer given, a large GeoJSON that isn't a FeatureCollection).
 #[cfg(not(target_arch = "wasm32"))]
@@ -2024,6 +2051,11 @@ pub(crate) fn add_data_ahead(p: &Value) -> Option<super::reads::ReadWork> {
     use super::reads::ahead;
     const NAME: &str = "Add Data";
     let path = gdb_path(ps(p, "path")?).into_owned();
+    if let Some(shp) = rustgis_data::io::shapefile_for_dbf(Path::new(&path)) {
+        let mut q = p.clone();
+        q["path"] = json!(shp.display().to_string());
+        return add_data_ahead(&q).map(|work| work.with_key(dbf_shapefile_key(&path)));
+    }
     let scan = super::raster::wants_scan(p, &path).ok()?;
     if !scan && rustgis_data::photo::is_photo_name(&path) && !rustgis_data::raster::world::places(Path::new(&path)) {
         return None;
@@ -2086,7 +2118,7 @@ pub(crate) fn add_data_ahead(p: &Value) -> Option<super::reads::ReadWork> {
     if rustgis_data::sheets::is_sheet_name(&path) {
         return Some(ahead(NAME, key, move || read_sheet_file(&q, &path)));
     }
-    (geojson || is_delimited_name(&path)).then(|| ahead(NAME, key, move || read_whole(&q, &path)))
+    (geojson || is_delimited_name(&path) || lower.ends_with(".dbf")).then(|| ahead(NAME, key, move || read_whole(&q, &path)))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2445,7 +2477,7 @@ fn file_layers(s: &mut Session, p: &Value) -> CmdResult {
         if meta.len() > super::raster::MAX_UPLOAD_BYTES as u64 {
             return Err(format!("{path} is too large to open"));
         }
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
         let layers = rustgis_data::sheets::sheet_names(&bytes).map_err(err)?;
         return Ok(json!({"count": layers.len(), "layers": layers}));
     }
@@ -2460,7 +2492,7 @@ fn file_layers(s: &mut Session, p: &Value) -> CmdResult {
         if meta.len() > rustgis_data::io::MAX_BYTES {
             return Err(format!("{path} is too large to open"));
         }
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
         let layers = rustgis_data::dxf::layers(path, &bytes).map_err(err)?;
         return Ok(json!({"count": layers.len(), "layers": layers}));
     }
@@ -2473,7 +2505,7 @@ fn file_layers(s: &mut Session, p: &Value) -> CmdResult {
         if meta.len() > super::raster::MAX_UPLOAD_BYTES as u64 {
             return Err(format!("{path} is too large to open"));
         }
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
         let zip = path.to_ascii_lowercase().ends_with(".zip");
         let layers: Vec<String> = match crs.filter(|_| zip || rustgis_data::io::is_city_model(path, &bytes)) {
             Some(crs) => {
@@ -3344,7 +3376,25 @@ pub(crate) fn add_converted(s: &mut Session, p: &Value, label: &str, original: &
         }
         let file = c.path.display().to_string();
         // One layer that can't be added doesn't stop the others.
-        let r = match add_source(s, &q, Origin::Path(&file), None) {
+        let added = match &c.origin {
+            ConvertedOrigin::Gdal(_) => {
+                rustgis_data::source::fgb::FgbSource::open_converted_path(&c.path, &c.name, Path::new(original), None)
+                    .map_err(|e| format!("{original}: {e}"))
+                    .and_then(|opened| add_source_with(s, &q, Origin::Path(&file), Some(Box::new(opened)), None))
+            }
+            ConvertedOrigin::Duckdb(d) => {
+                use rustgis_data::source::{duckdb::Database, parquet::ParquetSource};
+                let database = d.database.as_deref().map(Database::parse);
+                let original = match &database {
+                    Some(Database::File(path)) => Some(path.as_path()),
+                    _ => None,
+                };
+                ParquetSource::open_converted_path(&c.path, &c.name, original, None)
+                    .map_err(|e| format!("{file}: {e}"))
+                    .and_then(|opened| add_source_with(s, &q, Origin::Path(&file), Some(Box::new(opened)), None))
+            }
+        };
+        let r = match added {
             Ok(r) => r,
             Err(e) if !single => {
                 s.notify(format!("{}: {e}", c.name), true);
@@ -3608,18 +3658,18 @@ pub fn columns_in_file(path: &str, p: &Value) -> CmdResult {
         return Err(format!("{path} is too large to open"));
     }
     if rustgis_data::io::is_gzip_text_name(path) {
-        let reader = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let reader = rustgis_data::provenance::open(path).map_err(|e| format!("{path}: {e}"))?;
         let prefix = rustgis_data::io::gzip_text_prefix(reader, COLUMNS_PREFIX).map_err(|e| format!("{path}: {e}"))?;
         let plain = path.get(..path.len().saturating_sub(3)).unwrap_or(path);
         return gzip_columns(plain, &prefix, p);
     }
     let mut bytes = Vec::new();
-    let read = if sheet {
-        std::fs::File::open(path).and_then(|mut f| f.read_to_end(&mut bytes))
-    } else {
-        std::fs::File::open(path).and_then(|f| f.take(COLUMNS_PREFIX as u64).read_to_end(&mut bytes))
-    };
+    let mut file = rustgis_data::provenance::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let read = if sheet { file.read_to_end(&mut bytes) } else { (&file).take(COLUMNS_PREFIX as u64).read_to_end(&mut bytes) };
     read.map_err(|e| format!("{path}: {e}"))?;
+    if sheet {
+        rustgis_data::provenance::buffer(Path::new(path), &file, &bytes);
+    }
     columns_of(path, &bytes, p)
 }
 
@@ -4112,6 +4162,19 @@ fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
         // Redact the known address before composing any reason: a query value can contain
         // unescaped whitespace, so splitting an arbitrary error into URL words is not safe.
         let named = |e: String| crate::sources::message_with_address(url, &e);
+        // A URL a web document restricted to public addresses stays so: a request from a local
+        // origin (or none) doesn't lift the restriction its earlier request set.
+        let public =
+            public || crate::render::rustgis_tiles::cache::ceiling_for(url) == crate::render::rustgis_tiles::address::Reach::Public;
+        // A service's features with no app to leave them to (the CLI, a script, a task): read in
+        // pages as the app reads them, not as one answer cut at the service's record limit (#1144).
+        // A GeoTIFF keeps its own path below, read in place when it can be.
+        if super::b(p, "service").unwrap_or(false) && !tiff {
+            let label = ps(p, "name").map(str::to_string).unwrap_or_else(|| crate::sources::address_in_message(url));
+            let bounds = super::service::bounds_of(p.get("bounds"))?;
+            let file = |bytes: &[u8]| url_file_name(url, bytes);
+            return super::service::add_service_layer(s, p, &label, url, bounds, public, b(p, "zoom"), file).map_err(named);
+        }
         // An address without a file name may be a GeoTIFF too: its first bytes are read to see,
         // and anything that doesn't answer as one is downloaded whole, as before.
         let unnamed = !tiff && is_unnamed_url(url);
@@ -4125,10 +4188,6 @@ fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
                 return add_cog(s, p, url, true);
             }
         }
-        // A URL a web document restricted to public addresses stays so: a request from a local
-        // origin (or none) doesn't lift the restriction its earlier request set.
-        let public =
-            public || crate::render::rustgis_tiles::cache::ceiling_for(url) == crate::render::rustgis_tiles::address::Reach::Public;
         let bytes = if rustgis_data::io::shapefile_part_urls(url).is_some() {
             download_shapefile_blocking_with(url, public)?
         } else if public {
@@ -4828,6 +4887,9 @@ pub struct WindowAsked {
     /// The bands the file must have, when the caller needs a number of them (checked from its
     /// header, before anything else is read).
     bands: Option<usize>,
+    /// Whether `cell` was worked out by the caller (not asked for by the user): a window whose full
+    /// image has finer cells than it is the intended read, not something to say.
+    auto_cell: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -4837,7 +4899,13 @@ impl WindowAsked {
     /// with that box and `"cellSize"` reads it; a file without `bands` bands is refused from its
     /// header.
     pub(crate) fn of(url: &str, bbox: [f64; 4], cell: Option<f64>, bands: usize) -> WindowAsked {
-        WindowAsked { url: url.to_string(), bbox, cell, name: None, bands: Some(bands) }
+        WindowAsked { url: url.to_string(), bbox, cell, name: None, bands: Some(bands), auto_cell: false }
+    }
+    /// The cell size is the caller's own choice, not the user's: a full image finer than it is
+    /// read without saying so.
+    pub(crate) fn automatic(mut self) -> WindowAsked {
+        self.auto_cell = true;
+        self
     }
 }
 
@@ -4872,7 +4940,7 @@ fn window_settled(s: &Session, p: &Value, url: &str, seen: Option<[f64; 4]>) -> 
         Some(v) => Some(v.as_f64().filter(|c| c.is_finite() && *c > 0.0).ok_or_else(|| named("cellSize is a size above 0".into()))?),
     };
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(String::from);
-    Ok(WindowAsked { url: url.to_string(), bbox, cell, name, bands: None })
+    Ok(WindowAsked { url: url.to_string(), bbox, cell, name, bands: None, auto_cell: false })
 }
 
 /// A window the app reads off the frame: `p`, a `layer.addUrl` with `"bbox"` and its address bound
@@ -4915,6 +4983,13 @@ fn add_cog_window(s: &mut Session, p: &Value, url: &str) -> CmdResult {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_cog_window(asked: &WindowAsked) -> Result<CogWindow, String> {
     read_cog_window_until(asked, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// The cell size to say is finer than the file's own: the one asked, when no level has cells that
+/// small (`fits` false) and the user asked it (not `auto`, a size the caller worked out).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn finer_than_file(cell: Option<f64>, fits: bool, auto: bool) -> Option<f64> {
+    cell.filter(|_| !fits && !auto)
 }
 
 /// [`read_cog_window`]'s raster, giving up within a moment of `stop` being set (the app's Cancel of
@@ -5042,7 +5117,7 @@ pub(crate) fn read_window_raster(asked: &WindowAsked, stop: &std::sync::atomic::
     let fits =
         cell.and_then(|c| (0..layout.levels.len()).rev().find(|i| layout.levels.get(*i).is_some_and(|l| size_of(l) <= c * (1.0 + 1e-9))));
     let level = fits.unwrap_or(0);
-    let finer = cell.filter(|_| fits.is_none());
+    let finer = finer_than_file(cell, fits.is_some(), asked.auto_cell);
     let lv = layout.levels.get(level).ok_or_else(|| named("the file has no image".into()))?;
     let (c0, c1, r0, r1) = window(lv);
     if c1 <= c0 || r1 <= r0 {
@@ -5352,6 +5427,13 @@ fn window_box(s: &Session, p: &Value, seen: Option<[f64; 4]>) -> Result<[f64; 4]
     if w < e && so < n && lon(w) && lon(e) && lat(so) && lat(n) { Ok([w, so, e, n]) } else { Err(NEED.into()) }
 }
 
+/// A window's box as `layer.addUrl` settles it from `p`'s `"bbox"` (the view, or a box in degrees),
+/// for another command that reads windows.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn window_box_of(s: &Session, p: &Value) -> Result<[f64; 4], String> {
+    window_box(s, p, None)
+}
+
 /// `"bbox": "view"`, in any case or spacing.
 #[cfg(not(target_arch = "wasm32"))]
 fn is_view(bbox: Option<&Value>) -> bool {
@@ -5551,6 +5633,9 @@ pub(crate) fn add_read(
     let id = add_dataset(s, ds);
     if let Some(l) = s.map_mut().layer_mut(id) {
         l.synced = synced;
+        if let Some(x) = report.extrusion {
+            stand(l, &x);
+        }
     }
     if zoom.unwrap_or(empty_before)
         && let Some(e) = s.map().layer(id).map(|l| l.extent())
@@ -5558,6 +5643,20 @@ pub(crate) fn add_read(
         s.zoom_to(&e);
     }
     Ok(json!({"layer": id, "features": n}))
+}
+
+/// Extrudes a layer just added as its reader suggests (a city model's buildings and bridges): by
+/// its height field, on its base field, each only when it is numeric. A layer that isn't of
+/// polygons, or has no numeric height field, stays flat; the height where the field holds no number
+/// is 0, so an object with none stays flat too.
+fn stand(l: &mut rustgis_map::Layer, x: &rustgis_data::SuggestedExtrusion) {
+    if l.dataset.geometry_type != GeometryType::Polygon {
+        return;
+    }
+    let numeric = |n: &str| super::effects::numeric_field(&l.dataset, n).ok();
+    let Some(field) = numeric(&x.height_field) else { return };
+    let base_field = numeric(&x.base_field);
+    l.extrusion = Some(rustgis_map::effects::Extrusion { field: Some(field), base_field, ..Default::default() });
 }
 
 fn add_sample(s: &mut Session, p: &Value) -> CmdResult {

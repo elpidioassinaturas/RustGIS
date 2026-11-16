@@ -620,13 +620,8 @@ pub(crate) fn add_gdal_path(s: &mut Session, p: &Value, path: &str) -> CmdResult
         Some(read) => read,
         None => read_gdal(path, text("layer"), text("crs")),
     }?;
-    if c.assumed_lonlat {
-        s.notify(format!("{path} doesn't say its coordinate system; its coordinates look like longitude/latitude, so it's read as WGS 84 (give \"crs\" if not)"), false);
-    }
-    if !c.others.is_empty() {
-        let shown: Vec<&str> = c.others.iter().take(20).map(String::as_str).collect();
-        s.notify(format!("{path} has more variables ({}): add one with \"layer\"", shown.join(", ")), false);
-    }
+    // What converting found (a system GDAL assumed, variables not added) is in `r.lost`
+    // ([`raster::read_converted`]), said once with the layer's other losses by `read_notices`.
     let name = text("name").map(str::to_string).unwrap_or_else(|| r.name.clone());
     // A project names the file itself, with the subdataset and coordinate system chosen, and
     // converts it again (from the cache, while it is there) when it opens.
@@ -722,6 +717,11 @@ pub(crate) fn add_named_bytes(s: &mut Session, p: &Value, name: String, bytes: V
     // GeoParquet and FlatGeobuf uploads (binary vector files).
     if rustgis_data::source::is_source_name(&name) {
         return super::layer::add_source(s, p, super::layer::Origin::Bytes(&name, std::sync::Arc::new(bytes)), zoom);
+    }
+    // A standalone dBASE table is binary too, and uses the usual non-spatial table path.
+    if name.to_ascii_lowercase().ends_with(".dbf") {
+        let read = rustgis_data::io::read_bytes(&name, &bytes).map_err(|e| e.to_string())?;
+        return super::layer::add_read(s, p, read, zoom);
     }
     if name.to_ascii_lowercase().ends_with(".gz") && !rustgis_data::io::is_gzip_text_name(&name) {
         return Err(format!("{name}: decompress it first, then add the supported file inside"));

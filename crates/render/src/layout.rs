@@ -83,19 +83,26 @@ pub fn render_pending(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageIn
 /// [`render_pending`], its frames waiting for cast shadows when `wait_shadows` (an export).
 fn render_page(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo, wait_shadows: bool) -> Result<(Pixmap, bool), String> {
     let revisions = archive_revisions(layout, maps);
+    let mut source_error = None;
     let result = if wait_shadows {
-        render_pending_inner(layout, maps, dpi, info)
+        render_pending_inner(layout, maps, dpi, info, &mut source_error)
     } else {
-        crate::without_shadow_wait(|| render_pending_inner(layout, maps, dpi, info))
+        crate::without_shadow_wait(|| render_pending_inner(layout, maps, dpi, info, &mut source_error))
     };
-    revisions.finish_revision(archive_revisions(layout, maps), result, "the page is too large to draw")
+    revisions.finish_revision(archive_revisions(layout, maps), result, source_error.as_deref().unwrap_or("the page is too large to draw"))
 }
 
-fn render_pending_inner(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Option<(Pixmap, bool)> {
+fn render_pending_inner(
+    layout: &Layout,
+    maps: &mut [Map],
+    dpi: f64,
+    info: &PageInfo,
+    source_error: &mut Option<String>,
+) -> Option<(Pixmap, bool)> {
     let (w, h, k) = page_geometry(layout, dpi);
     let bounds = tiny_skia::IntRect::from_xywh(0, 0, w, h)?;
     let mut pending = false;
-    let pm = draw_page(layout, maps, info, k, bounds, None, None, &mut pending)?.into_pixmap();
+    let pm = draw_page(layout, maps, info, k, bounds, None, None, &mut pending, source_error)?.into_pixmap();
     Some((pm, pending))
 }
 
@@ -112,8 +119,9 @@ pub fn render_drawing(
     info: &PageInfo,
 ) -> Result<(crate::vector::Drawing, Vec<(u32, String)>), String> {
     let revisions = archive_revisions(layout, maps);
-    let result = render_drawing_inner(layout, maps, dpi, info);
-    revisions.finish_revision(archive_revisions(layout, maps), result, "the page is too large to draw")
+    let mut source_error = None;
+    let result = render_drawing_inner(layout, maps, dpi, info, &mut source_error);
+    revisions.finish_revision(archive_revisions(layout, maps), result, source_error.as_deref().unwrap_or("the page is too large to draw"))
 }
 
 fn render_drawing_inner(
@@ -121,11 +129,12 @@ fn render_drawing_inner(
     maps: &mut [Map],
     dpi: f64,
     info: &PageInfo,
+    source_error: &mut Option<String>,
 ) -> Option<(crate::vector::Drawing, Vec<(u32, String)>)> {
     let (w, h, k) = page_geometry(layout, dpi);
     let bounds = tiny_skia::IntRect::from_xywh(0, 0, w, h)?;
     let mut pictured = Vec::new();
-    let drawing = draw_page(layout, maps, info, k, bounds, None, Some(&mut pictured), &mut false)?.into_drawing()?;
+    let drawing = draw_page(layout, maps, info, k, bounds, None, Some(&mut pictured), &mut false, source_error)?.into_drawing()?;
     Some((drawing, pictured))
 }
 
@@ -228,9 +237,17 @@ pub fn clipped_text_notice(clipped: &[(u32, String)]) -> Option<String> {
 
 /// One element on transparency, allocating only its on-page pixel bounds.
 /// Outer `None` means rendering failed; inner `None` means the element is off-page.
-pub(crate) fn render_element(layout: &Layout, id: u32, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Option<Option<(Pixmap, [f64; 4])>> {
+/// A fatal source error is retained for the composed SVG's revision check and error report.
+pub(crate) fn render_element(
+    layout: &Layout,
+    id: u32,
+    maps: &mut [Map],
+    dpi: f64,
+    info: &PageInfo,
+    source_error: &mut Option<String>,
+) -> Option<Option<(Pixmap, [f64; 4])>> {
     let Some((bounds, k, mm)) = element_bounds(layout, id, dpi)? else { return Some(None) };
-    let pm = draw_page(layout, maps, info, k, bounds, Some(id), None, &mut false)?.into_pixmap();
+    let pm = draw_page(layout, maps, info, k, bounds, Some(id), None, &mut false, source_error)?.into_pixmap();
     Some(Some((pm, mm)))
 }
 
@@ -244,9 +261,10 @@ pub(crate) fn record_element(
     dpi: f64,
     info: &PageInfo,
     pictured: &mut Vec<(u32, String)>,
+    source_error: &mut Option<String>,
 ) -> Option<Option<(crate::vector::Drawing, [f64; 4], f64)>> {
     let Some((bounds, k, mm)) = element_bounds(layout, id, dpi)? else { return Some(None) };
-    let drawing = draw_page(layout, maps, info, k, bounds, Some(id), Some(pictured), &mut false)?.into_drawing()?;
+    let drawing = draw_page(layout, maps, info, k, bounds, Some(id), Some(pictured), &mut false, source_error)?.into_drawing()?;
     Some(Some((drawing, mm, k)))
 }
 
@@ -266,7 +284,8 @@ fn element_bounds(layout: &Layout, id: u32, dpi: f64) -> Option<Option<(tiny_ski
 /// Draws the selected region with the full layout's frame and dynamic-text context, recorded
 /// when `record` holds a list (see [`render_drawing`]), which gets the names of the frames
 /// drawn as pictures. `pending` is set when a frame drew while some of what it shows was still on
-/// its way (see [`render_pending`]).
+/// its way (see [`render_pending`]). A source read that stops the page supplies its named error;
+/// the caller checks the page's archive revision before reporting it.
 fn draw_page(
     layout: &Layout,
     maps: &mut [Map],
@@ -276,6 +295,7 @@ fn draw_page(
     element: Option<u32>,
     mut record: Option<&mut Vec<(u32, String)>>,
     pending: &mut bool,
+    source_error: &mut Option<String>,
 ) -> Option<Canvas> {
     let ppp = k / PT_PER_MM;
     let mut pm =
@@ -312,13 +332,23 @@ fn draw_page(
             let lonlat = crate::view_lonlat(map, &view);
             let scale = map.ground_res_at(&cam) / rustgis_geom::PIXEL_M;
             map.sync_sources(&lonlat, scale, true);
-            shown.push((*f, *show_no_data, complete_shown_legends(map, scale, *show_no_data)?));
+            let mut failed_source = None;
+            let Some(entries) = complete_shown_legends(map, scale, *show_no_data, &mut failed_source) else {
+                *source_error = failed_source_error(map, failed_source);
+                return None;
+            };
+            shown.push((*f, *show_no_data, entries));
         }
     }
     for e in layout.elements.iter().filter(visible) {
         // Each element is a layer of the recording, named after it (#1815) and identified by its
         // id: the same layer on every page of a series, whatever other elements draw there.
         pm.layer_with_id(if e.name.trim().is_empty() { e.kind.code() } else { &e.name }, u64::from(e.id));
+        // Its background under its content (#2257), on the whole page only: an element drawn
+        // alone is an SVG's picture of it, whose background the SVG writes as a shape of its own.
+        if element.is_none() {
+            draw_background(&mut pm, e, k, (f64::from(bounds.x()), f64::from(bounds.y())));
+        }
         let (x, y, ew, eh) =
             ((e.x * k - f64::from(bounds.x())) as f32, (e.y * k - f64::from(bounds.y())) as f32, (e.w * k) as f32, (e.h * k) as f32);
         let Some(r) = Rect::from_xywh(x, y, ew.max(1.0), eh.max(1.0)) else { continue };
@@ -335,8 +365,10 @@ fn draw_page(
                 // The grid is drawn with the frame's map, before its attribution, which keeps
                 // clear of the grid's labels.
                 let grid = grid.as_ref().map(|g| (g, layout.decimal_comma));
-                let Some(mut frame_pm) = frame_canvas(map, cam, fw, fh, fppp, pm.is_recording(), pending, grid) else {
+                let mut failed_source = None;
+                let Some(mut frame_pm) = frame_canvas(map, cam, fw, fh, fppp, pm.is_recording(), pending, grid, &mut failed_source) else {
                     if frame_requires_complete(map, &view) {
+                        *source_error = failed_source_error(map, failed_source);
                         return None;
                     }
                     // Preserve upstream's best-effort page export for ordinary maps.
@@ -348,7 +380,7 @@ fn draw_page(
                     frame_pm.overflowed() || pm.recorded_cost().saturating_add(frame_pm.recorded_cost()) > crate::vector::max_cost();
                 if frame_pm.is_recording()
                     && too_large
-                    && let Some(pixels) = frame_canvas(map, cam, fw, fh, fppp, false, pending, grid)
+                    && let Some(pixels) = frame_canvas(map, cam, fw, fh, fppp, false, pending, grid, &mut None)
                 {
                     frame_pm = pixels;
                     if let Some(list) = record.as_deref_mut() {
@@ -582,8 +614,9 @@ fn draw_page(
 /// page needs them all. Refuses a linked archive changed during the complete frame.
 pub fn frame_map(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64) -> Result<Pixmap, String> {
     let revisions = crate::archive_revisions([&*map]);
-    let result = frame_canvas(map, camera, w, h, ppp, false, &mut false, None).map(Canvas::into_pixmap);
-    revisions.finish([&*map], result, "could not draw the map frame")
+    let mut failed_source = None;
+    let result = frame_canvas(map, camera, w, h, ppp, false, &mut false, None, &mut failed_source).map(Canvas::into_pixmap);
+    revisions.finish(map, failed_source, result, "could not draw the map frame")
 }
 
 /// [`frame_map`] on a canvas: one that records (see [`crate::canvas`]) when `record` and the
@@ -600,12 +633,13 @@ fn frame_canvas(
     record: bool,
     pending: &mut bool,
     grid: Option<(&Grid, bool)>,
+    failed_source: &mut Option<u64>,
 ) -> Option<Canvas> {
     let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
     // Why its layers were drawn without their cast shadows is kept for the page's caller (see
     // `crate::shadows_said`).
     let (img, shadows) = crate::frame_with_shadows_to_come(|| {
-        if record { crate::render_complete_recorded(map, &view) } else { crate::render_complete(map, &view) }
+        if record { crate::render_complete_recorded(map, &view, failed_source) } else { crate::complete(map, &view, false, failed_source) }
     });
     let img = img?;
     *pending |= img.tiles_pending || img.data_pending || shadows;
@@ -726,6 +760,26 @@ pub fn expand(t: &str, layout: &Layout, info: &PageInfo, frame: Option<(&Map, ru
 fn dashed(stroke: Stroke, dash: Option<&rustgis_map::symbology::Dash>, ppp: f64, path: &tiny_skia::Path) -> Stroke {
     let dash = dash.and_then(|d| crate::dash_steps(d, ppp as f32, path)).and_then(|steps| tiny_skia::StrokeDash::new(steps, 0.0));
     Stroke { dash, ..stroke }
+}
+
+/// An element's background (#2257): its box grown by the padding, at `k` pixels a millimetre from
+/// `origin` (pixels), filled, outlined when the outline has a width, its corners rounded, turned
+/// about the element's centre with a turned text.
+fn draw_background(pm: &mut Canvas, e: &rustgis_map::layout::Element, k: f64, origin: (f64, f64)) {
+    let Some(b) = e.background else { return };
+    let (bx, by, bw, bh) = e.background_box();
+    let Some(r) =
+        Rect::from_xywh((bx * k - origin.0) as f32, (by * k - origin.1) as f32, ((bw * k) as f32).max(1.0), ((bh * k) as f32).max(1.0))
+    else {
+        return;
+    };
+    let turn = Transform::from_rotate_at(e.rotation() as f32, r.x() + r.width() / 2.0, r.y() + r.height() / 2.0);
+    let path = rounded_rect(r, (b.radius * k) as f32).unwrap_or_else(|| PathBuilder::from_rect(r));
+    pm.fill_path(&path, &paint(b.fill, 1.0), FillRule::Winding, turn, None);
+    if b.width > 0.0 {
+        let stroke = Stroke { width: (b.width * k / PT_PER_MM) as f32, ..Stroke::default() };
+        pm.stroke_path(&path, &paint(b.outline, 1.0), &stroke, turn, None);
+    }
 }
 
 /// A rectangle with its corners rounded by `rad` pixels (at most half its shorter side), each a
@@ -1836,8 +1890,22 @@ fn raster_classes(l: &rustgis_map::Layer, all_classes: bool) -> Option<Vec<Legen
     )
 }
 
+/// Names only the source whose read stopped this page, leaving unrelated failures generic.
+fn failed_source_error(map: &Map, failed_source: Option<u64>) -> Option<String> {
+    let id = failed_source?;
+    let layer = map.layers.iter().find(|layer| layer.instance_id() == id)?;
+    layer.source.as_ref()?.read_error().map(|why| format!("{}: {why}", layer.name))
+}
+
 /// Complete-source legends retain one minimal value per used class, never its geometry.
-fn complete_shown_legends(map: &mut Map, scale: f64, show_no_data: bool) -> Option<Vec<(u32, Vec<LegendEntry>)>> {
+/// A failed traversal returns its live layer identity for the page's source-error report.
+fn complete_shown_legends(
+    map: &mut Map,
+    scale: f64,
+    show_no_data: bool,
+    failed_source: &mut Option<u64>,
+) -> Option<Vec<(u32, Vec<LegendEntry>)>> {
+    *failed_source = None;
     if !map.layers.iter().any(|l| l.source.as_ref().and_then(|s| s.chunk_source()).is_some()) {
         return Some(shown_legends(map, scale, show_no_data));
     }
@@ -1907,7 +1975,11 @@ fn complete_shown_legends(map: &mut Map, scale: f64, show_no_data: bool) -> Opti
             if let Some(source) = &mut layer.source {
                 source.error = Some(e.to_string());
             }
+            *failed_source = Some(layer.instance_id());
             return None;
+        }
+        if let Some(source) = &mut layer.source {
+            source.clear_error();
         }
         if any {
             // (A sample of the classes seen: classed again at this scale, by expression.)
@@ -2373,7 +2445,7 @@ pub fn legend_sizes_with_no_data_mm(
     show_no_data: bool,
     (exclude, labels): (&[String], &BTreeMap<String, String>),
 ) -> Option<[(f64, f64); MAX_LEGEND_COLUMNS]> {
-    let drawn = if all_classes { None } else { Some(complete_shown_legends(map, scale, show_no_data)?) };
+    let drawn = if all_classes { None } else { Some(complete_shown_legends(map, scale, show_no_data, &mut None)?) };
     let rows = legend_rows(map, drawn.as_deref(), &LegendOptions { show_no_data, hide_other, exclude, labels, scale });
     let mm = 25.4 / 96.0;
     Some(std::array::from_fn(|i| {
@@ -3087,7 +3159,7 @@ mod tests {
         .unwrap();
         let fallback = l.renderer.symbol_for(&l.dataset, 2);
         let listed = |map: &mut Map, all: bool, show: bool| {
-            let drawn = (!all).then(|| complete_shown_legends(map, 1e6, show).unwrap());
+            let drawn = (!all).then(|| complete_shown_legends(map, 1e6, show, &mut None).unwrap());
             let opts = LegendOptions { show_no_data: show, hide_other: true, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
             legend_rows(map, drawn.as_deref(), &opts)
                 .into_iter()
@@ -5995,5 +6067,51 @@ Elaboração: RustGIS",
         let [(w, h), ..] = legend_sizes_mm(&mut map, 1e6, true, true, (&[], &NO_LABELS)).unwrap();
         assert!((h - f64::from(LEGEND_ROW + 48.0) * mm).abs() < 1e-6, "{h} mm");
         assert!((w - f64::from(48.0 + 12.0 + text::measure("a", 8.5, false)) * mm).abs() < 1e-4, "{w} mm");
+    }
+
+    /// An element's background (#2257) is drawn under it on the page, grown by its padding and
+    /// turned with a turned text; drawn alone, as an SVG's picture of it, the element leaves it to
+    /// the SVG's own shape.
+    #[test]
+    fn a_background_is_drawn_under_its_element_and_turns_with_it() {
+        use rustgis_map::layout::Background;
+        let px = |mm: f64| (mm * 96.0 / 25.4).round() as u32;
+        let red = |pm: &Pixmap, x: f64, y: f64| rgb(pm, px(x), px(y)) == (255, 0, 0);
+        let page = |turn: f64, background: Option<Background>| {
+            let mut l = Layout::new("L", 100.0, 100.0);
+            let mut kind = ElementKind::text("", 12.0, Rgba::rgb(0, 0, 0), false);
+            if let ElementKind::Text { rotation, .. } = &mut kind {
+                *rotation = turn;
+            }
+            let id = l.add("T", (40.0, 40.0, 20.0, 10.0), kind);
+            l.element_mut(id).unwrap().background = background;
+            (l, id)
+        };
+        let back = Background { padding: 5.0, ..Background::filled(Rgba::rgb(255, 0, 0)) };
+        let (plain, _) = page(0.0, None);
+        assert!(!red(&render(&plain, &mut [], 96.0, &PageInfo::default()).unwrap(), 45.0, 45.0), "none by default");
+        let (l, id) = page(0.0, Some(back));
+        let pm = render(&l, &mut [], 96.0, &PageInfo::default()).unwrap();
+        assert!(red(&pm, 45.0, 45.0), "inside the box");
+        assert!(red(&pm, 37.0, 37.0), "in the padding");
+        assert!(!red(&pm, 33.0, 45.0), "past the padding");
+        // Turned 90°, the box (and so its background) stands upright about its centre (50, 45).
+        let (turned, _) = page(90.0, Some(Background::filled(Rgba::rgb(255, 0, 0))));
+        let pm = render(&turned, &mut [], 96.0, &PageInfo::default()).unwrap();
+        assert!(red(&pm, 50.0, 37.0), "above the unturned box, inside the turned one");
+        assert!(!red(&pm, 42.0, 45.0), "left of the turned box");
+        // Clockwise, as the text turns: at 30° the box's right end dips below its centre line, at
+        // -30° it rises (90° alone would look the same either way).
+        let at = |turn: f64| {
+            red(
+                &render(&page(turn, Some(Background::filled(Rgba::rgb(255, 0, 0)))).0, &mut [], 96.0, &PageInfo::default()).unwrap(),
+                59.0,
+                46.0,
+            )
+        };
+        assert!(at(30.0) && !at(-30.0), "turned clockwise");
+        // Alone, the element's picture holds no background.
+        let (alone, _) = render_element(&l, id, &mut [], 96.0, &PageInfo::default(), &mut None).unwrap().unwrap();
+        assert!(alone.pixels().iter().all(|c| c.alpha() == 0 || c.green() > 0), "no red in the element's own picture");
     }
 }

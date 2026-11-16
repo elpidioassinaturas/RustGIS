@@ -119,9 +119,15 @@ the box's edge at that point (its Unique Values or Graduated Colors classes, so 
 matches; the topmost polygon where they overlap, among the features its definition query keeps;
 a fill colour partly transparent is laid over `color`). The contacts go straight down to the base,
 outlined: only where they cross the box's edge comes from the map, and the walls show no dip or
-thickness. Off every polygon, and in a polygon with no solid fill (hatches and other patterns
-aren't drawn on walls yet), the walls are `color`. The layer may be hidden, so the walls can
-show geology while the ground shows soils. It must be a polygon layer that holds all its
+thickness. Off every polygon the walls are `color`, and so is the background of a polygon with
+no solid fill. The hatches and markers of the class's fill layers (Fill Layers) over its topmost
+solid fill, or over `color` when it has none, are drawn on the wall too, in its plane and in
+perspective, as a geologic block diagram shows its rock units: a hatch's angle is from the
+horizontal (0° gives bedding lines), and a pattern is as big on the wall as on the ground at the
+view's centre (a reference scale grows it as it does on the ground). A pattern too fine to draw
+on a wall shows as its colour mixed over the fill. Gradient and shapeburst fills aren't drawn on
+walls. The layer may be hidden, so the walls can show geology while the ground shows soils. It
+must be a polygon layer that holds all its
 features (not one read a view at a time), with a name of its own; it follows the layer's renames,
 and when it is removed, or a project opens without it, the walls are `color` (said) until a
 polygon layer of that name comes back. A plain `"walls": "#RRGGBB"` takes the layer off.
@@ -141,7 +147,11 @@ hidden; its own symbology still draws it. Rivers stay lines. Over elevation tile
 read again until the tiles along the shores have come. A Shaded Relief layer draws the water's
 cells at their level with the even light of flat ground, flat or tilted: no hillshade, cast
 shadow, sky, fill light or rock on the water, so a semi-transparent water fill over it shows one
-tone. The relief's ramp colours them at the water's level.
+tone. The relief's ramp colours them at the water's level. A tilted view adds a soft sun glint:
+where the flat water would reflect the sun toward the eye, it goes toward white, broad and faint,
+so it shines a little on the sun's side. `"glint"` sets how much, 0 (none) to 1 (white at the
+brightest point), 0.3 by default. The sun is the first Shaded Relief layer drawn at the view's centre (its azimuth and altitude; shown, within its scale range and its groups'), or from the north-west at 45° without one. A flat view, seen from straight
+above, has no glint.
 
 <figure markdown="span">
   ![Mount Rainier in USGS imagery draped over Terrarium elevation tiles, tilted 65°](https://assets.rustgis.app/images/terrain.webp)
