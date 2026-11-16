@@ -1471,7 +1471,7 @@ share a slope turned fully from the sun keeps: lower draws deeper shadows. With 
 `h` is divided by its value on flat ground (`sin altitude`), and the sum is held to at most 1.3
 before the fill light is added: flat ground is drawn in the ramp's own colour, the colour the legend
 shows, slopes turned to the sun brighten (each channel clamped to 255) and slopes turned away fall
-toward `ambient`. A sun within about 0.2° of the horizon lights no flat ground, so there the
+toward `ambient`. A sun within about 0.1° of the horizon lights no flat ground, so there the
 balanced light is drawn as the plain one, with its own ambient. A layout's colour bar shows the
 colour of flat ground, so with the balanced light it is the ramp itself. Left unset, `ambient` is
 0.25, as the relief was always drawn, or 0.5 with the balanced light, which keeps about the same
