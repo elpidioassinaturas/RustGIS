@@ -1266,6 +1266,16 @@ fn shard_of(a: &Array, idx: &[u64], per: &[u64]) -> (String, usize) {
     (a.chunk_key(&shard), c as usize)
 }
 
+/// How many chunks a shard holds (`per` along each dimension): an error, not an overflow, when
+/// its index alone would be past what one chunk may hold.
+fn shard_count(a: &Array, per: &[u64]) -> Result<usize> {
+    per.iter()
+        .try_fold(1u64, |n, &p| n.checked_mul(p))
+        .filter(|&n| n.saturating_mul(16) <= MAX_CHUNK_BYTES)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| bad(format!("{}: its shards hold too many chunks to read", a.path)))
+}
+
 /// Adds chunk `idx` (see [`shard_of`]) to the shards read in part; the first chunk of a shard
 /// also adds the [`Part`] reading its index.
 fn read_in_shard(
@@ -1277,13 +1287,13 @@ fn read_in_shard(
     parts: &mut Vec<Part>,
 ) -> Result<()> {
     let Some(Codec::Sharding { index, index_at_end, .. }) = a.codecs.first() else { return Ok(()) };
+    let count = shard_count(a, per)?;
     let (key, c) = shard_of(a, idx, per);
     if let Some(s) = shard_at.get(&key).and_then(|&i| shards.get_mut(i)) {
         s.chunks.push(c);
         return Ok(());
     }
     shard_at.insert(key.clone(), shards.len());
-    let count = per.iter().product::<u64>() as usize;
     let len = index_len(count, index).ok_or_else(|| bad("a shard too large"))? as u64;
     let span = if *index_at_end { Span::Tail(len) } else { Span::Bytes(0, len - 1) };
     parts.push(Part { key: key.clone(), span, id: format!("{key}#index") });
@@ -2377,18 +2387,24 @@ fn shard_per(a: &Array) -> Vec<u64> {
 /// wasn't read is an error, not values made up.
 fn shard_chunk(a: &Array, idx: &[u64], per: &[u64], chunks: &HashMap<String, Vec<u8>>) -> Result<Option<(Vec<u8>, DType)>> {
     let Some(Codec::Sharding { inner, codecs, index, .. }) = a.codecs.first() else { return Ok(None) };
+    // A shard's chunk is held to what a chunk read whole may hold, before it's decoded or filled.
+    let n = inner
+        .iter()
+        .try_fold(1u64, |n, &c| n.checked_mul(c))
+        .filter(|&n| n.saturating_mul(a.dtype.size as u64) <= MAX_CHUNK_BYTES)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| bad(format!("{}: its shards' chunks are too large to read", a.path)))?;
+    let count = shard_count(a, per)?;
     let (key, c) = shard_of(a, idx, per);
     if let Some(bytes) = chunks.get(&inner_id(&key, c)) {
         let (d, little) = decode_chunk(codecs, bytes, inner, a.dtype, a.fill).map_err(|e| bad(format!("{}: {e}", a.path)))?;
         return Ok(Some((d, DType { little, ..a.dtype })));
     }
     let Some(raw) = chunks.get(&format!("{key}#index")) else { return Ok(None) };
-    let count = per.iter().product::<u64>() as usize;
     let placed = shard_index(raw, count, index).map_err(|e| bad(format!("{key}: {e}")))?;
     if placed.get(c).is_some_and(|&e| e != (u64::MAX, u64::MAX)) {
         return Err(bad(format!("{}: a chunk of shard {key} wasn't read", a.path)));
     }
-    let n = inner.iter().product::<u64>() as usize;
     Ok(Some((a.dtype.encode(a.fill.unwrap_or(0.0), a.dtype.little).repeat(n), a.dtype)))
 }
 
@@ -3936,10 +3952,6 @@ mod tests {
         assert!(assemble(&store, &p, &cut, "v", None).is_err());
     }
 
-    /// A window of a sharded variable reads each shard's index by its last bytes, then only the
-    /// shard's chunks it needs, by range; a chunk the index says isn't there shows the fill value
-    /// and a shard not stored is empty, as when the shards are read whole. An index cut short, or
-    /// placing a chunk past what a read takes, is an error.
     /// A point's series of a sharded variable reads each shard's index, then by range only the
     /// chunk holding the cell, never a whole shard (`aef-mosaic`'s are 686 MB at Viçosa, #1720).
     /// It gives what a shard read whole gives: the fill value for a chunk the shard doesn't hold,
@@ -3993,8 +4005,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(show(assemble_series(&store, &p, &got).unwrap()), show(vec![-1.0, 1304.0]));
         assert_eq!(total, 2 * 68 + inner.iter().map(|q| if let Span::Bytes(a, b) = q.span { b - a + 1 } else { 0 }).sum::<u64>());
+        // Shards of more chunks than an index read may hold, or chunks larger than a chunk read
+        // whole may be (hostile metadata), are refused, not overflowed or filled.
+        let huge = |shard: [u64; 3], inner: [u64; 3]| {
+            let z = serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [2, 1u64 << 33, 1u64 << 33], "data_type": "int16",
+                "dimension_names": ["time", "y", "x"], "fill_value": 0,
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": shard}},
+                "codecs": [{"name": "sharding_indexed", "configuration": {"chunk_shape": inner, "codecs": [{"name": "bytes"}],
+                    "index_codecs": [{"name": "bytes"}, {"name": "crc32c"}]}}]});
+            parse_store(&[("zarr.json".into(), z.to_string().into_bytes())]).unwrap()
+        };
+        let one = Selection { variable: "".into(), index: vec![], window: None };
+        let e = plan_series(&huge([1, 1 << 32, 1 << 32], [1, 1, 1]), &one, "time", 0, 1, 0, 0).unwrap_err();
+        assert!(e.to_string().contains("too many chunks"), "{e}");
+        let big = huge([1, 1 << 16, 1 << 16], [1, 1 << 16, 1 << 16]);
+        let p = plan_series(&big, &one, "time", 0, 1, 0, 0).unwrap();
+        let absent = HashMap::from([(p.parts[0].id.clone(), vec![0xffu8; 20])]);
+        let e = assemble_series(&big, &p, &absent).unwrap_err();
+        assert!(e.to_string().contains("too large to read"), "{e}");
     }
 
+    /// A window of a sharded variable reads each shard's index by its last bytes, then only the
+    /// shard's chunks it needs, by range; a chunk the index says isn't there shows the fill value
+    /// and a shard not stored is empty, as when the shards are read whole. An index cut short, or
+    /// placing a chunk past what a read takes, is an error.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_window_reads_only_its_shards_chunks_by_range() {
