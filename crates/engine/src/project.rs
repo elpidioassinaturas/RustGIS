@@ -73,6 +73,7 @@ pub const READ_FORMAT: u32 = 2;
 pub const CAPABILITIES: &[&str] = &[
     "terrain-block",
     "terrain-water",
+    "terrain-water-shore",
     "shaded-relief-effects",
     "normalized-legend-urls",
     "field-origin",

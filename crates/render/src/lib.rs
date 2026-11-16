@@ -4300,21 +4300,17 @@ fn render_frame(
     let (lake_light, lake_pending) = relief_water(map, view, &labels_to, scale).map_or((None, false), |(w, p)| (Some(w), p));
     // Shore tiles the water's levels wait for: the relief is drawn again once they land.
     tile_out.pending |= lake_pending;
-    // The water layer the shore band goes over (#1915), the water, and the band's darkness.
-    let shore = map.view.terrain.as_ref().and_then(|t| t.water.as_ref()).filter(|w| w.shore > 0.0).and_then(|w| {
-        let id = map.layer_by_name(&w.layer)?.id;
-        Some((id, frame_water(map, view, &labels_to)?.0, w.shore))
-    });
-    // The water layer was the last drawn: its shore band goes over it, before the next.
-    let mut shore_due = false;
+    // The water layer the shore band goes over (#1915), and the band's darkness.
+    let shore_of = map
+        .view
+        .terrain
+        .as_ref()
+        .and_then(|t| t.water.as_ref())
+        .filter(|w| w.shore > 0.0)
+        .and_then(|w| Some((map.layer_by_name(&w.layer)?.id, w.shore)));
     // The layer drawn last, whose tile layers go over it before the next.
     let mut below: Option<u32> = None;
     for li in order {
-        if std::mem::take(&mut shore_due)
-            && let Some((_, water, darkness)) = &shore
-        {
-            terrain::paint_shore(&mut pm, water, view, *darkness);
-        }
         // Each layer drawn is a layer of the recording (#1815); what comes between them isn't.
         pm.layer(None);
         // A frame no longer wanted stops between layers (see `cancel`).
@@ -4325,11 +4321,19 @@ fn render_frame(
             draw_tiles!(Some(id));
         }
         below = map.layers.get(li).map(|l| l.id);
+        // The water under the shore band, read only when its layer is drawn; shore tiles on
+        // their way leave the frame pending, for the band to be drawn once they land.
+        let shore = shore_of
+            .filter(|(id, _)| map.layers.get(li).is_some_and(|l| l.id == *id && l.visible && l.in_scale_range(scale) && !held.contains(id)))
+            .and_then(|(_, darkness)| {
+                let (water, pending) = frame_water(map, view, &labels_to)?;
+                tile_out.pending |= pending;
+                Some((water, darkness))
+            });
         let Some(layer) = map.layers.get_mut(li) else { continue };
         if !layer.visible || !layer.in_scale_range(scale) || held.contains(&layer.id) {
             continue;
         }
-        shore_due = shore.as_ref().is_some_and(|(id, ..)| *id == layer.id);
         pm.layer_with_id(&layer_name(layer), u64::from(layer.id));
         let opacity = layer.opacity() * group_opacity.get(&layer.id).copied().unwrap_or(1.0);
         let mask = masks.iter().find(|(id, _)| *id == layer.id).map(|(_, m)| m);
@@ -4870,6 +4874,11 @@ fn render_frame(
             if !complete_source {
                 if let (Some(a), Some(base)) = (layer.aggregation, aggregate_symbol) {
                     bins.draw(if direct { &mut pm } else { &mut target }, ctx, a, &base);
+                }
+                // The water layer's shore band, over its fill and with its opacity, mask and blend.
+                if let Some((water, darkness)) = &shore {
+                    terrain::paint_shore(if direct { &mut pm } else { &mut target }, water, view, *darkness);
+                    cpu_dirty = true;
                 }
                 if !direct {
                     if target.is_recording() {
@@ -5421,6 +5430,11 @@ fn render_frame(
             if let (Some(a), Some(base)) = (layer.aggregation, aggregate_symbol) {
                 bins.draw(if direct { &mut pm } else { &mut target }, ctx, a, &base);
             }
+            // The water layer's shore band, over its fill and with its opacity, mask and blend.
+            if let Some((water, darkness)) = &shore {
+                terrain::paint_shore(if direct { &mut pm } else { &mut target }, water, view, *darkness);
+                cpu_dirty = true;
+            }
             if !direct {
                 if target.is_recording() {
                     pm.place(target, Transform::identity(), opacity, layer_blend, None);
@@ -5434,9 +5448,6 @@ fn render_frame(
             ctx.highlight(&mut pm, &geometry, &symbol, &strokes, turn);
             cpu_dirty = true;
         }
-    }
-    if shore_due && let Some((_, water, darkness)) = &shore {
-        terrain::paint_shore(&mut pm, water, view, *darkness);
     }
     pm.layer(None);
     // A frame stopped part-way (see `cancel`) is no frame: its tiles, labels and effects aren't

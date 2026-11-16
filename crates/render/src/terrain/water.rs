@@ -663,18 +663,31 @@ const SHORE_STEPS: u16 = 4;
 
 impl Water {
     /// The outlines of the lakes reaching into `frame` (a north-up frame), their islands' too,
-    /// as one path in its pixels; `None` when none does.
+    /// as one path in its pixels; `None` when none does. Each lake's outline turns one way and
+    /// its islands' the other, so the path filled non-zero is every lake's water, islands out,
+    /// where lakes overlap too.
     fn outlines(&self, frame: &crate::View) -> Option<tiny_skia::Path> {
         let seen = frame.camera.extent(frame.width, frame.height);
         let ppp = frame.pixels_per_point;
         let mut path = tiny_skia::PathBuilder::new();
-        for ring in self.lakes.iter().filter(|l| l.extent.intersects(&seen)).flat_map(|l| &l.rings) {
-            for (i, c) in ring.iter().enumerate() {
-                let (x, y) = frame.camera.to_screen(*c, frame.width, frame.height);
-                let (x, y) = ((x * ppp) as f32, (y * ppp) as f32);
-                if i == 0 { path.move_to(x, y) } else { path.line_to(x, y) }
+        for lake in self.lakes.iter().filter(|l| l.extent.intersects(&seen)) {
+            for (k, ring) in lake.rings.iter().enumerate() {
+                // Twice the ring's signed area: positive turning counter-clockwise.
+                let turn: f64 = ring.iter().zip(ring.iter().cycle().skip(1)).map(|(a, b)| a.x * b.y - b.x * a.y).sum();
+                let along = (turn >= 0.0) == (k == 0);
+                let points = ring.iter().map(|c| frame.camera.to_screen(*c, frame.width, frame.height));
+                let mut first = true;
+                let mut put = |(x, y): (f64, f64)| {
+                    let (x, y) = ((x * ppp) as f32, (y * ppp) as f32);
+                    if std::mem::take(&mut first) { path.move_to(x, y) } else { path.line_to(x, y) }
+                };
+                if along {
+                    points.for_each(&mut put)
+                } else {
+                    points.rev().for_each(&mut put)
+                }
+                path.close();
             }
-            path.close();
         }
         path.finish()
     }
@@ -702,7 +715,7 @@ pub(crate) fn paint_shore(pm: &mut crate::Canvas, water: &Water, frame: &crate::
         let stroke = tiny_skia::Stroke { width, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
         band.stroke_path(&outlines, &paint, &stroke, tiny_skia::Transform::identity(), None);
     }
-    let clip = crate::vector::Clip { path: outlines, rule: tiny_skia::FillRule::EvenOdd, transform: tiny_skia::Transform::identity() };
+    let clip = crate::vector::Clip { path: outlines, rule: tiny_skia::FillRule::Winding, transform: tiny_skia::Transform::identity() };
     pm.place(band, tiny_skia::Transform::identity(), 1.0, rustgis_map::effects::Blend::Normal, Some(clip));
 }
 
@@ -1542,5 +1555,72 @@ mod tests {
             }
         }
         assert!(darker > 50, "{darker} pixels along the shore");
+    }
+
+    /// The lake's western shore just inside, and a few pixels in, in a flat view's picture.
+    fn western_shore(m: &mut Map, view: &crate::View) -> ([u8; 3], [u8; 3]) {
+        let pm = crate::render_complete(m, view).unwrap().pixmap;
+        let (x, y) = view.camera.to_screen(lonlat_to_merc(Coord::new(0.2, -0.1)), view.width, view.height);
+        let at = |dx: f64| pm.pixel((x + dx) as u32, y as u32).map(|c| [c.red(), c.green(), c.blue()]).unwrap();
+        (at(1.5), at(12.0))
+    }
+
+    /// The band needs no Shaded Relief, and goes with the water layer: none while that layer
+    /// isn't drawn (hidden or out of its scale range). Two lakes on one another still get it.
+    #[test]
+    fn the_shore_band_goes_with_the_water_layer_not_the_relief() {
+        let flat = |shore: f64, setup: &dyn Fn(&mut Map)| {
+            let (mut m, view) = shored(shore, 0.0);
+            setup(&mut m);
+            western_shore(&mut m, &view)
+        };
+        let id = |m: &Map, name: &str| m.layers.iter().find(|l| l.name == name).map(|l| l.id).unwrap();
+        let no_relief = |m: &mut Map| {
+            let dem = m.layers.iter().find(|l| l.raster.is_some()).map(|l| l.id).unwrap();
+            m.layer_mut(dem).unwrap().visible = false;
+        };
+        let (edge, inside) = flat(0.0, &no_relief);
+        let (dark, dark_inside) = flat(1.0, &no_relief);
+        assert!(dark.iter().zip(&edge).all(|(d, e)| d < e), "darker without a relief: {dark:?} from {edge:?}");
+        assert_eq!(dark_inside, inside);
+        // The same lake twice: the band is drawn, not cancelled by the overlap.
+        let twice = |m: &mut Map| {
+            use rustgis_data::Value;
+            let lagos = id(m, "lagos");
+            let lake = vec![square(0.2, -0.2, 0.3), square(0.33, -0.02, 0.04)];
+            m.layer_mut(lagos).unwrap().dataset.push(Some(Geometry::Polygon(vec![lake])), vec![Value::Null]);
+        };
+        let (edge, _) = flat(0.0, &twice);
+        let (dark, _) = flat(1.0, &twice);
+        assert!(dark.iter().zip(&edge).all(|(d, e)| d < e), "darker with two lakes in one: {dark:?} from {edge:?}");
+        // The water layer hidden, or out of its scale range: no band.
+        let hidden = |m: &mut Map| {
+            let lagos = id(m, "lagos");
+            m.layer_mut(lagos).unwrap().visible = false;
+        };
+        assert_eq!(flat(1.0, &hidden), flat(0.0, &hidden), "no band while the water layer is hidden");
+        let out_of_range = |m: &mut Map| {
+            let lagos = id(m, "lagos");
+            m.layer_mut(lagos).unwrap().max_scale = Some(1e12);
+        };
+        assert_eq!(flat(1.0, &out_of_range), flat(0.0, &out_of_range), "no band out of the water layer's scale range");
+    }
+
+    /// Over elevation tiles still on their way, a frame with the band waits for them, without a
+    /// Shaded Relief too; with the band off, its water isn't read for it.
+    #[test]
+    fn a_shore_band_over_tiles_on_their_way_leaves_the_frame_pending() {
+        let pending = |shore: f64| {
+            let (mut m, view) = shored(shore, 0.0);
+            let dem = m.layers.iter().find(|l| l.raster.is_some()).map(|l| l.id).unwrap();
+            m.layer_mut(dem).unwrap().visible = false;
+            m.view.terrain.as_mut().unwrap().source = rustgis_map::view::TerrainSource::Tiles {
+                url: "https://shore-band.invalid/{z}/{x}/{y}.png".into(),
+                encoding: TerrainEncoding::Terrarium,
+            };
+            crate::render(&mut m, &view).unwrap().tiles_pending
+        };
+        assert!(pending(0.35), "the band's shore tiles are waited for");
+        assert!(!pending(0.0), "nothing read without the band");
     }
 }
