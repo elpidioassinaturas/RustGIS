@@ -371,6 +371,9 @@ pub struct Services {
     /// Opens a file picker for `"data"`, `"project"`, or `"shapefile"`; results land in `inbox`.
     /// Shapefile picks carry [`SHAPEFILE_PICK`] after sidecars are gathered into ZIPs.
     pub open_async: Option<Box<dyn Fn(&str)>>,
+    /// Snapshot the pending options immediately before a picker is submitted. Phone shells
+    /// retain these only on admission, so a refused picker cannot overwrite an active request.
+    pub open_options: Option<Box<dyn Fn(&UiState)>>,
     /// Asks the device's camera for a photo (a phone's shell): the photo arrives in
     /// [`RustGisApp::photos`]. `None` where there is no camera to ask.
     pub take_photo: Option<Box<dyn Fn() -> Result<(), String>>>,
@@ -2030,6 +2033,7 @@ impl RustGisApp {
             || rustgis_engine::data::source::is_source_name(name)
             || rustgis_engine::data::io::is_multi_layer_name(name)
             || rustgis_engine::data::sheets::is_sheet_name(name)
+            || lower.ends_with(".dbf")
             || lower.ends_with(".gz")
             || (lower.ends_with(".dat") && std::str::from_utf8(bytes).is_err())
         {
@@ -2670,6 +2674,11 @@ impl RustGisApp {
                 let mark = self.session.notice_mark();
                 return exportjob::start(self, "source.publish", params).inspect_err(|e| self.command_failed(id, e, mark));
             }
+            // Ordering and writing a standalone table grows with its rows, like Export Features.
+            if id == "share.exportTable" {
+                let mark = self.session.notice_mark();
+                return exportjob::start(self, "share.exportTable", params).inspect_err(|e| self.command_failed(id, e, mark));
+            }
             // Converting the labels of a layer read in place reads all of its source first, on a
             // thread of its own, whoever asks (a click, the assistant).
             if id == "labels.convert"
@@ -2959,7 +2968,7 @@ impl RustGisApp {
         result
     }
 
-    /// Record Task: adds a command that ran from the app and changed the project as a step. Not
+    /// Record Task: adds a command that changed the project or exported a table as a step. Not
     /// panes and dialogs (`ui.*`), tasks themselves, or what only moves the view. A colour, outline
     /// or transparency set again on the same layer (dragged in its picker) updates the step it just
     /// made.
@@ -3021,7 +3030,9 @@ impl RustGisApp {
         {
             return;
         }
-        let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates).copied() else { return };
+        // Export Table writes a file without changing the project, but remains a replayable
+        // task step. Other exports keep their existing recording behavior.
+        let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates || id == "share.exportTable").copied() else { return };
         // Downloaded data is kept for this session only, and adding it uses it up: a task
         // couldn't add it again.
         // A result handed over by the app (`ran`: a summary worked out on a thread) is used up
@@ -3716,6 +3727,9 @@ impl RustGisApp {
                     self.ui.pending_open = None;
                     // `null`: the dialog, for the file picked.
                     self.ui.pending_csv = Some(opts.unwrap_or(Value::Null));
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open("text");
                 } else if let Some(path) = dialogs::pick_open(
                     &["csv", "tsv", "txt", "dat", "gz", "xlsx", "xlsm", "xlsb", "xls", "ods"],
@@ -3750,6 +3764,9 @@ impl RustGisApp {
                     self.ui.next_dxf = self.ui.next_dxf.checked_add(1).ok_or(tl!("DXF picker request limit reached"))?;
                     let id = self.ui.next_dxf;
                     self.ui.pending_dxf.insert(id, opts.unwrap_or(Value::Null));
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open(&format!("dxf:{id}"));
                 } else if let Some(path) = dialogs::pick_open(&["dxf"], tl!("DXF drawing")) {
                     return match opts {
@@ -3907,6 +3924,9 @@ impl RustGisApp {
                     self.ui.pending_open = None;
                     self.ui.pending_csv = None;
                     self.ui.pending_shapefile = Some(json!({"crs": text}));
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open("shapefile");
                 } else if let Some(path) = dialogs::pick_open(&["shp", "zip"], tl!("Shapefile")) {
                     // Read on a thread of its own, as Add Data's other files are.
@@ -3923,6 +3943,9 @@ impl RustGisApp {
                     self.ui.pending_picture = None;
                     self.ui.pending_open = None;
                     self.ui.pending_csv = None;
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open("data");
                 } else if let Some(path) = dialogs::pick_open(
                     &[
@@ -3947,6 +3970,7 @@ impl RustGisApp {
                             "jpg",
                             "jpeg",
                             "shp",
+                            "dbf",
                             "zip",
                             "gpkg",
                             "parquet",
@@ -3991,6 +4015,9 @@ impl RustGisApp {
                     self.ui.pending_layout_picture = false;
                     self.ui.pending_picture = None;
                     self.ui.pending_open = None;
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open("project");
                     self.ui.backstage = false;
                 } else if let Some(path) = dialogs::pick_open(
@@ -4081,6 +4108,9 @@ impl RustGisApp {
             "ui.reportLayoutFile" => {
                 if let Some(open) = &self.services.open_async {
                     self.ui.pending_open = Some("report.existingTemplate");
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open("item");
                 } else if let Some(path) = dialogs::pick_open(&["rgislayout"], tl!("RustGIS layout")) {
                     return self.run("report.existingTemplate", json!({"path": path}));
@@ -4125,6 +4155,9 @@ impl RustGisApp {
                     self.ui.pending_layout_picture = false;
                     self.ui.pending_picture = None;
                     self.ui.pending_open = None;
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open("layout");
                 } else if let Some(path) = dialogs::pick_open(&["rgislayout"], tl!("RustGIS layout")) {
                     return self.run("layout.import", json!({"path": path}));
@@ -4136,6 +4169,9 @@ impl RustGisApp {
                     self.ui.pending_layout_picture = true;
                     self.ui.pending_picture = None;
                     self.ui.pending_open = None;
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open("picture");
                 } else if let Some(path) = dialogs::pick_open(&["png", "jpg", "jpeg"], tl!("Pictures")) {
                     let v = self.run("layout.addElement", json!({"layout": li, "kind": "picture", "path": path}))?;
@@ -4212,6 +4248,9 @@ impl RustGisApp {
                 };
                 if let Some(open) = &self.services.open_async {
                     self.ui.pending_open = Some(cmd);
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open(match kind {
                         "ramps" => "ramp",
                         "geolibreProject" => "project",
@@ -4421,6 +4460,9 @@ impl RustGisApp {
                     self.ui.pending_layout_picture = false;
                     self.ui.pending_picture = None;
                     self.ui.pending_open = Some("presentation.imagePage");
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open("picture");
                 } else if let Some(path) = dialogs::pick_open(&["png", "jpg", "jpeg"], tl!("Pictures")) {
                     return self.run("presentation.imagePage", json!({"path": path}));
@@ -4532,6 +4574,9 @@ impl RustGisApp {
                 let cmd = if p.get("map").and_then(Value::as_bool) == Some(true) { "map.thumbnail" } else { "project.thumbnail" };
                 if let Some(open) = &self.services.open_async {
                     self.ui.pending_open = Some(cmd);
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open("picture");
                 } else if let Some(path) = dialogs::pick_open(&["png", "jpg", "jpeg"], tl!("Pictures")) {
                     return self.run(cmd, json!({"path": path}));
@@ -4639,7 +4684,8 @@ impl RustGisApp {
                 let name = format!("{}.{ext}", l.name);
                 // The features written, read whole, give their own extent (not a raster's, or the
                 // one a streamed layer's source declares).
-                let notes = rustgis_engine::data::export_notes([(ds, ds.extent())], &name, crs);
+                let mut notes = rustgis_engine::data::export_notes([(ds, ds.extent())], &name, crs);
+                rustgis_engine::cmd::share::coalesce_read_zm(&mut notes, &name, ds, &lost);
                 let mut dbf_notes = Vec::new();
                 if ext == "zip" {
                     dbf_notes.extend(io::shapefile_names_note(&ds.fields, &name));
@@ -4654,7 +4700,7 @@ impl RustGisApp {
                 if lost.rows > 0 {
                     dbf_notes.push(format!("{name}: {} rows couldn't be read and were left out", lost.rows));
                 }
-                dbf_notes.extend(rustgis_engine::cmd::share::read_date_notes(&name, &l.name, &lost));
+                dbf_notes.extend(rustgis_engine::cmd::share::read_notes(&name, &l.name, &lost));
                 // CSV holds a point a row, GPX a name for each feature and no areas.
                 dbf_notes.extend(io::export_losses_notes(ds, &ext, io::name_field(ds), &name));
                 if let Some(note) = io::left_out_note(&name, &ext, left_out) {
@@ -4943,6 +4989,9 @@ impl RustGisApp {
                 if let Some(open) = &self.services.open_async {
                     self.ui.pending_layout_picture = false;
                     self.ui.pending_open = None;
+                    if let Some(snapshot) = &self.services.open_options {
+                        snapshot(&self.ui);
+                    }
                     open("picture");
                 } else if let Some(path) = dialogs::pick_open(&["png", "jpg", "jpeg"], tl!("Pictures")) {
                     return self.add_picture(json!({"path": path}));
@@ -6027,9 +6076,19 @@ impl RustGisApp {
                 }
                 continue;
             }
+            // The renderer (exported images and PDFs, the layout view) has no installed CJK
+            // font in the browser either: it draws CJK text with this face too. It keeps the
+            // face for good, and the interface shares those bytes rather than a second copy.
+            let face = match region {
+                Some(ScriptFont::Cjk(r)) => match rustgis_engine::render::fonts::add_downloaded_cjk_font(r, bytes) {
+                    Ok(kept) => egui::FontData::from_static(kept),
+                    Err(bytes) => egui::FontData::from_owned(bytes),
+                },
+                _ => egui::FontData::from_owned(bytes),
+            };
             let name = format!("web-{}", url.rsplit('/').next().unwrap_or("font"));
             self.extra_fonts.retain(|(n, _, _)| *n != name);
-            self.extra_fonts.push((name, std::sync::Arc::new(egui::FontData::from_owned(bytes)), region));
+            self.extra_fonts.push((name, std::sync::Arc::new(face), region));
             self.fonts_dirty = true;
         }
         if self.fonts_dirty {
@@ -6038,6 +6097,9 @@ impl RustGisApp {
             theme::install_fonts(ctx, &self.extra_fonts, self.installed_region);
             self.fonts_pending = true;
             self.map.invalidate();
+            // A page drawn before a downloaded CJK face reached the renderer left its CJK text
+            // out: draw it again with the face.
+            self.layout.redraw();
         }
         // The label fonts the last frame's labels asked for (after the interface fonts, which
         // would replace them). Not in a frame that set the interface fonts: those take effect on
