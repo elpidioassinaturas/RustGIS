@@ -95,7 +95,9 @@ fn manifests_become_tool_forms() {
     // Grouped by the runner's taxonomy; a runner from before it, by the coarse category.
     assert!(matches!(slope.toolbox, "GeoLibre › Terrain › Derivatives" | "GeoLibre › Raster"), "{}", slope.toolbox);
     assert_eq!(slope.params.first().map(|p| p.kind), Some(ParamKind::RasterLayer));
-    assert!(slope.params.iter().all(|p| p.name != "output"), "outputs are not form fields");
+    // Outputs have no field of their own: one optional field names the new layer (#2224).
+    let outputs: Vec<&ParamSpec> = slope.params.iter().filter(|p| p.name == OUTPUT).collect();
+    assert!(matches!(outputs[..], [p] if is_output_name(p) && !p.required && p.default.is_empty()), "{outputs:?}");
     let units = slope.params.iter().find(|p| p.name == "units").unwrap();
     assert!(matches!(units.kind, ParamKind::Choice(c) if c.contains(&"percent")));
     // Defaults are JSON text (as for the built-in tools): the form and the runner parse it.
@@ -128,9 +130,86 @@ fn inputs_of_several_layers_are_layer_lists() {
             ("inputs", ParamKind::RasterLayers),
             ("vectors", ParamKind::VectorLayers),
             ("files", ParamKind::Text),
-            ("dem", ParamKind::RasterLayer)
+            ("dem", ParamKind::RasterLayer),
+            ("output", ParamKind::Text)
         ]
     );
+}
+
+/// The layers a run adds are named by `output`, as for the built-in tools, else by the tool;
+/// a name in use gets a number (#2224).
+#[test]
+fn outputs_are_named_by_the_output_field() {
+    let f = Fixture::new();
+    let one = json!({
+        "id": "contours", "display_name": "Contours From Raster", "category": "Raster", "summary": "",
+        "params": [
+            {"name": "input", "io_role": "input", "data_kind": "raster", "required": true, "schema": {"kind": "input"}},
+            {"name": "output", "io_role": "output", "data_kind": "vector", "required": false, "schema": {"kind": "output"}}
+        ]
+    });
+    let (spec, meta) = spec_of(&one).unwrap();
+    let field = spec.params.iter().find(|p| p.name == OUTPUT).unwrap();
+    assert!(is_output_name(field) && field.label == "Output Name", "{field:?}");
+    let job = |params: Value| {
+        let params = rustgis_analysis::resolve_params(&spec, &params)?;
+        prepare_with(&spec, &meta, &f, &params)
+    };
+    let named = |params: Value| job(params).map(|j| j.outputs.iter().map(|(_, n)| n.clone()).collect::<Vec<_>>());
+    // Empty (the form's start), blank or left out: the tool's name, as before.
+    for p in [json!({"input": "dem"}), json!({"input": "dem", "output": ""}), json!({"input": "dem", "output": "  "})] {
+        assert_eq!(named(p.clone()).unwrap(), ["Contours From Raster"], "{p}");
+    }
+    let given = job(json!({"input": "dem", "output": " Contours 10 m "})).unwrap();
+    assert_eq!(given.outputs, [("output.geojson".to_string(), "Contours 10 m".to_string())]);
+    // The file the runner writes doesn't change: the name is only the layer's.
+    assert_eq!(given.argv("/work"), ["--input=/work/in0-dem.tif", "--output=/work/output.geojson"]);
+    assert!(given.notes.is_empty(), "{:?}", given.notes);
+    // A layer has the name already: numbered, and said.
+    let taken = job(json!({"input": "dem", "output": "pts"})).unwrap();
+    assert_eq!(taken.outputs[0].1, "pts 2");
+    assert!(taken.notes.iter().any(|n| n.contains("'pts'") && n.contains("'pts 2'")), "{:?}", taken.notes);
+    // Too long: cut, and said.
+    let long = job(json!({"input": "dem", "output": "x".repeat(300)})).unwrap();
+    assert_eq!(long.outputs[0].1.chars().count(), MAX_OUTPUT_NAME);
+    assert!(long.notes.iter().any(|n| n.contains("cut from 300 to 200")), "{:?}", long.notes);
+    // Not text: an error, not a guess.
+    let e = job(json!({"input": "dem", "output": 5})).unwrap_err();
+    assert!(e.contains("must be text"), "{e}");
+
+    // Several outputs: each adds its label to the name, and two can't take one name.
+    let two = json!({
+        "id": "flow", "display_name": "Flow", "category": "Hydrology", "summary": "",
+        "params": [
+            {"name": "dem", "io_role": "input", "data_kind": "raster", "required": true},
+            {"name": "streams", "io_role": "output", "data_kind": "raster"},
+            {"name": "basins", "io_role": "output", "data_kind": "raster"}
+        ]
+    });
+    let (spec2, meta2) = spec_of(&two).unwrap();
+    let names = |params: Value| {
+        let params = rustgis_analysis::resolve_params(&spec2, &params).unwrap();
+        prepare_with(&spec2, &meta2, &f, &params).unwrap().outputs.into_iter().map(|(_, n)| n).collect::<Vec<_>>()
+    };
+    assert_eq!(names(json!({"dem": "dem"})), ["Flow streams", "Flow basins"]);
+    assert_eq!(names(json!({"dem": "dem", "output": "Rio Doce"})), ["Rio Doce streams", "Rio Doce basins"]);
+    assert_eq!(numbered("a", |n| ["a", "a 2"].contains(&n)), "a 3");
+    assert_eq!(numbered(&"y".repeat(200), |n| n.chars().all(|c| c == 'y')).chars().count(), MAX_OUTPUT_NAME);
+
+    // A tool whose own option is called `output` keeps it; its outputs keep the tool's name.
+    let own = json!({
+        "id": "own", "display_name": "Own", "category": "Raster", "summary": "",
+        "params": [
+            {"name": "output", "data_kind": "string", "required": false, "schema": {"kind": "string"}},
+            {"name": "result", "io_role": "output", "data_kind": "raster"}
+        ]
+    });
+    let (spec3, meta3) = spec_of(&own).unwrap();
+    assert!(!meta3.names_outputs && spec3.params.iter().filter(|p| p.name == OUTPUT).all(|p| !is_output_name(p)));
+    let params = rustgis_analysis::resolve_params(&spec3, &json!({"output": "fast"})).unwrap();
+    let j = prepare_with(&spec3, &meta3, &f, &params).unwrap();
+    assert_eq!(j.outputs[0].1, "Own");
+    assert!(j.argv("/work").contains(&"--output=fast".to_string()), "{:?}", j.argv("/work"));
 }
 
 #[test]
