@@ -12,7 +12,7 @@ use crate::GpRecord;
 mod capabilities;
 #[path = "project_label_losses.rs"]
 pub(crate) mod label_losses;
-pub(crate) use capabilities::{layer_file_bytes, map_file_bytes, model_uses_percent_slope};
+pub(crate) use capabilities::{layer_file_bytes, map_file_bytes, model_capabilities};
 
 /// A map export cannot keep runtime-only download reservations, even in a larger project.
 pub(crate) fn ensure_map_imports_complete(map: &Map) -> Result<(), String> {
@@ -70,8 +70,16 @@ pub const FORMAT: u32 = 2;
 pub const READ_FORMAT: u32 = 2;
 /// The saved additions this RustGIS understands. Writers require only capabilities used by
 /// their payload, so a format-2 reader without them refuses instead of discarding their fields.
-pub const CAPABILITIES: &[&str] =
-    &["terrain-block", "terrain-water", "shaded-relief-effects", "normalized-legend-urls", "field-origin", "slope-percent"];
+pub const CAPABILITIES: &[&str] = &[
+    "terrain-block",
+    "terrain-water",
+    "shaded-relief-effects",
+    "normalized-legend-urls",
+    "field-origin",
+    "slope-percent",
+    "table-export-order",
+    "tabulate-intersection-unit",
+];
 /// The most entries a document's `requires` may list: past it the document is refused without
 /// the rest being read.
 pub(crate) const MAX_REQUIRES: usize = 256;
@@ -1828,12 +1836,12 @@ pub(crate) fn read_file(path: &Path, max: u64) -> Result<Vec<u8>, String> {
         return Err(too_large());
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|f| f.take(max.saturating_add(1)).read_to_end(&mut bytes))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let file = rustgis_data::provenance::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    (&file).take(max.saturating_add(1)).read_to_end(&mut bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     if bytes.len() as u64 > max {
         return Err(too_large());
     }
+    rustgis_data::provenance::buffer(path, &file, &bytes);
     Ok(bytes)
 }
 
