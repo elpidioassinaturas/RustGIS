@@ -233,10 +233,12 @@ impl Line {
     /// 1.33, as its text's `size`), in turn along the line, centred `at` points along it (its middle
     /// when `None`): the label's centre, and each character's centre relative to it and angle
     /// (radians, clockwise, upright). Each character sits on the line, turned to the line's course
-    /// from `size` before its middle to `size` after it, so detail finer than the text (a river's
-    /// jitter) doesn't turn it (#2259). `None` when the line (with `overrun` past each end) is shorter
-    /// than the text, the text there runs past an end by more than that, or that course turns more
-    /// than [`MAX_TURN`] from one character to the next.
+    /// from `size` before its middle to `size` after it (half its own width when that is more, or
+    /// when `size` is no number), so detail finer than the text (a river's jitter) doesn't turn it,
+    /// and a corner is rounded over that span (#2259). `None` when the line (with `overrun` past each
+    /// end) is shorter than the text, the text there runs past an end by more than that, that course
+    /// turns more than [`MAX_TURN`] from one character to the next, or it turns a character more
+    /// than a right angle from the way the text reads (it would stand upside down).
     pub(super) fn curved(
         &self,
         advances: &[f32],
@@ -250,6 +252,10 @@ impl Line {
         let len = curved_len(advances, gap);
         let (path, mid) = self.upright(len, overrun, at)?;
         let centre = path.at(mid)?;
+        // Wrapped to within half a turn either way.
+        let wrap = |a: f32| (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        // The way the text reads: from its start to its end on the line.
+        let reads = angle(path.at(mid - len / 2.0)?, path.at(mid + len / 2.0)?);
         let mut d = mid - len / 2.0;
         let mut out = Vec::with_capacity(advances.len());
         let mut last: Option<f32> = None;
@@ -260,16 +266,11 @@ impl Line {
             let half = if size.is_finite() { size.max(adv.max(0.5) / 2.0) } else { adv.max(0.5) / 2.0 };
             let (a, b) = (path.at(char_mid - half)?, path.at(char_mid + half)?);
             let (p, turn) = (path.at(char_mid)?, angle(a, b));
-            if !turn.is_finite() {
+            if !turn.is_finite() || wrap(turn - reads).abs() > std::f32::consts::FRAC_PI_2 {
                 return None;
             }
-            if let Some(prev) = last {
-                let mut step = turn - prev;
-                // Wrapped to within half a turn either way.
-                step = (step + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
-                if step.abs() > MAX_TURN {
-                    return None;
-                }
+            if last.is_some_and(|prev| wrap(turn - prev).abs() > MAX_TURN) {
+                return None;
             }
             last = Some(turn);
             out.push((p.0 - centre.0, p.1 - centre.1, turn));
@@ -534,12 +535,21 @@ mod tests {
             let (_, wavy) = curved(&rough, &advances, 0.0, 0.0, along(&rough, x)).expect("placed on the zigzag");
             let most = steps(&even).into_iter().fold(0.0f32, f32::max);
             assert!(steps(&wavy).iter().all(|s| *s <= most + 2.0 * tilt && *s < MAX_TURN), "at {x}: {:?} past {most}", steps(&wavy));
-            assert!(
-                wavy.iter().zip(&even).all(|(w, e)| (w.2 - e.2).abs() <= tilt),
-                "at {x}: turned to the course
-{wavy:?}
-{even:?}"
-            );
+            assert!(wavy.iter().zip(&even).all(|(w, e)| (w.2 - e.2).abs() <= tilt), "at {x}: turned to the course: {wavy:?} {even:?}");
+        }
+    }
+
+    /// Read over the text's height, a short label's course can point back against the way the text
+    /// reads (here: rightward text whose courses both run back left); it is left out rather than
+    /// drawn upside down. With no usable size, a character's angle is read over its own width.
+    #[test]
+    fn curved_text_never_reads_against_itself() {
+        let line = [(20.0, -1.0), (0.0, -1.0), (0.0, 0.0), (8.0, 0.0), (8.0, 1.0), (-12.0, 1.0)];
+        assert!(curved(&line, &[3.0; 2], 0.0, 0.0, Some(25.0)).is_none());
+        let level = [(0.0, 50.0), (100.0, 50.0), (100.0, 150.0)];
+        for size in [f32::NAN, f32::INFINITY] {
+            let (_, glyphs) = Line::new(&level).unwrap().curved(&[5.0; 3], 0.0, size, 0.0, Some(30.0)).unwrap();
+            assert!(glyphs.iter().all(|g| g.2.abs() < 1e-4), "{size}: {glyphs:?}");
         }
     }
 
@@ -556,6 +566,13 @@ mod tests {
         assert!(curved(&hairpin, &[7.0; 8], 0.0, 0.0, None).is_none());
         // Off the turn, along one of its arms, the same text fits.
         assert!(curved(&hairpin, &[7.0; 8], 0.0, 0.0, Some(100.0)).is_some());
+        // A 45° corner is rounded over the text's height: taken, the characters turning a little at
+        // a time from one leg to the other.
+        let (c, s) = (45f32.to_radians().cos(), 45f32.to_radians().sin());
+        let (_, glyphs) = curved(&[(0.0, 100.0), (100.0, 100.0), (100.0 + 100.0 * c, 100.0 + 100.0 * s)], &[7.0; 8], 0.0, 0.0, None)
+            .expect("a 45° corner");
+        assert!(glyphs.windows(2).all(|w| w[1].2 >= w[0].2 && w[1].2 - w[0].2 < MAX_TURN), "{glyphs:?}");
+        assert!(glyphs.iter().all(|g| (-1e-4..=45f32.to_radians() + 1e-4).contains(&g.2)), "between the legs: {glyphs:?}");
     }
 
     /// A distance from the line goes to the text's nearest edge, either side, and 0 is on it (#1187).
