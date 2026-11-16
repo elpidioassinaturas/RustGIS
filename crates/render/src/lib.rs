@@ -5168,7 +5168,7 @@ fn render_frame(
                             .and_then(|to| {
                                 // Square to its nearest line, the line's course taken over a text
                                 // height; starting at the point, out by its offset.
-                                let runs = square_lines.get(&to.layer.to_lowercase())?;
+                                let runs = square_lines.get(&to.layer.to_ascii_lowercase())?;
                                 let reach = text::block_height(&text, size);
                                 let n = square_labels::normal(runs, (x as f32, y as f32), to.within * 1.33, reach, to.side)?;
                                 let start = (marker / 2.0 + 2.0 + class.offset[0] * 1.33) * label_factor;
@@ -6025,41 +6025,81 @@ fn longest_on_screen(ctx: &Ctx<'_>, parts: &[Vec<Coord>]) -> Option<Vec<(f32, f3
 }
 
 /// The lines of the layers point labels are turned square to ([`LabelPlacement::Perpendicular`],
-/// #2263), by lowercased layer name: each line's and polygon outline's runs on the screen, broken
-/// where a place doesn't project. A layer read in chunks from its source has none to hand.
-fn square_lines(map: &Map, ctx: &Ctx<'_>, flat: &rustgis_map::projection::Flat) -> std::collections::HashMap<String, Vec<Vec<(f32, f32)>>> {
+/// #2263), keyed by layer name in ASCII lower case (as [`Map::layer_by_name`] matches names):
+/// each line's and polygon outline's runs on the screen, a ring closed as it is drawn, broken
+/// where a place doesn't project (on the globe, cut at the horizon as its stroke is). A layer
+/// read in chunks from its source has none to hand.
+fn square_lines(
+    map: &Map,
+    ctx: &Ctx<'_>,
+    flat: &rustgis_map::projection::Flat,
+) -> std::collections::HashMap<String, Vec<square_labels::Run>> {
     let mut out = std::collections::HashMap::new();
-    let wanted = map
-        .layers
-        .iter()
-        .filter(|l| l.visible && l.labels.enabled)
-        .flat_map(|l| l.labels.in_order())
-        .filter_map(|c| c.square_to.as_ref().filter(|_| c.placement == LabelPlacement::Perpendicular).map(|t| t.layer.to_lowercase()));
+    let wanted = map.layers.iter().filter(|l| l.visible && l.labels.enabled).flat_map(|l| l.labels.in_order()).filter_map(|c| {
+        c.square_to.as_ref().filter(|_| c.placement == LabelPlacement::Perpendicular).map(|t| t.layer.to_ascii_lowercase())
+    });
     for name in wanted.collect::<Vec<_>>() {
         if out.contains_key(&name) {
             continue;
         }
         let Some(layer) = map.layer_by_name(&name) else { continue };
-        let screen = |c: &Coord| {
-            if ctx.globe.is_some() { ctx.screen(*c) } else { flat.forward_checked(*c).and_then(|m| ctx.screen(m)) }
-                .map(|(x, y)| (x as f32, y as f32))
-                .filter(|(x, y)| x.is_finite() && y.is_finite())
-        };
         let mut runs = Vec::new();
         for g in layer.dataset.features.iter().filter_map(|f| f.geometry.as_ref()) {
-            let parts: Vec<&Vec<Coord>> = match g {
-                Geometry::Line(parts) => parts.iter().collect(),
-                Geometry::Polygon(polys) => polys.iter().flatten().collect(),
+            let (parts, rings): (Vec<&Vec<Coord>>, bool) = match g {
+                Geometry::Line(parts) => (parts.iter().collect(), false),
+                Geometry::Polygon(polys) => (polys.iter().flatten().collect(), true),
                 _ => continue,
             };
             for part in parts {
-                let points: Vec<Option<(f32, f32)>> = part.iter().map(screen).collect();
-                runs.extend(points.split(Option::is_none).map(|r| r.iter().flatten().copied().collect::<Vec<_>>()).filter(|r| r.len() > 1));
+                // A ring left open is closed, as its outline is drawn.
+                let closed: Vec<Coord>;
+                let part = match (part.first(), part.last()) {
+                    (Some(a), Some(b)) if rings && a != b => {
+                        closed = part.iter().chain([a]).copied().collect();
+                        &closed
+                    }
+                    _ => part,
+                };
+                let pieces = match &ctx.globe {
+                    Some(g) => globe_runs(g, part),
+                    None => {
+                        let points: Vec<Option<(f32, f32)>> = part
+                            .iter()
+                            .map(|c| flat.forward_checked(*c).map(|m| ctx.view.to_screen(m)).map(|(x, y)| (x as f32, y as f32)))
+                            .collect();
+                        points.split(Option::is_none).map(|r| r.iter().flatten().copied().collect()).collect()
+                    }
+                };
+                runs.extend(pieces.into_iter().filter_map(square_labels::Run::new));
             }
         }
         out.insert(name, runs);
     }
     out
+}
+
+/// A line's runs on the globe in screen points: bent along great circles and cut at the horizon,
+/// as [`Ctx::globe_line`] strokes it.
+fn globe_runs(g: &Globe, part: &[Coord]) -> Vec<Vec<(f32, f32)>> {
+    let h = g.horizon();
+    let at = |v: V3| {
+        let (x, y) = g.project(v);
+        (x as f32, y as f32)
+    };
+    let mut runs: Vec<Vec<(f32, f32)>> = Vec::new();
+    let mut prev: Option<V3> = None;
+    for v in Ctx::globe_vectors(g, part) {
+        let vis = v[2] > h;
+        match prev {
+            Some(p) if p[2] > h && vis => runs.last_mut().into_iter().for_each(|r| r.push(at(v))),
+            Some(p) if p[2] > h => runs.last_mut().into_iter().for_each(|r| r.push(at(g.horizon_crossing(p, v)))),
+            Some(p) if vis => runs.push(vec![at(g.horizon_crossing(p, v)), at(v)]),
+            None if vis => runs.push(vec![at(v)]),
+            _ => {}
+        }
+        prev = Some(v);
+    }
+    runs
 }
 
 /// Full projected runs nearest a saved geographic anchor, independent of viewport clipping.
@@ -8049,7 +8089,8 @@ mod tests {
     fn a_perpendicular_label_turns_square_to_its_nearest_line() {
         let mut m = Map::new("Map");
         m.basemap = rustgis_map::Basemap::Blank;
-        let mut d = Dataset::new("Costa", GeometryType::Polyline, vec![]);
+        // (A name with a capital outside ASCII, matched as layer names are.)
+        let mut d = Dataset::new("Águas", GeometryType::Polyline, vec![]);
         d.push(Some(Geometry::Line(vec![vec![Coord::new(-1.0, 0.0), Coord::new(1.0, 0.0)]])), vec![]);
         m.add_dataset(d);
         let mut d = Dataset::new("Praias", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
@@ -8061,7 +8102,7 @@ mod tests {
         l.labels.enabled = true;
         l.labels.default.placement = LabelPlacement::Perpendicular;
         l.labels.default.square_to =
-            Some(rustgis_map::SquareTo { layer: "costa".into(), within: 20.0, side: rustgis_map::SquareSide::Away });
+            Some(rustgis_map::SquareTo { layer: "ÁGUAS".into(), within: 20.0, side: rustgis_map::SquareSide::Away });
         let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.02)), res: 100.0, bearing: 0.0, pitch: 0.0 };
         m.camera = camera;
         let view = View { width: 300.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };

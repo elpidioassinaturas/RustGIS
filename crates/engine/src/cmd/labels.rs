@@ -229,7 +229,9 @@ pub fn commands() -> Vec<C> {
                 if let Some(side) = side {
                     c.square_to.as_mut().ok_or("side needs a line to be square to: to {\"layer\"}")?.side = side;
                 }
-                if c.placement == LabelPlacement::Perpendicular && c.square_to.is_none() {
+                // Asked for without a line to be square to: refused. (A class saved so, its line
+                // unread, is labelled as auto; edits that don't ask for the position are taken.)
+                if pos == Some(LabelPlacement::Perpendicular) && c.square_to.is_none() {
                     return Err("perpendicular needs a line layer to be square to: to {\"layer\", \"within\"?}".into());
                 }
                 if let Some(on) = others {
@@ -262,6 +264,11 @@ pub fn commands() -> Vec<C> {
             })?;
             if let Some(note) = callout_note {
                 s.notify(note, false);
+            }
+            // A distance outside the range is brought within it, and says so.
+            if let Some(asked) = p.pointer("/to/within").and_then(number).filter(|w| !rustgis_map::symbology::SQUARE_WITHIN.contains(w)) {
+                let kept = rustgis_map::symbology::square_within(asked);
+                s.notify(format!("within {asked} points adjusted to {kept} (a perpendicular label's line is 1 to 500 points away)"), false);
             }
             if let Some(asked) = line_offset_asked {
                 let name = s.map().layer(id).map(|l| l.name.clone()).unwrap_or_default();

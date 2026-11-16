@@ -3281,7 +3281,8 @@ fn a_reference_scale_out_of_range_in_a_project_is_left_out_and_said() {
 }
 
 /// `labels.placement` perpendicular (#2263): square to a line or polygon layer by name, its side
-/// kept when the layer changes; refused without a layer to be square to, or with a point layer.
+/// kept when the layer changes, its layer followed through a rename; refused without a layer to
+/// be square to, or with a point layer; a distance out of range held to it, and said.
 #[test]
 fn cities_are_placed_square_to_a_line_layer() {
     let mut s = world();
@@ -3290,11 +3291,13 @@ fn cities_are_placed_square_to_a_line_layer() {
     assert!(s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "Cities"}})).is_err());
     assert!(s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "Nowhere"}})).is_err());
     assert!(s.run("labels.placement", &json!({"layer": "Cities", "side": "left"})).is_err(), "side without a line");
+    let mark = s.notices_given();
     s.run(
         "labels.placement",
         &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "rivers", "within": 900}, "side": "left"}),
     )
     .unwrap();
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("within 900 points adjusted to 500")));
     let c = class(&s);
     let to = c.square_to.clone().unwrap();
     assert_eq!(
@@ -3304,13 +3307,42 @@ fn cities_are_placed_square_to_a_line_layer() {
     s.run("labels.placement", &json!({"layer": "Cities", "to": {"layer": "Countries"}})).unwrap();
     let to = class(&s).square_to.unwrap();
     assert_eq!((to.layer.as_str(), to.within, to.side), ("Countries", 20.0, crate::map::SquareSide::Left));
+    s.run("layer.rename", &json!({"layer": "Countries", "name": "Nations"})).unwrap();
+    assert_eq!(class(&s).square_to.unwrap().layer, "Nations");
     assert!(s.run("labels.placement", &json!({"layer": "Cities", "side": "up"})).is_err());
     // Saved and read back with the project.
     let back: crate::map::LabelClass = serde_json::from_value(serde_json::to_value(class(&s)).unwrap()).unwrap();
     assert_eq!(back, class(&s));
+    // Its line unread (as a project saved so opens): labelled as auto, and other edits taken.
+    s.map_mut().layers.iter_mut().find(|l| l.name == "Cities").unwrap().labels.default.square_to = None;
+    s.run("labels.placement", &json!({"layer": "Cities", "offset": [2, 0]})).unwrap();
     // Placed elsewhere and cleared.
     s.run("labels.placement", &json!({"layer": "Cities", "position": "above", "to": null})).unwrap();
     assert_eq!(class(&s).square_to, None);
+}
+
+/// A project whose perpendicular label line doesn't read, names no layer, or is out of range
+/// says so on opening, one notice with a count; a good one or none says nothing (#2263).
+#[test]
+fn opening_a_project_says_when_a_perpendicular_line_is_dropped() {
+    let said = |v: &Value| {
+        let s = Session::new(Project::from_json(&v.to_string()).unwrap());
+        s.notices.iter().filter(|n| n.text.contains("perpendicular label line")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let clean: Value = serde_json::to_value(&world().project).unwrap();
+    assert!(said(&clean).is_empty());
+    let mut fine = clean.clone();
+    fine["maps"][0]["layers"][0]["labels"]["square_to"] = json!({"layer": "Rivers", "within": 30, "side": "left"});
+    assert!(said(&fine).is_empty());
+    let mut damaged = clean.clone();
+    damaged["maps"][0]["layers"][0]["labels"]["square_to"] = json!({"layer": ""});
+    damaged["maps"][0]["layers"][1]["labels"]["square_to"] = json!({"layer": "Rivers", "within": 9000});
+    let loaded = Project::from_json(&damaged.to_string()).unwrap();
+    assert_eq!(loaded.maps[0].layers[0].labels.default.square_to, None);
+    assert_eq!(loaded.maps[0].layers[1].labels.default.square_to.as_ref().map(|t| t.within), Some(500.0));
+    let notes = said(&damaged);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("2 perpendicular label line setting(s)"), "{notes:?}");
 }
 
 #[test]
