@@ -33,6 +33,7 @@ mod raster;
 pub mod raster_export;
 pub mod report;
 mod single_image;
+mod square_labels;
 mod stroke_paths;
 pub mod svg;
 pub mod terrain;
@@ -4202,6 +4203,8 @@ fn render_frame(
     let n_layers = map.layers.len();
     // Masks: layers shown only inside another layer's polygons, or left of the swipe divider.
     let masks = layer_masks(map, &ctx, w, h, &flat, &key, scale)?;
+    // The lines point labels are turned square to (#2263), on the screen.
+    let square_lines = square_lines(map, &ctx, &flat);
     // Bottom first; a higher depth priority draws later (on top) whatever the order.
     let mut order: Vec<usize> = (0..n_layers).rev().collect();
     order.sort_by_key(|i| map.layers.get(*i).map_or(0, |l| l.priority));
@@ -5021,6 +5024,8 @@ fn render_frame(
                         let mut curves = None;
                         let mut line_alternatives = Vec::new();
                         let mut line_places = None;
+                        // Turned square to a line: no other places round its point.
+                        let mut squared = false;
                         if let Some((mx, my)) = moved {
                             places.push((0, mx as f32, my as f32, None, Vec::new()));
                         } else if let (LabelPlacement::Parallel | LabelPlacement::Curved, Geometry::Line(parts)) = (class.placement, g) {
@@ -5156,6 +5161,28 @@ fn render_frame(
                                     }
                                 }
                             }
+                        } else if let Some((lx, ly, angle)) = class
+                            .square_to
+                            .as_ref()
+                            .filter(|_| is_point && class.placement == LabelPlacement::Perpendicular && point.is_some())
+                            .and_then(|to| {
+                                // Square to its nearest line, the line's course taken over a text
+                                // height; starting at the point, out by its offset.
+                                let runs = square_lines.get(&to.layer.to_lowercase())?;
+                                let reach = text::block_height(&text, size);
+                                let n = square_labels::normal(runs, (x as f32, y as f32), to.within * 1.33, reach, to.side)?;
+                                let start = (marker / 2.0 + 2.0 + class.offset[0] * 1.33) * label_factor;
+                                Some(square_labels::place(
+                                    (x as f32, y as f32),
+                                    n,
+                                    start,
+                                    bw * label_factor,
+                                    class.offset[1] * 1.33 * label_factor,
+                                ))
+                            })
+                        {
+                            squared = true;
+                            places.push((0, lx, ly, Some(angle), Vec::new()));
                         } else {
                             let (lx, ly) = place(class.placement);
                             // Turned by its angle expression (degrees clockwise), about its centre,
@@ -5187,7 +5214,7 @@ fn render_frame(
                                     class
                                         .placement
                                         .alternatives()
-                                        .filter(|_| class.other_positions && moved.is_none())
+                                        .filter(|_| class.other_positions && moved.is_none() && !squared)
                                         .map(place)
                                         .map(LabelPlace::from)
                                         .collect::<Vec<_>>()
@@ -5995,6 +6022,44 @@ fn longest_on_screen(ctx: &Ctx<'_>, parts: &[Vec<Coord>]) -> Option<Vec<(f32, f3
         .filter(|part| near(part))
         .flat_map(|part| line_labels::in_view(part.iter().map(|c| ctx.screen(*c).map(|(x, y)| (x as f32, y as f32))), w, h))
         .max_by(|a, b| length(a).total_cmp(&length(b)))
+}
+
+/// The lines of the layers point labels are turned square to ([`LabelPlacement::Perpendicular`],
+/// #2263), by lowercased layer name: each line's and polygon outline's runs on the screen, broken
+/// where a place doesn't project. A layer read in chunks from its source has none to hand.
+fn square_lines(map: &Map, ctx: &Ctx<'_>, flat: &rustgis_map::projection::Flat) -> std::collections::HashMap<String, Vec<Vec<(f32, f32)>>> {
+    let mut out = std::collections::HashMap::new();
+    let wanted = map
+        .layers
+        .iter()
+        .filter(|l| l.visible && l.labels.enabled)
+        .flat_map(|l| l.labels.in_order())
+        .filter_map(|c| c.square_to.as_ref().filter(|_| c.placement == LabelPlacement::Perpendicular).map(|t| t.layer.to_lowercase()));
+    for name in wanted.collect::<Vec<_>>() {
+        if out.contains_key(&name) {
+            continue;
+        }
+        let Some(layer) = map.layer_by_name(&name) else { continue };
+        let screen = |c: &Coord| {
+            if ctx.globe.is_some() { ctx.screen(*c) } else { flat.forward_checked(*c).and_then(|m| ctx.screen(m)) }
+                .map(|(x, y)| (x as f32, y as f32))
+                .filter(|(x, y)| x.is_finite() && y.is_finite())
+        };
+        let mut runs = Vec::new();
+        for g in layer.dataset.features.iter().filter_map(|f| f.geometry.as_ref()) {
+            let parts: Vec<&Vec<Coord>> = match g {
+                Geometry::Line(parts) => parts.iter().collect(),
+                Geometry::Polygon(polys) => polys.iter().flatten().collect(),
+                _ => continue,
+            };
+            for part in parts {
+                let points: Vec<Option<(f32, f32)>> = part.iter().map(screen).collect();
+                runs.extend(points.split(Option::is_none).map(|r| r.iter().flatten().copied().collect::<Vec<_>>()).filter(|r| r.len() > 1));
+            }
+        }
+        out.insert(name, runs);
+    }
+    out
 }
 
 /// Full projected runs nearest a saved geographic anchor, independent of viewport clipping.
@@ -7975,6 +8040,45 @@ mod tests {
         // Lyon's, not moved, is where its class puts it, with no line.
         let lyon = labels.iter().find(|l| l.text == "Lyon").unwrap();
         assert!(!lyon.collide.pinned && lyon.collide.callout.is_none());
+    }
+
+    /// A point placed perpendicular to a line's layer (#2263): turned square to it, starting at
+    /// the point, across the line to the side the point isn't on; one farther than `within`
+    /// stays above its point, upright.
+    #[test]
+    fn a_perpendicular_label_turns_square_to_its_nearest_line() {
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        let mut d = Dataset::new("Costa", GeometryType::Polyline, vec![]);
+        d.push(Some(Geometry::Line(vec![vec![Coord::new(-1.0, 0.0), Coord::new(1.0, 0.0)]])), vec![]);
+        m.add_dataset(d);
+        let mut d = Dataset::new("Praias", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        // About 11 and 55 points north of the line, at 100 m a point.
+        d.push(Some(Geometry::Point(Coord::new(-0.05, 0.01))), vec![Value::Text("Near".into())]);
+        d.push(Some(Geometry::Point(Coord::new(0.05, 0.05))), vec![Value::Text("Far".into())]);
+        let pts = m.add_dataset(d);
+        let l = m.layer_mut(pts).unwrap();
+        l.labels.enabled = true;
+        l.labels.default.placement = LabelPlacement::Perpendicular;
+        l.labels.default.square_to =
+            Some(rustgis_map::SquareTo { layer: "costa".into(), within: 20.0, side: rustgis_map::SquareSide::Away });
+        let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.02)), res: 100.0, bearing: 0.0, pitch: 0.0 };
+        m.camera = camera;
+        let view = View { width: 300.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let at = |c: Coord| view.to_screen(lonlat_to_merc(c));
+        let labels = render(&mut m, &view).unwrap().labels;
+        let near = labels.iter().find(|l| l.text == "Near").expect("near labelled");
+        let a = near.angle.expect("turned");
+        assert!((a.abs() - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "square to the line: {}", a.to_degrees());
+        // Below its point (south, across the line), its near end just off it.
+        let (px, py) = at(Coord::new(-0.05, 0.01));
+        let w = text::spaced_block_width("Near", near.size, text::Face::default(), 0.0);
+        assert!((near.x - px as f32).abs() < 0.5, "{} {px}", near.x);
+        let start = near.y - py as f32 - w / 2.0;
+        assert!((0.0..10.0).contains(&start), "starts at the point: {start}");
+        let far = labels.iter().find(|l| l.text == "Far").expect("far labelled");
+        let (_, fy) = at(Coord::new(0.05, 0.05));
+        assert!(far.angle.is_none() && far.y < fy as f32, "as auto: {:?} {} {fy}", far.angle, far.y);
     }
 
     /// A label moved by hand into view is drawn whatever its feature's place: a point's, or a

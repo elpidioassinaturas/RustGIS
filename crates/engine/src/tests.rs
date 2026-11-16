@@ -3280,6 +3280,39 @@ fn a_reference_scale_out_of_range_in_a_project_is_left_out_and_said() {
     }
 }
 
+/// `labels.placement` perpendicular (#2263): square to a line or polygon layer by name, its side
+/// kept when the layer changes; refused without a layer to be square to, or with a point layer.
+#[test]
+fn cities_are_placed_square_to_a_line_layer() {
+    let mut s = world();
+    let class = |s: &Session| s.map().layer_by_name("Cities").unwrap().labels.default.clone();
+    assert!(s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular"})).is_err(), "no line");
+    assert!(s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "Cities"}})).is_err());
+    assert!(s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "Nowhere"}})).is_err());
+    assert!(s.run("labels.placement", &json!({"layer": "Cities", "side": "left"})).is_err(), "side without a line");
+    s.run(
+        "labels.placement",
+        &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "rivers", "within": 900}, "side": "left"}),
+    )
+    .unwrap();
+    let c = class(&s);
+    let to = c.square_to.clone().unwrap();
+    assert_eq!(
+        (c.placement, to.layer.as_str(), to.within, to.side),
+        (crate::map::LabelPlacement::Perpendicular, "Rivers", 500.0, crate::map::SquareSide::Left)
+    );
+    s.run("labels.placement", &json!({"layer": "Cities", "to": {"layer": "Countries"}})).unwrap();
+    let to = class(&s).square_to.unwrap();
+    assert_eq!((to.layer.as_str(), to.within, to.side), ("Countries", 20.0, crate::map::SquareSide::Left));
+    assert!(s.run("labels.placement", &json!({"layer": "Cities", "side": "up"})).is_err());
+    // Saved and read back with the project.
+    let back: crate::map::LabelClass = serde_json::from_value(serde_json::to_value(class(&s)).unwrap()).unwrap();
+    assert_eq!(back, class(&s));
+    // Placed elsewhere and cleared.
+    s.run("labels.placement", &json!({"layer": "Cities", "position": "above", "to": null})).unwrap();
+    assert_eq!(class(&s).square_to, None);
+}
+
 #[test]
 fn rivers_are_labelled_along_their_lines_in_italics() {
     let mut s = world();
