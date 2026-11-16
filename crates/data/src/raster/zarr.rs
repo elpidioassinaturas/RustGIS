@@ -1596,11 +1596,13 @@ pub fn series_inner_parts(store: &Store, plan: &SeriesPlan, got: &HashMap<String
 }
 
 /// The bytes of `shards`' chunks of variable `var`, from their indexes in `got`; `smaller` says
-/// how to read less when they are too many.
+/// how to read less when they are too many. The indexes already read count toward the same
+/// [`MAX_READ`], so both reads together stay under it.
 fn shard_chunk_parts(store: &Store, var: &str, shards: &[ShardRead], got: &HashMap<String, Vec<u8>>, smaller: &str) -> Result<Vec<Part>> {
     let Some(a) = store.array(var) else { return Ok(Vec::new()) };
     let Some(Codec::Sharding { index, .. }) = a.codecs.first() else { return Ok(Vec::new()) };
-    let (mut parts, mut total) = (Vec::new(), 0u64);
+    let read: u64 = shards.iter().filter_map(|s| got.get(&format!("{}#index", s.key))).map(|r| r.len() as u64).sum();
+    let (mut parts, mut total) = (Vec::new(), read);
     for s in shards {
         let Some(raw) = got.get(&format!("{}#index", s.key)) else { continue };
         let idx = shard_index(raw, s.count, index).map_err(|e| bad(format!("{}: {e}", s.key)))?;
