@@ -173,10 +173,13 @@ GeoParquet and FlatGeobuf carry their coordinate system in the file. Rasters kee
 coordinate system and are reprojected as they draw. The map uses Web Mercator by default, but
 **View › Projection** can change it; see [Maps](maps.md).
 
-ESRI `.prj` files without an EPSG code use their projection parameters and, for ED50,
-Monte Mario (from Greenwich or from Rome), OSGB36, DHDN, Amersfoort, GGRS87, CH1903/CH1903+
-and S-JTSK, the same built-in Helmert datum transformation as the EPSG definition. In a `.prj`
-or other WKT:
+ESRI `.prj` files without an EPSG code use their projection parameters and, for ED50, Monte
+Mario (from Greenwich or from Rome), OSGB36, DHDN, Amersfoort, GGRS87, CH1903/CH1903+ and
+S-JTSK, the same built-in Helmert datum transformation as the EPSG definition. Other datums are
+recognized by the name Esri gives them (`D_Philippine_Reference_System_1992`, `D_Pulkovo_1942`,
+`D_Tokyo` and some 320 more) and take their EPSG definition's transformation, when all the EPSG
+systems on the datum share one Helmert transformation and the file's ellipsoid is the datum's
+own. In a `.prj` or other WKT:
 
 - A transformation in the file (a `TOWGS84`, or a WKT2 `BOUNDCRS`'s) takes precedence, also over
   the built-in one of an EPSG code in the WKT, as in PROJ and GDAL. It also takes precedence over
@@ -1477,6 +1480,24 @@ with its foot, so its walls come out gentler than they are: 25° to 40° suits i
 can start higher. Missing keys keep the current rock's (or those defaults), and `"rock": false`
 removes it; it is off by default and saved with the project only when set.
 
+**Ambient** and **Balanced light**, on a Shaded Relief layer (`raster.symbology` `"ambient"`, 0 to
+1, and `"balanced"`, true or false), set how the sun's light shades the colour. Each cell is drawn
+at `ambient × sky + (1 − ambient) × h × direct` of its colour, where `h` is how squarely it faces
+the sun (0 to 1), `sky` the share of the sky it sees (1 without sky visibility) and `direct` what
+cast shadows leave of the sun (1 without them); the fill light is added to that. So `ambient` is the
+share a slope turned fully from the sun keeps: lower draws deeper shadows. With the balanced light,
+`h` is divided by its value on flat ground (`sin altitude`), and the sum is held to at most 1.3
+before the fill light is added: flat ground that sees the whole sky is drawn in the ramp's own colour, the colour the legend
+shows, slopes turned to the sun brighten (each channel clamped to 255) and slopes turned away fall
+toward `ambient`. A sun within about 0.1° of the horizon lights no flat ground, so there the
+balanced light is drawn as the plain one, with its own ambient; below about 1° the picture changes
+sharply with small changes of altitude, so keep the sun higher with the balanced light. A layout's colour bar shows the
+colour of flat open ground, so with the balanced light it is the ramp itself; where sky visibility
+hides part of the sky, the ground is drawn darker than the bar. Left unset, `ambient` is
+0.25, as the relief was always drawn, or 0.5 with the balanced light, which keeps about the same
+contrast; `"ambient": null` goes back to that default. A Z factor of 1.5 to 2 suits the balanced
+light on 30 m data. Both are saved with the project only when set.
+
 With **Resampling** set to bilinear, a Shaded Relief layer's light (its hillshade, cast shadows,
 sky visibility and fill light) and its rock tint are blended between the cells' centres, as its
 values are, so a cell drawn over many pixels shades smoothly instead of in squares; nearest keeps
@@ -1538,7 +1559,7 @@ a few at a time, in the background.
 Stores are read in pure Rust, in the web app as well as on the desktop: Zarr 2 with consolidated
 metadata (`.zmetadata`, as xarray writes) and Zarr 3 (`zarr.json`, sharded arrays too), chunks
 compressed with blosc (LZ4, zlib or zstd, byte- or bit-shuffled), zlib, gzip, zstd or LZ4, of
-integer or float values, in C or Fortran order. A sharded array's shards are fetched whole, except in a window (below).
+integer or float values, in C or Fortran order. A sharded array's shards are fetched whole, except in a window (below) and in a series at a point (`zarr.series`), which reads each shard's index and then only the chunk holding the cell, by range.
 `_FillValue`, `missing_value` and a Zarr 2 array's fill value are no data; a Zarr 3 array's fill
 value isn't: chunks never written are left empty, but chunks missing from inside a shard show the
 fill value. `scale_factor` and `add_offset` are applied. The coordinates must be evenly spaced (a curvilinear grid isn't read);
@@ -1558,8 +1579,9 @@ the root's `spatial:dimensions` and the coordinates its dimensions name are then
 (`raster.zarrInfo` without one says so). The Add Data › Zarr dialog can't name a variable before
 it connects yet: give it the address of one array.
 Blosclz-compressed and transposed chunks and shards inside shards aren't read yet, and say so. A
-store by web address must allow the browser to fetch it (CORS) for the web app;
-Google Cloud's CMIP6 bucket does, ARCO-ERA5's doesn't (the desktop reads both).
+blosc or LZ4 chunk whose header claims more bytes than its data can make, or whose blocks lie
+outside it, is refused, naming the array. A store by web address must allow the browser to fetch it
+(CORS) for the web app; Google Cloud's CMIP6 bucket does, ARCO-ERA5's doesn't (the desktop reads both).
 
 ```sh
 rustgis-cli run --cmd 'layer.addZarr={"url":"https://storage.googleapis.com/gcp-public-data-arco-era5/ar/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2","variable":"2m_temperature","index":{"time":539100}}'
@@ -1604,6 +1626,9 @@ point. Pick a Zarr layer, then **Pick a Point** on the map. A layer that follows
 gives its period, a slice the whole axis, and `"start"`/`"end"` any other. Only the chunks holding
 that point's cell are read. A store chunked one step at a time, such as ARCO-ERA5's map-oriented
 copy, reads a chunk per step: about 4,000 steps at most, so a long axis needs a shorter period.
+A sharded variable counts the chunks inside its shards the same way, since each one is its own
+request; each shard read also takes one request for its index, which the cap doesn't count, so a
+series with one step per shard makes about twice as many requests as it has steps.
 The chart draws up to six points as lines and marks the time slider's step, and a click on it
 takes the slider to that date. **Export CSV…** writes the date and value of each point.
 

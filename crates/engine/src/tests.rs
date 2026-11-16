@@ -3388,6 +3388,98 @@ fn a_reference_scale_out_of_range_in_a_project_is_left_out_and_said() {
     }
 }
 
+/// `labels.placement` perpendicular (#2263): square to a line or polygon layer by name, its side
+/// kept when the layer changes, its layer followed through a rename; refused without a layer to
+/// be square to, or with a point layer; a distance out of range held to it, and said.
+#[test]
+fn cities_are_placed_square_to_a_line_layer() {
+    let mut s = world();
+    let class = |s: &Session| s.map().layer_by_name("Cities").unwrap().labels.default.clone();
+    assert!(s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular"})).is_err(), "no line");
+    assert!(s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "Cities"}})).is_err());
+    assert!(s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "Nowhere"}})).is_err());
+    assert!(s.run("labels.placement", &json!({"layer": "Cities", "side": "left"})).is_err(), "side without a line");
+    let mark = s.notices_given();
+    s.run(
+        "labels.placement",
+        &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "rivers", "within": 900}, "side": "left"}),
+    )
+    .unwrap();
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("within 900 points adjusted to 500")));
+    let c = class(&s);
+    let to = c.square_to.clone().unwrap();
+    assert_eq!(
+        (c.placement, to.layer.as_str(), to.within, to.side),
+        (crate::map::LabelPlacement::Perpendicular, "Rivers", 500.0, crate::map::SquareSide::Left)
+    );
+    s.run("labels.placement", &json!({"layer": "Cities", "to": {"layer": "Countries"}})).unwrap();
+    let to = class(&s).square_to.unwrap();
+    assert_eq!((to.layer.as_str(), to.within, to.side), ("Countries", 20.0, crate::map::SquareSide::Left));
+    s.run("layer.rename", &json!({"layer": "Countries", "name": "Nations"})).unwrap();
+    assert_eq!(class(&s).square_to.unwrap().layer, "Nations");
+    assert!(s.run("labels.placement", &json!({"layer": "Cities", "side": "up"})).is_err());
+    // Saved and read back with the project.
+    let back: crate::map::LabelClass = serde_json::from_value(serde_json::to_value(class(&s)).unwrap()).unwrap();
+    assert_eq!(back, class(&s));
+    // Its line taken away while it stays perpendicular: refused, the class as it was; with a new
+    // position given, taken.
+    let before = class(&s);
+    let err = s.run("labels.placement", &json!({"layer": "Cities", "to": null})).unwrap_err();
+    assert!(err.contains("perpendicular needs a line"), "{err}");
+    assert_eq!(class(&s), before);
+    // Its line unread (as a project saved so opens): labelled as auto, and other edits taken.
+    s.map_mut().layers.iter_mut().find(|l| l.name == "Cities").unwrap().labels.default.square_to = None;
+    s.run("labels.placement", &json!({"layer": "Cities", "offset": [2, 0]})).unwrap();
+    // Placed elsewhere and cleared.
+    s.run("labels.placement", &json!({"layer": "Cities", "position": "above", "to": null})).unwrap();
+    assert_eq!(class(&s).square_to, None);
+}
+
+/// The line perpendicular labels are square to removed (#2263): the class keeps its name, so a
+/// layer of that name brings it back, and its labels are placed as auto meanwhile: said once.
+#[test]
+fn removing_a_perpendicular_label_line_says_so() {
+    let mut s = world();
+    s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "Rivers"}})).unwrap();
+    let said = |s: &Session, mark| {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("perpendicular")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let mark = s.notices_given();
+    s.run("layer.remove", &json!({"layer": "Countries"})).unwrap();
+    assert!(said(&s, mark).is_empty());
+    let mark = s.notices_given();
+    s.run("layer.remove", &json!({"layer": "Rivers"})).unwrap();
+    let notes = said(&s, mark);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("'Rivers' was removed"), "{notes:?}");
+    let c = s.map().layer_by_name("Cities").unwrap().labels.default.clone();
+    assert_eq!((c.placement, c.square_to.unwrap().layer.as_str()), (crate::map::LabelPlacement::Perpendicular, "Rivers"));
+}
+
+/// A project whose perpendicular label line doesn't read, names no layer, or is out of range
+/// says so on opening, one notice with a count; a good one or none says nothing (#2263).
+#[test]
+fn opening_a_project_says_when_a_perpendicular_line_is_dropped() {
+    let said = |v: &Value| {
+        let s = Session::new(Project::from_json(&v.to_string()).unwrap());
+        s.notices.iter().filter(|n| n.text.contains("perpendicular label line")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let clean: Value = serde_json::to_value(&world().project).unwrap();
+    assert!(said(&clean).is_empty());
+    let mut fine = clean.clone();
+    fine["maps"][0]["layers"][0]["labels"]["square_to"] = json!({"layer": "Rivers", "within": 30, "side": "left"});
+    assert!(said(&fine).is_empty());
+    let mut damaged = clean.clone();
+    damaged["maps"][0]["layers"][0]["labels"]["square_to"] = json!({"layer": ""});
+    damaged["maps"][0]["layers"][1]["labels"]["square_to"] = json!({"layer": "Rivers", "within": 9000});
+    let loaded = Project::from_json(&damaged.to_string()).unwrap();
+    assert_eq!(loaded.maps[0].layers[0].labels.default.square_to, None);
+    assert_eq!(loaded.maps[0].layers[1].labels.default.square_to.as_ref().map(|t| t.within), Some(500.0));
+    let notes = said(&damaged);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("2 perpendicular label line setting(s)"), "{notes:?}");
+}
+
 #[test]
 fn rivers_are_labelled_along_their_lines_in_italics() {
     let mut s = world();
@@ -4728,6 +4820,43 @@ fn shaded_relief_keeps_its_fill_light() {
     assert_eq!(fill(&t), 0.45, "back when opened");
 }
 
+/// Shaded Relief's ambient and balanced light (#1977) are set, clamped, kept when left out, saved
+/// only when set, and back when the project is opened again; a null ambient is the default again.
+#[test]
+fn shaded_relief_keeps_its_ambient_and_balanced_light() {
+    let mut s = with_raster();
+    let light = |s: &Session| match s.map().layers.iter().find_map(|l| l.raster.as_ref()).map(|r| &r.style.renderer) {
+        Some(rustgis_map::RasterRenderer::ShadedRelief { ambient, balanced, .. }) => (*ambient, *balanced),
+        other => panic!("{other:?}"),
+    };
+    let saved = |s: &mut Session| {
+        let text = s.project.saved_text(None).unwrap().0;
+        (text.matches("\"ambient\"").count(), text.matches("\"balanced\"").count())
+    };
+    let (a0, b0) = saved(&mut s);
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!((light(&s), saved(&mut s)), ((None, false), (a0, b0)), "unset, and not saved");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "ambient": 0.4, "balanced": true})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 200})).unwrap();
+    assert_eq!((light(&s), saved(&mut s)), ((Some(0.4), true), (a0 + 1, b0 + 1)), "left out, kept");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "ambient": 3})).unwrap();
+    assert_eq!(light(&s), (Some(1.0), true));
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "ambient": null})).unwrap();
+    assert_eq!(light(&s), (None, true), "null: the default");
+    assert!(s.run("raster.symbology", &json!({"type": "shadedRelief", "ambient": "dark"})).is_err());
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "ambient": "0.35"})).unwrap();
+    assert_eq!(light(&s), (Some(0.35), true), "a number as text, as other keys take");
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("rustgis-ambient-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ambient.rgis");
+    s.run("project.saveAs", &json!({"path": path.display().to_string()})).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path": path.display().to_string()})).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(light(&t), (Some(0.35), true), "back when opened");
+}
+
 /// Shaded Relief's rock on steep slopes (#1913): an object turns it on, its missing keys from the
 /// current rock or the defaults; kept when left out; `false` removes it; a `from` not below `to`
 /// or a bad colour is refused; saved with the project only when set.
@@ -5252,6 +5381,9 @@ fn hostile_params_never_panic(shard: usize) {
                 | "gp.installGeolibre"
                 // Deletes the installed GeoLibre runner.
                 | "gp.uninstallGeolibre"
+                // Downloads GeoLibre's tool translations, and deletes the kept ones.
+                | "gp.installGeolibreLanguage"
+                | "gp.uninstallGeolibreLanguage"
                 | "plugin.registry"
                 | "plugin.installFromRegistry"
                 // Ask Earth Search when no API is given.
@@ -14550,6 +14682,11 @@ fn plugin_edits_are_one_undo_step() {
     for op in ["script.run", "project.new", "edit.undo", "plugin.uninstall", "plugin:eng-edit/h", "gp.setGeolibre", "gp.uninstallGeolibre"]
     {
         assert!(forward(&mut s, "eng-edit", op, json!({})).is_err(), "{op}");
+    }
+    // With a valid locale, so the refusal is the policy's, not a missing parameter.
+    for op in ["gp.installGeolibreLanguage", "gp.uninstallGeolibreLanguage"] {
+        let e = forward(&mut s, "eng-edit", op, json!({"locale": "pt"})).unwrap_err();
+        assert!(e.contains("reserved actions"), "{op}: {e}");
     }
     // Files need their own permission.
     let e = forward(&mut s, "eng-edit", "layer.addData", json!({"path": "/etc/passwd"})).unwrap_err();
@@ -48386,6 +48523,20 @@ fn long_commands_stop_when_cancelled_while_they_run() {
         note(command, read.run(&control).map(|_| ()), &control);
     }
 
+    // Shape fitting uses the same cancellable read queue, without modifying its source.
+    {
+        let mut shapes = Session::new(Project::default());
+        let id = shapes.map_mut().add_dataset(rustgis_data::Dataset::new("Conversion", rustgis_data::GeometryType::Polygon, vec![]));
+        shapes.active_layer = Some(id);
+        shapes.run("edit.enable", &json!({"on":true})).unwrap();
+        shapes.run("edit.addBox", &json!({"box":{"center":[0,0],"width":100,"height":60,"angle":25}})).unwrap();
+        let read =
+            crate::cmd::reads::read_ahead(&mut shapes, "edit.previewShapeConversion", &json!({"layer":id,"row":0,"kind":"rotatedBox"}))
+                .unwrap();
+        let control = Control::cancelled_once_started();
+        note("edit.previewShapeConversion", read.run(&control).map(|_| ()), &control);
+    }
+
     // Column Statistics counts every row of a layer on a thread of its own in the desktop app.
     {
         let read = crate::cmd::reads::read_ahead(&mut s, "table.statistics", &json!({"layer": "Cities", "field": "pop_max"})).unwrap();
@@ -50503,6 +50654,67 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
     ] {
         assert!(s.run("layer.addZarr", &bad).is_err(), "{bad}");
     }
+}
+
+/// A point's series of a sharded Zarr variable (#1720: `aef-mosaic`'s shards are 686 MB) reads
+/// each step's shard index, then the 12 bytes of the chunk holding the cell, by range; never a
+/// shard whole. A folder gives the same values.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_series_of_a_sharded_variable_reads_only_the_cells_chunks() {
+    // `v` (time 2, lat 4, lon 6; int16, `t·1000 + row·100 + col`) in shards of 1 × 4 × 6 holding
+    // chunks of 1 × 2 × 3, the index at the end; latitudes 3.5 down by 1, longitudes 0.5 up by 1.
+    let coord = |n: u64, attrs: Value| {
+        json!({"zarr_format": 3, "node_type": "array", "shape": [n], "data_type": "float64", "attributes": attrs,
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [n]}}, "codecs": [{"name": "bytes"}], "fill_value": 0})
+    };
+    let v = json!({"zarr_format": 3, "node_type": "array", "shape": [2, 4, 6], "data_type": "int16",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 4, 6]}},
+        "codecs": [{"name": "sharding_indexed", "configuration": {"chunk_shape": [1, 2, 3], "codecs": [{"name": "bytes"}],
+            "index_codecs": [{"name": "bytes"}, {"name": "crc32c"}], "index_location": "end"}}],
+        "fill_value": -1, "dimension_names": ["time", "lat", "lon"]});
+    let root = json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+        "v": v, "lat": coord(4, json!({"units": "degrees_north"})), "lon": coord(6, json!({"units": "degrees_east"})),
+        "time": coord(2, json!({"units": "days since 2000-01-01"}))}}});
+    let f64s = |v: Vec<f64>| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let mut files = vec![
+        ("zarr.json".to_string(), root.to_string().into_bytes()),
+        ("lat/c/0".to_string(), f64s((0..4).map(|i| 3.5 - i as f64).collect())),
+        ("lon/c/0".to_string(), f64s((0..6).map(|i| 0.5 + i as f64).collect())),
+        ("time/c/0".to_string(), f64s(vec![0.0, 366.0])),
+    ];
+    for t in 0..2u64 {
+        let (mut body, mut index) = (Vec::new(), Vec::new());
+        for (iy, ix) in [(0u64, 0u64), (0, 1), (1, 0), (1, 1)] {
+            index.extend([body.len() as u64, 12]);
+            for (r, c) in (0..2).flat_map(|r| (0..3).map(move |c| (r, c))) {
+                body.extend(((t * 1000 + (iy * 2 + r) * 100 + ix * 3 + c) as i16).to_le_bytes());
+            }
+        }
+        body.extend(index.iter().flat_map(|v| v.to_le_bytes()));
+        body.extend([0u8; 4]);
+        files.push((format!("v/c/{t}/0/0"), body));
+    }
+    let dir = std::env::temp_dir().join(format!("rustgis-zarr-shard-series-engine-{}", std::process::id()));
+    for (k, b) in &files {
+        let path = dir.join("s.zarr").join(k);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b).unwrap();
+    }
+    let (base, log) = serve_ranged_files(files.iter().map(|(k, b)| (format!("/s.zarr/{k}"), b.clone())).collect());
+    let mut s = Session::new(Project::default());
+    // At 4.2°E 1.2°N: row 2, column 4, the shard's last chunk (bytes 36–47).
+    let r = s.run("zarr.series", &json!({"url": format!("{base}/s.zarr"), "variable": "v", "lon": 4.2, "lat": 1.2})).unwrap();
+    assert_eq!(r["values"], json!([204.0, 1204.0]));
+    let asked: Vec<(String, String)> = log.lock().unwrap().clone();
+    for t in 0..2 {
+        let mut ranges: Vec<&str> = asked.iter().filter(|(p, _)| *p == format!("/s.zarr/v/c/{t}/0/0")).map(|(_, r)| r.as_str()).collect();
+        ranges.sort();
+        assert_eq!(ranges, ["-68", "36-47"], "{asked:?}");
+    }
+    let from_dir = s.run("zarr.series", &json!({"path": dir.join("s.zarr"), "variable": "v", "lon": 4.2, "lat": 1.2}));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(from_dir.unwrap()["values"], json!([204.0, 1204.0]));
 }
 
 /// A web store whose group places its grid by `spatial:transform` and `proj:code`, as the AlphaEarth
