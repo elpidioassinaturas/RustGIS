@@ -161,16 +161,22 @@ fn relief_light(layer: &Layer) -> bool {
     )
 }
 
-/// The renderer capabilities a layer needs, in [`map_capabilities`]'s order.
+/// Whether a layer is a window of a Zarr variable following the time slider (#1720): an older
+/// reader would drop the window and read the whole map at each step.
+fn zarr_window(layer: &Layer) -> bool {
+    layer.raster.as_ref().and_then(|r| r.time_zarr.as_ref()).is_some_and(|z| z.window.is_some())
+}
+
+/// The capabilities a layer needs, in [`map_capabilities`]'s order.
 fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
-    [(relief_effects(layer), "shaded-relief-effects"), (relief_light(layer), "shaded-relief-light")]
+    [(relief_effects(layer), "shaded-relief-effects"), (relief_light(layer), "shaded-relief-light"), (zarr_window(layer), "zarr-window")]
         .into_iter()
         .filter_map(|(used, name)| used.then_some(name))
         .collect()
 }
 
 fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static str> {
-    let (mut block, mut water, mut relief, mut light, mut legends) = (false, false, false, false, false);
+    let (mut block, mut water, mut relief, mut light, mut legends, mut zarr) = (false, false, false, false, false, false);
     for map in maps {
         if let Some(t) = &map.view.terrain {
             block |= t.block.is_some();
@@ -178,6 +184,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         }
         relief |= map.layers.iter().any(relief_effects);
         light |= map.layers.iter().any(relief_light);
+        zarr |= map.layers.iter().any(zarr_window);
         legends |= map.tiles.iter().any(|tile| {
             tile.legends.iter().any(|legend| rustgis_data::login_address::inner(&legend.url).len() > rustgis_map::tiles::MAX_LEGEND_URL)
         });
@@ -188,6 +195,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         (relief, "shaded-relief-effects"),
         (light, "shaded-relief-light"),
         (legends, "normalized-legend-urls"),
+        (zarr, "zarr-window"),
     ]
     .into_iter()
     .filter_map(|(used, name)| used.then_some(name))
@@ -493,6 +501,30 @@ mod tests {
         let mut unknown = saved;
         unknown["requires"] = json!(["future-terrain"]);
         assert!(Project::from_json(&unknown.to_string()).unwrap_err().contains("future-terrain"));
+    }
+
+    /// A Zarr window following the time slider (#1720) is required by name in a project, a map
+    /// file and a layer file: an older reader would drop it and read the whole map at each step.
+    #[test]
+    fn a_zarr_window_is_required_where_it_is_saved() {
+        let mut p = Project::from_json(include_str!("../../../schema/fixtures/zarr_window.rgis")).unwrap();
+        let layer = p.map().layers[0].clone();
+        assert_eq!(
+            layer.raster.as_ref().and_then(|r| r.time_zarr.as_ref()).and_then(|z| z.window),
+            Some([1526419, 1162633, 1526643, 1162857])
+        );
+        let saved = serde_json::to_value(&p).unwrap();
+        assert_eq!(saved["requires"], json!(["zarr-window"]));
+        assert_eq!(json_bytes(&map_file_bytes(p.map()).unwrap())["requires"], saved["requires"]);
+        assert_eq!(json_bytes(&layer_file_bytes(&layer).unwrap())["requires"], saved["requires"]);
+        // The whole variable following the slider needs nothing new.
+        if let Some(z) = p.maps[0].layers[0].raster.as_mut().and_then(|r| r.time_zarr.as_mut()) {
+            z.window = None;
+        }
+        assert!(serde_json::to_value(&p).unwrap().get("requires").is_none());
+        let mut unknown = saved;
+        unknown["requires"] = json!(["zarr-window", "future-zarr"]);
+        assert!(Project::from_json(&unknown.to_string()).unwrap_err().contains("future-zarr"));
     }
 
     /// Nondefault relief effects survive project, map and layer files; ordinary relief needs none.

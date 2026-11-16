@@ -50787,13 +50787,25 @@ fn a_zarr_window_follows_the_time_slider() {
         ranges.dedup();
         assert_eq!(ranges, ["-68", "36-47"], "{asked:?}");
     }
-    // Saved and opened again: the window is kept with the store, and read again at the step.
+    // Saved and opened again: the window is kept with the store, required by name, and read
+    // again at the step.
     let text = serde_json::to_string(&s.project).unwrap();
     assert!(text.contains("\"window\":[3,2,6,4]") && !text.contains("\"embedded\""), "{text}");
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap()["requires"], json!(["zarr-window"]));
     let mut t = Session::new(Project::default());
     t.run("project.openText", &json!({"text": text})).unwrap();
     let again = t.map().layers.iter().find_map(|l| l.raster.as_ref()?.data.clone()).unwrap();
     assert_eq!((again.width, again.height, again.bands[0].data.clone()), (3, 2, step(1.0)));
+    // A window edited by hand to one cell wide isn't widened to the whole map: the step is
+    // refused, and said.
+    let mut u = Session::new(Project::default());
+    let mark = u.notice_mark();
+    let narrow = text.replace("\"window\":[3,2,6,4]", "\"window\":[3,2,4,4]");
+    let opened = u.run("project.openText", &json!({"text": narrow}));
+    let data = u.map().layers.iter().find_map(|l| l.raster.as_ref()?.data.clone());
+    assert!(data.is_none_or(|d| (d.width, d.height) != (6, 4)), "the whole map was read");
+    let said: Vec<String> = u.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(opened.is_err() || said.iter().any(|n| n.contains("2 × 2")), "{opened:?} {said:?}");
     // A folder: the same cells, by cells.
     let mut f = Session::new(Project::default());
     let r = f.run("layer.addZarr", &json!({"path": dir.join("s.zarr"), "variable": "v", "time": true, "cells": [3, 2, 6, 4]}));
@@ -50801,10 +50813,14 @@ fn a_zarr_window_follows_the_time_slider() {
     let _ = std::fs::remove_dir_all(&dir);
     let got = got.unwrap_or_else(|| panic!("{r:?}"));
     assert_eq!((got.width, got.height, got.bands[0].data.clone()), (3, 2, step(0.0)));
-    // A window outside the grid is refused before the slider is touched.
+    // A window outside the grid, or under 2 × 2 cells, is refused before the slider is touched,
+    // as a still window is, not read as the whole map.
     let mut g = Session::new(Project::default());
-    assert!(g.run("layer.addZarr", &json!({"url": url, "variable": "v", "time": true, "cells": [3, 2, 60, 4]})).is_err());
-    assert!(g.map().time.is_none() && g.map().layers.is_empty());
+    for cells in [json!([3, 2, 60, 4]), json!([3, 2, 4, 4]), json!([3, 3, 6, 4]), json!([100, 0, 101, 2])] {
+        let e = g.run("layer.addZarr", &json!({"url": url, "variable": "v", "time": true, "cells": cells})).unwrap_err();
+        assert!(e.contains("2 × 2"), "{cells}: {e}");
+        assert!(g.map().time.is_none() && g.map().layers.is_empty(), "{cells}");
+    }
 }
 
 /// A web store whose group places its grid by `spatial:transform` and `proj:code`, as the AlphaEarth

@@ -1300,6 +1300,12 @@ fn add_following(s: &mut Session, p: &Value, asked: Option<Asked>) -> CmdResult 
                 sel.variable
             )
         })?;
+        // A window is checked against the grid as a still window is (within it, 2 × 2 cells at
+        // least), before the slider is touched: the same for every step, so step 0 stands for all.
+        if sel.window.is_some() {
+            let first = zarr::Selection { index: sel.index.iter().filter(|(d, _)| *d != dim).cloned().collect(), ..sel.clone() };
+            zarr::plan(&store, &first).map_err(|e| crate::sources::message_with_address(&root, &e.to_string()))?;
+        }
         // Each date is a step: an axis out of order or with a date twice (stores joined end to end)
         // can't be followed step by step.
         if !dates.iter().all(|d| d.is_finite()) || !dates.windows(2).all(|w| w[0] < w[1]) {

@@ -1062,7 +1062,8 @@
           "shaded-relief-light",
           "table-export-order",
           "tabulate-intersection-unit",
-          "layout-element-background"
+          "layout-element-background",
+          "zarr-window"
         ],
         "type": "string"
       },
@@ -1136,7 +1137,8 @@
     "shaded-relief-light",
     "table-export-order",
     "tabulate-intersection-unit",
-    "layout-element-background"
+    "layout-element-background",
+    "zarr-window"
   ],
   "x-rustgis-reads-format": 2,
   "x-rustgis-writes-format": 2

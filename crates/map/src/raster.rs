@@ -1145,7 +1145,8 @@ pub struct ZarrTime {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crs: Option<String>,
     /// The window of the map's cells each step reads, `[x0, y0, x1, y1]` as `layer.addZarr`'s
-    /// `cells` (the ends not included); `None` for the whole map.
+    /// `cells` (the ends not included); `None` for the whole map. A project with one requires
+    /// `zarr-window`: an older reader would read the whole map at each step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window: Option<[u64; 4]>,
     /// The step whose slice the layer holds (an index into `dates`); `None` when none is.
@@ -1252,11 +1253,8 @@ impl ZarrTime {
             self.dates.clear();
         }
         self.index.truncate(32);
-        // A window of fewer than 2 × 2 cells (a project edited by hand) is no window a read takes:
-        // the whole map is read instead, as before windows.
-        if self.window.is_some_and(|[x0, y0, x1, y1]| x1 < x0.saturating_add(2) || y1 < y0.saturating_add(2)) {
-            self.window = None;
-        }
+        // A window is kept as it is: one a read can't take (a project edited by hand) is refused
+        // at each step, never widened to the whole map.
         for t in [&mut self.store, &mut self.variable, &mut self.dim] {
             *t = t.chars().take(4096).collect();
         }
@@ -2710,7 +2708,8 @@ mod tests {
     }
 
     /// A following layer's window is part of each step's selection, as `zarr::Selection::parse`
-    /// reads it; one of fewer than 2 × 2 cells (a project edited by hand) is dropped on repair.
+    /// reads it; repair keeps one a read refuses (a project edited by hand), never dropping it to
+    /// the whole map.
     #[test]
     fn a_zarr_window_is_in_each_steps_selection() {
         let mut z = ZarrTime {
@@ -2724,11 +2723,9 @@ mod tests {
         };
         z.repair();
         assert_eq!(z.selection(1), "t[time=4,level=2,cells=4:1:9:3]");
-        for bad in [[4, 1, 5, 3], [4, 1, 9, 2], [9, 1, 4, 3]] {
-            z.window = Some(bad);
-            z.repair();
-            assert_eq!((z.window, z.selection(0)), (None, "t[time=3,level=2]".to_string()), "{bad:?}");
-        }
+        z.window = Some([4, 1, 5, 3]);
+        z.repair();
+        assert_eq!((z.window, z.selection(0)), (Some([4, 1, 5, 3]), "t[time=3,level=2,cells=4:1:5:3]".to_string()));
     }
 
     fn dem() -> Raster {

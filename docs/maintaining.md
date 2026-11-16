@@ -121,6 +121,11 @@ refuses them instead of opening the layout and saving it again, or running the c
 without the background. Layout files (`.rgislayout`) carry no format header yet and are not
 covered (#2277).
 
+Projects, map files and layer files with a window of a Zarr variable that follows the time slider
+(`layer.addZarr` with `"time": true` and `"cells"` or `"bbox"`) require `zarr-window`, so an older
+reader refuses them instead of reading the whole map at each step. A saved `layer.addZarr` command
+with both needs nothing: an older RustGIS refuses it when it runs.
+
 ## New dependencies
 
 A proposal for a dependency answers:
