@@ -3903,10 +3903,8 @@ impl Drop for TiltGlint {
 }
 
 /// The terrain's water a frame's Shaded Relief layers draw flat at its level with the even light
-/// of flat ground (#1915), and whether shore tiles it was read from are still on their way. A
-/// band of a tilted view or drape takes the whole view's ([`BAND_WATER`]); another frame reads it
-/// for the view it stands in for. `None` without water or with no Shaded Relief layer drawn at
-/// `scale`.
+/// of flat ground (#1915), and whether shore tiles it was read from are still on their way (see
+/// [`frame_water`]). `None` without water or with no Shaded Relief layer drawn at `scale`.
 fn relief_water(map: &Map, view: &View, labels_to: &Labels, scale: f64) -> Option<(std::sync::Arc<terrain::Water>, bool)> {
     map.view.terrain.as_ref()?.water.as_ref()?;
     let relief = map.layers.iter().any(|l| {
@@ -3917,6 +3915,14 @@ fn relief_water(map: &Map, view: &View, labels_to: &Labels, scale: f64) -> Optio
     if !relief {
         return None;
     }
+    frame_water(map, view, labels_to)
+}
+
+/// The terrain's water a frame is drawn over (#1915), and whether shore tiles it was read from
+/// are still on their way: a band of a tilted view or drape takes the whole view's
+/// ([`BAND_WATER`]); another frame reads it for the view it stands in for.
+fn frame_water(map: &Map, view: &View, labels_to: &Labels) -> Option<(std::sync::Arc<terrain::Water>, bool)> {
+    map.view.terrain.as_ref()?.water.as_ref()?;
     if matches!(labels_to, Labels::Tilted(..) | Labels::Shared)
         && let Some(water) = BAND_WATER.with(|w| w.borrow().clone())
     {
@@ -4248,9 +4254,21 @@ fn render_frame(
     let (lake_light, lake_pending) = relief_water(map, view, &labels_to, scale).map_or((None, false), |(w, p)| (Some(w), p));
     // Shore tiles the water's levels wait for: the relief is drawn again once they land.
     tile_out.pending |= lake_pending;
+    // The water layer the shore band goes over (#1915), the water, and the band's darkness.
+    let shore = map.view.terrain.as_ref().and_then(|t| t.water.as_ref()).filter(|w| w.shore > 0.0).and_then(|w| {
+        let id = map.layer_by_name(&w.layer)?.id;
+        Some((id, frame_water(map, view, &labels_to)?.0, w.shore))
+    });
+    // The water layer was the last drawn: its shore band goes over it, before the next.
+    let mut shore_due = false;
     // The layer drawn last, whose tile layers go over it before the next.
     let mut below: Option<u32> = None;
     for li in order {
+        if std::mem::take(&mut shore_due)
+            && let Some((_, water, darkness)) = &shore
+        {
+            terrain::paint_shore(&mut pm, water, view, *darkness);
+        }
         // Each layer drawn is a layer of the recording (#1815); what comes between them isn't.
         pm.layer(None);
         // A frame no longer wanted stops between layers (see `cancel`).
@@ -4265,6 +4283,7 @@ fn render_frame(
         if !layer.visible || !layer.in_scale_range(scale) || held.contains(&layer.id) {
             continue;
         }
+        shore_due = shore.as_ref().is_some_and(|(id, ..)| *id == layer.id);
         pm.layer_with_id(&layer_name(layer), u64::from(layer.id));
         let opacity = layer.opacity() * group_opacity.get(&layer.id).copied().unwrap_or(1.0);
         let mask = masks.iter().find(|(id, _)| *id == layer.id).map(|(_, m)| m);
@@ -5366,6 +5385,9 @@ fn render_frame(
             cpu_dirty = true;
         }
     }
+    if shore_due && let Some((_, water, darkness)) = &shore {
+        terrain::paint_shore(&mut pm, water, view, *darkness);
+    }
     pm.layer(None);
     // A frame stopped part-way (see `cancel`) is no frame: its tiles, labels and effects aren't
     // worth working out.
@@ -5984,11 +6006,11 @@ pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32)
     let anchors = std::mem::take(&mut map.label_lock_line_anchors);
     map.label_display.paused = true;
     let mut out = Vec::new();
-    // The bands' Shaded Relief draws the whole view's water (see `relief_water`).
-    let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
-    let _water = BandWater::set(relief_water(map, view, &Labels::Own, scale).map(|(w, _)| w));
-    // And the sun's glint on it, toward the view's eye.
-    let _glint = TiltGlint::set(terrain::Ground::of(map, &view.camera).and_then(|g| terrain::Glint::of(map, view, &g)));
+    // The bands' Shaded Relief and shore band draw the whole view's water (see `frame_water`),
+    // and the sun's glint on it, toward the view's eye.
+    let ground = terrain::Ground::of(map, &view.camera);
+    let _water = BandWater::set(ground.as_ref().and_then(|g| g.water().cloned()));
+    let _glint = TiltGlint::set(ground.as_ref().and_then(|g| terrain::Glint::of(map, view, g)));
     for b in bands {
         let (mut w, mut h) = (b.width * (1.0 + 2.0 * margin), b.height * (1.0 + 2.0 * margin));
         let mut camera = b.camera;

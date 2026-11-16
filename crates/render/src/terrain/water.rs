@@ -62,6 +62,8 @@ struct Lake {
     /// Metres, before exaggeration.
     level: f64,
     edges: Slabs,
+    /// Its outline and its holes' (islands'), for the shore band.
+    rings: Vec<Vec<Coord>>,
 }
 
 /// A polygon's edges, by horizontal strip of its box: whether a point is inside (even-odd, holes
@@ -182,7 +184,7 @@ impl Water {
                 continue;
             };
             extent = extent.union(&e);
-            lakes.push(Lake { edges: Slabs::new(&rings, &e), extent: e, level });
+            lakes.push(Lake { edges: Slabs::new(&rings, &e), extent: e, level, rings });
         }
         let side = ((lakes.len() as f64).sqrt().ceil() as usize * 2).clamp(1, MAX_GRID);
         let (cols, rows) = (side, side);
@@ -516,6 +518,59 @@ impl Glint {
     }
 }
 
+/// How far inside the water's outline its shore band reaches, in logical pixels (#1915): a few,
+/// as relief artists draw it.
+const SHORE_PX: f32 = 4.0;
+
+/// The strokes the shore band is drawn with, each narrower than the one before, so it fades from
+/// the outline inward in as many steps.
+const SHORE_STEPS: u16 = 4;
+
+impl Water {
+    /// The outlines of the lakes reaching into `frame` (a north-up frame), their islands' too,
+    /// as one path in its pixels; `None` when none does.
+    fn outlines(&self, frame: &crate::View) -> Option<tiny_skia::Path> {
+        let seen = frame.camera.extent(frame.width, frame.height);
+        let ppp = frame.pixels_per_point;
+        let mut path = tiny_skia::PathBuilder::new();
+        for ring in self.lakes.iter().filter(|l| l.extent.intersects(&seen)).flat_map(|l| &l.rings) {
+            for (i, c) in ring.iter().enumerate() {
+                let (x, y) = frame.camera.to_screen(*c, frame.width, frame.height);
+                let (x, y) = ((x * ppp) as f32, (y * ppp) as f32);
+                if i == 0 { path.move_to(x, y) } else { path.line_to(x, y) }
+            }
+            path.close();
+        }
+        path.finish()
+    }
+}
+
+/// Darkens the terrain's water along its shores (#1915) on `pm`, a north-up frame drawn for
+/// `frame`: a band [`SHORE_PX`] wide inside each lake's outline and around its islands, toward
+/// black by `darkness` (0 to 1) at the outline and fading to nothing at its inner edge. Strokes
+/// of the outlines cut to the water, so a recording canvas keeps them as vectors.
+pub(crate) fn paint_shore(pm: &mut crate::Canvas, water: &Water, frame: &crate::View, darkness: f64) {
+    if darkness.is_nan() || darkness <= 0.0 {
+        return;
+    }
+    let Some(outlines) = water.outlines(frame) else { return };
+    let Some(mut band) = pm.sub(pm.width(), pm.height()) else { return };
+    // Each stroke this dark, so that where all of them lie, at the outline, they come to
+    // `darkness`.
+    let step = 1.0 - (1.0 - darkness.min(1.0)).powf(1.0 / f64::from(SHORE_STEPS));
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color(tiny_skia::Color::from_rgba(0.0, 0.0, 0.0, step as f32).unwrap_or(tiny_skia::Color::BLACK));
+    // Centred on the outline, each stroke reaches half its width inside.
+    let reach = 2.0 * SHORE_PX * frame.pixels_per_point.max(0.0) as f32;
+    for k in 1..=SHORE_STEPS {
+        let width = reach * f32::from(k) / f32::from(SHORE_STEPS);
+        let stroke = tiny_skia::Stroke { width, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
+        band.stroke_path(&outlines, &paint, &stroke, tiny_skia::Transform::identity(), None);
+    }
+    let clip = crate::vector::Clip { path: outlines, rule: tiny_skia::FillRule::EvenOdd, transform: tiny_skia::Transform::identity() };
+    pm.place(band, tiny_skia::Transform::identity(), 1.0, rustgis_map::effects::Blend::Normal, Some(clip));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,8 +595,14 @@ mod tests {
             source: rustgis_map::view::TerrainSource::Layer("dem".into()),
             exaggeration: 2.0,
             block: None,
-            // No glint unless a test asks for one: it would brighten the water's colours.
-            water: Some(rustgis_map::view::TerrainWater { layer: "lagos".into(), level: level.map(str::to_string), glint: 0.0 }),
+            // No glint or shore band unless a test asks for one: they would change the water's
+            // colours.
+            water: Some(rustgis_map::view::TerrainWater {
+                layer: "lagos".into(),
+                level: level.map(str::to_string),
+                glint: 0.0,
+                shore: 0.0,
+            }),
         });
         let camera = rustgis_map::Camera { center: lonlat_to_merc(Coord::new(0.0, -0.6)), res: 600.0, bearing: 0.0, pitch: 65.0 };
         (m, camera)
@@ -1115,5 +1176,73 @@ mod tests {
         let (a, e) = (GLINT_SUN.0.to_radians(), GLINT_SUN.1.to_radians());
         let want = [a.sin() * e.cos(), -a.cos() * e.cos(), e.sin()];
         assert!(north_west.iter().zip(want).all(|(s, w)| (s - w).abs() < 1e-9), "{north_west:?} against {want:?}");
+    }
+
+    /// The test hill's lake drawn in mid-blue over a Shaded Relief, seen from straight above
+    /// (`pitch` 0) or tilted, its shore band at `shore`.
+    fn shored(shore: f64, pitch: f64) -> (Map, crate::View) {
+        let (mut m, mut view) = glinting(315.0, 0.0);
+        m.view.terrain.as_mut().unwrap().water.as_mut().unwrap().shore = shore;
+        view.camera.center = lonlat_to_merc(Coord::new(0.35, if pitch > 0.0 { -0.3 } else { -0.05 }));
+        view.camera.pitch = pitch;
+        (m, view)
+    }
+
+    /// The water is darker along its shore (#1915 part 4), from straight above: just inside the
+    /// lake's outline it goes toward black, a few pixels in it is untouched, and so is the land
+    /// just outside.
+    #[test]
+    fn a_lake_is_darker_along_its_shore() {
+        let drawn = |shore: f64| {
+            let (mut m, view) = shored(shore, 0.0);
+            let pm = crate::render_complete(&mut m, &view).unwrap().pixmap;
+            // The lake's western shore, halfway between its south shore and the island.
+            let (x, y) = view.camera.to_screen(lonlat_to_merc(Coord::new(0.2, -0.1)), view.width, view.height);
+            let at = |dx: f64| {
+                let c = pm.pixel((x + dx) as u32, y as u32).unwrap();
+                [c.red(), c.green(), c.blue(), c.alpha()]
+            };
+            (at(1.5), at(12.0), at(-3.0), pm)
+        };
+        let (edge, inside, land, off) = drawn(0.0);
+        let (dark_edge, dark_inside, dark_land, on) = drawn(1.0);
+        assert!(dark_edge[..3].iter().zip(&edge[..3]).all(|(d, e)| d < e), "darker at the shore: {dark_edge:?} from {edge:?}");
+        assert_eq!(dark_edge[3], edge[3], "alpha kept");
+        assert_eq!(dark_inside, inside, "a few pixels in, untouched");
+        assert_eq!(dark_land, land, "the land outside untouched");
+        // Only darker anywhere, never lighter.
+        for (d, e) in on.pixels().iter().zip(off.pixels()) {
+            assert!(d.red() <= e.red() && d.green() <= e.green() && d.blue() <= e.blue(), "{d:?} from {e:?}");
+        }
+    }
+
+    /// A tilted view's water is darker along its shore too, in the drape's bands and drawn whole,
+    /// and the land never is.
+    #[test]
+    fn a_tilted_views_lake_is_darker_along_its_shore() {
+        let near_shore = [(0.203, -0.1), (0.497, -0.15), (0.3, -0.197)];
+        let land = [(0.1, 0.0), (0.6, -0.3)];
+        let (mut m, view) = shored(0.0, 65.0);
+        let (edge, dry) = (in_bands(&mut m, &view, &near_shore), in_bands(&mut m, &view, &land));
+        assert_eq!(edge.len(), near_shore.len(), "every point is in a band");
+        let (mut m, view) = shored(1.0, 65.0);
+        let (dark_edge, dark_dry) = (in_bands(&mut m, &view, &near_shore), in_bands(&mut m, &view, &land));
+        assert_eq!(dark_dry, dry, "the land isn't darkened");
+        for (d, e) in dark_edge.iter().zip(&edge) {
+            assert!(d.iter().zip(e).all(|(d, e)| d < e), "darker at the shore: {d:?} from {e:?}");
+        }
+        let whole = |shore: f64| {
+            let (mut m, view) = shored(shore, 65.0);
+            crate::render_complete(&mut m, &view).unwrap().pixmap
+        };
+        let (off, on) = (whole(0.0), whole(1.0));
+        let mut darker = 0;
+        for (d, e) in on.pixels().iter().zip(off.pixels()) {
+            if d != e {
+                assert!(d.red() <= e.red() && d.green() <= e.green() && d.blue() <= e.blue() && d.alpha() == e.alpha(), "{d:?} {e:?}");
+                darker += 1;
+            }
+        }
+        assert!(darker > 50, "{darker} pixels along the shore");
     }
 }
