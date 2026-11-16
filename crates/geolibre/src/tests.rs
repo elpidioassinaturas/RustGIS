@@ -222,8 +222,16 @@ fn outputs_are_named_by_the_output_field() {
     assert_eq!(both.outputs.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(), ["Taken streams 2", "Taken basins 2"]);
     let numbered_notes: Vec<&String> = both.notes.iter().filter(|n| n.contains("numbered")).collect();
     assert!(matches!(numbered_notes[..], [n] if n.contains("2 output name(s)")), "{:?}", both.notes);
-    assert_eq!(numbered("a", |n| ["a", "a 2"].contains(&n)), "a 3");
-    assert_eq!(numbered(&"y".repeat(200), |n| n.chars().all(|c| c == 'y')).chars().count(), MAX_OUTPUT_NAME);
+    // A long name whose output name is taken: the number goes after the output's name, which is
+    // kept whole (review).
+    let long_streams = format!("{} streams", "x".repeat(192));
+    let fl = TakenNames(&f, &[long_streams.as_str()]);
+    let params = rustgis_analysis::resolve_params(&spec2, &json!({"dem": "dem", "output": "x".repeat(200)})).unwrap();
+    let near = prepare_with(&spec2, &meta2, &fl, &params).unwrap();
+    let first = &near.outputs[0].1;
+    assert!(first.ends_with("x streams 2") && first.chars().count() == MAX_OUTPUT_NAME, "{first}");
+    assert_eq!(numbered("a", "", |n| ["a", "a 2"].contains(&n)), "a 3");
+    assert_eq!(numbered(&"y".repeat(200), "", |n| n.chars().all(|c| c == 'y')).chars().count(), MAX_OUTPUT_NAME);
 
     // A tool whose own option is called `output` keeps it; its outputs keep the tool's name.
     let own = json!({

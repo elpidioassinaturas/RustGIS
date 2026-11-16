@@ -681,7 +681,7 @@ fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Valu
                 let taken = |n: &str| {
                     inputs.dataset(n).is_some() || inputs.raster(n).is_some() || job.outputs.iter().any(|(_, o)| o.eq_ignore_ascii_case(n))
                 };
-                let free = numbered(&name, taken);
+                let free = numbered(base, &suffix, taken);
                 if given.is_some() && free != name {
                     renamed.push(format!("'{name}' is now '{free}'"));
                 }
@@ -728,15 +728,19 @@ fn output_name(spec: &ToolSpec, params: &Value, notes: &mut Vec<String>) -> Resu
     Ok(Some(name.chars().take(MAX_OUTPUT_NAME).collect()))
 }
 
-/// `base`, or the first of `base 2`, `base 3`… that `taken` doesn't claim, within
-/// [`MAX_OUTPUT_NAME`] characters.
-fn numbered(base: &str, taken: impl Fn(&str) -> bool) -> String {
-    let mut name = base.to_string();
+/// `base` with `suffix` (one output's own name) after it, or, while `taken` claims that, the
+/// first with ` 2`, ` 3`… after the suffix that it doesn't. Each fits [`MAX_OUTPUT_NAME`]
+/// characters by cutting `base`, never the suffix or the number.
+fn numbered(base: &str, suffix: &str, taken: impl Fn(&str) -> bool) -> String {
+    let fit = |tail: &str| -> String {
+        let room = MAX_OUTPUT_NAME.saturating_sub(tail.chars().count());
+        base.chars().take(room).chain(tail.chars()).collect()
+    };
+    let mut name = fit(suffix);
     let mut k = 1u64;
     while taken(&name) {
         k += 1;
-        let suffix = format!(" {k}");
-        name = base.chars().take(MAX_OUTPUT_NAME.saturating_sub(suffix.len())).chain(suffix.chars()).collect();
+        name = fit(&format!("{suffix} {k}"));
     }
     name
 }
