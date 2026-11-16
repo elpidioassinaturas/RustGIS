@@ -703,20 +703,21 @@ pub(crate) fn paint_shore(pm: &mut crate::Canvas, water: &Water, frame: &crate::
     }
     let Some(outlines) = water.outlines(frame) else { return };
     let Some(mut band) = pm.sub(pm.width(), pm.height()) else { return };
-    // Centred on the outline, each stroke reaches half its width inside: the k-th of n covers
-    // the band's k outer n-ths. Where strokes k to n lie, they come to `darkness`·(n+1−k)/n, a
-    // fade from `darkness` at the outline to `darkness`/n at the band's inner edge, even when
-    // `darkness` is 1.
-    let n = f64::from(SHORE_STEPS);
-    let darkness = darkness.min(1.0);
-    let reached = |k: u16| darkness * (n + 1.0 - f64::from(k)) / n;
-    let reach = 2.0 * SHORE_PX * frame.pixels_per_point.max(0.0) as f32;
+    // The darkness a point reaches under `m` of the strokes, the widest `m` lying over it:
+    // `darkness` with all of them, at the outline, falling in equal steps inward. Each stroke
+    // takes the point from one step to the next, so full darkness still fades rather than
+    // painting every stroke opaque.
+    let steps = f64::from(SHORE_STEPS);
+    let reached = |m: f64| darkness.min(1.0) * m / steps;
     let mut paint = tiny_skia::Paint::default();
+    // Centred on the outline, each stroke reaches half its width inside.
+    let reach = 2.0 * SHORE_PX * frame.pixels_per_point.max(0.0) as f32;
     for k in 1..=SHORE_STEPS {
-        // What strokes k+1 to n leave clear, this one darkens to its own zone's tone.
-        let beyond = if k == SHORE_STEPS { 0.0 } else { reached(k + 1) };
-        let alpha = (1.0 - (1.0 - reached(k)) / (1.0 - beyond)).clamp(0.0, 1.0);
-        paint.set_color(tiny_skia::Color::from_rgba(0.0, 0.0, 0.0, alpha as f32).unwrap_or(tiny_skia::Color::BLACK));
+        // Stroke `k` is the `m`th widest, so its opacity is the one that takes `reached(m - 1)`
+        // to `reached(m)`.
+        let m = f64::from(SHORE_STEPS - k + 1);
+        let step = 1.0 - (1.0 - reached(m)) / (1.0 - reached(m - 1.0));
+        paint.set_color(tiny_skia::Color::from_rgba(0.0, 0.0, 0.0, step as f32).unwrap_or(tiny_skia::Color::BLACK));
         let width = reach * f32::from(k) / f32::from(SHORE_STEPS);
         let stroke = tiny_skia::Stroke { width, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
         band.stroke_path(&outlines, &paint, &stroke, tiny_skia::Transform::identity(), None);
@@ -1584,6 +1585,15 @@ mod tests {
             }
         }
         assert!(darker > 50, "{darker} pixels along the shore");
+    }
+
+    /// At full darkness the band still fades inward: just inside the outline it darkens the
+    /// water without painting it solid black, as every stroke at full opacity would.
+    #[test]
+    fn a_full_dark_shore_band_is_not_solid_black() {
+        let (mut m, view) = shored(1.0, 0.0);
+        let (edge, _) = western_shore(&mut m, &view);
+        assert!(edge.iter().any(|&c| c > 0), "lit a little just inside the outline: {edge:?}");
     }
 
     /// The lake's western shore just inside, and a few pixels in, in a flat view's picture.
