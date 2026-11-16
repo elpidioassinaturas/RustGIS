@@ -51,7 +51,8 @@ This guide walks through RustGIS by task. Each page covers one part of the app:
   outlined, is the one the Style and Data tabs act on. Right-click one of them to zoom to them
   all, show or hide them, allow or block selecting their features on the map, move them to the top
   or bottom of the drawing order (one in a group, to the top or bottom of its group), put them in
-  a group or take them out of one, or remove them; a layer the filter hides is left out.
+  a group or take them out of one, raise or flatten their polygons together
+  ([Extrusion](cartography.md#layer-effects)), or remove them; a layer the filter hides is left out.
   A new group made from the menu asks for its name. In scripts, `layer.select` takes
   a list and a `mode` (`replace`, `toggle` or `extend`), and the commands that remove, show, move,
   group or zoom to a layer take a list in `layer`, or the picked layers when it is left out.
@@ -243,6 +244,12 @@ The desktop app also keeps a copy of unsaved work and offers it back after a cra
 Exports and other files already written are not undone.
 
 ### Repair Data Source
+
+When drawing cannot read a linked vector file, the error names the layer and its file path.
+If the file was moved or deleted, restore it or repair the source. Newly failing layers share
+one counted notice, listing up to five layers and their files. Screen redraws report each failure
+once per layer; a successful read allows a later failure to be reported again. Every export that
+succeeds without a layer reports the read failure for that output, including repeated exports.
 
 If a linked file moved or was renamed, right-click its layer or local PMTiles/MBTiles tile
 archive and choose **Repair Data Source…**. For the selected layer, use **Data › Data Source ›
