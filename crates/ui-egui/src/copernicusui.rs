@@ -49,7 +49,7 @@ pub fn pane(app: &mut RustGisApp, ui: &mut egui::Ui) {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
     }
     match copernicus::signed_in() {
-        Some(info) => signed_in(app, ui, &info, remembered, busy),
+        Some(info) => signed_in(app, ui, &info, remembered),
         None => {
             let line = if busy {
                 tl!("Signing in with the account remembered on this computer…")
@@ -73,10 +73,12 @@ pub fn pane(app: &mut RustGisApp, ui: &mut egui::Ui) {
 }
 
 /// The sign-in kept: as whom, its token, whether it is remembered, and Sign out.
-fn signed_in(app: &mut RustGisApp, ui: &mut egui::Ui, info: &copernicus::Info, remembered: Option<bool>, busy: bool) {
+fn signed_in(app: &mut RustGisApp, ui: &mut egui::Ui, info: &copernicus::Info, remembered: Option<bool>) {
     ui.label(egui::RichText::new(crate::i18n::fmt("Signed in as {name}.", &[("name", &info.username)])).strong());
     let token = match info.renews_until {
         Some(until) => crate::i18n::fmt("The token is renewed until {date}.", &[("date", &earthdata::date_of(until))]),
+        // A refresh token whose lifetime wasn't said renews it until CDSE refuses it.
+        None if info.renews => tl!("The token is renewed until you sign out.").to_string(),
         None => crate::i18n::fmt("The token expires on {date}.", &[("date", &earthdata::date_of(info.expires_at))]),
     };
     ui.label(egui::RichText::new(token).small());
@@ -84,7 +86,7 @@ fn signed_in(app: &mut RustGisApp, ui: &mut egui::Ui, info: &copernicus::Info, r
         ui.label(egui::RichText::new(tl!("It is remembered on this computer.")).small());
     }
     if ui
-        .add_enabled(!busy, egui::Button::new(tl!("Sign out")))
+        .add_enabled(remembered.is_some(), egui::Button::new(tl!("Sign out")))
         .on_hover_text(tl!("Forgets the sign-in, deletes the one remembered on this computer and empties the download cache."))
         .clicked()
     {
@@ -139,7 +141,12 @@ fn sign_in(app: &mut RustGisApp) {
     if !totp.trim().is_empty() {
         p["totp"] = json!(totp.trim());
     }
+    let two_factor = p.get("totp").is_some();
     let r = app.run("copernicus.login", p);
+    // An account with two-factor authentication isn't remembered: the box says so too.
+    if two_factor && r.is_ok() {
+        app.ui.copernicus.remember = false;
+    }
     answered(app, r);
 }
 
@@ -245,7 +252,7 @@ mod tests {
             return;
         }
         let (endpoint, asked) = keycloak().unwrap();
-        rustgis_tiles::copernicus::set_test_token_url(Some(&endpoint));
+        copernicus::set_test_token_url(Some(&endpoint));
         let store = std::sync::Arc::new(MemorySecrets::new());
         let app = RustGisApp::with_sample().with_services(crate::Services { secrets: Some(store.clone()), ..Default::default() });
         let mut h = harness(app);
@@ -289,8 +296,21 @@ mod tests {
         assert_eq!(store.load(copernicus::ACCOUNT).unwrap(), None, "Sign out deletes the remembered sign-in");
         assert!(!h.state().ui.copernicus.remember, "Remember follows: nothing is remembered now");
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2, "a sign-out asks nothing");
-        rustgis_tiles::copernicus::set_test_token_url(None);
+        copernicus::set_test_token_url(None);
         copernicus::set_secret_store(None);
+    }
+
+    /// The test hook takes 127.0.0.1 itself, never an address with it as user info.
+    #[test]
+    fn the_test_endpoint_is_on_this_computer_only() {
+        for elsewhere in [
+            "http://127.0.0.1:@evil.example/token",
+            "http://127.0.0.1:80@evil.example/token",
+            "http://127.0.0.1:/token",
+            "https://identity.example/token",
+        ] {
+            assert!(std::panic::catch_unwind(|| copernicus::set_test_token_url(Some(elsewhere))).is_err(), "{elsewhere}");
+        }
     }
 
     /// Without a credential store (the command line, a test) there is no Remember to tick.

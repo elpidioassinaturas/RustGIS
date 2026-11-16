@@ -122,8 +122,11 @@ pub struct Info {
     pub username: String,
     /// When the access token expires (Unix seconds).
     pub expires_at: i64,
-    /// Until when it is renewed (Unix seconds), if it can be.
+    /// Until when it is renewed (Unix seconds), if it can be and that is said.
     pub renews_until: Option<i64>,
+    /// Whether it is renewed at all (a refresh token was given): with no `renews_until`, until
+    /// CDSE refuses the refresh token.
+    pub renews: bool,
 }
 
 /// The sign-in kept, if one is.
@@ -134,6 +137,7 @@ pub fn signed_in() -> Option<Info> {
         username: s.username.clone(),
         expires_at: s.expires_at,
         renews_until: s.refresh.as_ref().map(|_| s.refresh_expires_at).filter(|t| *t < i64::MAX),
+        renews: s.refresh.is_some(),
     })
 }
 
@@ -234,17 +238,16 @@ pub fn is_remembered() -> bool {
     matches!(*known, Known::Kept { .. })
 }
 
-/// [`is_remembered`] without waiting, for a frame: `None` while the store is in use (a sign-in
-/// with the remembered one under way, which may wait up to a request's timeout).
+/// [`is_remembered`] for a frame: never waits and never reads the store (the system may ask for
+/// it to be unlocked). `false` until it has been read, off the frame: by `restore` at launch, or
+/// a sign-in or sign-out. `None` while the store is in use (a sign-in with the remembered one under
+/// way, which may wait up to a request's timeout).
 pub fn is_remembered_now() -> Option<bool> {
-    let mut known = match REMEMBERED.known.try_lock() {
+    let known = match REMEMBERED.known.try_lock() {
         Ok(k) => k,
         Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return None,
     };
-    if let Some(store) = secret_store() {
-        read_store(&mut known, store.as_ref());
-    }
     Some(matches!(*known, Known::Kept { .. }))
 }
 
@@ -664,7 +667,12 @@ mod native {
     /// other address, so a password is never sent elsewhere.
     #[cfg(feature = "testing")]
     pub fn set_test_token_url(url: Option<&str>) {
-        assert!(url.is_none_or(|u| u.starts_with("http://127.0.0.1:")), "a test token endpoint is on 127.0.0.1");
+        // The host itself, not a prefix: `http://127.0.0.1:@elsewhere/` has 127.0.0.1 as user info.
+        let local = |u: &str| {
+            let port = u.strip_prefix("http://127.0.0.1:").and_then(|r| r.split('/').next()).unwrap_or("");
+            !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+        };
+        assert!(url.is_none_or(local), "a test token endpoint is on 127.0.0.1");
         *TEST_TOKEN_URL.lock().unwrap_or_else(|e| e.into_inner()) = url.map(str::to_string);
     }
 

@@ -1046,7 +1046,7 @@ fn search_action(id: &str) -> Option<SearchAction> {
         "cube.catalog" | "cube.open" => Dialog("dataCubes"),
         "nationalMap.add" => Dialog("nationalMap"),
         "fieldsOfTheWorld.add" => Dialog("fieldsOfTheWorld"),
-        "copernicus.login" | "copernicus.status" => Dialog("copernicus"),
+        "copernicus.login" | "copernicus.logout" | "copernicus.status" => Dialog("copernicus"),
         "portal.add" | "portal.search" => Command("ui.searchOpenData"),
         "stac.addAsset" | "stac.addFootprints" | "stac.search" => Command("ui.stac"),
         _ => return None,
