@@ -3435,6 +3435,27 @@ fn cities_are_placed_square_to_a_line_layer() {
     assert_eq!(class(&s).square_to, None);
 }
 
+/// The line perpendicular labels are square to removed (#2263): the class keeps its name, so a
+/// layer of that name brings it back, and its labels are placed as auto meanwhile: said once.
+#[test]
+fn removing_a_perpendicular_label_line_says_so() {
+    let mut s = world();
+    s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "Rivers"}})).unwrap();
+    let said = |s: &Session, mark| {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("perpendicular")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let mark = s.notices_given();
+    s.run("layer.remove", &json!({"layer": "Countries"})).unwrap();
+    assert!(said(&s, mark).is_empty());
+    let mark = s.notices_given();
+    s.run("layer.remove", &json!({"layer": "Rivers"})).unwrap();
+    let notes = said(&s, mark);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("'Rivers' was removed"), "{notes:?}");
+    let c = s.map().layer_by_name("Cities").unwrap().labels.default.clone();
+    assert_eq!((c.placement, c.square_to.unwrap().layer.as_str()), (crate::map::LabelPlacement::Perpendicular, "Rivers"));
+}
+
 /// A project whose perpendicular label line doesn't read, names no layer, or is out of range
 /// says so on opening, one notice with a count; a good one or none says nothing (#2263).
 #[test]

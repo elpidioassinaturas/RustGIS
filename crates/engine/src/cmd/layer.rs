@@ -5913,8 +5913,27 @@ pub(crate) fn drop_layers(s: &mut Session, ids: &[u32]) {
     m.release_tiles(ids);
     m.layers.retain(|l| !ids.contains(&l.id));
     terrain_follows_removal(s, &names);
+    square_labels_follow_removal(s, &names);
     for n in &names {
         legends_follow_layer(s, n, None);
+    }
+}
+
+/// After layers called `names` are removed: point labels turned square to one of them (#2263)
+/// keep its name, so a layer of that name brings their line back, and are placed as auto
+/// meanwhile: said once a layer, as for the terrain's water.
+fn square_labels_follow_removal(s: &mut Session, names: &[String]) {
+    for n in names {
+        let used = s.map().layers.iter().flat_map(|l| l.labels.in_order()).any(|c| {
+            c.placement == rustgis_map::LabelPlacement::Perpendicular
+                && c.square_to.as_ref().is_some_and(|t| t.layer.eq_ignore_ascii_case(n))
+        });
+        if used && named_layers(s, n) == 0 {
+            s.notify(
+                format!("Labels: the perpendicular labels' line layer '{n}' was removed, so they are placed as auto until a layer of that name comes back"),
+                false,
+            );
+        }
     }
 }
 
@@ -5972,6 +5991,7 @@ fn remove(s: &mut Session, p: &Value) -> CmdResult {
     let next = m.layers.get(at.min(m.layers.len().saturating_sub(1))).map(|l| l.id);
     s.set_layer_selection(next.into_iter().collect(), next);
     terrain_follows_removal(s, &names);
+    square_labels_follow_removal(s, &names);
     // A legend that left it out forgets it.
     for name in names {
         legends_follow_layer(s, &name, None);
