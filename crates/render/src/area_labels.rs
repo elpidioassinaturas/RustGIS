@@ -25,6 +25,17 @@ pub(super) const MAX_SIDE: usize = 160;
 /// on the grid anyway.
 const MAX_VERTICES: usize = 20_000;
 
+/// Every `every`th point of `ring`, but at least three of it, so a small hole or island next to a
+/// long outline keeps its place (#2295).
+fn thin<T: Copy>(ring: &[T], every: usize) -> impl Iterator<Item = T> + '_ {
+    ring.iter().step_by(every.min(ring.len() / 3).max(1)).copied()
+}
+
+/// How many points of `n` outline points [`thin`] keeps one of.
+fn every(n: usize) -> usize {
+    n.div_ceil(MAX_VERTICES).max(1)
+}
+
 /// How far the centre line is trimmed at each end, as a share of its distance to the outline there.
 const TIP: f32 = 2.0;
 
@@ -106,11 +117,10 @@ fn farthest(cost: &[f32], from: usize) -> usize {
 /// runs into the polygon's tips and where the polygon is narrower than `half_width` either side of
 /// it. `None` for a polygon with no inside in view, or a centre line of fewer than two points.
 pub(super) fn centre_line(rings: &[Vec<(f32, f32)>], w: f32, h: f32, half_width: f32) -> Option<Vec<(f32, f32)>> {
-    let total: usize = rings.iter().map(Vec::len).sum();
-    let every = total.div_ceil(MAX_VERTICES).max(1);
+    let every = every(rings.iter().map(Vec::len).sum());
     let rings: Vec<Vec<(f32, f32)>> = rings
         .iter()
-        .map(|r| r.iter().step_by(every).copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect::<Vec<_>>())
+        .map(|r| thin(r, every).filter(|p| p.0.is_finite() && p.1.is_finite()).collect::<Vec<_>>())
         .filter(|r| r.len() >= 3)
         .collect();
     // The polygon's extent in view.
@@ -127,19 +137,25 @@ pub(super) fn centre_line(rings: &[Vec<(f32, f32)>], w: f32, h: f32, half_width:
     let (nx, ny) = (((x1 - x0) / cell).ceil() as usize + 2, ((y1 - y0) / cell).ceil() as usize + 2);
     let (ox, oy) = (x0 - cell, y0 - cell);
     let mut depth = vec![0.0f32; nx * ny];
-    // Inside cells, row by row where the outline crosses the row's middle (even–odd).
-    let mut cross = Vec::new();
-    for j in 1..ny - 1 {
-        let yc = oy + (j as f32 + 0.5) * cell;
-        cross.clear();
-        for r in &rings {
-            for (k, a) in r.iter().enumerate() {
-                let Some(b) = r.get(k + 1).or_else(|| r.first()) else { continue };
-                if (a.1 <= yc) != (b.1 <= yc) {
-                    cross.push(a.0 + (yc - a.1) * (b.0 - a.0) / (b.1 - a.1));
+    // Where the outline crosses each row's middle: each edge put in the rows it spans, so the work
+    // grows with the edges and the cells, not their product.
+    let mut rows: Vec<Vec<f32>> = vec![Vec::new(); ny];
+    let row_of = |y: f32| ((y - oy) / cell - 0.5).ceil().clamp(1.0, (ny - 1) as f32) as usize;
+    for r in &rings {
+        for (k, a) in r.iter().enumerate() {
+            let Some(b) = r.get(k + 1).or_else(|| r.first()) else { continue };
+            for j in row_of(a.1.min(b.1)).saturating_sub(1).max(1)..(row_of(a.1.max(b.1)) + 1).min(ny - 1) {
+                let yc = oy + (j as f32 + 0.5) * cell;
+                if let Some(row) = rows.get_mut(j)
+                    && (a.1 <= yc) != (b.1 <= yc)
+                {
+                    row.push(a.0 + (yc - a.1) * (b.0 - a.0) / (b.1 - a.1));
                 }
             }
         }
+    }
+    // Inside cells, row by row between pairs of crossings (even–odd).
+    for (j, cross) in rows.iter_mut().enumerate() {
         cross.sort_by(f32::total_cmp);
         for [a, b] in cross.as_chunks::<2>().0 {
             // The cells whose middles are between the two crossings.
@@ -189,8 +205,7 @@ pub(super) fn centre_line(rings: &[Vec<(f32, f32)>], w: f32, h: f32, half_width:
     }
     // Trimmed at each end while the line is nearer that end than twice its distance to the
     // outline: the line runs from the middle out into a tip or a corner there (in a right-angled
-    // corner its distance to the outline grows by 0.7 of the way it goes). Also while the polygon
-    // is too narrow.
+    // corner its distance to the outline grows by 0.7 of the way it goes).
     let deep = |i: &usize| grid.depth.get(*i).copied().unwrap_or(0.0);
     let keep = |cells: &[usize]| {
         let mut run = 0.0;
@@ -199,7 +214,7 @@ pub(super) fn centre_line(rings: &[Vec<(f32, f32)>], w: f32, h: f32, half_width:
             .position(|w| {
                 let (Some(p), Some(q)) = (w.first(), w.get(1)) else { return true };
                 run += if p % nx != q % nx && p / nx != q / nx { std::f32::consts::SQRT_2 } else { 1.0 };
-                run >= TIP * deep(q) && deep(q) * cell >= half_width
+                run >= TIP * deep(q)
             })
             .map_or(cells.len(), |k| k + 1)
     };
@@ -207,7 +222,9 @@ pub(super) fn centre_line(rings: &[Vec<(f32, f32)>], w: f32, h: f32, half_width:
     cells.reverse();
     let end = cells.len().checked_sub(keep(&cells) + 1)?;
     cells.reverse();
-    let cells = cells.get(start..=end)?;
+    // Of what is left, the longest stretch where the polygon is wide enough all along: a narrow
+    // neck between two wide parts (a dumbbell) is never under the text (#2295).
+    let cells = cells.get(start..=end)?.split(|i| deep(i) * cell < half_width).max_by_key(|run| run.len()).filter(|run| run.len() >= 2)?;
     // Cell centres, softened over two cells either side so the grid's steps don't turn the text.
     let pts: Vec<(f32, f32)> = cells.iter().map(|i| (ox + ((i % nx) as f32 + 0.5) * cell, oy + ((i / nx) as f32 + 0.5) * cell)).collect();
     let soft: Vec<(f32, f32)> = (0..pts.len())
@@ -226,6 +243,10 @@ pub(super) fn centre_line(rings: &[Vec<(f32, f32)>], w: f32, h: f32, half_width:
 /// line, with the polygon at least half its height either side of it. `None` when it fits nowhere,
 /// or a part of the polygon near the view doesn't project (behind the globe): the label is then
 /// placed as `Auto`.
+///
+/// It works per frame, for each polygon labelled this way with its label point in view, and looks at
+/// no Cancel: a step bounded by the outline's points near the view (projected once, at most
+/// [`MAX_VERTICES`] read) and a grid of at most [`MAX_SIDE`] + 2 cells a side, walked three times.
 pub(super) fn glyphs(
     ctx: &super::Ctx<'_>,
     polys: &[Vec<Vec<Coord>>],
@@ -255,11 +276,12 @@ fn curved(
         ring.iter().for_each(|c| e.expand(*c));
         ctx.globe.is_some() || ctx.cull.intersects(&e)
     };
-    let rings: Vec<Vec<(f32, f32)>> = polys
-        .iter()
-        .filter(|poly| poly.first().is_some_and(near))
-        .flatten()
-        .map(|ring| ring.iter().map(|c| ctx.screen(*c).map(|(x, y)| (x as f32, y as f32))).collect::<Option<Vec<_>>>())
+    let near: Vec<&Vec<Coord>> = polys.iter().filter(|poly| poly.first().is_some_and(near)).flatten().collect();
+    // Thinned before they are projected.
+    let every = every(near.iter().map(|r| r.len()).sum());
+    let rings: Vec<Vec<(f32, f32)>> = near
+        .into_iter()
+        .map(|ring| thin(ring, every).map(|c| ctx.screen(c).map(|(x, y)| (x as f32, y as f32))).collect::<Option<Vec<_>>>())
         .collect::<Option<_>>()?;
     let len = line_labels::curved_len(advances, gap);
     // Too small on the screen for the text: no grid worked out.
@@ -363,6 +385,44 @@ mod tests {
         let before = level.iter().find(|l| l.text == "Lagoa Redonda").expect("placed");
         assert!(small.glyphs.is_empty() && (small.x, small.y, small.angle) == (before.x, before.y, before.angle));
         assert!(level.iter().all(|l| l.glyphs.is_empty()), "Auto stays level");
+    }
+
+    /// An outline thinned to its [`MAX_VERTICES`] keeps a small hole: the line still goes round it.
+    #[test]
+    fn a_long_outline_keeps_its_small_holes() {
+        // 40 000 points round a 600 × 100 rectangle, and a five-point hole across its upper half.
+        let n = 10_000;
+        let mut outer: Vec<(f32, f32)> = (0..n).map(|i| (i as f32 * 600.0 / n as f32, 0.0)).collect();
+        outer.extend((0..n).map(|i| (600.0, i as f32 * 100.0 / n as f32)));
+        outer.extend((0..n).map(|i| (600.0 - i as f32 * 600.0 / n as f32, 100.0)));
+        outer.extend((0..n).map(|i| (0.0, 100.0 - i as f32 * 100.0 / n as f32)));
+        let hole = vec![(50.0, 10.0), (550.0, 10.0), (550.0, 50.0), (50.0, 50.0), (50.0, 10.0)];
+        let line = centre_line(&[outer, hole], 1000.0, 1000.0, 4.0).expect("below the hole");
+        assert!(line.iter().filter(|p| (100.0..500.0).contains(&p.0)).all(|p| p.1 > 55.0), "{line:?}");
+    }
+
+    /// Two wide ends joined by a narrow neck: the line is on one end only, never across the neck.
+    #[test]
+    fn a_narrow_neck_is_never_under_the_text() {
+        let dumbbell = vec![
+            (0.0, 0.0),
+            (250.0, 0.0),
+            (250.0, 45.0),
+            (350.0, 45.0),
+            (350.0, 0.0),
+            (600.0, 0.0),
+            (600.0, 100.0),
+            (350.0, 100.0),
+            (350.0, 55.0),
+            (250.0, 55.0),
+            (250.0, 100.0),
+            (0.0, 100.0),
+        ];
+        let line = centre_line(std::slice::from_ref(&dumbbell), 1000.0, 1000.0, 10.0).expect("on one end");
+        assert!(line.iter().all(|p| p.0 < 250.0) || line.iter().all(|p| p.0 > 350.0), "{line:?}");
+        // With text thin enough for the neck, the line runs from end to end.
+        let through = centre_line(&[dumbbell], 1000.0, 1000.0, 2.0).expect("end to end");
+        assert!(through.iter().any(|p| p.0 < 250.0) && through.iter().any(|p| p.0 > 350.0), "{through:?}");
     }
 
     #[test]
