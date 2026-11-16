@@ -1531,7 +1531,14 @@ fn store_parts(
             if forbidden > 0 {
                 return Err(crate::sources::message_with_address(root, &format!("access denied (HTTP 403) to {forbidden} of its files")));
             }
-            out.extend(got);
+            // Within one total over all batches, as a folder's parts and `store_files_by` are.
+            for (k, b) in got {
+                total = total.saturating_add(b.len() as u64);
+                if total > zarr::MAX_READ {
+                    return Err(crate::sources::message_with_address(root, "the series is too large to read: take a shorter period"));
+                }
+                out.insert(k, b);
+            }
         } else {
             zarr::read_parts(Path::new(root), batch, &mut out, &mut total).map_err(|e| format!("{root}: {e}"))?;
         }

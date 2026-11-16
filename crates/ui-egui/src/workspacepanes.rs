@@ -783,6 +783,8 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         .map(|l| l.name.clone())
         .collect();
     if layers.is_empty() {
+        // A read started before its layer was removed can still be cancelled.
+        series_progress(app, ui);
         ui.label(egui::RichText::new(tl!("Add a Zarr variable first (Home › Add › Add Data › Zarr…).")).weak());
         return;
     }
@@ -1401,6 +1403,7 @@ mod tests {
         // The layer's first step is read with the gate open; the series' other steps wait for it.
         app.run("layer.addZarr", json!({"url": format!("{base}/air.zarr"), "variable": "t", "time": true, "name": "air"})).unwrap();
         set_gate(false);
+        let asked_before = asked.load(std::sync::atomic::Ordering::Relaxed);
         let pick = |app: &mut RustGisApp| {
             app.workflow.pick = Some(crate::analysispane::Pick {
                 purpose: "ts_point",
@@ -1416,13 +1419,13 @@ mod tests {
             },
             app,
         );
-        // Frames go on while the store holds the series' chunks.
+        // Frames go on while the store holds the series' chunks (asked after the layer's own read).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        while asked.load(std::sync::atomic::Ordering::Relaxed) == 0 && std::time::Instant::now() < deadline {
+        while asked.load(std::sync::atomic::Ordering::Relaxed) <= asked_before && std::time::Instant::now() < deadline {
             h.run_steps(1);
             std::thread::yield_now();
         }
-        assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > 0, "the series asked the store for its chunks");
+        assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > asked_before, "the series asked the store for its chunks");
         h.run_steps(5);
         assert!(h.state().ws.series_reading.is_some(), "the series is still being read");
         assert!(h.state().ws.series.is_empty());
