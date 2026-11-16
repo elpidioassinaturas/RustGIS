@@ -59,6 +59,11 @@ pub fn pane(app: &mut RustGisApp, ui: &mut egui::Ui) {
                 tl!("Not signed in.")
             };
             ui.label(egui::RichText::new(line).strong());
+            // Kept when its host couldn't be reached: it can still be deleted from here.
+            if remembered == Some(true) {
+                ui.label(egui::RichText::new(tl!("A sign-in is remembered on this computer: it signs in when a file needs it.")).small());
+                sign_out(app, ui, true);
+            }
             form(app, ui, busy);
         }
     }
@@ -85,8 +90,13 @@ fn signed_in(app: &mut RustGisApp, ui: &mut egui::Ui, info: &copernicus::Info, r
     if remembered == Some(true) {
         ui.label(egui::RichText::new(tl!("It is remembered on this computer.")).small());
     }
+    sign_out(app, ui, remembered.is_some());
+}
+
+/// The Sign out button (`copernicus.logout`), off while the remembered sign-in is under way.
+fn sign_out(app: &mut RustGisApp, ui: &mut egui::Ui, enabled: bool) {
     if ui
-        .add_enabled(remembered.is_some(), egui::Button::new(tl!("Sign out")))
+        .add_enabled(enabled, egui::Button::new(tl!("Sign out")))
         .on_hover_text(tl!("Forgets the sign-in, deletes the one remembered on this computer and empties the download cache."))
         .clicked()
     {
@@ -297,6 +307,34 @@ mod tests {
         assert!(!h.state().ui.copernicus.remember, "Remember follows: nothing is remembered now");
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2, "a sign-out asks nothing");
         copernicus::set_test_token_url(None);
+        copernicus::set_secret_store(None);
+    }
+
+    /// A sign-in remembered but not kept (its host couldn't be reached at launch) can be deleted
+    /// from the pane: Sign out is there with the form, and no request is made.
+    #[test]
+    fn a_remembered_sign_in_without_a_session_can_be_signed_out() {
+        use rustgis_engine::data::secrets::Secret;
+        // The sign-in and its store are process-wide: this scenario runs alone.
+        if crate::isolate_account_test("copernicusui::tests::a_remembered_sign_in_without_a_session_can_be_signed_out") {
+            return;
+        }
+        let store = std::sync::Arc::new(MemorySecrets::new());
+        store
+            .save(copernicus::ACCOUNT, &Secret::new(r#"{"username":"synthetic.user@example.invalid","password":"synthetic-password"}"#))
+            .unwrap();
+        let app = RustGisApp::with_sample().with_services(crate::Services { secrets: Some(store.clone()), ..Default::default() });
+        // Read as the launch's restore reads it, with no sign-in made.
+        assert!(copernicus::is_remembered() && copernicus::signed_in().is_none());
+        let mut h = harness(app);
+        h.run();
+        h.get_by_label("Not signed in.");
+        assert!(h.state().ui.copernicus.remember, "the box shows it is remembered");
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Sign out").click();
+        h.run();
+        h.run();
+        assert_eq!(store.load(copernicus::ACCOUNT).unwrap(), None, "Sign out deletes it");
+        assert!(h.query_by_label("Sign out").is_none() && !h.state().ui.copernicus.remember);
         copernicus::set_secret_store(None);
     }
 
