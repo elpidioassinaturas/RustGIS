@@ -709,6 +709,10 @@ fn tools_read_the_features_a_definition_query_keeps() {
     let r = s.run("select.byAttributes", &json!({"layer": "Cities", "where": "pop_max > 0"})).unwrap();
     assert_eq!(r["selected"], json!(big));
     assert!(said(&s, mark, &format!("{} more features match but aren't drawn", cities - big)));
+    // Both notices are templates a translated interface says in its language; the CLI keeps English.
+    let localized: Vec<String> = s.notices_since(mark).iter().filter_map(|n| n.translated(|key, _| format!("<{key}>"))).collect();
+    assert!(localized.contains(&"<{n} features selected>".to_string()), "{localized:?}");
+    assert!(localized.iter().any(|t| t.starts_with("<{n} more features match but aren't drawn")), "{localized:?}");
     // A query that hides every feature: a Select tool selects nothing, rather than being refused.
     query(&mut s, "Cities", "pop_max < 0");
     s.run("gp.run", &json!({"tool": "selectByAttributes", "params": {"input": "Cities", "where": "pop_max > 0"}})).unwrap();
@@ -13300,50 +13304,92 @@ fn a_scan_warped_onto_its_points_is_placed_for_real() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A one-in-one plane returns 45 degrees, with its unit in the band description through both
-/// function paths, GeoTIFF export and project reopening. A following function clears that label.
-/// The geographic case uses the documented centre-latitude approximation; zFactor scales rise.
+/// A one-in-one plane returns 45 degrees by default or 100 percent when requested, with its
+/// unit kept through both function paths, GeoTIFF export and project reopening. A following
+/// function clears that label. Geographic grids use the centre-latitude approximation and
+/// zFactor scales rise in either unit; explicit degrees agrees with the default. Unrepresentable
+/// percent values are errors with a cell count; degree output stays finite.
 #[test]
-fn slope_results_describe_degrees() {
+fn slope_results_use_chosen_units() {
     use base64::Engine;
     use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
     for (crs, cell, top, rise) in [(Crs::WebMercator, 10.0, 30.0, 10.0), (Crs::LonLat, 0.001, 60.0015, 55.66)] {
         for chain in [false, true] {
-            let mut s = world();
-            let gt = GeoTransform { origin_x: 0.0, origin_y: top, pixel_width: cell, pixel_height: -cell };
-            let pixels = (0..9).map(|i| (i % 3) as f32 * rise).collect();
-            let dem = Raster::new("plane", 3, 3, vec![pixels], gt, crs, None, ColorHint::Gray, "Float32").unwrap();
-            let data = base64::engine::general_purpose::STANDARD.encode(geotiff::write(&dem, 0).unwrap());
-            s.run("layer.addDataBytes", &json!({"fileName": "plane.tif", "data": data})).unwrap();
-            let (cmd, params, expected) = if chain {
-                ("raster.functionChain", json!({"layer": "plane", "steps": [{"function": "slope"}], "name": "S"}), 45.0)
-            } else {
-                (
-                    "raster.function",
-                    json!({"layer": "plane", "function": "slope", "zFactor": 0.5, "name": "S"}),
-                    0.5_f64.atan().to_degrees(),
-                )
-            };
-            s.run(cmd, &params).unwrap();
-            let info = s.run("raster.info", &json!({"layer": "S"})).unwrap();
-            assert_eq!(info["bands"][0]["name"], "Slope (degrees)");
-            let out = s.map().layer_by_name("S").unwrap().raster.as_ref().unwrap().data.as_ref().unwrap();
-            assert!((f64::from(out.bands[0].data[4]) - expected).abs() < 1e-4, "{crs:?} {cmd}");
-            let back = geotiff::read(std::io::Cursor::new(geotiff::write(out, 0).unwrap()), "S").unwrap();
-            assert_eq!(back.bands[0].name, "Slope (degrees)");
-            let text = serde_json::to_string(&s.project).unwrap();
-            let mut reopened = Session::new(Project::default());
-            reopened.run("project.openText", &json!({"text": text})).unwrap();
-            assert_eq!(reopened.run("raster.info", &json!({"layer": "S"})).unwrap()["bands"][0]["name"], "Slope (degrees)");
-            s.run(
-                "raster.functionChain",
-                &json!({"layer": "plane", "steps": [
-                {"function": "slope"}, {"function": "threshold", "value": 30}
+            for units in [None, Some("degrees"), Some("percent")] {
+                let mut s = world();
+                let gt = GeoTransform { origin_x: 0.0, origin_y: top, pixel_width: cell, pixel_height: -cell };
+                let pixels = (0..9).map(|i| (i % 3) as f32 * rise).collect();
+                let dem = Raster::new("plane", 3, 3, vec![pixels], gt, crs, None, ColorHint::Gray, "Float32").unwrap();
+                let data = base64::engine::general_purpose::STANDARD.encode(geotiff::write(&dem, 0).unwrap());
+                s.run("layer.addDataBytes", &json!({"fileName": "plane.tif", "data": data})).unwrap();
+                let (cmd, mut params, mut expected) = if chain {
+                    ("raster.functionChain", json!({"layer": "plane", "steps": [{"function": "slope"}], "name": "S"}), 45.0)
+                } else {
+                    (
+                        "raster.function",
+                        json!({"layer": "plane", "function": "slope", "zFactor": 0.5, "name": "S"}),
+                        0.5_f64.atan().to_degrees(),
+                    )
+                };
+                if let Some(units) = units {
+                    if chain {
+                        params["steps"][0]["units"] = json!(units);
+                    } else {
+                        params["units"] = json!(units);
+                    }
+                }
+                let band_name = if units == Some("percent") {
+                    expected = if chain { 100.0 } else { 50.0 };
+                    "Slope (percent)"
+                } else {
+                    "Slope (degrees)"
+                };
+                let mut bad = params.clone();
+                if chain {
+                    bad["steps"][0]["units"] = json!("radians");
+                } else {
+                    bad["units"] = json!("radians");
+                }
+                assert!(s.run(cmd, &bad).unwrap_err().contains("slope units must be degrees or percent"));
+                s.run(cmd, &params).unwrap();
+                let info = s.run("raster.info", &json!({"layer": "S"})).unwrap();
+                assert_eq!(info["bands"][0]["name"], band_name);
+                let out = s.map().layer_by_name("S").unwrap().raster.as_ref().unwrap().data.as_ref().unwrap();
+                assert!((f64::from(out.bands[0].data[4]) - expected).abs() < 1e-4, "{crs:?} {cmd} {units:?}");
+                let back = geotiff::read(std::io::Cursor::new(geotiff::write(out, 0).unwrap()), "S").unwrap();
+                assert_eq!(back.bands[0].name, band_name);
+                let text = serde_json::to_string(&s.project).unwrap();
+                let mut reopened = Session::new(Project::default());
+                reopened.run("project.openText", &json!({"text": text})).unwrap();
+                assert_eq!(reopened.run("raster.info", &json!({"layer": "S"})).unwrap()["bands"][0]["name"], band_name);
+                s.run(
+                    "raster.functionChain",
+                    &json!({"layer": "plane", "steps": [
+                {"function": "slope", "units": units.unwrap_or("degrees")}, {"function": "threshold", "value": 75}
             ], "name": "mask"}),
-            )
-            .unwrap();
-            assert_ne!(s.run("raster.info", &json!({"layer": "mask"})).unwrap()["bands"][0]["name"], "Slope (degrees)");
+                )
+                .unwrap();
+                assert_ne!(s.run("raster.info", &json!({"layer": "mask"})).unwrap()["bands"][0]["name"], band_name);
+                let mask = s.map().layer_by_name("mask").unwrap().raster.as_ref().unwrap().data.as_ref().unwrap();
+                assert_eq!(mask.bands[0].data[4], if units == Some("percent") { 1.0 } else { 0.0 });
+            }
         }
+    }
+    // Finite elevations can overflow percent rise's Float32 storage while degrees stay finite.
+    let mut s = world();
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 3.0, pixel_width: 1.0, pixel_height: -1.0 };
+    let pixels = (0..9).map(|i| (i % 3) as f32 * 1e37).collect();
+    let dem = Raster::new("large", 3, 3, vec![pixels], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+    let data = base64::engine::general_purpose::STANDARD.encode(geotiff::write(&dem, 0).unwrap());
+    s.run("layer.addDataBytes", &json!({"fileName": "large.tif", "data": data})).unwrap();
+    s.run("raster.function", &json!({"layer": "large", "function": "slope", "name": "degrees"})).unwrap();
+    let out = s.map().layer_by_name("degrees").unwrap().raster.as_ref().unwrap().data.as_ref().unwrap();
+    assert_eq!(out.bands[0].data[4], 90.0);
+    for (cmd, params) in [
+        ("raster.function", json!({"layer": "large", "function": "slope", "units": "percent"})),
+        ("raster.functionChain", json!({"layer": "large", "steps": [{"function": "slope", "units": "percent"}]})),
+    ] {
+        assert!(s.run(cmd, &params).unwrap_err().contains("9 percent slope cells exceed the Float32 range"));
     }
 }
 
@@ -22286,6 +22332,124 @@ fn extrusion_base_sets_the_base_and_nothing_else() {
     assert_eq!(x(&s).unwrap().base, 0.0);
     let got = x(&s).unwrap();
     assert_eq!((got.field, got.height, got.factor), (None, 30.0, 2.0), "nothing else changed on the way");
+}
+
+/// A list of layers is raised, based and flattened alike, one undo step each (#2160). A list with
+/// a layer that lacks the field, isn't polygons or isn't raised yet is refused whole, naming them,
+/// and changes none; one layer works as before.
+#[test]
+fn extrusion_sets_several_layers_alike_or_none() {
+    let mut s = world();
+    let square = |props: &str| {
+        format!(
+            r#"{{"type":"FeatureCollection","features":[{{"type":"Feature","properties":{props},"geometry":{{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}}}}]}}"#
+        )
+    };
+    let well = r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"h":1},"geometry":{"type":"Point","coordinates":[0,0]}}]}"#;
+    for (name, text) in [
+        ("Blocks", square(r#"{"h": 10, "b": 2}"#)),
+        ("Towers", square(r#"{"H": 90, "b": 5, "label": "x"}"#)),
+        ("Park", square(r#"{"label": "x"}"#)),
+        ("Wells", well.to_string()),
+    ] {
+        s.run("layer.addDataText", &json!({"fileName": format!("{name}.geojson"), "text": text, "name": name})).unwrap();
+    }
+    let x = |s: &Session, n: &str| s.map().layer_by_name(n).unwrap().extrusion.clone();
+    let pair = json!(["Blocks", "Towers"]);
+    // Raised by a field each layer spells its own way, in one undo step.
+    let depth = s.undo_depth();
+    s.run("layer.extrusion", &json!({"layer": pair, "type": "field", "field": "h", "factor": 2})).unwrap();
+    assert_eq!(s.undo_depth(), depth + 1, "one undo step");
+    assert_eq!(x(&s, "Blocks").unwrap().field.as_deref(), Some("h"));
+    assert_eq!(x(&s, "Towers").unwrap().field.as_deref(), Some("H"), "the layer's own spelling");
+    assert_eq!(x(&s, "Towers").unwrap().factor, 2.0);
+    // Based alike on a field, then back on the ground.
+    s.run("layer.extrusionBase", &json!({"layer": pair, "field": "b"})).unwrap();
+    for n in ["Blocks", "Towers"] {
+        assert_eq!(x(&s, n).unwrap().base_field.as_deref(), Some("b"), "{n}");
+    }
+    s.run("layer.extrusionBase", &json!({"layer": pair, "field": null, "base": 0})).unwrap();
+    for n in ["Blocks", "Towers"] {
+        let got = x(&s, n).unwrap();
+        assert_eq!((got.base_field, got.base, got.factor), (None, 0.0, 2.0), "{n}: the base only");
+    }
+    // Refused whole, naming the layers, and nothing changes.
+    let all = |s: &Session| ["Blocks", "Towers", "Park", "Wells"].map(|n| x(s, n));
+    let was = all(&s);
+    let refused = [
+        (
+            "layer.extrusion",
+            json!({"layer": ["Blocks", "Towers", "Park"], "type": "field", "field": "h"}),
+            "no numeric field 'h' in 'Park'",
+        ),
+        ("layer.extrusion", json!({"layer": ["Blocks", "Wells"], "type": "none"}), "these aren't: 'Wells'"),
+        ("layer.extrusionBase", json!({"layer": ["Blocks", "Park"], "base": 3}), "turn extrusion on first (Layer Extrusion) in 'Park'"),
+        ("layer.extrusionBase", json!({"layer": pair, "field": "label"}), "no numeric field 'label' in 'Blocks', 'Towers'"),
+        // The command's conditions read the list's first layer, as for every command taking one.
+        ("layer.extrusion", json!({"layer": ["Wells", "Blocks"], "type": "none"}), "this works on polygon layers"),
+    ];
+    for (id, p, why) in refused {
+        let e = s.run(id, &p).unwrap_err();
+        assert!(e.contains(why), "{p}: {e}");
+    }
+    assert_eq!(all(&s), was, "no layer changed");
+    // Flattened together, and one undo raises both again.
+    s.run("layer.extrusion", &json!({"layer": pair, "type": "none"})).unwrap();
+    assert!(x(&s, "Blocks").is_none() && x(&s, "Towers").is_none());
+    s.undo();
+    assert!(x(&s, "Blocks").is_some() && x(&s, "Towers").is_some(), "one undo brings both back");
+    // One layer as before: its own message, and on the globe the note that it draws them flat.
+    let e = s.run("layer.extrusion", &json!({"layer": "Park", "type": "field", "field": "h"})).unwrap_err();
+    assert!(e.contains("no numeric field 'h'") && !e.contains("no layer changed"), "{e}");
+    s.run("map.projection", &json!({"type": "globe"})).unwrap();
+    let r = s.run("layer.extrusion", &json!({"layer": "Park", "type": "height", "height": 4})).unwrap();
+    assert!(r["note"].as_str().is_some_and(|n| n.contains("the globe draws the polygons flat")), "{r}");
+    assert_eq!(x(&s, "Park").unwrap().height, 4.0);
+    // A call that doesn't give the height keeps each layer's own, also below the 1,000 m a new
+    // extrusion starts at: the factor alone, or a field over a constant height.
+    s.run("layer.extrusion", &json!({"layer": "Park", "type": "height", "factor": 3})).unwrap();
+    assert_eq!((x(&s, "Park").unwrap().height, x(&s, "Park").unwrap().factor), (4.0, 3.0));
+    s.run("layer.extrusion", &json!({"layer": pair, "type": "height", "height": 30})).unwrap();
+    s.run("layer.extrusion", &json!({"layer": pair, "type": "field", "field": "h"})).unwrap();
+    for n in ["Blocks", "Towers"] {
+        assert_eq!(x(&s, n).unwrap().height, 30.0, "{n}: the fallback height stays");
+    }
+}
+
+/// Extruding several layers whose diagrams the extrusion hides says so once, with how many more
+/// layers it holds for; layers without a diagram say nothing (#2160).
+#[test]
+fn extruding_several_layers_gives_one_notice_for_their_hidden_diagrams() {
+    let mut s = world();
+    let square = r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"h": 10, "k": 2},"geometry":{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}}]}"#;
+    for name in ["A", "B", "C"] {
+        s.run("layer.addDataText", &json!({"fileName": format!("{name}.geojson"), "text": square, "name": name})).unwrap();
+    }
+    let hidden = |s: &Session, mark| {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("its diagram doesn't show")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    // No diagram: nothing to say.
+    let mark = s.notice_mark();
+    s.run("layer.extrusion", &json!({"layer": ["A", "B", "C"], "type": "field", "field": "h"})).unwrap();
+    assert!(hidden(&s, mark).is_empty(), "{:?}", hidden(&s, mark));
+    for (name, n) in [("A", 0), ("B", 1), ("C", 2)] {
+        s.run("layer.diagram", &json!({"layer": name, "kind": "pie", "fields": ["h", "k"]})).unwrap();
+        let mark = s.notice_mark();
+        let layers: Vec<&str> = ["A", "B", "C"][..=n].to_vec();
+        s.run("layer.extrusion", &json!({"layer": layers, "type": "field", "field": "h"})).unwrap();
+        let said = hidden(&s, mark);
+        assert_eq!(said.len(), 1, "one notice: {said:?}");
+        let more = match n {
+            0 => None,
+            1 => Some("(and 1 more layer like it)"),
+            _ => Some("(and 2 more layers like it)"),
+        };
+        assert!(said[0].starts_with("Layer 'A'"), "{said:?}");
+        match more {
+            Some(m) => assert!(said[0].ends_with(m), "{said:?}"),
+            None => assert!(!said[0].contains("more layer"), "{said:?}"),
+        }
+    }
 }
 
 #[test]

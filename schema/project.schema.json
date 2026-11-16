@@ -1058,6 +1058,7 @@
           "shaded-relief-effects",
           "normalized-legend-urls",
           "field-origin",
+          "slope-percent",
           "shaded-relief-light"
         ],
         "type": "string"
@@ -1128,6 +1129,7 @@
     "shaded-relief-effects",
     "normalized-legend-urls",
     "field-origin",
+    "slope-percent",
     "shaded-relief-light"
   ],
   "x-rustgis-reads-format": 2,
