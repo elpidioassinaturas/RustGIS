@@ -3421,6 +3421,12 @@ fn cities_are_placed_square_to_a_line_layer() {
     // Saved and read back with the project.
     let back: crate::map::LabelClass = serde_json::from_value(serde_json::to_value(class(&s)).unwrap()).unwrap();
     assert_eq!(back, class(&s));
+    // Its line taken away while it stays perpendicular: refused, the class as it was; with a new
+    // position given, taken.
+    let before = class(&s);
+    let err = s.run("labels.placement", &json!({"layer": "Cities", "to": null})).unwrap_err();
+    assert!(err.contains("perpendicular needs a line"), "{err}");
+    assert_eq!(class(&s), before);
     // Its line unread (as a project saved so opens): labelled as auto, and other edits taken.
     s.map_mut().layers.iter_mut().find(|l| l.name == "Cities").unwrap().labels.default.square_to = None;
     s.run("labels.placement", &json!({"layer": "Cities", "offset": [2, 0]})).unwrap();

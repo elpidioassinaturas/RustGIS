@@ -214,6 +214,8 @@ pub fn commands() -> Vec<C> {
                 None => None,
                 Some(v) => Some(serde_json::from_value::<SquareSide>(v.clone()).map_err(|_| "side must be \"away\", \"left\" or \"right\"")?),
             };
+            // `to: null`: this call takes the line away.
+            let clears = matches!(to, Some(None));
             let id = s.layer_id(p)?;
             let (points, lines) = points_and_lines(s.map().layer(id).ok_or("no such layer")?);
             let done = with_labels(s, p, |labels| {
@@ -229,9 +231,10 @@ pub fn commands() -> Vec<C> {
                 if let Some(side) = side {
                     c.square_to.as_mut().ok_or("side needs a line to be square to: to {\"layer\"}")?.side = side;
                 }
-                // Asked for without a line to be square to: refused. (A class saved so, its line
-                // unread, is labelled as auto; edits that don't ask for the position are taken.)
-                if pos == Some(LabelPlacement::Perpendicular) && c.square_to.is_none() {
+                // Asked for, or its line taken away, without a line to be square to: refused. (A
+                // class saved so, its line unread, is labelled as auto; edits that touch neither
+                // are taken.)
+                if c.placement == LabelPlacement::Perpendicular && c.square_to.is_none() && (pos.is_some() || clears) {
                     return Err("perpendicular needs a line layer to be square to: to {\"layer\", \"within\"?}".into());
                 }
                 if let Some(on) = others {
