@@ -236,6 +236,7 @@ pub(crate) fn share_output(s: &mut Session, kind: &str, p: &Value) -> Result<(St
     Ok((name, bytes, source, notes))
 }
 
+/// Build the saved payload for each share kind; web tools carry capabilities of their steps.
 fn share_bytes_inner(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>, String), String> {
     match kind {
         "webMap" => {
@@ -273,19 +274,7 @@ fn share_bytes_inner(s: &mut Session, kind: &str, p: &Value) -> Result<(String, 
             let m = s.project.models.get_mut(i).ok_or("make a model first (ModelBuilder)")?;
             let name = m.name.clone();
             let (bytes, report) = crate::durable::output(m, None, |m| {
-                let params: Vec<Value> = m
-                    .steps
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(i, st)| {
-                        st.params
-                            .as_object()
-                            .into_iter()
-                            .flatten()
-                            .map(move |(k, v)| json!({"step": i + 1, "tool": st.tool, "name": k, "default": v}))
-                    })
-                    .collect();
-                let tool = json!({"format": "RustGIS web tool", "version": crate::model::WEB_TOOL_VERSION, "name": m.name, "steps": m.steps, "parameters": params});
+                let tool = crate::model::to_web_tool_file(&m.name, &m.steps);
                 serde_json::to_vec_pretty(&tool).map_err(|e| e.to_string())
             })?;
             crate::durable::notify(s, &report);
@@ -1418,13 +1407,18 @@ fn link_chart(s: &Session, rel: Option<&str>) -> Result<(String, Option<String>)
             // out; one already in the chart may still be linked.
             // Up to 200 links drawn from it: destinations the chart has no room for don't count
             // toward them, so a later one it can draw still is.
-            let mut a = index.get(&(om, o.id, orow)).copied();
+            let origin = (om, o.id, orow);
+            let mut a = index.get(&origin).copied();
+            if a.is_none() && nodes.len() >= MAX_NODES {
+                continue;
+            }
             let mut drawn_here = 0;
             for &drow in drows {
                 if drawn_here >= MAX_FEATURE_LINKS || links.len() >= MAX_LINKS {
                     break;
                 }
-                let new = usize::from(a.is_none()) + usize::from(!index.contains_key(&(dm, d.id, drow)));
+                let destination = (dm, d.id, drow);
+                let new = usize::from(a.is_none()) + usize::from(destination != origin && !index.contains_key(&destination));
                 if nodes.len() + new > MAX_NODES {
                     continue;
                 }
