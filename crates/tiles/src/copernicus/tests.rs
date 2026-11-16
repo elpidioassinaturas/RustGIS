@@ -413,13 +413,23 @@ fn a_refused_remembered_sign_in_is_deleted_and_an_unreachable_host_is_tried_agai
     assert_eq!(restore(), Restored::Refused);
     assert!(store.kept().is_none() && !is_remembered() && expired());
     assert!(refused_message(DATA).contains("sign-in expired: sign in again"), "{}", refused_message(DATA));
-    // Damaged: deleted, never sent.
+    // Damaged: deleted, never sent, and said: the sign-in ended, sign in again.
+    logout();
+    assert!(!expired());
     store.0.save(ACCOUNT, &rustgis_data::secrets::Secret::new("not json")).unwrap();
     set_secret_store(Some(store.0.clone()));
     let _ = asked.try_iter().count();
-    assert_eq!(restore(), Restored::Nothing);
+    assert_eq!(restore(), Restored::Damaged);
     assert!(asked.recv_timeout(Duration::from_millis(200)).is_err());
-    assert!(store.kept().is_none());
+    assert!(store.kept().is_none() && !is_remembered() && expired());
+    assert!(refused_message(DATA).contains("sign-in expired: sign in again"), "{}", refused_message(DATA));
+    // A clean one gives no such report.
+    logout();
+    store.0.save(ACCOUNT, &remembered_value(USER, PASSWORD)).unwrap();
+    set_secret_store(Some(store.0.clone()));
+    *answer.lock().unwrap() = json_answer(200, &grant("access", "refresh", 1800, 3600));
+    assert_eq!(restore(), Restored::SignedIn);
+    assert!(!expired());
 }
 
 /// A store that reads and saves but refuses to delete (a policy-locked keychain).

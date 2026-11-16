@@ -653,6 +653,8 @@ mod native {
         /// Copernicus Data Space refused it (a changed password): it was deleted, and the user is
         /// to sign in again.
         Refused,
+        /// It couldn't be read (damaged): it was deleted, and the user is to sign in again.
+        Damaged,
     }
 
     /// Signs in with the sign-in remembered on this computer when none is kept: after launch (the
@@ -682,9 +684,11 @@ mod native {
             }
         };
         let Some((username, password)) = super::read_remembered(secret.expose()) else {
-            // Damaged: of no use to anyone.
+            // Damaged: of no use to anyone. Said as a refused one is: the sign-in ended, sign in again.
+            log::warn!("the Copernicus Data Space sign-in remembered on this computer couldn't be read, and was deleted");
             *known = if store.delete(super::ACCOUNT).is_ok() { Known::Nothing } else { Known::Kept { retry_at: i64::MAX } };
-            return Restored::Nothing;
+            super::state().expired = true;
+            return Restored::Damaged;
         };
         match sign_in(&token_url(), &username, &password, None) {
             Ok(_) => {
