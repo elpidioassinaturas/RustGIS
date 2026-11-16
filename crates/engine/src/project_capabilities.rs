@@ -38,8 +38,8 @@ impl Project {
 
 fn relief_effects(layer: &Layer) -> bool {
     layer.raster.as_ref().is_some_and(|r| {
-        matches!(&r.style.renderer, RasterRenderer::ShadedRelief { shadow, sky, fill, rock, .. }
-            if *shadow != 0.0 || *sky != 0.0 || *fill != 0.0 || rock.is_some())
+        matches!(&r.style.renderer, RasterRenderer::ShadedRelief { shadow, sky, fill, rock, ambient, balanced, .. }
+            if *shadow != 0.0 || *sky != 0.0 || *fill != 0.0 || rock.is_some() || ambient.is_some() || *balanced)
     })
 }
 
@@ -170,10 +170,13 @@ mod tests {
         }))
         .unwrap();
         let clean = Layer::new_raster(1, "DEM", raster);
-        for field in ["shadow", "sky", "fill", "rock"] {
+        for field in ["shadow", "sky", "fill", "rock", "ambient", "balanced"] {
             let mut value = serde_json::to_value(&clean).unwrap();
-            value["raster"]["style"]["renderer"]["ShadedRelief"][field] =
-                if field == "rock" { serde_json::to_value(rustgis_map::raster::Rock::DEFAULT).unwrap() } else { json!(0.4) };
+            value["raster"]["style"]["renderer"]["ShadedRelief"][field] = match field {
+                "rock" => serde_json::to_value(rustgis_map::raster::Rock::DEFAULT).unwrap(),
+                "balanced" => json!(true),
+                _ => json!(0.4),
+            };
             let layer: Layer = serde_json::from_value(value).unwrap();
             let mut p = Project::new("Relief");
             p.maps[0].layers.push(layer.clone());
