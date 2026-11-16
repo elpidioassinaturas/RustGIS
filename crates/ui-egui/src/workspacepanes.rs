@@ -784,6 +784,7 @@ pub fn time_series(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         .collect();
     if layers.is_empty() {
         // A read started before its layer was removed can still be cancelled.
+        #[cfg(not(target_arch = "wasm32"))]
         series_progress(app, ui);
         ui.label(egui::RichText::new(tl!("Add a Zarr variable first (Home › Add › Add Data › Zarr…).")).weak());
         return;
