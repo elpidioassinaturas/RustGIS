@@ -34,13 +34,22 @@ pub const MAX_BYTES: usize = 5 * 1024 * 1024;
 const MAX_LEAVES: usize = 100_000;
 
 /// The languages GeoLibre publishes a pack for (its `v1/index.json`, the English template left
-/// out), by the codes RustGIS's languages use.
+/// out, and `zh-HK`/`zh-MO`, which RustGIS has no language for), by the codes RustGIS's languages
+/// use: lower case (`zh-tw` for GeoLibre's `zh-TW`).
 pub const LOCALES: &[&str] =
-    &["ar", "az", "de", "es", "fa", "fr", "he", "hi", "id", "it", "ja", "ka", "ko", "nl", "pt", "ru", "th", "tr", "vi", "zh"];
+    &["ar", "az", "de", "es", "fa", "fr", "he", "hi", "id", "it", "ja", "ka", "ko", "nl", "pt", "ru", "th", "tr", "vi", "zh", "zh-tw"];
 
-/// The address of the published pack for `locale`, if GeoLibre publishes one.
+/// The address of the published pack for `locale`, if GeoLibre publishes one. GeoLibre names a
+/// pack by its code with the region in capitals (`zh-TW.json`), and the address is case-sensitive.
 pub fn url(locale: &str) -> Option<String> {
-    LOCALES.contains(&locale).then(|| format!("{BASE_URL}/v1/whitebox/{locale}.json"))
+    LOCALES.contains(&locale).then(|| {
+        let published: Vec<String> = locale
+            .split('-')
+            .enumerate()
+            .map(|(i, part)| if i > 0 && part.len() == 2 { part.to_ascii_uppercase() } else { part.to_string() })
+            .collect();
+        format!("{BASE_URL}/v1/whitebox/{}.json", published.join("-"))
+    })
 }
 
 /// One tool's strings in a pack.
@@ -55,7 +64,8 @@ struct ToolText {
 /// A language pack, checked.
 #[derive(Debug)]
 pub struct Pack {
-    /// The language it translates into (`pt`, `zh`…).
+    /// The language it translates into, as RustGIS writes it: lower case (`pt`, `zh-tw` for a
+    /// `zh-TW` pack).
     pub locale: String,
     /// By tool id (without [`crate::PREFIX`]).
     tools: HashMap<String, ToolText>,
@@ -133,8 +143,13 @@ pub fn parse(text: &str) -> Result<Pack, String> {
     if root.get("formatVersion").and_then(Value::as_u64) != Some(1) {
         return Err(format!("language pack format {} isn't supported (only 1)", root.get("formatVersion").unwrap_or(&Value::Null)));
     }
-    let locale =
-        root.get("locale").and_then(Value::as_str).filter(|l| valid_locale(l)).ok_or("the language pack has no valid language code")?;
+    // Language codes ignore case; RustGIS's are lower case, so a `zh-TW` pack serves `zh-tw`.
+    let locale = root
+        .get("locale")
+        .and_then(Value::as_str)
+        .filter(|l| valid_locale(l))
+        .map(str::to_ascii_lowercase)
+        .ok_or("the language pack has no valid language code")?;
     let translations = object_of(
         root.get("translations").unwrap_or(&Value::Null),
         &["processing"],
@@ -688,6 +703,10 @@ mod tests {
     fn only_published_languages_have_an_address() {
         assert_eq!(url("pt").as_deref(), Some("https://languages.geolibre.app/v1/whitebox/pt.json"));
         assert_eq!(url("en"), None);
-        assert_eq!(url("zh-tw"), None);
+        assert_eq!(url("zh-tw").as_deref(), Some("https://languages.geolibre.app/v1/whitebox/zh-TW.json"));
+        assert_eq!(url("zh-hk"), None);
+        assert_eq!(url("zh-TW"), None, "RustGIS's own codes only");
+        // GeoLibre's `zh-TW` pack serves RustGIS's `zh-tw`.
+        assert_eq!(parse(&pack_text("zh-TW")).unwrap().locale, "zh-tw");
     }
 }
