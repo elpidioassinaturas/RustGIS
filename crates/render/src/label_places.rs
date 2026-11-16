@@ -16,6 +16,8 @@ pub(super) struct CurveSpec {
     pub chars: Vec<String>,
     pub advances: Vec<f32>,
     pub gap: f32,
+    /// The text's size, the span either side of a character its angle is read over.
+    pub size: f32,
     pub overrun: f32,
     /// How far off the line, in screen points ([`line_labels::off_line`]).
     pub off: f32,
@@ -106,7 +108,7 @@ impl Curves {
         let ((x, y), turns) = self
             .spec
             .line
-            .curved(&self.spec.advances, self.spec.gap, self.spec.overrun, Some(at))
+            .curved(&self.spec.advances, self.spec.gap, self.spec.size, self.spec.overrun, Some(at))
             .and_then(|c| line_labels::curved_off(c, self.spec.off))?;
         // Reuse the preceding rejected place's vector and String capacities. The accepted
         // middle preview retains its own glyphs; later failed attempts can share this pool.
