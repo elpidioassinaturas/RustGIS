@@ -15842,7 +15842,7 @@ fn wait_for_exit(plugin: &str) {
 }
 
 /// What a program sent as it exited, after many lines, is answered before the next command, as
-/// between commands: its edit is an undo step of its own, not part of that command's.
+/// between commands: its edit and input provenance are its own, not part of that command's.
 #[test]
 fn a_session_programs_last_request_is_its_own_step_before_the_next_command() {
     let _turn = session_plugins_turn();
@@ -15850,13 +15850,23 @@ fn a_session_programs_last_request_is_its_own_step_before_the_next_command() {
     let dir = std::env::temp_dir().join(format!("rustgis-test-eng-session-late-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let run = rustgis_plugins::testing::child_run("tests::plugin_process_child");
-    std::fs::write(dir.join("plugin.json"), rustgis_plugins::testing::session_manifest("eng-sess-late", &["edit"], &run)).unwrap();
+    std::fs::write(dir.join("plugin.json"), rustgis_plugins::testing::session_manifest("eng-sess-late", &["edit", "files"], &run)).unwrap();
     rustgis_plugins::load(rustgis_plugins::Package::from_dir(&dir).unwrap(), "test").unwrap();
-    let fc = json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [3, 4]}}]});
-    s.run("plugin:eng-sess-late/y", &json!({"op": "host.addLayer", "params": {"name": "Late", "geojson": fc}})).unwrap();
+    let path = dir.join("late.csv");
+    std::fs::write(&path, "x,y,name\n3,4,Late\n").unwrap();
+    s.log.set_on(true);
+    s.run("plugin:eng-sess-late/y", &json!({"op": "layer.addData", "params": {"name": "Late", "path": path, "x": "x", "y": "y"}})).unwrap();
     wait_for_exit("eng-sess-late");
     // No poll in between: the next command finds it exited.
     assert_eq!(s.run("plugin:eng-sess-late/h", &Value::Null).unwrap(), json!({"hello": "world"}));
+    let request = s.log.entries().find(|e| e.command == "layer.addData" && e.plugin.as_deref() == Some("eng-sess-late")).unwrap();
+    assert_eq!(request.inputs.len(), 1);
+    assert_eq!(request.inputs[0].path, path.display().to_string());
+    assert!(request.inputs[0].sha256.is_some());
+    assert_eq!(request.rustgis_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    let command = s.log.entries().last().unwrap();
+    assert_eq!(command.command, "plugin:eng-sess-late/h");
+    assert!(command.inputs.is_empty(), "the next command did not read the earlier request's input");
     assert!(s.map().layer_by_name("Late").is_some());
     assert_eq!(s.undo_label(), Some("Hello"));
     assert!(s.undo());
@@ -17605,6 +17615,11 @@ fn kml_and_gpx_add_as_layers() {
     .unwrap();
     let mut s = Session::new(Project::default());
     s.run("layer.addData", &json!({"path": gpx.display().to_string()})).unwrap();
+    let entry = s.log.entries().last().unwrap();
+    assert_eq!(entry.rustgis_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    assert_eq!(entry.inputs.len(), 1);
+    assert_eq!(entry.inputs[0].path, gpx.display().to_string());
+    assert!(entry.inputs[0].sha256.is_some());
     let names: Vec<String> = s.map().layers.iter().map(|l| l.name.clone()).collect();
     for n in ["walk waypoints", "walk tracks", "walk track points"] {
         assert!(names.contains(&n.to_string()), "{names:?}");
@@ -17726,7 +17741,7 @@ fn duckdb_queries_and_databases() {
 
 /// A source split by geometry type is added polygons first, so its points end on top and none hides
 /// under its own polygons, whether DuckDB or GDAL split it (#1488). Neither program is needed: the
-/// parts are files already written, as they would have converted them.
+/// parts use each program's conversion format: GeoParquet for DuckDB, FlatGeobuf for GDAL.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn split_sources_keep_their_points_on_top() {
@@ -17740,17 +17755,19 @@ fn split_sources_keep_their_points_on_top() {
         Family::Polygons => r#"{"type": "Polygon", "coordinates": [[[10, 50], [11, 50], [11, 51], [10, 50]]]}"#,
     };
     // A file per part, in the order both programs give them: points first (`Family::ALL`).
-    let write = |stem: &str, f: Family| {
-        let path = dir.join(format!("{stem}-{}.geojson", f.label()));
+    let write = |stem: &str, f: Family, extension: &str| {
+        let path = dir.join(format!("{stem}-{}.{extension}", f.label()));
         let feature = format!(r#"{{"type": "Feature", "properties": {{}}, "geometry": {}}}"#, geometry(f));
-        std::fs::write(&path, format!(r#"{{"type": "FeatureCollection", "features": [{feature}]}}"#)).unwrap();
+        let json = format!(r#"{{"type": "FeatureCollection", "features": [{feature}]}}"#);
+        let (ds, _) = rustgis_data::io::read_bytes("part.geojson", json.as_bytes()).unwrap();
+        rustgis_data::io::write_path(&ds, &path).unwrap();
         path
     };
     let names = |s: &Session| s.map().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
 
     // A DuckDB query.
     let mut s = Session::new(Project::default());
-    let parts = Family::ALL.iter().map(|f| duckdb::Part { path: write("query", *f), family: *f, count: 1 }).collect();
+    let parts = Family::ALL.iter().map(|f| duckdb::Part { path: write("query", *f, "parquet"), family: *f, count: 1 }).collect();
     let origin =
         |family| rustgis_map::source::DuckdbOrigin { sql: Some("SELECT 1".into()), database: None, table: None, crs: None, family };
     let parts = duckdb_parts(&mut s, "Trip", duckdb::Output { parts, skipped: 0, other_family: 0 }, origin);
@@ -17769,7 +17786,7 @@ fn split_sources_keep_their_points_on_top() {
         .into_iter()
         .flat_map(|layer| Family::ALL.map(|f| (layer, f)))
         .map(|(layer, f)| gdal::Converted {
-            path: write(layer, f),
+            path: write(layer, f, "fgb"),
             name: format!("{layer} ({})", f.label()),
             layer: layer.to_string(),
             family: Some(f),
@@ -17783,7 +17800,7 @@ fn split_sources_keep_their_points_on_top() {
     assert!(!s.notices.iter().any(|n| n.text.contains("converted layer parts keep their generated names")), "no ignored name was supplied");
     let mut single = Session::new(Project::default());
     let output = duckdb::Output {
-        parts: vec![duckdb::Part { path: write("single", Family::Points), family: Family::Points, count: 1 }],
+        parts: vec![duckdb::Part { path: write("single", Family::Points, "parquet"), family: Family::Points, count: 1 }],
         skipped: 0,
         other_family: 0,
     };
@@ -22131,6 +22148,259 @@ fn area_review_reports_retain_where_clauses_when_fitted() {
         let error = crate::cmd::report::build(&session, index).unwrap_err();
         assert!(error.contains("1 ring(s) in 1 feature(s)"), "{error}");
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn streamed_non_local_source_error_remains_unsaid_for_its_own_reporting() {
+    use rustgis_map::source::SourceLayer;
+
+    let mut session = Session::new(Project::default());
+    let mut source = SourceLayer::default();
+    source.path = Some("https://example.invalid/sites.fgb".into());
+    source.error = Some("the server refused the read".into());
+    assert!(source.linked_file().is_none());
+    let id = session.map_mut().add_streamed("Remote sites", source);
+    let mark = session.notice_mark();
+    for _ in 0..2 {
+        session.notice_landed_rasters();
+    }
+    assert!(session.notices_since(mark).is_empty());
+    // Local-file notices must leave the failure available to the remote source's reporter.
+    let source = session.map_mut().layer_mut(id).unwrap().source.as_mut().unwrap();
+    assert_eq!(source.error_unsaid().as_deref(), Some("the server refused the read"));
+    assert!(source.error_unsaid().is_none());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn streamed_source_recovery_between_notice_passes_reports_the_same_failure_again() {
+    use crate::render;
+    use rustgis_data::{Coord, Dataset, Geometry, GeometryType};
+    use rustgis_map::source::SourceLayer;
+
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("rustgis-source-recovery-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut data = Dataset::new("sites", GeometryType::Point, vec![]);
+    data.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![]);
+    for ext in ["fgb", "shp"] {
+        let path = dir.join(format!("sites.{ext}"));
+        let parked = dir.join(format!("moved.{ext}"));
+        rustgis_data::io::write_path(&data, &path).unwrap();
+        let source = SourceLayer::from_path(path.to_string_lossy(), None, rustgis_data::source::open_path(&path, None).unwrap());
+        let mut session = Session::new(Project::default());
+        let id = session.map_mut().add_streamed("Survey sites", source);
+        let view = render::View { width: 120.0, height: 90.0, pixels_per_point: 1.0, camera: session.map().camera, sky: false };
+        assert!(render::render_png(session.map_mut(), &view).is_ok());
+        let mark = session.notice_mark();
+        let mut first_error = None;
+        for step in 0..3 {
+            if step == 1 {
+                std::fs::rename(&parked, &path).unwrap();
+            } else {
+                std::fs::rename(&path, &parked).unwrap();
+            }
+            if ext == "fgb" {
+                session.map_mut().layer_mut(id).unwrap().source.as_mut().unwrap().reset();
+            }
+            // Complete Shapefile reads happen on a render copy; window reads land on the layer.
+            // Its window stays cached so adopting the complete traversal keeps the owning rows.
+            let result = if ext == "shp" {
+                let mut copy = session.map().clone();
+                let result = render::render_png(&mut copy, &view);
+                session.map_mut().adopt_caches(&copy);
+                result
+            } else {
+                render::render_png(session.map_mut(), &view)
+            };
+            let error = session.map().layer(id).unwrap().source.as_ref().unwrap().error.clone();
+            if step == 1 {
+                assert!(result.is_ok(), "{ext}: {result:?}");
+                assert!(error.is_none(), "{ext}: {error:?}");
+                // No notice pass sees the successful read before the identical failure returns.
+                continue;
+            }
+            assert!(error.is_some(), "{ext}: {result:?}");
+            if step == 0 {
+                first_error = error;
+            } else {
+                assert_eq!(error, first_error, "the failure must be identical");
+            }
+            session.notice_landed_rasters();
+            session.notice_landed_rasters();
+            let notices: Vec<_> = session.notices_since(mark).iter().filter(|n| n.error && n.text.contains("Survey sites")).collect();
+            assert_eq!(notices.len(), if step == 0 { 1 } else { 2 }, "{ext}: {notices:?}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn missing_read_in_place_file_names_layer_and_path_once() {
+    use crate::{
+        cmd::exports::{export_land, export_start},
+        render,
+    };
+    use rustgis_analysis::control::Control;
+    use rustgis_data::{Coord, Dataset, Geometry, GeometryType};
+    use rustgis_map::source::SourceLayer;
+
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("rustgis-missing-source-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut data = Dataset::new("sites", GeometryType::Point, vec![]);
+    data.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![]);
+    // Both command-line dispatch and the app's worker must report a successful export's gap
+    // immediately for each output, without relying on a later screen frame.
+    let check_exports = |saved: &str, missing: bool, path: &std::path::Path, other: &std::path::Path| {
+        for background in [false, true] {
+            for (command, file) in [
+                ("share.exportMap", "map.png"),
+                ("share.exportMap", "map.tif"),
+                ("layout.export", "page.png"),
+                ("layout.export", "page.pdf"),
+                ("layout.export", "page.svg"),
+            ] {
+                let mut session = Session::new(serde_json::from_str(saved).unwrap());
+                for attempt in 0..2 {
+                    let mark = session.notice_mark();
+                    let output = dir.join(format!("missing-{missing}-background-{background}-attempt-{attempt}-{file}"));
+                    assert!(!output.exists(), "each export must create a new output: {}", output.display());
+                    let params = json!({"path": output, "width": 160, "height": 120, "dpi": 48});
+                    if background {
+                        let run = export_start(&mut session, command, &params).unwrap();
+                        let started = run.started();
+                        export_land(&mut session, started, run.run(&Control::new())).unwrap();
+                    } else {
+                        session.run(command, &params).unwrap();
+                    }
+                    assert!(output.is_file(), "{command} did not write {}", output.display());
+                    let notices: Vec<_> = session.notices_since(mark).iter().filter(|n| n.text.contains("Survey sites")).collect();
+                    assert_eq!(notices.len(), usize::from(missing), "{command} {file} background={background}: {notices:?}");
+                    if missing {
+                        assert!(notices[0].error);
+                        assert!(notices[0].text.contains(output.to_str().unwrap()), "{notices:?}");
+                        for detail in [
+                            "2 linked layers",
+                            "Boundary sites",
+                            path.to_str().unwrap(),
+                            other.to_str().unwrap(),
+                            "moved or deleted",
+                            "Repair Data Source",
+                        ] {
+                            assert!(notices[0].text.contains(detail), "missing {detail:?} in {notices:?}");
+                        }
+                        assert_eq!(notices[0].text.matches("Repair Data Source").count(), 1);
+                    }
+                    session.notice_landed_rasters();
+                    assert_eq!(
+                        session.notices_since(mark).iter().filter(|n| n.text.contains("Survey sites")).count(),
+                        usize::from(missing),
+                        "screen redraw must not repeat the export's failure"
+                    );
+                }
+            }
+        }
+    };
+    for ext in ["shp", "fgb", "parquet", "gpkg"] {
+        let path = dir.join(format!("sites.{ext}"));
+        rustgis_data::io::write_path(&data, &path).unwrap();
+        let mut session = Session::new(Project::default());
+        let source = SourceLayer::from_path(path.to_string_lossy(), None, rustgis_data::source::open_path(&path, None).unwrap());
+        let id = session.map_mut().add_streamed("Survey sites", source);
+        // A moved folder can break several links at once: one counted notice names both.
+        let other = dir.join("boundaries.fgb");
+        if ext == "fgb" {
+            rustgis_data::io::write_path(&data, &other).unwrap();
+            let source = SourceLayer::from_path(other.to_string_lossy(), None, rustgis_data::source::open_path(&other, None).unwrap());
+            session.map_mut().add_streamed("Boundary sites", source);
+        }
+        let view = render::View { width: 160.0, height: 120.0, pixels_per_point: 1.0, camera: session.map().camera, sky: false };
+        let mark = session.notice_mark();
+        assert!(render::render_png(session.map_mut(), &view).is_ok(), "{ext}: intact file");
+        session.notice_landed_rasters();
+        assert!(session.notices_since(mark).is_empty(), "{:?}", session.notices_since(mark));
+        if ext == "fgb" {
+            session.run("layout.new", &json!({"template": "map"})).unwrap();
+        }
+        let saved = serde_json::to_string(&session.project).unwrap();
+        if ext == "fgb" {
+            check_exports(&saved, false, &path, &other);
+        }
+        // Discard the cached window so the next view must read the file again.
+        for layer in &mut session.map_mut().layers {
+            layer.source.as_mut().unwrap().reset();
+        }
+        // GeoParquet and GeoPackage retain open file handles: deleting their paths need not
+        // interrupt a live reader, but reopening must still report the missing file.
+        let mut sessions = if matches!(ext, "parquet" | "gpkg") {
+            drop(session);
+            Vec::new()
+        } else {
+            vec![session]
+        };
+        sessions.push(Session::new(serde_json::from_str(&saved).unwrap()));
+        std::fs::remove_file(&path).unwrap();
+        if ext == "fgb" {
+            std::fs::remove_file(&other).unwrap();
+        }
+        for mut session in sessions {
+            let result = render::render_png(session.map_mut(), &view);
+            let layer = session.map().layer(id).unwrap();
+            let error = format!("{}: {}", layer.name, layer.source.as_ref().unwrap().read_error().unwrap());
+            if ext == "shp" {
+                // The Shapefile reader already refuses a partial drawing; preserve
+                // the named source error at the archive/revision finalizer.
+                assert_eq!(result.unwrap_err(), error);
+            } else {
+                assert!(result.is_ok(), "a failed window source is omitted: {result:?}");
+            }
+            for detail in ["Survey sites", path.to_str().unwrap(), "moved or deleted", "Repair Data Source"] {
+                assert!(error.contains(detail), "missing {detail:?} in {error:?}");
+            }
+            let mark = session.notice_mark();
+            for _ in 0..3 {
+                // The screen draws a copy and adopts its errors before the frame's notices.
+                let mut worker = session.map().clone();
+                let _ = render::render(&mut worker, &view);
+                session.map_mut().adopt_caches(&worker);
+                session.notice_landed_rasters();
+            }
+            let notices: Vec<_> = session.notices_since(mark).iter().filter(|n| n.error).collect();
+            assert_eq!(notices.len(), 1, "{ext}: {notices:?}");
+            for detail in ["Survey sites", path.to_str().unwrap(), "moved or deleted", "Repair Data Source"] {
+                assert!(notices[0].text.contains(detail), "{ext}: missing {detail:?} in {notices:?}");
+            }
+            assert_eq!(notices[0].text.matches("Repair Data Source").count(), 1);
+            if ext == "fgb" {
+                for detail in ["2 linked layers", "Boundary sites", other.to_str().unwrap()] {
+                    assert!(notices[0].text.contains(detail), "missing {detail:?} in {notices:?}");
+                }
+            }
+        }
+        if ext == "fgb" {
+            check_exports(&saved, true, &path, &other);
+            // More broken links than the notice displays still count, and all are marked said.
+            let mut folder = Session::new(serde_json::from_str(&saved).unwrap());
+            let source = folder.map().layer(id).unwrap().source.clone().unwrap();
+            for i in 0..5 {
+                folder.map_mut().add_streamed(format!("Other sites {i}"), source.clone());
+            }
+            assert!(render::render_png(folder.map_mut(), &view).is_ok());
+            let mark = folder.notice_mark();
+            for _ in 0..3 {
+                folder.notice_landed_rasters();
+            }
+            let notices: Vec<_> = folder.notices_since(mark).iter().filter(|n| n.error).collect();
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(notices[0].text.starts_with("7 linked layers"), "{notices:?}");
+            assert!(notices[0].text.contains("2 more"), "{notices:?}");
+            assert_eq!(notices[0].text.matches("Repair Data Source").count(), 1);
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -39999,13 +40269,17 @@ fn a_layout_exports_to_svg_with_each_element_its_own_group() {
     // A required map-source failure is reported without leaving an incomplete file.
     let dir = std::env::temp_dir().join(format!("rustgis-svg-failure-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    let missing = dir.join("missing.shp");
+    let layer_name = s.map().layers[0].name.clone();
     let mut source = rustgis_map::source::SourceLayer::default();
-    source.path = Some(dir.join("missing.shp").display().to_string());
+    source.path = Some(missing.display().to_string());
     s.map_mut().layers[0].source = Some(source);
     // Use a world view so the missing layer is visible on the exported page.
     s.run("layout.frameZoom", &json!({"to": "full"})).unwrap();
     let error = s.run("layout.export", &json!({"path": out.to_string_lossy(), "dpi": 36})).unwrap_err();
-    assert!(error.contains("map sources"), "{error}");
+    for detail in [layer_name.as_str(), missing.to_str().unwrap(), "Repair Data Source"] {
+        assert!(error.contains(detail), "missing {detail:?} in {error:?}");
+    }
     assert!(!out.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -40164,6 +40438,229 @@ fn calculate_geometry_updates_ellipsoidal_lengths_in_one_undo_step() {
     assert!((out.value(0, length).as_f64().unwrap() - 111.31949079327356).abs() < 1e-6);
 }
 
+/// Actual reads, including desktop read-ahead and script children, reach exported provenance.
+/// Outputs aren't inputs; old projects and exported entries without provenance still load.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn session_log_records_input_fingerprints_and_version() {
+    use crate::cmd::reads::{read_ahead, read_land};
+    use crate::project_log::LogEntry;
+    let dir = std::env::temp_dir().join(format!("rustgis-log-provenance-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("points.csv");
+    let contents = b"x,y,name\n1,2,A\n";
+    std::fs::write(&path, contents).unwrap();
+    let params = json!({"path": path, "x": "x", "y": "y"});
+    let mut s = world();
+    s.run("layer.addData", &params).unwrap();
+    let entry = s.log.entries().last().unwrap();
+    assert_eq!(entry.rustgis_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    let input = entry.inputs.iter().find(|f| f.path == path.to_string_lossy() && f.sha256.is_some()).unwrap();
+    assert_eq!(input.size, Some(contents.len() as u64));
+    assert_eq!(
+        input.modified_ns,
+        Some(std::fs::metadata(&path).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string())
+    );
+    assert_eq!(input.sha256.as_deref(), Some("219f018d3f821dbd36cfffae3dfea5f6d4c6554b9e9dbf62b90dc0297680ae32"));
+    assert_eq!(input.hash_unavailable, None);
+    let first = input.clone();
+    // The desktop worker's reads belong to the admitted command that consumes them.
+    let ahead = read_ahead(&mut s, "layer.addData", &params).unwrap();
+    let read = std::thread::spawn(move || ahead.run(&rustgis_analysis::control::Control::new()).unwrap()).join().unwrap();
+    read_land(&mut s, read).unwrap();
+    assert!(s.log.entries().last().unwrap().inputs.contains(&first));
+    // A worker admitted while logging is off must not stat or hash its reads for the log.
+    s.log.set_on(false);
+    let ahead = read_ahead(&mut s, "layer.addData", &params).unwrap();
+    let read = std::thread::spawn(move || ahead.run(&rustgis_analysis::control::Control::new()).unwrap()).join().unwrap();
+    assert!(read.inputs.is_empty(), "logging off must disable capture on the worker");
+    s.log.set_on(true);
+    read_land(&mut s, read).unwrap();
+    assert!(s.log.entries().last().unwrap().inputs.is_empty());
+    // A nested command contributes to its enclosing script's single entry.
+    s.run("script.run", &json!({"script": format!("layer.addData {params}")})).unwrap();
+    assert!(s.log.entries().last().unwrap().inputs.contains(&first));
+    // Mutating a file of the same size is visible in the recorded hash.
+    std::fs::write(&path, b"x,y,name\n1,2,B\n").unwrap();
+    s.run("layer.addData", &params).unwrap();
+    assert!(s.log.entries().last().unwrap().inputs.iter().any(|f| f.path == first.path && f.sha256.is_some() && f.sha256 != first.sha256));
+    // A WAL can hold newer input even when the database file's metadata hasn't changed.
+    let gpkg = dir.join("points.gpkg");
+    rustgis_data::io::write_path(&s.map().layer_by_name("points").unwrap().dataset, &gpkg).unwrap();
+    let db = rusqlite::Connection::open(&gpkg).unwrap();
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE log_probe (id INTEGER);").unwrap();
+    s.run("layer.addData", &json!({"path": gpkg})).unwrap();
+    let wal = format!("{}-wal", gpkg.display());
+    assert!(s.log.entries().last().unwrap().inputs.iter().any(|f| f.path == wal && f.size.is_some() && f.hash_unavailable.is_some()));
+    drop(db);
+    let out = dir.join("log.jsonl");
+    s.run("project.exportLog", &json!({"path": out})).unwrap();
+    let entries: Vec<LogEntry> = std::fs::read_to_string(&out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(entries.iter().any(|e| e.inputs.contains(&first) && e.rustgis_version.is_some()));
+    assert!(s.log.entries().last().unwrap().inputs.is_empty(), "export destination isn't a read");
+    let old: LogEntry = serde_json::from_value(json!({"at": 1, "command": "layer.addData", "ok": true})).unwrap();
+    assert!(old.inputs.is_empty() && old.rustgis_version.is_none() && old.inputs_omitted == 0);
+    s.run("project.openText", &json!({"text": include_str!("../../../schema/fixtures/empty.rgis")})).unwrap();
+    assert!(s.project.maps.iter().all(|m| m.layers.is_empty()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Reopening a replaced output is not an input read; the export worker's true source still is.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn session_log_export_inputs_exclude_output_reloads() {
+    use crate::cmd::exports::{export_land, export_start};
+    let dir = std::env::temp_dir().join(format!("rustgis-log-exports-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("source.gpkg");
+    let mut s = world();
+    s.run("share.exportLayer", &json!({"layer": "Cities", "path": path})).unwrap();
+    s.run("layer.addData", &json!({"path": path, "layer": "Cities", "stream": true, "name": "InPlace"})).unwrap();
+    let copy = dir.join("copy.gpkg");
+    let work = export_start(&mut s, "share.exportLayer", &json!({"layer": "InPlace", "path": copy})).unwrap();
+    let started = work.started();
+    let done = std::thread::spawn(move || work.run(&rustgis_analysis::control::Control::new())).join().unwrap();
+    export_land(&mut s, started, done).unwrap();
+    let inputs = &s.log.entries().last().unwrap().inputs;
+    assert!(inputs.iter().any(|i| i.path == path.display().to_string()));
+    assert!(!inputs.iter().any(|i| i.path == copy.display().to_string()));
+    let params = json!({"layer": "Countries", "path": path, "mode": "replaceTable", "tableName": "Cities"});
+    s.run("share.exportLayer", &params).unwrap();
+    assert!(s.log.entries().last().unwrap().inputs.is_empty());
+    let work = export_start(&mut s, "share.exportLayer", &params).unwrap();
+    let started = work.started();
+    let done = std::thread::spawn(move || work.run(&rustgis_analysis::control::Control::new())).join().unwrap();
+    export_land(&mut s, started, done).unwrap();
+    assert!(s.log.entries().last().unwrap().inputs.is_empty());
+    assert_eq!(
+        s.map().layer_by_name("InPlace").unwrap().load_all().unwrap().features.len(),
+        s.map().layer_by_name("Countries").unwrap().dataset.features.len()
+    );
+    drop(s);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// DuckDB cache payloads never become inputs, including retained and restored streamed reads.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn session_log_duckdb_inputs_exclude_conversion_cache() {
+    use crate::cmd::layer::{add_converted, duckdb_parts};
+    use rustgis_data::source::{Family, duckdb};
+    let dir = std::env::temp_dir().join(format!("rustgis-log-duckdb-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let database = dir.join("source.duckdb");
+    std::fs::write(&database, b"source identity").unwrap();
+    let cache = dir.join("generated.parquet");
+    let mut s = world();
+    rustgis_data::io::write_path(&s.map().layer_by_name("Cities").unwrap().dataset, &cache).unwrap();
+    let params = json!({"stream": true});
+    let added = s
+        .command_epilogue("layer.addSql", &params, |s| {
+            let out = duckdb::Output {
+                parts: vec![duckdb::Part { path: cache.clone(), family: Family::Points, count: 1 }],
+                skipped: 0,
+                other_family: 0,
+            };
+            let parts = duckdb_parts(s, "Converted", out, |family| rustgis_map::source::DuckdbOrigin {
+                sql: Some("SELECT * FROM cities".into()),
+                database: Some(database.display().to_string()),
+                table: None,
+                crs: None,
+                family,
+            });
+            add_converted(s, &params, "the query", &database.display().to_string(), parts)
+        })
+        .unwrap();
+    let inputs = &s.log.entries().last().unwrap().inputs;
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].path, database.display().to_string());
+    // Opening the saved stream's concrete reader also retains the original file identity.
+    let text = serde_json::to_string(&s.project).unwrap();
+    s.run("project.openText", &json!({"text": text})).unwrap();
+    s.run("layer.loadAll", &json!({"layer": added["layer"]})).unwrap();
+    let inputs = &s.log.entries().last().unwrap().inputs;
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].path, database.display().to_string());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Large input lists stay bounded, including merged entries, and disclose the missing count.
+#[test]
+fn session_log_bounds_input_fingerprints() {
+    use crate::project_log::LOG_LIST_ITEMS;
+    use rustgis_data::provenance::{Fingerprint, record};
+    let inputs = |from, to| {
+        (from..to).map(|i| Fingerprint {
+            path: format!("/inputs/{i:04}.csv"),
+            size: Some(14),
+            modified_ns: Some("123456789".into()),
+            sha256: None,
+            hash_unavailable: Some("streamed input".into()),
+        })
+    };
+    let mut s = world();
+    let mark = s.notice_mark();
+    s.command_epilogue("project.rename", &json!({"name": "Clean"}), |_| {
+        record(inputs(0, 2));
+        Ok(Value::Null)
+    })
+    .unwrap();
+    let clean = s.log.entries().last().unwrap();
+    assert_eq!(clean.inputs.len(), 2);
+    assert_eq!(clean.inputs_omitted, 0);
+    assert!(s.notices_since(mark).is_empty());
+    assert!(serde_json::to_value(clean).unwrap().get("inputs_omitted").is_none());
+    let total = LOG_LIST_ITEMS + 7;
+    s.command_epilogue("project.rename", &json!({"name": "Many"}), |_| {
+        record(inputs(0, total));
+        Ok(Value::Null)
+    })
+    .unwrap();
+    let entry = s.log.entries().last().unwrap();
+    assert_eq!(entry.inputs, inputs(0, LOG_LIST_ITEMS).collect::<Vec<_>>());
+    assert_eq!(entry.inputs_omitted, 7);
+    assert_eq!(s.notices_since(mark).len(), 1);
+    assert!(s.notices_since(mark)[0].text.contains("7 input fingerprints"));
+    assert!(!s.notices_since(mark)[0].error);
+    let mut jsonl = Vec::new();
+    s.log.write(&mut jsonl, false).unwrap();
+    let jsonl = String::from_utf8(jsonl).unwrap();
+    let exported: crate::project_log::LogEntry = serde_json::from_str(jsonl.lines().last().unwrap()).unwrap();
+    assert_eq!(exported.inputs_omitted, 7);
+    assert_eq!(exported.inputs, entry.inputs);
+    let mut csv = Vec::new();
+    s.log.write(&mut csv, true).unwrap();
+    let csv = String::from_utf8(csv).unwrap();
+    assert!(csv.lines().last().unwrap().ends_with(",7"));
+    // A later step reusing two inputs and reading two new ones cannot grow a joined entry.
+    let mut next = entry.clone();
+    next.inputs = inputs(LOG_LIST_ITEMS - 2, LOG_LIST_ITEMS + 2).collect();
+    next.inputs_omitted = 0;
+    s.log_entry(next, true);
+    let joined = s.log.entries().last().unwrap();
+    assert_eq!(joined.inputs.len(), LOG_LIST_ITEMS);
+    assert_eq!(joined.inputs_omitted, 9);
+    assert_eq!(s.notices_since(mark).len(), 1);
+    assert!(s.notices_since(mark)[0].text.contains("9 input fingerprints"));
+    let mut unchanged = joined.clone();
+    unchanged.inputs.clear();
+    unchanged.inputs_omitted = 0;
+    s.log_entry(unchanged, true);
+    assert_eq!(s.notices_since(mark).len(), 1);
+    assert!(s.notices_since(mark)[0].text.contains("9 input fingerprints"));
+    s.notices.clear();
+    let mut later = s.log.entries().last().unwrap().clone();
+    later.inputs = inputs(LOG_LIST_ITEMS, LOG_LIST_ITEMS + 1).collect();
+    later.inputs_omitted = 0;
+    s.log_entry(later, true);
+    assert!(s.notices.is_empty(), "a consumed notice is not repeated per joined step");
+    let mut separate = s.log.entries().last().unwrap().clone();
+    separate.inputs_omitted = 3;
+    s.log_entry(separate, false);
+    assert_eq!(s.notices.len(), 1);
+    assert!(s.notices[0].text.contains("3 input fingerprints"));
+}
+
 /// The session log (#797): a command run by itself that changes the project, or reaches a file
 /// or a service, is logged once (a script's lines inside it), with its outcome; reading isn't.
 /// Undo keeps the entries and is logged with the step it took back (not when there is none).
@@ -40307,12 +40804,13 @@ fn the_session_log_records_each_command_run_in_the_session() {
     s.run("project.exportLog", &json!({"path": csv.to_string_lossy()})).unwrap();
     let csv_text = std::fs::read_to_string(&csv).unwrap();
     assert!(
-        csv_text.starts_with("time_utc,at,command,ok,millis,error,params,plugin,project\n") && csv_text.contains("\"edit.undo\""),
+        csv_text.starts_with("time_utc,at,command,ok,millis,error,params,plugin,project,rustgis_version,inputs,inputs_omitted\n")
+            && csv_text.contains("\"edit.undo\""),
         "{csv_text}"
     );
     assert!(csv_text.contains("\"'=HYPERLINK(1)\"") && !csv_text.contains(",\"=HYPERLINK"), "{csv_text}");
-    // The plugin is the cell before the project's name, the last.
-    let plugin_cell = |l: &str| l.rsplit(',').nth(1).map(str::to_string);
+    // The plugin precedes the project, version, inputs and omitted count (empty or zero here).
+    let plugin_cell = |l: &str| l.rsplit(',').nth(4).map(str::to_string);
     assert!(csv_text.lines().any(|l| l.contains("\"host.addLayer\"") && plugin_cell(l).as_deref() == Some("\"globe\"")), "{csv_text}");
     assert!(
         csv_text.lines().any(|l| l.contains("\"edit.undo\"") && plugin_cell(l).as_deref() == Some("\"\"")),
@@ -40477,11 +40975,12 @@ fn session_log_entries_name_their_project_and_say_when_their_params_are_partial(
     // And `project.log` says so: `partial` is in its answer.
     let answer = s.run("project.log", &json!({"command": "service.layers", "limit": 1})).unwrap();
     assert_eq!(answer["entries"][0]["partial"], json!(true), "{answer}");
-    // Saved: the project's name last in a CSV row; in JSON, the name, and `partial` only when so.
+    // Saved: the project precedes version and inputs in CSV; in JSON, the name, and `partial` only when so.
     let mut csv = Vec::new();
     s.log.write(&mut csv, true).unwrap();
     let csv = String::from_utf8(csv).unwrap();
-    assert!(csv.lines().nth(1).is_some_and(|row| row.ends_with(",\"Atlas\"")), "{csv}");
+    let suffix = format!(",\"Atlas\",\"{}\",\"[]\",0", env!("CARGO_PKG_VERSION"));
+    assert!(csv.lines().nth(1).is_some_and(|row| row.ends_with(&suffix)), "{csv}");
     let json = serde_json::to_value(&renamed).unwrap();
     assert_eq!(json["project"], "Atlas");
     assert!(json.get("opened").is_none() && json.get("partial").is_none(), "{json}");
@@ -44267,12 +44766,15 @@ fn exports_run_on_another_thread() {
     let mark = s.notice_mark();
     assert_eq!(land(&mut s, &copy), None, "a source opened afresh keeps its own state");
     let said = s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>().join("\n");
-    assert!(said.contains("Countries isn't in the file") && said.contains("gone.fgb: not found"), "and the file's gap is said: {said}");
+    assert!(
+        said.contains("1 linked layer could not be read") && said.contains("Countries") && said.contains("gone.fgb: not found"),
+        "and the file's gap is said: {said}"
+    );
     // Opened afresh and failing again: still said, as the file lacks the layer either way.
     s.map_mut().layers[li].source.as_mut().unwrap().error = Some("found.fgb: not found".into());
     let mark = s.notice_mark();
     land(&mut s, &copy);
-    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("Countries isn't in the file")));
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains(&at("drawn.png")) && n.text.contains("Countries")));
     // Several left out: one notice, with a count.
     let mut two = copy.clone();
     let other = two.layers.iter().position(|l| l.name != "Countries").unwrap();
@@ -44282,8 +44784,9 @@ fn exports_run_on_another_thread() {
     two.layers[other].source = Some(gone);
     let mark = s.notice_mark();
     land(&mut s, &two);
-    let missing: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.contains("in the file")).map(|n| n.text.clone()).collect();
-    assert!(missing.len() == 1 && missing[0].contains("2 layers aren't in the file"), "{missing:?}");
+    let missing: Vec<_> =
+        s.notices_since(mark).iter().filter(|n| n.error && n.text.contains(&at("drawn.png"))).map(|n| n.text.clone()).collect();
+    assert!(missing.len() == 1 && missing[0].contains("2 linked layers could not be read"), "{missing:?}");
     s.map_mut().layers[li].source = None;
     // One that lands (or is refused) after another project opened is logged under the project it
     // started in.
@@ -51326,4 +51829,56 @@ fn standalone_dbf_add_data_uses_tables_and_companion_shapefile() {
         assert_eq!(paired.map().layers[0].dataset.geometry_type, GeometryType::Point);
     }
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A city model's buildings come in standing by `height` on `base_height`, its roads flat; one undo
+/// takes the layers away with their extrusion. Other data with the same columns comes in flat
+/// (#2161).
+#[test]
+fn a_city_models_volumes_come_in_extruded() {
+    let shell = json!([[[[0, 3, 2, 1]], [[4, 5, 6, 7]], [[0, 1, 5, 4]]]]);
+    let model = json!({
+        "type": "CityJSON",
+        "version": "2.0",
+        "transform": {"scale": [0.001, 0.001, 1.0], "translate": [0.0, 0.0, 0.0]},
+        "metadata": {"referenceSystem": "https://www.opengis.net/def/crs/EPSG/0/4326"},
+        "vertices": [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0], [0, 0, 12], [10, 0, 12], [10, 10, 12], [0, 10, 12]],
+        "CityObjects": {
+            "b": {"type": "Building", "geometry": [{"type": "Solid", "lod": "2", "boundaries": shell}]},
+            "r": {"type": "Road", "geometry": [{"type": "Solid", "lod": "2", "boundaries": shell}]},
+        },
+    })
+    .to_string();
+    for picked in [None, Some("Building")] {
+        let mut s = Session::new(Project::default());
+        let mut params = json!({"fileName": "m.city.json", "text": model});
+        if let Some(want) = picked {
+            params["layer"] = json!(want);
+        }
+        s.run("layer.addDataText", &params).unwrap();
+        let x = s.map().layer_by_name("m Building").and_then(|l| l.extrusion.clone()).expect("the building stands");
+        assert_eq!((x.field.as_deref(), x.base_field.as_deref()), (Some("height"), Some("base_height")));
+        assert_eq!((x.height, x.factor), (0.0, 1.0), "an object without a height stays flat");
+        if picked.is_none() {
+            assert!(s.map().layer_by_name("m Road").is_some_and(|l| l.extrusion.is_none()), "a road stays flat");
+        }
+        s.run("edit.undo", &Value::Null).unwrap();
+        assert!(s.map().layers.is_empty(), "one undo takes the model away");
+    }
+    // Named `.json`, the first layer comes in alone, standing too.
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataText", &json!({"fileName": "m.json", "text": model})).unwrap();
+    assert!(s.map().layer_by_name("m Building").is_some_and(|l| l.extrusion.is_some()));
+    // Its fallback of 0 isn't kept for a constant height, which would show nothing; a field keeps it.
+    s.run("layer.extrusion", &json!({"layer": "m Building", "type": "field", "field": "height"})).unwrap();
+    assert_eq!(s.map().layer_by_name("m Building").and_then(|l| l.extrusion.as_ref()).map(|x| x.height), Some(0.0));
+    s.run("layer.extrusion", &json!({"layer": "m Building", "type": "height"})).unwrap();
+    assert_eq!(s.map().layer_by_name("m Building").and_then(|l| l.extrusion.as_ref()).map(|x| x.height), Some(1000.0));
+    let geojson = json!({"type": "FeatureCollection", "features": [{"type": "Feature",
+        "properties": {"type": "Building", "height": 12.0, "base_height": 0.0},
+        "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}}]})
+    .to_string();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataText", &json!({"fileName": "b.geojson", "text": geojson})).unwrap();
+    assert!(s.map().layers.iter().all(|l| l.extrusion.is_none()), "only a reader that knows the type extrudes");
 }
