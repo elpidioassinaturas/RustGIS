@@ -2698,7 +2698,7 @@ pub fn read_metadata(dir: &std::path::Path) -> Result<Store> {
         if p.metadata().map(|m| m.len()).unwrap_or(0) as usize > MAX_METADATA {
             return Err(bad(format!("{} is too large", p.display())));
         }
-        if let Ok(b) = std::fs::read(&p) {
+        if let Ok(b) = crate::provenance::read(&p) {
             docs.push((rel, b));
         }
         Ok(())
@@ -2752,7 +2752,7 @@ pub fn read_metadata(dir: &std::path::Path) -> Result<Store> {
 pub fn read_parts(dir: &std::path::Path, parts: &[Part], chunks: &mut HashMap<String, Vec<u8>>, total: &mut u64) -> Result<()> {
     use std::io::{Read, Seek, SeekFrom};
     for part in parts {
-        let mut f = match std::fs::File::open(dir.join(&part.key)) {
+        let mut f = match crate::provenance::open(dir.join(&part.key)) {
             Ok(f) => f,
             // Never written: only a file that isn't there. Any other failure is said.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -2808,7 +2808,7 @@ pub fn read_dir_in(store: &Store, dir: &std::path::Path, selection: &str, crs: O
         if !meta.is_file() || meta.len() > MAX_CHUNK_FILE || total > MAX_READ {
             return Err(bad(format!("{}: the slice's chunks are too large to read", dir.display())));
         }
-        chunks.insert(k.clone(), std::fs::read(&path)?);
+        chunks.insert(k.clone(), crate::provenance::read(&path)?);
     }
     // A window's bytes of files: shards' indexes and coordinates, then the shards' chunks.
     read_parts(dir, &p.parts, &mut chunks, &mut total)?;

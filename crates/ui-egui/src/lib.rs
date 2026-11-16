@@ -2033,6 +2033,7 @@ impl RustGisApp {
             || rustgis_engine::data::source::is_source_name(name)
             || rustgis_engine::data::io::is_multi_layer_name(name)
             || rustgis_engine::data::sheets::is_sheet_name(name)
+            || lower.ends_with(".dbf")
             || lower.ends_with(".gz")
             || (lower.ends_with(".dat") && std::str::from_utf8(bytes).is_err())
         {
@@ -2673,6 +2674,11 @@ impl RustGisApp {
                 let mark = self.session.notice_mark();
                 return exportjob::start(self, "source.publish", params).inspect_err(|e| self.command_failed(id, e, mark));
             }
+            // Ordering and writing a standalone table grows with its rows, like Export Features.
+            if id == "share.exportTable" {
+                let mark = self.session.notice_mark();
+                return exportjob::start(self, "share.exportTable", params).inspect_err(|e| self.command_failed(id, e, mark));
+            }
             // Converting the labels of a layer read in place reads all of its source first, on a
             // thread of its own, whoever asks (a click, the assistant).
             if id == "labels.convert"
@@ -2962,7 +2968,7 @@ impl RustGisApp {
         result
     }
 
-    /// Record Task: adds a command that ran from the app and changed the project as a step. Not
+    /// Record Task: adds a command that changed the project or exported a table as a step. Not
     /// panes and dialogs (`ui.*`), tasks themselves, or what only moves the view. A colour, outline
     /// or transparency set again on the same layer (dragged in its picker) updates the step it just
     /// made.
@@ -3024,7 +3030,9 @@ impl RustGisApp {
         {
             return;
         }
-        let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates).copied() else { return };
+        // Export Table writes a file without changing the project, but remains a replayable
+        // task step. Other exports keep their existing recording behavior.
+        let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates || id == "share.exportTable").copied() else { return };
         // Downloaded data is kept for this session only, and adding it uses it up: a task
         // couldn't add it again.
         // A result handed over by the app (`ran`: a summary worked out on a thread) is used up
@@ -3962,6 +3970,7 @@ impl RustGisApp {
                             "jpg",
                             "jpeg",
                             "shp",
+                            "dbf",
                             "zip",
                             "gpkg",
                             "parquet",
