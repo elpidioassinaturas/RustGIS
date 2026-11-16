@@ -658,6 +658,7 @@ fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Valu
     let n_outputs = meta.params.iter().filter(|p| p.role == Role::Output).count();
     let given = if meta.names_outputs { output_name(spec, params, &mut job.notes)? } else { None };
     let base = given.as_deref().unwrap_or(spec.name);
+    let (mut renamed, mut shortened) = (Vec::new(), false);
     for p in &meta.params {
         match p.role {
             Role::Input => {
@@ -670,7 +671,11 @@ fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Valu
             Role::Output => {
                 let file = format!("{}.{}", safe(&p.name), output_ext(p, meta));
                 job.args.push((p.name.clone(), Arg::Files(vec![FileRef::Work(file.clone())])));
-                let name = if n_outputs > 1 { format!("{base} {}", label_of(&p.name).to_lowercase()) } else { base.to_string() };
+                // Each output's own name after the one given, kept whole within the limit.
+                let suffix = if n_outputs > 1 { format!(" {}", label_of(&p.name).to_lowercase()) } else { String::new() };
+                let room = MAX_OUTPUT_NAME.saturating_sub(suffix.chars().count());
+                shortened |= given.is_some() && base.chars().count() > room;
+                let name: String = base.chars().take(room).chain(suffix.chars()).collect();
                 // A name a layer, a table or an earlier output of this run has gets a number, so two
                 // runs don't give two layers of one name. Said when it was the name given.
                 let taken = |n: &str| {
@@ -678,7 +683,7 @@ fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Valu
                 };
                 let free = numbered(&name, taken);
                 if given.is_some() && free != name {
-                    job.notes.push(format!("{}: a layer is named '{name}' already, so the new one is '{free}'", spec.name));
+                    renamed.push(format!("'{name}' is now '{free}'"));
                 }
                 job.outputs.push((file, free));
             }
@@ -694,6 +699,13 @@ fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Valu
                 job.args.push((p.name.clone(), Arg::Value(v)));
             }
         }
+    }
+    // One notice per kind, with a count.
+    if !renamed.is_empty() {
+        job.notes.push(format!("{}: {} output name(s) in use already, so numbered: {}", spec.name, renamed.len(), renamed.join(", ")));
+    }
+    if shortened {
+        job.notes.push(format!("{}: the output name is cut to fit each output's own name within {MAX_OUTPUT_NAME} characters", spec.name));
     }
     Ok(job)
 }

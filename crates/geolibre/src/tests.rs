@@ -45,6 +45,21 @@ impl Inputs for Fixture {
     }
 }
 
+/// The fixture, plus layers of these names that hold nothing a tool reads.
+struct TakenNames<'a>(&'a Fixture, &'a [&'a str]);
+
+impl Inputs for TakenNames<'_> {
+    fn dataset(&self, layer: &str) -> Option<&Dataset> {
+        self.0.dataset(layer).or_else(|| self.1.contains(&layer).then_some(&self.0.points))
+    }
+    fn selection(&self, _: &str) -> &[usize] {
+        &[]
+    }
+    fn raster(&self, layer: &str) -> Option<RasterInput<'_>> {
+        self.0.raster(layer)
+    }
+}
+
 /// The fixture, or `None` (the test is skipped) when no runner is installed: set
 /// `RUSTGIS_GEOLIBRE` to a `geolibre` executable, or put one on PATH, to run these.
 fn setup() -> Option<Fixture> {
@@ -168,7 +183,7 @@ fn outputs_are_named_by_the_output_field() {
     // A layer has the name already: numbered, and said.
     let taken = job(json!({"input": "dem", "output": "pts"})).unwrap();
     assert_eq!(taken.outputs[0].1, "pts 2");
-    assert!(taken.notes.iter().any(|n| n.contains("'pts'") && n.contains("'pts 2'")), "{:?}", taken.notes);
+    assert!(taken.notes.iter().any(|n| n.contains("1 output name(s)") && n.contains("'pts' is now 'pts 2'")), "{:?}", taken.notes);
     // Too long: cut, and said.
     let long = job(json!({"input": "dem", "output": "x".repeat(300)})).unwrap();
     assert_eq!(long.outputs[0].1.chars().count(), MAX_OUTPUT_NAME);
@@ -193,6 +208,20 @@ fn outputs_are_named_by_the_output_field() {
     };
     assert_eq!(names(json!({"dem": "dem"})), ["Flow streams", "Flow basins"]);
     assert_eq!(names(json!({"dem": "dem", "output": "Rio Doce"})), ["Rio Doce streams", "Rio Doce basins"]);
+    // A long name leaves room for each output's own: every name within the limit, still apart (review).
+    let params = rustgis_analysis::resolve_params(&spec2, &json!({"dem": "dem", "output": "x".repeat(200)})).unwrap();
+    let long = prepare_with(&spec2, &meta2, &f, &params).unwrap();
+    let long_names: Vec<&str> = long.outputs.iter().map(|(_, n)| n.as_str()).collect();
+    assert!(long_names.iter().all(|n| n.chars().count() == MAX_OUTPUT_NAME), "{long_names:?}");
+    assert!(long_names[0].ends_with("x streams") && long_names[1].ends_with("x basins"), "{long_names:?}");
+    assert_eq!(long.notes.iter().filter(|n| n.contains("cut to fit")).count(), 1, "{:?}", long.notes);
+    // Both names in use: one notice with the count, not one per output (review).
+    let fg = TakenNames(&f, &["Taken streams", "Taken basins"]);
+    let params = rustgis_analysis::resolve_params(&spec2, &json!({"dem": "dem", "output": "Taken"})).unwrap();
+    let both = prepare_with(&spec2, &meta2, &fg, &params).unwrap();
+    assert_eq!(both.outputs.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(), ["Taken streams 2", "Taken basins 2"]);
+    let numbered_notes: Vec<&String> = both.notes.iter().filter(|n| n.contains("numbered")).collect();
+    assert!(matches!(numbered_notes[..], [n] if n.contains("2 output name(s)")), "{:?}", both.notes);
     assert_eq!(numbered("a", |n| ["a", "a 2"].contains(&n)), "a 3");
     assert_eq!(numbered(&"y".repeat(200), |n| n.chars().all(|c| c == 'y')).chars().count(), MAX_OUTPUT_NAME);
 
