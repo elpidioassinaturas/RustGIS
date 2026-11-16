@@ -670,7 +670,10 @@ impl Water {
         let seen = frame.camera.extent(frame.width, frame.height);
         let ppp = frame.pixels_per_point;
         let mut path = tiny_skia::PathBuilder::new();
-        for lake in self.lakes.iter().filter(|l| l.extent.intersects(&seen)) {
+        // A lake with a vertex that isn't a number is left out whole: one such vertex would
+        // leave the path without bounds (no band at all), and a hole drawn without its outer ring
+        // would be painted.
+        for lake in self.lakes.iter().filter(|l| l.extent.intersects(&seen) && l.rings.iter().flatten().all(|c| c.is_finite())) {
             for (k, ring) in lake.rings.iter().enumerate() {
                 // Twice the ring's signed area: positive turning counter-clockwise.
                 let turn: f64 = ring.iter().zip(ring.iter().cycle().skip(1)).map(|(a, b)| a.x * b.y - b.x * a.y).sum();
@@ -1555,6 +1558,27 @@ mod tests {
             |dx: f64| pm.pixel((x + dx) as u32, y as u32).map(|c| u32::from(c.red()) + u32::from(c.green()) + u32::from(c.blue())).unwrap();
         let (edge, inner) = (at(1.5), at(3.5));
         assert!(edge < inner, "lighter a few pixels in: {inner} after {edge} at the outline");
+    }
+
+    /// A lake with a vertex that isn't a number (a bad row) takes no band, and leaves the others
+    /// theirs.
+    #[test]
+    fn a_lake_with_a_bad_vertex_leaves_the_others_their_band() {
+        let banded = |bad: bool| {
+            let (mut m, view) = shored(1.0, 0.0);
+            if bad {
+                let l = m.layers.iter_mut().find(|l| l.name == "lagos").unwrap();
+                let mut ring = square(0.6, -0.2, 0.05);
+                ring[1] = Coord::new(f64::NAN, -0.2);
+                l.dataset.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![rustgis_data::Value::Float(1234.0)]);
+            }
+            western_shore(&mut m, &view).0
+        };
+        let (_, view) = shored(0.0, 0.0);
+        let (mut m, _) = shored(0.0, 0.0);
+        let plain = western_shore(&mut m, &view).0;
+        assert_ne!(banded(false), plain, "the band is drawn");
+        assert_eq!(banded(true), banded(false), "and still is beside a lake with a bad vertex");
     }
 
     /// A tilted view's water is darker along its shore too, in the drape's bands and drawn whole,
