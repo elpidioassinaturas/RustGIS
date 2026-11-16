@@ -78,6 +78,7 @@ pub const CAPABILITIES: &[&str] = &[
     "field-origin",
     "slope-percent",
     "shaded-relief-light",
+    "table-export-order",
 ];
 /// The most entries a document's `requires` may list: past it the document is refused without
 /// the rest being read.

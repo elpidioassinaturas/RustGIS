@@ -100,7 +100,9 @@ features present in the saved payload: `terrain-block`, `terrain-water`,
 `shaded-relief-effects` (cast shadows, sky visibility, fill light or rock colour),
 `shaded-relief-light` (a Shaded Relief's ambient or balanced light) and
 `normalized-legend-urls` for normalized legend addresses. Project
-requirements include offline map snapshots. Earlier format-2 readers refuse unknown required
+requirements include offline map snapshots. `table-export-order` protects saved task commands,
+command notebook cells and replayable history using Export Table sort or limit options.
+Earlier format-2 readers refuse unknown required
 capabilities instead of opening and later saving away those settings; legacy format-1 files
 still open.
 

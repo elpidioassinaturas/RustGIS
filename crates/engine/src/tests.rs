@@ -583,6 +583,114 @@ fn standalone_tables_keep_their_ids_in_the_project_file() {
     assert_eq!(s.table_standalone, None);
 }
 
+/// Export the ranked table itself, preserving ties and the source table; options are validated
+/// before writing. A Summary Statistics result follows the same standalone-table path.
+#[test]
+fn table_export_sorts_stably_and_keeps_the_first_rows() {
+    use rustgis_data::{Dataset, Field, FieldType, GeometryType, Value as Cell};
+    let mut s = world();
+    let mut ds =
+        Dataset::new("ranked", GeometryType::None, vec![Field::new("label", FieldType::Text), Field::new("score", FieldType::Integer)]);
+    for (label, score) in [("z", Some(2)), ("b", None), ("c", Some(10)), ("a", Some(10)), ("d", Some(-1))] {
+        ds.push(None, vec![Cell::Text(label.into()), score.map(Cell::Int).unwrap_or(Cell::Null)]);
+    }
+    let original = ds.clone();
+    let table = s.project.add_table(ds);
+    let dir = std::env::temp_dir().join(format!("rustgis-table-order-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut export = |file: &str, sort: Value, limit: Value, expected: &[&str], omitted: Option<usize>| {
+        let path = dir.join(file);
+        let mark = s.notice_mark();
+        s.run("share.exportTable", &json!({"table": table, "path": path, "sort": sort, "limit": limit})).unwrap();
+        let csv = std::fs::read_to_string(path).unwrap();
+        let labels: Vec<_> = csv.lines().skip(1).map(|line| line.split(',').next().unwrap()).collect();
+        assert_eq!(labels, expected, "{file}: {csv}");
+        let notices: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.contains("requested limit")).collect();
+        if let Some(n) = omitted {
+            assert_eq!(notices.len(), 1);
+            assert!(notices[0].text.contains(&format!("{n} row(s)")));
+        } else {
+            assert!(notices.is_empty());
+        }
+        assert_eq!(s.project.table(table).unwrap().dataset, original);
+    };
+    let number = json!([{"field": "score", "descending": true}]);
+    export("desc.csv", number.clone(), Value::Null, &["c", "a", "z", "d", "b"], None);
+    export("top.csv", number.clone(), json!(1), &["c"], Some(4));
+    export("text.csv", json!([{"field": "label"}]), Value::Null, &["a", "b", "c", "d", "z"], None);
+    export("asc.csv", json!([{"field": "score"}]), Value::Null, &["d", "z", "c", "a", "b"], None);
+    export("multi.csv", json!([{"field": "score", "descending": true}, {"field": "label"}]), json!(20), &["a", "c", "z", "d", "b"], None);
+    export("default.csv", Value::Null, Value::Null, &["z", "b", "c", "a", "d"], None);
+    export("first.csv", Value::Null, json!(2), &["z", "b"], Some(3));
+    export("empty.csv", number, json!(0), &[], Some(5));
+    for bad in [
+        json!({"sort": [{"field": "missing"}]}),
+        json!({"sort": "score"}),
+        json!({"sort": [{}]}),
+        json!({"sort": [{"field": "score", "descending": "yes"}]}),
+        json!({"limit": -1}),
+        json!({"limit": 1.5}),
+        json!({"limit": "2"}),
+    ] {
+        let path = dir.join("refused.csv");
+        let mut params = bad.clone();
+        params["table"] = json!(table);
+        params["path"] = json!(path);
+        let error = s.run("share.exportTable", &params).unwrap_err();
+        if bad["sort"][0]["field"] == "missing" {
+            assert!(error.contains("no field named 'missing'"), "{error}");
+        }
+        assert!(!path.exists(), "invalid options must not write: {bad}");
+    }
+    s.run(
+        "gp.run",
+        &json!({"tool": "summaryStatistics", "params": {
+            "input": "ranked", "case": ["label"], "statistics": [{"field": "score", "statistic": "SUM"}],
+        }}),
+    )
+    .unwrap();
+    let stats = s.project.tables.last().unwrap().id;
+    let path = dir.join("summary.csv");
+    s.run("share.exportTable", &json!({"table": stats, "path": path, "sort": [{"field": "SUM_score", "descending": true}], "limit": 2}))
+        .unwrap();
+    let csv = std::fs::read_to_string(path).unwrap();
+    assert_eq!(csv.lines().skip(1).map(|line| line.split(',').next().unwrap()).collect::<Vec<_>>(), ["a", "c"]);
+    // The writer turns nonfinite numbers into blank cells; they must sort alongside nulls,
+    // including stable ties between all four forms, and never displace the largest finite row.
+    let mut ds =
+        Dataset::new("nonfinite", GeometryType::None, vec![Field::new("label", FieldType::Text), Field::new("score", FieldType::Double)]);
+    for (label, score) in [
+        ("nan", Cell::Float(f64::NAN)),
+        ("high", Cell::Int(9)),
+        ("inf", Cell::Float(f64::INFINITY)),
+        ("null", Cell::Null),
+        ("low", Cell::Float(-2.5)),
+        ("neg-inf", Cell::Float(f64::NEG_INFINITY)),
+    ] {
+        ds.push(None, vec![Cell::Text(label.into()), score]);
+    }
+    let table = s.project.add_table(ds);
+    for (descending, want) in
+        [(true, vec!["high", "low", "nan", "inf", "null", "neg-inf"]), (false, vec!["low", "high", "nan", "inf", "null", "neg-inf"])]
+    {
+        let path = dir.join(format!("nonfinite-{descending}.geojson"));
+        let mark = s.notice_mark();
+        s.run("share.exportTable", &json!({"table": table, "path": path, "sort": [{"field":"score", "descending":descending}]})).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let rows = written["features"].as_array().unwrap();
+        assert_eq!(rows.iter().map(|row| row["properties"]["label"].as_str().unwrap()).collect::<Vec<_>>(), want);
+        assert!(rows.iter().skip(2).all(|row| row["properties"]["score"].is_null()), "{written}");
+        assert!(s.notices_since(mark).iter().any(|n| n.text.contains("3") && n.text.contains("null")));
+    }
+    let path = dir.join("finite-top.geojson");
+    let mark = s.notice_mark();
+    s.run("share.exportTable", &json!({"table":table,"path":path,"sort":[{"field":"score","descending":true}],"limit":1})).unwrap();
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(written["features"][0]["properties"]["label"], "high");
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("written as null")));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn select_symbolize_undo_redo() {
     let mut s = world();
@@ -20669,6 +20777,55 @@ fn arcgis_features_read_past_the_record_limit() {
             at("/1/query", None)
         ]
     );
+}
+
+/// `layer.addUrl` with `"service": true` and no app to leave it to (the CLI, a script, a task)
+/// reads an ArcGIS query as `service.add` does: its description, then its pages from the start,
+/// not its first answer cut at the record limit; the layer is known by the address and drawn as
+/// the description says (#1144).
+#[test]
+fn a_service_query_added_by_address_is_read_in_pages_without_the_app() {
+    use ogc_server::{Route, Server, arcgis_page};
+    let q = "where=1%3D1&outFields=*&returnGeometry=true&outSR=4326&f=geojson";
+    let blocks = "/arcgis/rest/services/B/MapServer/0";
+    let page = |offset: u32| format!("{blocks}/query?{q}&resultOffset={offset}&resultRecordCount=2&orderByFields=OBJECTID");
+    let square = json!({"type": "esriSMS", "style": "esriSMSSquare", "color": [230, 0, 0, 255], "size": 10});
+    let described = json!({"currentVersion": 11.5, "maxRecordCount": 2, "advancedQueryCapabilities": {"supportsPagination": true},
+        "fields": [{"name": "OBJECTID", "type": "esriFieldTypeOID"}], "drawingInfo": {"renderer": {"type": "simple", "symbol": square}}})
+    .to_string();
+    let server = Server::new(vec![
+        // The query as it is: its first answer, cut at the record limit (never asked for).
+        Route::new(&format!("{blocks}/query?{q}"), &arcgis_page(&[3, 0], true)),
+        Route::new(blocks, &described),
+        Route::new(&page(0), &arcgis_page(&[0, 1], true)),
+        Route::new(&page(2), &arcgis_page(&[2, 3], true)),
+        Route::new(&page(4), &arcgis_page(&[4], false)),
+    ]);
+    let url = format!("{}{blocks}/query?{q}", server.base);
+    let mut s = Session::new(Project::default());
+    s.run("layer.addUrl", &json!({"url": url, "name": "Blocks", "service": true})).unwrap();
+    let layer = s.map().layer_by_name("Blocks").unwrap();
+    let ids: Vec<_> = layer.dataset.features.iter().map(|f| f.attrs[0].as_f64()).collect();
+    assert_eq!(ids, [Some(0.0), Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
+    assert_eq!(layer.dataset.source.as_deref(), Some(url.as_str()));
+    let rustgis_map::Renderer::Single(sym) = layer.renderer else { panic!("{:?}", layer.renderer) };
+    assert_eq!((sym.marker, sym.fill), (rustgis_map::symbology::Marker::Square, rustgis_map::Rgba::rgb(230, 0, 0)));
+    let texts: Vec<_> = s.notices.iter().map(|n| n.text.as_str()).collect();
+    assert!(!texts.iter().any(|t| t.contains("record limit") || t.contains("aren't read")), "{texts:?}");
+    // Bounds that aren't a geographic rectangle are refused before anything is fetched, as when the
+    // app adds the download.
+    let e = s.run("layer.addUrl", &json!({"url": url, "name": "Bad", "service": true, "bounds": [10, 0, 5, 1]})).unwrap_err();
+    assert!(e.contains("bounds must be"), "{e}");
+    assert!(s.map().layer_by_name("Bad").is_none());
+    let asked: Vec<_> = server
+        .requests()
+        .iter()
+        .map(|r| {
+            let offset = r.query.iter().find(|(k, _)| k == "resultOffset").map(|(_, v)| v.clone()).unwrap_or_default();
+            format!("{} {offset}", r.path.trim_start_matches(blocks))
+        })
+        .collect();
+    assert_eq!(asked, [" ", "/query 0", "/query 2", "/query 4"]);
 }
 
 /// A where clause is encoded as one query value, combined with the area and kept by every
@@ -43982,6 +44139,7 @@ fn exports_run_on_another_thread() {
     let dir = std::env::temp_dir().join(format!("rustgis-exports-thread-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let at = |name: &str| dir.join(name).display().to_string();
+    s.run("layer.addDataText", &json!({"fileName": "ranks.csv", "text": "name,score\na,1\nb,3\nc,3\n"})).unwrap();
     s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
     for (command, file, p) in [
         ("data.convert", "converted.geojson", json!({"layer": "Cities", "format": "geojson"})),
@@ -43990,6 +44148,7 @@ fn exports_run_on_another_thread() {
         ("layout.export", "layout.png", json!({"dpi": 48})),
         ("layout.export", "layout.pdf", json!({"dpi": 48})),
         ("layout.export", "layout.svg", json!({"dpi": 48})),
+        ("share.exportTable", "ranks.csv", json!({"table": "ranks", "sort": [{"field": "score", "descending": true}], "limit": 2})),
         ("share.exportLayer", "countries.geojson", json!({"layer": "Countries"})),
         ("share.exportLayer", "countries.shp", json!({"layer": "Countries"})),
         ("share.exportLayer", "countries.gpkg", json!({"layer": "Countries", "crs": "EPSG:3857"})),
@@ -47366,6 +47525,8 @@ fn cancel_world(dir: &std::path::Path) -> (Session, String) {
     s.run("layer.addData", &json!({"path": out("towns.shp"), "name": "towns"})).unwrap();
     s.run("edit.setValue", &json!({"layer": "towns", "row": 0, "field": "name", "value": "Renamed"})).unwrap();
     s.run("report.new", &json!({"layer": "Cities"})).unwrap();
+    // A standalone table to export ranked and limited.
+    s.run("layer.addDataText", &json!({"fileName": "ranks.csv", "text": "name,score\na,1\nb,3\n"})).unwrap();
     (s, dem)
 }
 
@@ -47406,6 +47567,10 @@ fn cancel_exports(out: &dyn Fn(&str) -> String, dem: &str) -> Vec<(&'static str,
     vec![
         ("data.convert", json!({"layer": "Cities", "format": "geojson", "path": out("converted.geojson")})),
         ("share.exportLayer", json!({"layer": "Cities", "path": out("cities.geojson")})),
+        (
+            "share.exportTable",
+            json!({"table": "ranks", "path": out("ranks.csv"), "sort": [{"field": "score", "descending": true}], "limit": 1}),
+        ),
         ("share.exportRaster", json!({"layer": dem, "path": out("dem.tif")})),
         ("share.exportMap", json!({"path": out("map.png"), "width": 320, "height": 200})),
         ("map.exportOrbit", json!({"path": out("orbit.zip"), "frames": 3, "width": 96, "height": 64})),
@@ -47418,7 +47583,7 @@ fn cancel_exports(out: &dyn Fn(&str) -> String, dem: &str) -> Vec<(&'static str,
 /// The tools whose work grows past a second or two on real data: buffers, overlays, joins, hulls,
 /// densities and interpolation. A new long tool is added here (AGENTS.md › Never hold the window).
 #[cfg(not(target_arch = "wasm32"))]
-fn cancel_tools() -> Vec<(&'static str, Value)> {
+fn cancel_tools(dem: &str) -> Vec<(&'static str, Value)> {
     vec![
         ("buffer", json!({"input": "Cities", "distance": 100})),
         ("dissolve", json!({"input": "Countries"})),
@@ -47437,6 +47602,7 @@ fn cancel_tools() -> Vec<(&'static str, Value)> {
         ("convexHull", json!({"input": "Countries", "group": "All", "output": "Hulls_all"})),
         ("kernelDensity", json!({"input": "Cities", "crs": "EPSG:3857"})),
         ("kriging", json!({"input": "Cities", "field": "pop_max"})),
+        ("tabulateArea", json!({"raster": dem, "zones": "Countries"})),
     ]
 }
 
@@ -47551,7 +47717,7 @@ fn long_commands_stop_when_cancelled_while_they_run() {
     note("layer.repairSource", read.run(&control).map(|_| ()), &control);
     std::fs::remove_file(replacement).unwrap();
 
-    let tools = cancel_tools();
+    let tools = cancel_tools(&dem);
     for (tool, params) in &tools {
         // The parameters are good: a run that isn't cancelled succeeds.
         s.run("gp.run", &json!({"tool": tool, "params": params})).unwrap_or_else(|e| panic!("{tool}: {e}"));
@@ -47673,7 +47839,10 @@ fn cancelling_at_each_check_leaves_nothing_behind() {
                     while s.undo_depth() > before.1 {
                         s.undo();
                     }
-                    if state(s) != before {
+                    let mut after = state(s);
+                    // Table ids are never reused: undo keeps the counter (see the standalone-table removal regression).
+                    after.0["next_table_id"] = before.0["next_table_id"].clone();
+                    if after != before {
                         problems.push(format!("{what}, look {n} of {total}: undoing the run again doesn't give the project back"));
                     }
                 }
@@ -47710,7 +47879,7 @@ fn cancelling_at_each_check_leaves_nothing_behind() {
         };
         sweep(&mut s, command, false, command == "source.publish", &attempt);
     }
-    for (tool, params) in cancel_tools() {
+    for (tool, params) in cancel_tools(&dem) {
         let attempt = |s: &mut Session, control: &Arc<Control>| {
             let run = crate::cmd::gp::tool_start(s, tool, &params)?;
             let id = run.id;
@@ -49419,8 +49588,9 @@ fn an_imported_name_cut_to_fit_its_number_says_it_came_from_the_file() {
     }
 }
 
-/// Serves each file by its path (others are 404) with byte ranges (`bytes=a-b`, `bytes=-n`)
-/// answered 206, keeping each request's path and range (empty for a whole file).
+/// Serves each file by its path (others are 404, or 403 as S3 answers when a file `/!403` is
+/// listed) with byte ranges (`bytes=a-b`, `bytes=-n`) answered 206, keeping each request's path
+/// and range (empty for a whole file).
 #[cfg(not(target_arch = "wasm32"))]
 fn serve_ranged_files(files: Vec<(String, Vec<u8>)>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>) {
     use std::io::{Read, Write};
@@ -49447,7 +49617,8 @@ fn serve_ranged_files(files: Vec<(String, Vec<u8>)>) -> (String, std::sync::Arc<
                 let range = req.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(|r| r.trim().to_string()));
                 log.lock().unwrap().push((path.clone(), range.clone().unwrap_or_default()));
                 let Some((_, body)) = files.iter().find(|(p, _)| *p == path) else {
-                    let _ = write!(s, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    let missing = if files.iter().any(|(p, _)| p == "/!403") { "403 Forbidden" } else { "404 Not Found" };
+                    let _ = write!(s, "HTTP/1.1 {missing}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     return;
                 };
                 let (status, part) = match range.as_deref().and_then(|r| r.split_once('-')) {
@@ -49641,6 +49812,85 @@ fn a_zarr_box_on_a_spatial_transform_reads_no_coordinates() {
     let asked: Vec<String> = log.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
     assert!(asked.iter().all(|p| !p.starts_with("/s.zarr/v/") || p == "/s.zarr/v/c/0/0/0" || p == "/s.zarr/v/c/0/0/1"), "{asked:?}");
     assert!(asked.iter().all(|p| !p.starts_with("/s.zarr/x") && !p.starts_with("/s.zarr/y")), "{asked:?}");
+}
+
+/// A web store whose root lists no arrays (no consolidated metadata), as the AlphaEarth mosaic
+/// (#1720): its variable is found by name, and its `time` of whole years is a time axis, so the
+/// series at a point is read by year.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_store_without_consolidated_metadata_is_read_by_its_variables_name() {
+    // `emb` (time 3, y 4, x 6; int8, `10·step + row`) in one chunk per step, placed by the root's
+    // transform: 0.5° cells from (-43°, -20°).
+    let bytes = json!([{"name": "bytes", "configuration": {"endian": "little"}}]);
+    let emb = json!({"zarr_format": 3, "node_type": "array", "shape": [3, 4, 6], "data_type": "int8",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 4, 6]}}, "codecs": bytes, "fill_value": -128,
+        "dimension_names": ["time", "y", "x"]});
+    let time = json!({"zarr_format": 3, "node_type": "array", "shape": [3], "data_type": "int32",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [3]}}, "codecs": bytes, "fill_value": 0,
+        "dimension_names": ["time"]});
+    let root = json!({"zarr_format": 3, "node_type": "group", "attributes": {"proj:code": "EPSG:4326",
+        "spatial:dimensions": ["y", "x"], "spatial:transform": [0.5, 0.0, -43.0, 0.0, -0.5, -20.0], "spatial:shape": [4, 6]}});
+    let mut files = vec![
+        ("/s.zarr/zarr.json".to_string(), root.to_string().into_bytes()),
+        ("/s.zarr/emb/zarr.json".to_string(), emb.to_string().into_bytes()),
+        ("/s.zarr/time/zarr.json".to_string(), time.to_string().into_bytes()),
+        ("/s.zarr/time/c/0".to_string(), [2017i32, 2018, 2025].iter().flat_map(|y| y.to_le_bytes()).collect()),
+    ];
+    for t in 0..3u8 {
+        files.push((format!("/s.zarr/emb/c/{t}/0/0"), (0..4u8).flat_map(|r| [10 * t + r; 6]).collect()));
+    }
+    let (base, log) = serve_ranged_files(files.clone());
+    let url = format!("{base}/s.zarr");
+    let mut s = Session::new(Project::default());
+    // With no variable, the store's arrays can't be listed, and that is said.
+    let e = s.run("raster.zarrInfo", &json!({"url": url})).unwrap_err();
+    assert!(e.contains("no consolidated metadata") && e.contains("\"variable\""), "{e}");
+    let info = s.run("raster.zarrInfo", &json!({"url": url, "variable": "emb"})).unwrap();
+    assert_eq!(info["variables"][0]["name"], "emb", "{info}");
+    assert_eq!(info["variables"][0]["dims"][0]["labels"], json!(["2017", "2018", "2025"]), "{info}");
+    // A variable that isn't there is said, not answered with an empty list.
+    let e = s.run("raster.zarrInfo", &json!({"url": url, "variable": "emv"})).unwrap_err();
+    assert!(e.contains("no array named emv"), "{e}");
+    // At 42.2°W 20.8°S: row 1, so 10·step + 1 by year.
+    let r = s.run("zarr.series", &json!({"url": url, "variable": "emb", "lon": -42.2, "lat": -20.8})).unwrap();
+    assert_eq!(r["values"], json!([1.0, 11.0, 21.0]), "{r}");
+    assert_eq!(r["dates"].as_array().map(Vec::len), Some(3), "{r}");
+    assert!(r["labels"][0].as_str().is_some_and(|l| l.starts_with("2017-01-01")), "{r}");
+    // The missing coordinates are asked for once in each of the three store reads (zarrInfo with
+    // emb, with emv, then zarr.series).
+    let asked: Vec<String> = log.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+    assert_eq!(asked.iter().filter(|p| p.as_str() == "/s.zarr/y/zarr.json").count(), 3, "one store read per command: {asked:?}");
+
+    // A nested g/emb (50 + 10·step + row) read first doesn't stand in for the root's emb in the
+    // run's store cache.
+    let mut nested = files.clone();
+    nested.push(("/s.zarr/g/emb/zarr.json".to_string(), emb.to_string().into_bytes()));
+    for t in 0..3u8 {
+        nested.push((format!("/s.zarr/g/emb/c/{t}/0/0"), (0..4u8).flat_map(|r| [50 + 10 * t + r; 6]).collect()));
+    }
+    let (base, _) = serve_ranged_files(nested);
+    let at = |v: &str| json!({"url": format!("{base}/s.zarr"), "variable": v, "lon": -42.2, "lat": -20.8});
+    assert_eq!(s.run("zarr.series", &at("g/emb")).unwrap()["values"], json!([51.0, 61.0, 71.0]));
+    assert_eq!(s.run("zarr.series", &at("emb")).unwrap()["values"], json!([1.0, 11.0, 21.0]));
+
+    // A host answering 403 for files that don't exist (S3 without listing): the missing
+    // coordinates aren't taken for access denied, but a missing variable is.
+    files.push(("/!403".to_string(), Vec::new()));
+    let (base, _) = serve_ranged_files(files.clone());
+    let url = format!("{base}/s.zarr");
+    let info = s.run("raster.zarrInfo", &json!({"url": url, "variable": "emb"})).unwrap();
+    assert_eq!(info["variables"][0]["dims"][0]["labels"], json!(["2017", "2018", "2025"]), "{info}");
+    let e = s.run("raster.zarrInfo", &json!({"url": url, "variable": "nothing"})).unwrap_err();
+    assert!(e.contains("access denied"), "{e}");
+    // With no coordinate stored at all, every round after the variable's gets only 403s: the
+    // variable is still read, with no labels.
+    files.retain(|(p, _)| !p.starts_with("/s.zarr/time/"));
+    let (base, _) = serve_ranged_files(files);
+    let url = format!("{base}/s.zarr");
+    let info = s.run("raster.zarrInfo", &json!({"url": url, "variable": "emb"})).unwrap();
+    assert_eq!(info["variables"][0]["name"], "emb", "{info}");
+    assert!(info["variables"][0]["dims"][0].get("labels").is_none(), "{info}");
 }
 
 /// `layer.rename` refuses a name over 200 characters (once trimmed) rather than cutting it
@@ -50726,6 +50976,36 @@ fn convert_field_uses_explicit_date_formats() {
     }
 }
 
+/// County-export clocks retain their wall time, with invalid hours counted and undoable.
+#[test]
+fn convert_field_reads_county_permit_dates_and_counts_bad_hours() {
+    use rustgis_data::FieldType;
+    let mut s = Session::new(Project::default());
+    let bad = "6/23/2021 13:00:00 PM";
+    let csv = format!("issued\n6/23/2021 5:00:00 AM\n6/23/2021 12:30:00 AM\n6/23/2021 12:00:00 PM\n{bad}\n");
+    s.run("layer.addDataText", &json!({"fileName":"permits.csv", "text":csv})).unwrap();
+    let params = json!({"table":"permits", "field":"issued", "type":"datetime", "format":"%-m/%-d/%Y %I:%M:%S %p"});
+    let before = s.project.tables[0].dataset.clone();
+    let mark = s.notice_mark();
+    assert_eq!(s.run("edit.convertField", &params).unwrap(), json!({"converted":3, "null":1}));
+    let ds = &s.project.tables[0].dataset;
+    assert_eq!(ds.fields[0].ty, FieldType::DateTime);
+    for (row, expected) in ["2021-06-23T05:00:00", "2021-06-23T00:30:00", "2021-06-23T12:00:00"].iter().enumerate() {
+        assert_eq!(ds.value(row, 0).to_string(), *expected);
+    }
+    assert!(ds.value(3, 0).is_null());
+    let notices = s.notices_since(mark);
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].text.contains("1 row") && notices[0].text.contains(bad));
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.project.tables[0].dataset, before);
+    s.run("edit.setValue", &json!({"table":"permits", "field":"issued", "row":3, "value":"6/23/2021 1:00:00 pM"})).unwrap();
+    let mark = s.notice_mark();
+    assert_eq!(s.run("edit.convertField", &params).unwrap(), json!({"converted":4, "null":0}));
+    assert_eq!(s.project.tables[0].dataset.value(3, 0).to_string(), "2021-06-23T13:00:00");
+    assert!(s.notices_since(mark).is_empty());
+}
+
 /// Prepared layer and table conversions preserve undo and refuse intervening row edits. This
 /// also guards against consuming a prepared result as the other target's result type.
 #[test]
@@ -50960,4 +51240,90 @@ fn bookmark_layout_map_names_over_their_limit_are_refused() {
     s.run("bookmark.add", &json!({"name": long(120), "description": long(2000)})).unwrap();
     s.run("map.rename", &json!({"name": long(200)})).unwrap();
     assert_eq!(s.map().name.chars().count(), 200);
+}
+/// DBF imports land in the same table path as non-spatial CSV/GPKG, through desktop read-ahead
+/// and uploaded bytes. Picking attributes with a companion SHP still opens the spatial layer.
+#[test]
+fn standalone_dbf_add_data_uses_tables_and_companion_shapefile() {
+    use base64::Engine;
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as Cell};
+    let mut data =
+        Dataset::new("places", GeometryType::Point, vec![Field::new("name", FieldType::Text), Field::new("count", FieldType::Integer)]);
+    data.push_next(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Cell::Text("one".into()), Cell::Int(7)]);
+    data.push_next(Some(Geometry::Point(Coord::new(3.0, 4.0))), vec![Cell::Text("two".into()), Cell::Int(12)]);
+    let (parts, _) = rustgis_data::io::shapefile_parts(&data).unwrap();
+    let dbf = parts.iter().find(|(e, _)| *e == "dbf").unwrap().1.clone();
+    let dir = std::env::temp_dir().join(format!("rustgis-add-dbf-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("places.DBF");
+    std::fs::write(&path, &dbf).unwrap();
+    let p = json!({"path": path});
+    let mut s = Session::new(Project::default());
+    let ahead = crate::cmd::reads::read_ahead(&mut s, "layer.addData", &p).unwrap();
+    assert!(ahead.reads());
+    let control = rustgis_analysis::control::Control::cancelled_once_started();
+    assert!(crate::cmd::reads::read_ahead(&mut s, "layer.addData", &p).unwrap().run(&control).is_err());
+    assert!(control.looked() > 0);
+    let read = ahead.run(&rustgis_analysis::control::Control::new()).unwrap();
+    // A new companion after the read must not turn the prepared table into a layer.
+    let shp = path.with_extension("ShP");
+    let shape_bytes = &parts.iter().find(|(e, _)| *e == "shp").unwrap().1;
+    std::fs::write(&shp, shape_bytes).unwrap();
+    crate::cmd::reads::read_land(&mut s, read).unwrap();
+    std::fs::remove_file(&shp).unwrap();
+    assert!(s.map().layers.is_empty());
+    assert_eq!(s.project.tables.len(), 1);
+    let table = &s.project.tables[0].dataset;
+    assert_eq!(table.features.len(), 2);
+    assert_eq!(table.fields[1].ty, FieldType::Integer);
+    assert_eq!(table.value(1, 1), &Cell::Int(12));
+    let mut uploaded = Session::new(Project::default());
+    uploaded
+        .run("layer.addDataBytes", &json!({"fileName": "places.dbf", "data": base64::engine::general_purpose::STANDARD.encode(&dbf)}))
+        .unwrap();
+    assert_eq!(uploaded.project.tables[0].dataset.features, table.features);
+    let zip = rustgis_data::zip::write(
+        &parts
+            .iter()
+            .map(|(e, b)| (format!("places.{e}"), b.clone()))
+            .chain(std::iter::once(("L_COMM_INFO.dbf".into(), dbf)))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let mut mixed = Session::new(Project::default());
+    mixed
+        .run("layer.addDataBytes", &json!({"fileName": "county.zip", "data": base64::engine::general_purpose::STANDARD.encode(zip)}))
+        .unwrap();
+    assert_eq!(mixed.map().layers.len(), 1);
+    assert_eq!(mixed.project.tables.len(), 1);
+    assert_eq!(mixed.project.tables[0].dataset.name, "L_COMM_INFO");
+    for (ext, bytes) in &parts {
+        std::fs::write(
+            path.with_extension(match *ext {
+                "shp" => "ShP",
+                "dbf" => "DBF",
+                ext => ext,
+            }),
+            bytes,
+        )
+        .unwrap();
+    }
+    // Read-ahead and dispatch must agree on the SHP path, including the streamed route.
+    for stream in [false, true] {
+        let mut paired = Session::new(Project::default());
+        let p = json!({"path": path, "stream": stream});
+        let ahead = crate::cmd::reads::read_ahead(&mut paired, "layer.addData", &p).unwrap();
+        assert_eq!(ahead.reads(), !stream);
+        let read = ahead.run(&rustgis_analysis::control::Control::new()).unwrap();
+        if !stream {
+            std::fs::remove_file(&shp).unwrap();
+        }
+        crate::cmd::reads::read_land(&mut paired, read).unwrap();
+        std::fs::write(&shp, shape_bytes).unwrap();
+        assert_eq!(paired.map().layers.len(), 1);
+        assert!(paired.project.tables.is_empty());
+        assert_eq!(paired.map().layers[0].dataset.geometry_type, GeometryType::Point);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
