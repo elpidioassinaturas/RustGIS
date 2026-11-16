@@ -1060,8 +1060,10 @@
           "normalized-legend-urls",
           "field-origin",
           "slope-percent",
+          "shaded-relief-light",
           "table-export-order",
-          "tabulate-intersection-unit"
+          "tabulate-intersection-unit",
+          "layout-element-background"
         ],
         "type": "string"
       },
@@ -1133,8 +1135,10 @@
     "normalized-legend-urls",
     "field-origin",
     "slope-percent",
+    "shaded-relief-light",
     "table-export-order",
-    "tabulate-intersection-unit"
+    "tabulate-intersection-unit",
+    "layout-element-background"
   ],
   "x-rustgis-reads-format": 2,
   "x-rustgis-writes-format": 2

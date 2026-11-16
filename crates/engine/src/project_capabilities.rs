@@ -49,6 +49,12 @@ impl Project {
         {
             required.push("table-export-order");
         }
+        // Saved layouts as well as saved commands: an older reader keeps neither.
+        if !required.contains(&"layout-element-background")
+            && self.layouts.iter().any(|l| l.elements.iter().any(|e| e.background.is_some()))
+        {
+            required.push("layout-element-background");
+        }
         required
     }
 
@@ -68,8 +74,22 @@ impl Project {
 }
 
 type CommandCheck = fn(&str, &Value) -> bool;
-const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] =
-    &[("slope-percent", command_uses_percent_slope), ("tabulate-intersection-unit", command_uses_tabulate_unit)];
+const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] = &[
+    ("slope-percent", command_uses_percent_slope),
+    ("tabulate-intersection-unit", command_uses_tabulate_unit),
+    ("layout-element-background", command_uses_element_background),
+];
+
+/// A layout command that gives an element a background: an older reader warns that it ignores
+/// the key and makes the element without one. `null` only takes a background away, which an
+/// older reader's elements never have.
+fn command_uses_element_background(id: &str, params: &Value) -> bool {
+    match id {
+        "layout.addElement" | "layout.update" => params.get("background").is_some_and(|b| !b.is_null()),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_element_background)),
+        _ => false,
+    }
+}
 
 /// Require only executable payloads being saved: graph files omit steps, web tools omit graphs.
 pub(crate) fn model_capabilities(steps: &[ModelStep], graph: Option<&ModelGraph>) -> Vec<&'static str> {
@@ -133,8 +153,24 @@ fn relief_effects(layer: &Layer) -> bool {
     })
 }
 
+/// Whether a layer sets Shaded Relief's ambient or balanced light (#1977): newer than
+/// `shaded-relief-effects`, so a reader that knows only that would drop them.
+fn relief_light(layer: &Layer) -> bool {
+    layer.raster.as_ref().is_some_and(
+        |r| matches!(&r.style.renderer, RasterRenderer::ShadedRelief { ambient, balanced, .. } if ambient.is_some() || *balanced),
+    )
+}
+
+/// The renderer capabilities a layer needs, in [`map_capabilities`]'s order.
+fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
+    [(relief_effects(layer), "shaded-relief-effects"), (relief_light(layer), "shaded-relief-light")]
+        .into_iter()
+        .filter_map(|(used, name)| used.then_some(name))
+        .collect()
+}
+
 fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static str> {
-    let (mut block, mut water, mut shore, mut relief, mut legends) = (false, false, false, false, false);
+    let (mut block, mut water, mut shore, mut relief, mut light, mut legends) = (false, false, false, false, false, false);
     for map in maps {
         if let Some(t) = &map.view.terrain {
             block |= t.block.is_some();
@@ -143,6 +179,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
             shore |= t.water.as_ref().is_some_and(|w| w.shore != rustgis_map::view::WATER_SHORE);
         }
         relief |= map.layers.iter().any(relief_effects);
+        light |= map.layers.iter().any(relief_light);
         legends |= map.tiles.iter().any(|tile| {
             tile.legends.iter().any(|legend| rustgis_data::login_address::inner(&legend.url).len() > rustgis_map::tiles::MAX_LEGEND_URL)
         });
@@ -152,6 +189,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         (water, "terrain-water"),
         (shore, "terrain-water-shore"),
         (relief, "shaded-relief-effects"),
+        (light, "shaded-relief-light"),
         (legends, "normalized-legend-urls"),
     ]
     .into_iter()
@@ -175,8 +213,7 @@ pub(crate) fn map_file_bytes(map: &Map) -> Result<Vec<u8>, String> {
 
 /// A layer file keeps the same renderer capabilities as the layer saved inside a project.
 pub(crate) fn layer_file_bytes(layer: &Layer) -> Result<Vec<u8>, String> {
-    let requires = if relief_effects(layer) { vec!["shaded-relief-effects"] } else { Vec::new() };
-    serde_json::to_vec(&Item { format: FORMAT, requires, value: layer }).map_err(|e| e.to_string())
+    serde_json::to_vec(&Item { format: FORMAT, requires: layer_capabilities(layer), value: layer }).map_err(|e| e.to_string())
 }
 
 /// Only executable export options require the capability, not fields in unrelated data.
@@ -333,6 +370,62 @@ mod tests {
         assert!(serde_json::to_value(&project).unwrap().get("requires").is_none());
     }
 
+    /// A layout element's background is required where it is saved, so an older reader refuses
+    /// the project instead of opening it and saving it again without the background.
+    #[test]
+    fn element_background_capability_follows_saved_layouts() {
+        let fixture = Project::from_json(include_str!("../../../schema/fixtures/layout_element_background.rgis")).unwrap();
+        let saved = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(saved["requires"], json!(["layout-element-background"]));
+        let reopened = Project::from_json(&saved.to_string()).unwrap();
+        let backgrounds = |p: &Project| p.layouts[0].elements.iter().map(|e| e.background).collect::<Vec<_>>();
+        assert_eq!(backgrounds(&reopened), backgrounds(&fixture));
+        assert!(backgrounds(&fixture)[1].is_some_and(|b| b.padding == 1.5));
+        let mut clean = fixture;
+        for e in &mut clean.layouts[0].elements {
+            e.background = None;
+        }
+        assert!(serde_json::to_value(&clean).unwrap().get("requires").is_none());
+        // A saved command that gives an element a background needs it too; one that takes it
+        // away or sets none doesn't.
+        let base = serde_json::to_value(&clean).unwrap();
+        for (background, required) in
+            [(Some(json!({"fill": "#FFFFFF"})), true), (Some(json!({})), true), (Some(Value::Null), false), (None, false)]
+        {
+            let mut params = json!({"element": 2, "x": 5});
+            if let Some(b) = background {
+                params["background"] = b;
+            }
+            let script = format!("# Panel\nlayout.update= {params}");
+            for (field, value) in [
+                ("tasks", json!([{"name": "Task", "steps": [{"title": "Panel", "command": "layout.update", "params": params}]}])),
+                (
+                    "tasks",
+                    json!([{"name": "Script", "steps": [{"title": "Panel", "command": "script.run", "params": {"script": script}}]}]),
+                ),
+                ("notebooks", json!([{"name": "Notebook", "cells": [{"kind": "code", "source": script}]}])),
+                (
+                    "gp_history",
+                    json!([{"tool": "Panel", "params": {}, "command": ["layout.addElement", params], "ok": true, "messages": [], "millis": 0}]),
+                ),
+            ] {
+                let mut document = base.clone();
+                document[field] = value;
+                let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+                if required {
+                    assert_eq!(saved["requires"], json!(["layout-element-background"]), "{field} {params}");
+                } else {
+                    assert!(saved.get("requires").is_none(), "{field} {params}");
+                }
+            }
+        }
+        // Both a saved background and a saved command: listed once.
+        let mut both = saved.clone();
+        both["tasks"] = json!([{"name": "Task", "steps": [{"title": "Panel", "command": "layout.update", "params": {"element": 2, "background": {}}}]}]);
+        let saved = serde_json::to_value(Project::from_json(&both.to_string()).unwrap()).unwrap();
+        assert_eq!(saved["requires"], json!(["layout-element-background"]));
+    }
+
     #[test]
     fn field_identity_is_preserved_and_required_in_a_plain_saved_project() {
         let project = Project::from_json(include_str!("../../../schema/fixtures/field_origin.rgis")).unwrap();
@@ -419,10 +512,13 @@ mod tests {
         }))
         .unwrap();
         let clean = Layer::new_raster(1, "DEM", raster);
-        for field in ["shadow", "sky", "fill", "rock"] {
+        for field in ["shadow", "sky", "fill", "rock", "ambient", "balanced"] {
             let mut value = serde_json::to_value(&clean).unwrap();
-            value["raster"]["style"]["renderer"]["ShadedRelief"][field] =
-                if field == "rock" { serde_json::to_value(rustgis_map::raster::Rock::DEFAULT).unwrap() } else { json!(0.4) };
+            value["raster"]["style"]["renderer"]["ShadedRelief"][field] = match field {
+                "rock" => serde_json::to_value(rustgis_map::raster::Rock::DEFAULT).unwrap(),
+                "balanced" => json!(true),
+                _ => json!(0.4),
+            };
             let layer: Layer = serde_json::from_value(value).unwrap();
             let mut p = Project::new("Relief");
             p.maps[0].layers.push(layer.clone());
@@ -431,7 +527,8 @@ mod tests {
                 json_bytes(&map_file_bytes(p.map()).unwrap()),
                 json_bytes(&layer_file_bytes(&layer).unwrap()),
             ] {
-                assert_eq!(document["requires"], json!(["shaded-relief-effects"]), "{field}: {document}");
+                let needs = if matches!(field, "ambient" | "balanced") { "shaded-relief-light" } else { "shaded-relief-effects" };
+                assert_eq!(document["requires"], json!([needs]), "{field}: {document}");
             }
         }
         assert!(json_bytes(&layer_file_bytes(&clean).unwrap()).get("requires").is_none());
