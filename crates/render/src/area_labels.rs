@@ -21,14 +21,28 @@ use crate::line_labels::{self, Line};
 /// to work out per frame for the polygons labelled in view.
 pub(super) const MAX_SIDE: usize = 160;
 
-/// The most outline vertices read: more are dropped evenly, as finer detail than a cell is lost
-/// on the grid anyway.
+/// About the most outline vertices projected: more are dropped evenly, as finer detail than a cell
+/// is lost on the grid anyway. A ring keeps at least three points and its shape, so many small
+/// rings (a multipolygon's islands, holes) can keep more than this.
 const MAX_VERTICES: usize = 20_000;
 
-/// Every `every`th point of `ring`, but at least three of it, so a small hole or island next to a
-/// long outline keeps its place (#2295).
-fn thin<T: Copy>(ring: &[T], every: usize) -> impl Iterator<Item = T> + '_ {
-    ring.iter().step_by(every.min(ring.len() / 3).max(1)).copied()
+/// Every `every`th point of `ring` (at `xy`), but at least three of it, so a small hole or island
+/// next to a long outline keeps its place, and fewer dropped while that would lose half its area,
+/// so a ring dense along one side is not left a line with no inside (#2295).
+fn thin<T: Copy>(ring: &[T], every: usize, xy: impl Fn(&T) -> (f64, f64)) -> Vec<T> {
+    let area = |step: usize| {
+        let points: Vec<(f64, f64)> = ring.iter().step_by(step).map(&xy).collect();
+        let twice: f64 = points.iter().zip(points.iter().cycle().skip(1)).map(|(a, b)| a.0 * b.1 - b.0 * a.1).sum();
+        twice.abs() / 2.0
+    };
+    let mut step = every.min(ring.len() / 3).max(1);
+    if step > 1 {
+        let whole = area(1);
+        while step > 1 && area(step) < whole / 2.0 {
+            step /= 2;
+        }
+    }
+    ring.iter().step_by(step).copied().collect()
 }
 
 /// How many points of `n` outline points [`thin`] keeps one of.
@@ -120,7 +134,12 @@ pub(super) fn centre_line(rings: &[Vec<(f32, f32)>], w: f32, h: f32, half_width:
     let every = every(rings.iter().map(Vec::len).sum());
     let rings: Vec<Vec<(f32, f32)>> = rings
         .iter()
-        .map(|r| thin(r, every).filter(|p| p.0.is_finite() && p.1.is_finite()).collect::<Vec<_>>())
+        .map(|r| {
+            thin(r, every, |p| (f64::from(p.0), f64::from(p.1)))
+                .into_iter()
+                .filter(|p| p.0.is_finite() && p.1.is_finite())
+                .collect::<Vec<_>>()
+        })
         .filter(|r| r.len() >= 3)
         .collect();
     // The polygon's extent in view.
@@ -166,7 +185,7 @@ pub(super) fn centre_line(rings: &[Vec<(f32, f32)>], w: f32, h: f32, half_width:
             }
         }
     }
-    // Distance to the outline, two passes (3–4 chamfer, in cells).
+    // Distance to the outline, two passes (a chamfer with steps 1 and √2, in cells).
     let grid_steps = |i: usize, forward: bool| -> [(Option<usize>, f32); 4] {
         let (x, y) = (i % nx, i / nx);
         let at = |dx: isize, dy: isize| {
@@ -245,8 +264,8 @@ pub(super) fn centre_line(rings: &[Vec<(f32, f32)>], w: f32, h: f32, half_width:
 /// placed as `Auto`.
 ///
 /// It works per frame, for each polygon labelled this way with its label point in view, and looks at
-/// no Cancel: a step bounded by the outline's points near the view (projected once, at most
-/// [`MAX_VERTICES`] read) and a grid of at most [`MAX_SIDE`] + 2 cells a side, walked three times.
+/// no Cancel: a step bounded by the outline's points near the view (each read once or a few times
+/// to thin it, about [`MAX_VERTICES`] projected) and a grid of at most [`MAX_SIDE`] + 2 cells a side, walked three times.
 pub(super) fn glyphs(
     ctx: &super::Ctx<'_>,
     polys: &[Vec<Vec<Coord>>],
@@ -281,7 +300,12 @@ fn curved(
     let every = every(near.iter().map(|r| r.len()).sum());
     let rings: Vec<Vec<(f32, f32)>> = near
         .into_iter()
-        .map(|ring| thin(ring, every).map(|c| ctx.screen(c).map(|(x, y)| (x as f32, y as f32))).collect::<Option<Vec<_>>>())
+        .map(|ring| {
+            thin(ring, every, |c| (c.x, c.y))
+                .into_iter()
+                .map(|c| ctx.screen(c).map(|(x, y)| (x as f32, y as f32)))
+                .collect::<Option<Vec<_>>>()
+        })
         .collect::<Option<_>>()?;
     let len = line_labels::curved_len(advances, gap);
     // Too small on the screen for the text: no grid worked out.
@@ -397,6 +421,23 @@ mod tests {
         outer.extend((0..n).map(|i| (600.0 - i as f32 * 600.0 / n as f32, 100.0)));
         outer.extend((0..n).map(|i| (0.0, 100.0 - i as f32 * 100.0 / n as f32)));
         let hole = vec![(50.0, 10.0), (550.0, 10.0), (550.0, 50.0), (50.0, 50.0), (50.0, 10.0)];
+        let line = centre_line(&[outer, hole], 1000.0, 1000.0, 4.0).expect("below the hole");
+        assert!(line.iter().filter(|p| (100.0..500.0).contains(&p.0)).all(|p| p.1 > 55.0), "{line:?}");
+    }
+
+    /// A hole dense along one side keeps its shape when thinned: points taken from that side alone
+    /// would leave it a line with no inside, and the line through it.
+    #[test]
+    fn a_hole_dense_along_one_side_keeps_its_shape() {
+        // 100 000 points round a 600 × 100 rectangle (one point in five read), and a hole across
+        // its upper half with eleven points along its top side.
+        let n = 25_000;
+        let mut outer: Vec<(f32, f32)> = (0..n).map(|i| (i as f32 * 600.0 / n as f32, 0.0)).collect();
+        outer.extend((0..n).map(|i| (600.0, i as f32 * 100.0 / n as f32)));
+        outer.extend((0..n).map(|i| (600.0 - i as f32 * 600.0 / n as f32, 100.0)));
+        outer.extend((0..n).map(|i| (0.0, 100.0 - i as f32 * 100.0 / n as f32)));
+        let mut hole: Vec<(f32, f32)> = (0..=10).map(|i| (50.0 + i as f32 * 50.0, 10.0)).collect();
+        hole.extend([(550.0, 50.0), (300.0, 50.0), (50.0, 50.0), (50.0, 10.0)]);
         let line = centre_line(&[outer, hole], 1000.0, 1000.0, 4.0).expect("below the hole");
         assert!(line.iter().filter(|p| (100.0..500.0).contains(&p.0)).all(|p| p.1 > 55.0), "{line:?}");
     }
