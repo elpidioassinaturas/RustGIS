@@ -11911,6 +11911,16 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
     // One saved with its glint off keeps it off (`terrain_water_glint.rgis`).
     let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_water_glint.rgis")).unwrap();
     assert_eq!(saved.maps[0].view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.glint), Some(0.0));
+    // A glint out of range (a hand edit) is brought into 0 to 1, said once; a clean file says nothing.
+    let text = include_str!("../../../schema/fixtures/terrain_water_glint.rgis");
+    let mut clean = Project::from_json(text).unwrap();
+    assert!(!clean.take_read_notices(&crate::project::ALL_PARTS).iter().any(|n| n.english().contains("glint")));
+    for (edited, kept) in [("1.5", 1.0), ("-0.5", 0.0)] {
+        let mut p = Project::from_json(&text.replace("\"glint\":0.0", &format!("\"glint\":{edited}"))).unwrap();
+        assert_eq!(p.maps[0].view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.glint), Some(kept), "{edited}");
+        let said: Vec<String> = p.take_read_notices(&crate::project::ALL_PARTS).iter().map(|n| n.english()).collect();
+        assert_eq!(said.iter().filter(|t| t.contains("terrain water glint(s) outside 0 to 1")).count(), 1, "{said:?}");
+    }
 }
 
 /// A saved project's block is read back (the schema fixture `terrain_block.rgis`), its walls left
