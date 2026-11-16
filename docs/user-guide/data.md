@@ -1590,7 +1590,8 @@ gives its period, a slice the whole axis, and `"start"`/`"end"` any other. Only 
 that point's cell are read. A store chunked one step at a time, such as ARCO-ERA5's map-oriented
 copy, reads a chunk per step: about 4,000 steps at most, so a long axis needs a shorter period.
 A sharded variable counts the chunks inside its shards the same way, since each one is its own
-request.
+request; each shard read also takes one request for its index, which the cap doesn't count, so a
+series with one step per shard makes about twice as many requests as it has steps.
 The chart draws up to six points as lines and marks the time slider's step, and a click on it
 takes the slider to that date. **Export CSV…** writes the date and value of each point.
 
