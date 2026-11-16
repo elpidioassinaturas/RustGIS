@@ -549,6 +549,17 @@ pub fn renewal_done(r: &Renewal, answer: Result<(u16, &[u8]), String>) {
 
 /// The message for a request a data host turned away (HTTP 401).
 pub fn refused_message(url: &str) -> String {
+    refused_message_in(url, cfg!(target_arch = "wasm32"))
+}
+
+/// [`refused_message`], for the web app (`web`) or not: the web app can't sign in yet (its panel
+/// doesn't offer it), so its message sends the user where they can.
+fn refused_message_in(url: &str, web: bool) -> String {
+    let how = if web {
+        "with the desktop app or the command line (copernicus.login): the web app can't sign in yet"
+    } else {
+        "(copernicus.login)"
+    };
     // An OData address names its file in its last node: `…/Nodes(f.tif)/$value`.
     let last = url.split(['?', '#']).next().unwrap_or(url).trim_end_matches("/$value").rsplit('/').next().unwrap_or("");
     let file = last.strip_prefix("Nodes(").and_then(|n| n.strip_suffix(')')).unwrap_or(last);
@@ -556,15 +567,15 @@ pub fn refused_message(url: &str) -> String {
         // Kept, but its token expired and the sign-in host didn't renew it (it holds off a while).
         if info.expires_at <= now_secs() {
             format!(
-                "{file}: the Copernicus Data Space sign-in's token expired and couldn't be renewed yet: try again in a minute, or sign in again (copernicus.login)"
+                "{file}: the Copernicus Data Space sign-in's token expired and couldn't be renewed yet: try again in a minute, or sign in again {how}"
             )
         } else {
-            format!("{file}: Copernicus Data Space didn't accept the sign-in's token: sign in again (copernicus.login)")
+            format!("{file}: Copernicus Data Space didn't accept the sign-in's token: sign in again {how}")
         }
     } else if expired() {
-        format!("{file}: the Copernicus Data Space sign-in expired: sign in again (copernicus.login)")
+        format!("{file}: the Copernicus Data Space sign-in expired: sign in again {how}")
     } else {
-        format!("{file}: Copernicus Data Space asks for a sign-in for this file: sign in with a free account (copernicus.login)")
+        format!("{file}: Copernicus Data Space asks for a sign-in for this file: sign in with a free account {how}")
     }
 }
 
