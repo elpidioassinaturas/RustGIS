@@ -827,7 +827,7 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
                     ambient: match p.get("ambient") {
                         None => cur_ambient,
                         Some(Value::Null) => None,
-                        Some(v) => Some(v.as_f64().ok_or("\"ambient\" must be a number from 0 to 1, or null")?.clamp(0.0, 1.0)),
+                        Some(_) => Some(f(p, "ambient").ok_or("\"ambient\" must be a number from 0 to 1, or null")?.clamp(0.0, 1.0)),
                     },
                     balanced: b(p, "balanced").unwrap_or(cur_balanced),
                 }

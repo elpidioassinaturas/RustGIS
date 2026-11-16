@@ -6842,14 +6842,14 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
                     ui.end_row();
                 }
             });
-            let mut even = *balanced;
+            let mut on = *balanced;
             if ui
-                .checkbox(&mut even, tl!("Balanced light"))
+                .checkbox(&mut on, tl!("Balanced light"))
                 .on_hover_text(tl!("Flat ground keeps the ramp's colour and slopes facing the sun brighten"))
                 .changed()
             {
                 let mut p = relief(*band, az, alt, zf, sh);
-                p["balanced"] = json!(even);
+                p["balanced"] = json!(on);
                 let _ = app.run("raster.symbology", p);
             }
             rock_on_slopes(app, ui, l.id, *rock, relief(*band, az, alt, zf, sh));

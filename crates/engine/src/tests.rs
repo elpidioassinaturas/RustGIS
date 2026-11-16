@@ -4640,7 +4640,8 @@ fn shaded_relief_keeps_its_ambient_and_balanced_light() {
     s.run("raster.symbology", &json!({"type": "shadedRelief", "ambient": null})).unwrap();
     assert_eq!(light(&s), (None, true), "null: the default");
     assert!(s.run("raster.symbology", &json!({"type": "shadedRelief", "ambient": "dark"})).is_err());
-    s.run("raster.symbology", &json!({"type": "shadedRelief", "ambient": 0.35})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "ambient": "0.35"})).unwrap();
+    assert_eq!(light(&s), (Some(0.35), true), "a number as text, as other keys take");
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir().join(format!("rustgis-ambient-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

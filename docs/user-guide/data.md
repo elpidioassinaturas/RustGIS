@@ -1471,7 +1471,8 @@ what cast shadows leave of the sun (1 without them); the fill light is added to 
 the balanced light, `h` is divided by its value on flat ground (`sin altitude`), and the sum is
 held to at most 1.3: flat ground is drawn in the ramp's own colour, the colour the legend shows,
 slopes turned to the sun brighten (each channel clamped to 255) and slopes turned away fall
-toward `ambient`. Left unset, `ambient` is 0.25, as the relief was always drawn, or 0.5 with the
+toward `ambient`. A sun on the horizon (altitude 0) lights no flat ground, so there the balanced
+light is drawn as the plain one, with its own ambient. Left unset, `ambient` is 0.25, as the relief was always drawn, or 0.5 with the
 balanced light, which keeps about the same contrast; `"ambient": null` goes back to that
 default. A Z factor of 1.5 to 2 suits the balanced light on 30 m data. Both are saved with the
 project only when set.

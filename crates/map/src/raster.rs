@@ -1998,22 +1998,15 @@ impl<'a> Colorizer<'a> {
         self.color_lit(vals, hillshade, None, None, None)
     }
 
-    /// [`Colorizer::color`], with Shaded Relief's ambient light scaled by `ambient` (0–255, the
+    /// [`Colorizer::color`], with Shaded Relief's ambient light scaled by `sky` (0–255, the
     /// share of it the sky a cell sees leaves, see [`RasterRenderer::ShadedRelief`]'s `sky`),
     /// `fill` (0–255, a share of the colour) added for its fill light (its `fill`), and its colour
     /// moved `rock` (0–255) of the way to its rock colour (its `rock`, see [`Rock::share`]).
-    pub fn color_lit(
-        &self,
-        vals: &[f32],
-        hillshade: Option<u8>,
-        ambient: Option<u8>,
-        fill: Option<u8>,
-        rock: Option<u8>,
-    ) -> Option<[u8; 4]> {
+    pub fn color_lit(&self, vals: &[f32], hillshade: Option<u8>, sky: Option<u8>, fill: Option<u8>, rock: Option<u8>) -> Option<[u8; 4]> {
         // The renderer masks values as it samples them (they arrive as NaN); this is for other callers.
         let mask = &self.style.mask;
         if mask.is_empty() || !vals.iter().any(|v| mask.hides(*v)) {
-            return self.paint(vals, hillshade, ambient, fill, rock);
+            return self.paint(vals, hillshade, sky, fill, rock);
         }
         // Masked values are no data. The renderer bands are at most three.
         let mut kept = [f32::NAN; 3];
@@ -2022,10 +2015,10 @@ impl<'a> Colorizer<'a> {
                 *k = *v;
             }
         }
-        self.paint(kept.get(..vals.len().min(3)).unwrap_or(&kept), hillshade, ambient, fill, rock)
+        self.paint(kept.get(..vals.len().min(3)).unwrap_or(&kept), hillshade, sky, fill, rock)
     }
 
-    fn paint(&self, vals: &[f32], hillshade: Option<u8>, ambient: Option<u8>, fill: Option<u8>, rock: Option<u8>) -> Option<[u8; 4]> {
+    fn paint(&self, vals: &[f32], hillshade: Option<u8>, sky: Option<u8>, fill: Option<u8>, rock: Option<u8>) -> Option<[u8; 4]> {
         let v0 = *vals.first()?;
         let c = match &self.style.renderer {
             RasterRenderer::Rgb { .. } => {
@@ -2052,7 +2045,7 @@ impl<'a> Colorizer<'a> {
                 }
                 *self.palette.get(i as usize)?
             }
-            RasterRenderer::ShadedRelief { ramp, rock: steep, altitude, ambient: kept, balanced, .. } => {
+            RasterRenderer::ShadedRelief { ramp, rock: steep, altitude, ambient: setting, balanced, .. } => {
                 let h = hillshade.unwrap_or(180) as f64 / 255.0;
                 let base = if ramp.is_some() { *self.ramp_lut.get(self.byte(0, v0) as usize)? } else { [255, 255, 255, 255] };
                 // Steep ground first takes on the rock colour; the light then shades either.
@@ -2062,14 +2055,16 @@ impl<'a> Colorizer<'a> {
                 };
                 // Multiply the tint by the hillshade, keeping some ambient light (less of it where
                 // the terrain hides part of the sky), and adding the fill light on its own.
-                let share = relief_ambient(*kept, *balanced);
-                let a = share * ambient.map_or(1.0, |a| f64::from(a) / 255.0);
+                let share = relief_ambient(*setting, *balanced);
+                let a = share * sky.map_or(1.0, |s| f64::from(s) / 255.0);
                 let f = fill.map_or(0.0, |f| f64::from(f) / 255.0);
-                let lit = if *balanced {
-                    // The sun's light over its value on flat ground, rounded as the hillshade is:
-                    // flat ground keeps the ramp's colour, slopes facing the sun brighten.
-                    let flat = (255.0 * altitude.clamp(0.0, 90.0).to_radians().sin()).round().max(1.0) / 255.0;
-                    (a + (1.0 - share) * h / flat).min(BALANCED_MAX)
+                // Flat ground's hillshade, rounded as the hillshade is: 0 for a sun on the horizon,
+                // which lights no flat ground to balance against, so that is lit as unbalanced.
+                let flat = (255.0 * altitude.clamp(0.0, 90.0).to_radians().sin()).round();
+                let lit = if *balanced && flat > 0.0 {
+                    // The sun's light over its value on flat ground: flat ground keeps the ramp's
+                    // colour, slopes facing the sun brighten.
+                    (a + (1.0 - share) * h * 255.0 / flat).min(BALANCED_MAX)
                 } else {
                     a + (1.0 - share) * h
                 };
@@ -3076,6 +3071,12 @@ mod tests {
             // The sky dims the ambient share, the fill light adds to it, as before.
             let sky_fill = 0.5 * 128.0 / 255.0 + 0.5 * f64::from(flat / 2) / f64::from(flat) + 30.0 / 255.0;
             assert_eq!(paint(relief(altitude, None, true), flat / 2, Some(128), Some(30)), grey(sky_fill));
+        }
+
+        // A sun on the horizon lights no flat ground (its hillshade rounds to 0): balanced is
+        // lit as unbalanced, with its own ambient.
+        for h in [0u8, 40, 120] {
+            assert_eq!(paint(relief(0.0, None, true), h, None, None), paint(relief(0.0, Some(0.5), false), h, None, None));
         }
 
         // Saved only when set, and read back as it was.
