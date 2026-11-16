@@ -703,14 +703,20 @@ pub(crate) fn paint_shore(pm: &mut crate::Canvas, water: &Water, frame: &crate::
     }
     let Some(outlines) = water.outlines(frame) else { return };
     let Some(mut band) = pm.sub(pm.width(), pm.height()) else { return };
-    // Each stroke this dark, so that where all of them lie, at the outline, they come to
-    // `darkness`.
-    let step = 1.0 - (1.0 - darkness.min(1.0)).powf(1.0 / f64::from(SHORE_STEPS));
-    let mut paint = tiny_skia::Paint::default();
-    paint.set_color(tiny_skia::Color::from_rgba(0.0, 0.0, 0.0, step as f32).unwrap_or(tiny_skia::Color::BLACK));
-    // Centred on the outline, each stroke reaches half its width inside.
+    // Centred on the outline, each stroke reaches half its width inside: the k-th of n covers
+    // the band's k outer n-ths. Where strokes k to n lie, they come to `darkness`·(n+1−k)/n, a
+    // fade from `darkness` at the outline to `darkness`/n at the band's inner edge, even when
+    // `darkness` is 1.
+    let n = f64::from(SHORE_STEPS);
+    let darkness = darkness.min(1.0);
+    let reached = |k: u16| darkness * (n + 1.0 - f64::from(k)) / n;
     let reach = 2.0 * SHORE_PX * frame.pixels_per_point.max(0.0) as f32;
+    let mut paint = tiny_skia::Paint::default();
     for k in 1..=SHORE_STEPS {
+        // What strokes k+1 to n leave clear, this one darkens to its own zone's tone.
+        let beyond = if k == SHORE_STEPS { 0.0 } else { reached(k + 1) };
+        let alpha = (1.0 - (1.0 - reached(k)) / (1.0 - beyond)).clamp(0.0, 1.0);
+        paint.set_color(tiny_skia::Color::from_rgba(0.0, 0.0, 0.0, alpha as f32).unwrap_or(tiny_skia::Color::BLACK));
         let width = reach * f32::from(k) / f32::from(SHORE_STEPS);
         let stroke = tiny_skia::Stroke { width, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
         band.stroke_path(&outlines, &paint, &stroke, tiny_skia::Transform::identity(), None);
@@ -1535,6 +1541,19 @@ mod tests {
         for (d, e) in on.pixels().iter().zip(off.pixels()) {
             assert!(d.red() <= e.red() && d.green() <= e.green() && d.blue() <= e.blue(), "{d:?} from {e:?}");
         }
+    }
+
+    /// At its darkest (`shore` 1) the band still fades inward: black at the outline, lighter a few
+    /// pixels in.
+    #[test]
+    fn a_black_shore_still_fades_inward() {
+        let (mut m, view) = shored(1.0, 0.0);
+        let pm = crate::render_complete(&mut m, &view).unwrap().pixmap;
+        let (x, y) = view.camera.to_screen(lonlat_to_merc(Coord::new(0.2, -0.1)), view.width, view.height);
+        let at =
+            |dx: f64| pm.pixel((x + dx) as u32, y as u32).map(|c| u32::from(c.red()) + u32::from(c.green()) + u32::from(c.blue())).unwrap();
+        let (edge, inner) = (at(1.5), at(3.5));
+        assert!(edge < inner, "lighter a few pixels in: {inner} after {edge} at the outline");
     }
 
     /// A tilted view's water is darker along its shore too, in the drape's bands and drawn whole,
