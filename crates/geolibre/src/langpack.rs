@@ -560,6 +560,9 @@ pub fn import(path: &std::path::Path) -> Result<(String, usize), String> {
 /// Deletes the pack kept for `locale`, and stops using it.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn remove(locale: &str) -> Result<(), String> {
+    // With `check_kept`: a read that failed just before the file went can't record an error for
+    // a pack no longer kept.
+    let _lifecycle = LIFECYCLE.lock().map_err(|_| "the tool translations are in an unusable state".to_string())?;
     let path = file(locale)?;
     if !path.is_file() {
         return Err(format!("no tool translations are kept for '{locale}'"));
@@ -725,7 +728,14 @@ mod tests {
         check_kept();
         assert_eq!(load_errors().iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), ["pt"]);
         assert_eq!(active_locale().as_deref(), Some("fr"), "the check changes nothing in use");
-        remove("fr").unwrap();
+        // A removal waits for a check in progress (it holds `LIFECYCLE`), so the check can't
+        // record an error for a pack already gone.
+        let check = LIFECYCLE.lock().unwrap();
+        let removal = std::thread::spawn(|| remove("fr"));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!removal.is_finished(), "remove ran during a check");
+        drop(check);
+        removal.join().unwrap().unwrap();
         remove("pt").unwrap();
         assert!(kept().is_empty() && load_error("pt").is_none() && !in_use("pt"));
         assert!(remove("pt").is_err(), "nothing left to remove");
