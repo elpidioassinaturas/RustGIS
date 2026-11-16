@@ -16,7 +16,8 @@ pub(super) struct CurveSpec {
     pub chars: Vec<String>,
     pub advances: Vec<f32>,
     pub gap: f32,
-    /// The text's size, the span either side of a character its angle is read over.
+    /// The text's size: with the letter spacing, how far the line is smoothed either side of the
+    /// text when its course is read ([`line_labels::Line::curved`]).
     pub size: f32,
     pub overrun: f32,
     /// How far off the line, in screen points ([`line_labels::off_line`]).

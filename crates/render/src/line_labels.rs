@@ -74,8 +74,8 @@ impl Path {
 
     /// The line's course from `from` to `to` points along it: sampled every so often and averaged
     /// over `reach` points either side, twice (so it bends smoothly), its detail finer than that
-    /// smoothed away. With how often it was sampled (points along the line), from `2 * reach` before
-    /// `from`.
+    /// smoothed away. The samples start `2 * reach` before `from` and are spaced the returned
+    /// number of points along the line apart.
     fn smoothed(&self, from: f32, to: f32, reach: f32) -> Option<(Path, f32)> {
         if !(from.is_finite() && to.is_finite() && reach.is_finite() && reach > 0.0 && to > from) {
             return None;
@@ -111,7 +111,8 @@ impl Path {
         (d.is_finite() && d > 0.0).then_some((Path { pts, along }, every))
     }
 
-    /// The least distance from `p` to the line between `from` and `to` points along it.
+    /// The least distance from `p` to the line between `from` and `to` points along it, carried on
+    /// past its ends (as text may overhang them).
     fn distance(&self, p: (f32, f32), from: f32, to: f32) -> f32 {
         let first = self.along.partition_point(|a| *a < from).saturating_sub(1);
         let last = self.along.partition_point(|a| *a <= to).min(self.pts.len().saturating_sub(1));
@@ -120,7 +121,9 @@ impl Path {
             let (Some(a), Some(b)) = (self.pts.get(i), self.pts.get(i + 1)) else { continue };
             let (dx, dy) = (b.0 - a.0, b.1 - a.1);
             let l2 = dx * dx + dy * dy;
-            let t = if l2 > 0.0 { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+            let low = if i == 0 { f32::NEG_INFINITY } else { 0.0 };
+            let high = if i + 2 == self.pts.len() { f32::INFINITY } else { 1.0 };
+            let t = if l2 > 0.0 { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l2).clamp(low, high) } else { 0.0 };
             best = best.min((p.0 - a.0 - t * dx).hypot(p.1 - a.1 - t * dy));
         }
         best
@@ -295,11 +298,11 @@ impl Line {
     /// smoothed over `reach` either side, the larger of the text's size and the step from one
     /// character to the next, so detail finer than that (a river's jitter, or meanders shorter
     /// than widely spaced letters) neither turns them nor bunches them up, and they stay evenly
-    /// spaced. The course must stay within half `reach` of the line at each character, so the text
-    /// never leaves the line it names. `None` when the line (with `overrun` past each end) is
-    /// shorter than the text, the text there runs past an end by more than that, the course strays
-    /// further, it turns more than [`MAX_TURN`] from one character to the next, or it turns a
-    /// character more than a right angle from the way the text reads (it would stand upside down).
+    /// spaced. The course must stay within half `reach` of the line (carried on past its ends) at
+    /// each character: half the text's size for ordinary spacing, half a step for widely spaced
+    /// letters. `None` when the line (with `overrun` past each end) is shorter than the text, the
+    /// text there runs past an end by more than that, the course strays further, it turns more than [`MAX_TURN`] from one character to the next, or it turns a
+    /// character further past vertical than that (it would stand upside down).
     pub(super) fn curved(
         &self,
         advances: &[f32],
@@ -324,8 +327,6 @@ impl Line {
         let centre = course.at(cmid)?;
         // Wrapped to within half a turn either way.
         let wrap = |a: f32| (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
-        // The way the text reads, upright: from its start to its end on the line.
-        let reads = angle(path.at(from)?, path.at(to)?);
         let mut d = cmid - len / 2.0;
         let mut out = Vec::with_capacity(advances.len());
         let mut last: Option<f32> = None;
@@ -334,7 +335,8 @@ impl Line {
             let w = adv.max(0.5) / 2.0;
             let (a, b) = (course.at(char_mid - w)?, course.at(char_mid + w)?);
             let (p, turn) = (course.at(char_mid)?, angle(a, b));
-            if !turn.is_finite() || wrap(turn - reads).abs() > std::f32::consts::FRAC_PI_2 {
+            // Upright, or no further past vertical than a turn from one character to the next.
+            if !turn.is_finite() || wrap(turn).abs() > std::f32::consts::FRAC_PI_2 + MAX_TURN {
                 return None;
             }
             if last.is_some_and(|prev| wrap(turn - prev).abs() > MAX_TURN) {
@@ -627,6 +629,32 @@ mod tests {
         for size in [f32::NAN, f32::INFINITY] {
             let (_, glyphs) = Line::new(&level).unwrap().curved(&[5.0; 3], 0.0, size, 0.0, Some(30.0)).unwrap();
             assert!(glyphs.iter().all(|g| g.2.abs() < 1e-4), "{size}: {glyphs:?}");
+        }
+    }
+
+    /// Text may run past a line's ends by its overrun: the line is carried on there, so the text
+    /// over a straight line's end is on it, not off it (#2259).
+    #[test]
+    fn curved_text_may_overhang_a_lines_ends() {
+        let line = [(0.0, 50.0), (100.0, 50.0)];
+        let (_, glyphs) = curved(&line, &[10.0; 12], 0.36, 12.0, None).expect("overhangs by nearly 12 of 12");
+        assert!(glyphs.iter().all(|g| g.1.abs() < 1e-3 && g.2.abs() < 1e-4), "{glyphs:?}");
+    }
+
+    /// A bend of nearly half a turn under a label whose start-to-end direction is steep: none of
+    /// its characters stand upside down, though each is within a right angle of that direction.
+    #[test]
+    fn curved_text_round_a_half_turn_never_stands_upside_down() {
+        // Its course turns from -0.5 to 2.9 radians, so the text's ends are -0.3 and 2.7 and its
+        // start-to-end direction about 1.2.
+        let arc: Vec<(f32, f32)> = (0..=340)
+            .map(|i| {
+                let t = -0.5 + i as f32 / 100.0;
+                (200.0 + 58.0 * t.sin(), 200.0 - 58.0 * t.cos())
+            })
+            .collect();
+        if let Some((_, glyphs)) = curved(&arc, &[7.0; 25], 0.0, 0.0, None) {
+            assert!(glyphs.iter().all(|g| g.2.abs() <= std::f32::consts::FRAC_PI_2 + MAX_TURN), "upside down: {glyphs:?}");
         }
     }
 
