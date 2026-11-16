@@ -234,6 +234,20 @@ pub fn is_remembered() -> bool {
     matches!(*known, Known::Kept { .. })
 }
 
+/// [`is_remembered`] without waiting, for a frame: `None` while the store is in use (a sign-in
+/// with the remembered one under way, which may wait up to a request's timeout).
+pub fn is_remembered_now() -> Option<bool> {
+    let mut known = match REMEMBERED.known.try_lock() {
+        Ok(k) => k,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    if let Some(store) = secret_store() {
+        read_store(&mut known, store.as_ref());
+    }
+    Some(matches!(*known, Known::Kept { .. }))
+}
+
 /// The username and password as the store keeps them.
 #[cfg(not(target_arch = "wasm32"))]
 fn remembered_value(username: &str, password: &str) -> rustgis_data::secrets::Secret {
@@ -552,6 +566,8 @@ pub fn refused_message(url: &str) -> String {
     }
 }
 
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+pub use native::set_test_token_url;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Restored, authorization_fresh, login, restore};
 
@@ -633,15 +649,24 @@ mod native {
 
     /// The token endpoint: [`TOKEN_URL`](super::TOKEN_URL), or a test's fake one.
     fn token_url() -> String {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         if let Some(url) = TEST_TOKEN_URL.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return url;
         }
         super::TOKEN_URL.to_string()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) static TEST_TOKEN_URL: Mutex<Option<String>> = Mutex::new(None);
+
+    /// Points `login` at a fake token endpoint on this computer (`http://127.0.0.1:<port>/…`), or
+    /// back at CDSE's with `None`, for other crates' tests (the `testing` feature). Panics on any
+    /// other address, so a password is never sent elsewhere.
+    #[cfg(feature = "testing")]
+    pub fn set_test_token_url(url: Option<&str>) {
+        assert!(url.is_none_or(|u| u.starts_with("http://127.0.0.1:")), "a test token endpoint is on 127.0.0.1");
+        *TEST_TOKEN_URL.lock().unwrap_or_else(|e| e.into_inner()) = url.map(str::to_string);
+    }
 
     /// What signing in with the remembered sign-in did.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
