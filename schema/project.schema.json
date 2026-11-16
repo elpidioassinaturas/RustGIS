@@ -1063,6 +1063,7 @@
           "table-export-order",
           "tabulate-intersection-unit",
           "layout-element-background",
+          "picture-markers",
           "zarr-window"
         ],
         "type": "string"
@@ -1138,6 +1139,7 @@
     "table-export-order",
     "tabulate-intersection-unit",
     "layout-element-background",
+    "picture-markers",
     "zarr-window"
   ],
   "x-rustgis-reads-format": 2,
