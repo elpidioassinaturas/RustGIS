@@ -276,6 +276,12 @@ static REVISION: AtomicU64 = AtomicU64::new(0);
 /// Languages whose pack was looked for in the data folder and isn't there.
 static MISSING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
+/// Held across reading a kept pack and putting it in use, and across keeping a new one and putting
+/// it in use, so a read that started before a download or an import kept a newer pack can't put
+/// the older one back in use after it.
+#[cfg(not(target_arch = "wasm32"))]
+static LIFECYCLE: Mutex<()> = Mutex::new(());
+
 /// Why the pack kept for a language couldn't be read, by language.
 static LOAD_ERRORS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
@@ -360,7 +366,15 @@ pub fn translate(locale: &str, english: &str) -> Option<String> {
 /// and wasn't there. One file read, of about 2 MB, once per language switch.
 #[cfg(not(target_arch = "wasm32"))]
 fn load_kept(locale: &str) {
-    if active_locale().as_deref() == Some(locale) || MISSING.lock().ok().is_some_and(|m| m.as_ref().is_some_and(|m| m.contains(locale))) {
+    let settled = || {
+        active_locale().as_deref() == Some(locale) || MISSING.lock().ok().is_some_and(|m| m.as_ref().is_some_and(|m| m.contains(locale)))
+    };
+    if settled() {
+        return;
+    }
+    let Ok(_lifecycle) = LIFECYCLE.lock() else { return };
+    // A download or an import may have kept and put in use a pack for it while this waited.
+    if settled() {
         return;
     }
     match load(locale) {
@@ -458,8 +472,9 @@ fn keep(pack: Pack, text: &str) -> Result<usize, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    rustgis_data::io::write_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
     let n = matched(&pack);
+    let _lifecycle = LIFECYCLE.lock().map_err(|_| "the tool translations are in an unusable state".to_string())?;
+    rustgis_data::io::write_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
     activate(Some(pack));
     Ok(n)
 }

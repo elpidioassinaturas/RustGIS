@@ -3398,9 +3398,19 @@ fn geolibre_uninstall(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
 #[cfg(not(target_arch = "wasm32"))]
 fn geolibre_language(app: &mut RustGisApp, ui: &mut Ui) {
     let lang = crate::i18n::current().code();
-    if let Some((for_lang, slot)) = &app.gp.language_download {
+    // One download at a time, whatever the language now: a second one would take the first's
+    // place, and the first's result (or failure) would never be shown.
+    if let Some((_, slot)) = &app.gp.language_download {
         let done = slot.lock().ok().and_then(|mut r| r.take());
         match done {
+            // A pack that names none of these tools (made for another runner version) would leave
+            // them in English under Remove translations, without a word.
+            Some(Ok(0)) => {
+                app.gp.language_download = None;
+                app.gp.language_error = Some(
+                    tl!("The downloaded translations name none of these tools: they may be for another GeoLibre version.").to_string(),
+                );
+            }
             Some(Ok(_)) => {
                 app.gp.language_download = None;
                 app.gp.language_error = None;
@@ -3409,11 +3419,10 @@ fn geolibre_language(app: &mut RustGisApp, ui: &mut Ui) {
                 app.gp.language_download = None;
                 app.gp.language_error = Some(e);
             }
-            None if *for_lang == lang => {
+            None => {
                 ui.spinner().on_hover_text(tl!("Downloading the tool translations…"));
                 return;
             }
-            None => {}
         }
     }
     if !rustgis_engine::cmd::gp::geolibre_language_available(lang) {
