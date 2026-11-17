@@ -6,6 +6,10 @@ use crate::{Project, Session, sample};
 #[path = "tests/scene_losses.rs"]
 mod scene_losses;
 
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "tests/cancellation.rs"]
+mod cancellation;
+
 #[path = "tests/permission_policy.rs"]
 mod permission_policy;
 
@@ -1662,6 +1666,129 @@ fn a_character_of_a_font_is_a_marker_on_points_and_along_lines() {
         s.run("layer.lineStrokes", &json!({"layer": "Rivers", "strokes": [{"markers": {"mark": "circle", "char": "x"}}]})).unwrap_err();
     assert!(err.contains("not both"), "{err}");
     assert_eq!(s.undo_depth(), depth);
+}
+
+#[test]
+fn an_image_is_a_marker_kept_in_the_project_file_that_an_older_reader_refuses() {
+    use base64::Engine;
+    use rustgis_map::{Marker, Picture};
+    let mut s = world();
+    let marker = |s: &Session| s.map().layer_by_name("Cities").unwrap().symbol(0).marker;
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(8, 4, image::Rgba([200, 30, 30, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    let depth = s.undo_depth();
+    s.run("layer.marker", &json!({"layer": "Cities", "image": format!(" {b64}\n"), "size": 20})).unwrap();
+    assert_eq!(marker(&s), Marker::Picture(Picture::new(&b64)));
+    assert_eq!(s.undo_depth(), depth + 1);
+    // Kept in the project file, which names it for an older reader to refuse; drawn in an export.
+    let dir = std::env::temp_dir().join(format!("rustgis-pictures-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pictures.rgis");
+    s.run("project.saveAs", &json!({"path": path.display().to_string()})).unwrap();
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["requires"], json!(["picture-markers"]));
+    // So does the map file a map package holds.
+    for mobile in [false, true] {
+        let pkg = dir.join(if mobile { "mobile.rgismpk" } else { "map.rgismpk" });
+        s.run("map.package", &json!({"path": pkg.display().to_string(), "mobile": mobile})).unwrap();
+        let entries = rustgis_data::zip::read_matching(&std::fs::read(&pkg).unwrap(), |n| n.ends_with(".rgismap")).unwrap();
+        let packed: Value = serde_json::from_slice(&entries[0].1).unwrap();
+        assert_eq!(packed["requires"], json!(["picture-markers"]), "mobile: {mobile}");
+    }
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path": path.display().to_string()})).unwrap();
+    assert_eq!(marker(&t), Marker::Picture(Picture::new(&b64)));
+    t.run("share.exportMap", &json!({"path": dir.join("map.png").display().to_string(), "width": 320, "height": 200})).unwrap();
+    // An image the file gives that isn't kept, or that isn't an image, is said, not drawn as a
+    // circle silently; the rest reads, and a clean file says nothing.
+    let saved_text = std::fs::read_to_string(&path).unwrap();
+    let opened = |text: String| {
+        let mut u = Session::new(Project::default());
+        let mark = u.notice_mark();
+        u.run("project.openText", &json!({"text": text})).unwrap();
+        let said: Vec<String> = u.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        (u, said)
+    };
+    let (_, said) = opened(saved_text.clone());
+    assert!(!said.iter().any(|n| n.contains("Image markers")), "{said:?}");
+    let too_long = "A".repeat(rustgis_map::symbology::MAX_PICTURE_BYTES + 4);
+    let (u, said) = opened(saved_text.replace(&b64, &too_long));
+    assert!(said.iter().any(|n| n.contains("Image markers in \"Cities\" weren't kept")), "{said:?}");
+    assert!(matches!(marker(&u), Marker::Picture(p) if p.is_dropped()));
+    // A PNG cut after its header reads as one until it's decoded.
+    let cut = base64::engine::general_purpose::STANDARD.encode(&png[..40]);
+    for junk in ["bm90IGFuIGltYWdl", cut.as_str()] {
+        let (_, said) = opened(saved_text.replace(&b64, junk));
+        assert!(said.iter().any(|n| n.contains("Image markers in \"Cities\" aren't PNG or JPEG images")), "{said:?}");
+        assert!(!said.iter().any(|n| n.contains("weren't kept")), "{said:?}");
+    }
+    // So does a map file or a layer file added on its own.
+    let map = serde_json::to_string(t.map()).unwrap();
+    let layer = serde_json::to_string(t.map().layer_by_name("Cities").unwrap()).unwrap();
+    for (command, text) in [("map.import", map), ("layer.addLayerFile", layer)] {
+        let said = |text: String| {
+            let mut w = world();
+            let mark = w.notices_given();
+            w.run(command, &json!({"text": text})).unwrap();
+            w.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<String>>()
+        };
+        assert!(!said(text.clone()).iter().any(|n| n.contains("Image markers")), "{command}");
+        let lost = said(text.replace(&b64, &too_long));
+        assert!(lost.iter().any(|n| n.contains("Image markers in \"Cities\" weren't kept")), "{command}: {lost:?}");
+    }
+    // And a styles file.
+    let mut w = world();
+    w.run("layer.marker", &json!({"layer": "Cities", "image": b64})).unwrap();
+    w.run("style.new", &json!({"layer": "Cities", "name": "Icons"})).unwrap();
+    let styles = serde_json::to_string(&w.project.styles).unwrap().replace(&b64, &too_long);
+    let mark = w.notices_given();
+    w.run("style.add", &json!({"text": styles})).unwrap();
+    let said: Vec<String> = w.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|n| n.contains("Image markers in \"Icons\" weren't kept")), "{said:?}");
+    // A layer file names it too.
+    let layer = dir.join("cities.rgislayer");
+    t.run("layer.save", &json!({"layer": "Cities", "path": layer.display().to_string()})).unwrap();
+    let saved: Value = serde_json::from_slice(&std::fs::read(&layer).unwrap()).unwrap();
+    assert_eq!(saved["requires"], json!(["picture-markers"]));
+    std::fs::remove_dir_all(&dir).ok();
+    // A shape takes its place, and the file no longer names it.
+    s.run("layer.marker", &json!({"layer": "Cities", "shape": "circle"})).unwrap();
+    assert_eq!(marker(&s), Marker::Circle);
+    assert!(serde_json::to_value(&s.project).unwrap().get("requires").is_none());
+    // A saved style keeps its image, and the project names it while it keeps the style.
+    s.run("layer.marker", &json!({"layer": "Cities", "image": b64})).unwrap();
+    s.run("style.new", &json!({"layer": "Cities", "name": "Icons"})).unwrap();
+    s.run("layer.marker", &json!({"layer": "Cities", "shape": "circle"})).unwrap();
+    assert_eq!(serde_json::to_value(&s.project).unwrap()["requires"], json!(["picture-markers"]));
+    // A task that sets one names it too (once), and one that only sizes doesn't.
+    let mut project = s.project.clone();
+    project.styles.clear();
+    let task = |params: Value| {
+        serde_json::from_value(json!({"name": "Icons", "steps": [{"title": "Icon", "command": "layer.marker", "params": params}]})).unwrap()
+    };
+    project.tasks = vec![task(json!({"size": 9}))];
+    assert!(serde_json::to_value(&project).unwrap().get("requires").is_none());
+    project.tasks = vec![task(json!({"image": b64})), task(json!({"image": b64}))];
+    assert_eq!(serde_json::to_value(&project).unwrap()["requires"], json!(["picture-markers"]));
+    let depth = s.undo_depth();
+    for (bad, says) in [
+        (json!({"layer": "Cities", "image": 7}), "PNG or JPEG image as base64"),
+        (json!({"layer": "Cities", "image": "bm90IGFuIGltYWdl"}), "PNG or JPEG image as base64"),
+        (json!({"layer": "Cities", "image": "%%%"}), "PNG or JPEG image as base64"),
+        (json!({"layer": "Cities", "image": "A".repeat(rustgis_map::symbology::MAX_PICTURE_BYTES + 4)}), "at most 2 MiB"),
+        (json!({"layer": "Cities", "image": b64, "shape": "star"}), "only one"),
+        (json!({"layer": "Cities", "image": b64, "char": "x"}), "only one"),
+        // No layer: refused before the image is kept.
+        (json!({"layer": "Nowhere", "image": b64}), "Nowhere"),
+    ] {
+        let err = s.run("layer.marker", &bad).unwrap_err();
+        assert!(err.contains(says), "{err}");
+    }
+    assert_eq!(s.undo_depth(), depth);
+    assert_eq!(marker(&s), Marker::Circle);
 }
 
 #[test]
@@ -8942,9 +9069,6 @@ fn layout_colours_are_refused_for_elements_without_them() {
     let red = "#B91C1C";
     // Added: a kind without the colour is refused, nothing added; with it, it is applied.
     let refused = [
-        ("legend", "color", "only text, lines"),
-        ("table", "color", "only text, lines"),
-        ("colorbar", "color", "only text, lines"),
         ("northArrow", "color", "only text, lines"),
         ("legend", "fill", "take a fill"),
         ("table", "fill", "take a fill"),
@@ -8980,6 +9104,9 @@ fn layout_colours_are_refused_for_elements_without_them() {
         ("circle", "color"),
         ("grid", "color"),
         ("scaleBar", "color"),
+        ("legend", "color"),
+        ("colorbar", "color"),
+        ("table", "color"),
         ("scaleBar", "fill"),
         ("northArrow", "fill"),
         ("northArrow", "outline"),
@@ -9010,9 +9137,7 @@ fn layout_colours_are_refused_for_elements_without_them() {
     let scale = find(&s, "scaleBar");
     let table = s.run("layout.addElement", &json!({"kind": "table"})).unwrap()["element"].as_u64().unwrap();
     for (el, key, said) in [
-        (legend, "color", "take a color"),
         (u64::from(frame), "color", "take a color"),
-        (table, "color", "take a color"),
         (legend, "fill", "take a fill"),
         (table, "fill", "take a fill"),
         (legend, "outline", "take an outline"),
@@ -12127,7 +12252,7 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
     // Set: the pond off the DEM, with no level either, stays on the ground, said once.
     let mark = s.notice_mark();
     let v = s.run("map.terrain", &json!({"water": {"layer": lagos, "level": "nivel"}})).unwrap();
-    assert_eq!(v["water"], json!({"layer": lagos, "level": "nivel", "glint": 0.3}));
+    assert_eq!(v["water"], json!({"layer": lagos, "level": "nivel", "glint": 0.3, "shore": 0.35}));
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
     assert_eq!(said.iter().filter(|t| t.contains(&format!("1 polygon of '{lagos}' has no height along its shore"))).count(), 1, "{said:?}");
     // Another change keeps it, and it is saved with the project.
@@ -12192,6 +12317,15 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
         assert!(e.contains("glint is a number from 0 to 1"), "{e}");
     }
     assert_eq!(s.map().view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.glint), Some(0.8));
+    // The shore band the same: 0.35 when left out, 0 to 1 when given, anything else refused.
+    assert_eq!(v["water"]["shore"], json!(rustgis_map::view::WATER_SHORE));
+    let v = s.run("map.terrain", &json!({"water": {"layer": mar, "shore": 0.0}})).unwrap();
+    assert_eq!(v["water"]["shore"], json!(0.0));
+    for bad in [json!(2), json!(-0.5), json!(true)] {
+        let e = s.run("map.terrain", &json!({"water": {"layer": mar, "shore": bad}})).unwrap_err();
+        assert!(e.contains("shore is a number from 0 to 1"), "{e}");
+    }
+    assert_eq!(s.map().view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.shore), Some(0.0));
     // Removing the water's layer is said; the water keeps its name, for a layer of that name to
     // bring it back.
     let sea_id = s.map().layer_by_name(&mar).map(|l| l.id).unwrap();
@@ -12207,10 +12341,15 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
     // A saved project's water is read back (the schema fixture `terrain_water.rgis`).
     let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_water.rgis")).unwrap();
     let water = saved.maps[0].view.terrain.as_ref().and_then(|t| t.water.clone());
-    // Saved before the glint (#1915 part 3), it takes the default.
+    // Saved before the glint and the shore band (#1915 parts 3 and 4), it takes their defaults.
     assert_eq!(
         water,
-        Some(rustgis_map::view::TerrainWater { layer: "lagos".into(), level: Some("nivel".into()), glint: rustgis_map::view::WATER_GLINT })
+        Some(rustgis_map::view::TerrainWater {
+            layer: "lagos".into(),
+            level: Some("nivel".into()),
+            glint: rustgis_map::view::WATER_GLINT,
+            shore: rustgis_map::view::WATER_SHORE,
+        })
     );
     // One saved with its glint off keeps it off (`terrain_water_glint.rgis`).
     let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_water_glint.rgis")).unwrap();
@@ -12224,6 +12363,18 @@ fn terrain_water_is_a_polygon_layer_of_its_own() {
         assert_eq!(p.maps[0].view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.glint), Some(kept), "{edited}");
         let said: Vec<String> = p.take_read_notices(&crate::project::ALL_PARTS).iter().map(|n| n.english()).collect();
         assert_eq!(said.iter().filter(|t| t.contains("terrain water glint(s) outside 0 to 1")).count(), 1, "{said:?}");
+    }
+    // One saved with its shore band off keeps it off (`terrain_water_shore.rgis`); one out of
+    // range is brought into 0 to 1, said once.
+    let text = include_str!("../../../schema/fixtures/terrain_water_shore.rgis");
+    let mut clean = Project::from_json(text).unwrap();
+    assert_eq!(clean.maps[0].view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.shore), Some(0.0));
+    assert!(!clean.take_read_notices(&crate::project::ALL_PARTS).iter().any(|n| n.english().contains("shore")));
+    for (edited, kept) in [("1.5", 1.0), ("-0.5", 0.0)] {
+        let mut p = Project::from_json(&text.replace("\"shore\":0.0", &format!("\"shore\":{edited}"))).unwrap();
+        assert_eq!(p.maps[0].view.terrain.as_ref().and_then(|t| t.water.as_ref()).map(|w| w.shore), Some(kept), "{edited}");
+        let said: Vec<String> = p.take_read_notices(&crate::project::ALL_PARTS).iter().map(|n| n.english()).collect();
+        assert_eq!(said.iter().filter(|t| t.contains("terrain water shore band(s) outside 0 to 1")).count(), 1, "{said:?}");
     }
 }
 
@@ -33097,6 +33248,66 @@ fn layout_element_backgrounds_from_commands() {
     assert!(s.project.layouts.last().unwrap().elements.iter().all(|e| e.kind.takes_background() || e.background.is_none()));
 }
 
+/// A legend, colorbar, table or chart takes an ink (#2257): added with it, changed, given the
+/// default again with null, undone and kept by a copy and a save; a bad colour is refused with
+/// nothing changed, and on a locked element a null is a change too.
+#[test]
+fn layout_element_inks_from_commands() {
+    use rustgis_map::Rgba;
+    let mut s = world();
+    s.run("layout.new", &json!({"name": "L"})).unwrap();
+    let li = s.active_layout.unwrap();
+    let ink = |s: &Session, id: u32| s.project.layouts[li].element(id).unwrap().kind.ink();
+    let white = Rgba::rgb(255, 255, 255);
+    let mut added = Vec::new();
+    for p in [
+        json!({"kind": "legend", "color": "#FFFFFF"}),
+        json!({"kind": "colorbar", "color": "#FFFFFF"}),
+        json!({"kind": "table", "layer": "Countries", "color": "#FFFFFF"}),
+        json!({"kind": "chart", "layer": "Countries", "field": "pop_est", "color": "#FFFFFF"}),
+    ] {
+        let id = s.run("layout.addElement", &p).unwrap_or_else(|e| panic!("{p}: {e}"))["element"].as_u64().unwrap() as u32;
+        assert_eq!(ink(&s, id), Some(white), "{p}");
+        added.push(id);
+    }
+    // None given, or null: the default dark grey.
+    for p in [json!({"kind": "legend"}), json!({"kind": "table", "layer": "Countries", "color": null})] {
+        let id = s.run("layout.addElement", &p).unwrap()["element"].as_u64().unwrap() as u32;
+        assert_eq!(ink(&s, id), None, "{p}");
+    }
+    let legend = added[0];
+    s.run("layout.update", &json!({"element": legend, "color": "#33445580"})).unwrap();
+    assert_eq!(ink(&s, legend), Some(Rgba::new(0x33, 0x44, 0x55, 0x80)));
+    // A change of something else keeps it; a copy and a save keep it.
+    s.run("layout.update", &json!({"element": legend, "title": "Key"})).unwrap();
+    assert_eq!(ink(&s, legend), Some(Rgba::new(0x33, 0x44, 0x55, 0x80)));
+    let copy = s.run("layout.duplicateElement", &json!({"element": legend})).unwrap()["element"].as_u64().unwrap() as u32;
+    assert_eq!(ink(&s, copy), ink(&s, legend));
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&serde_json::to_string(&s.project.layouts[li]).unwrap()).unwrap();
+    assert_eq!(back, s.project.layouts[li]);
+    // null gives the default again, and undo brings the ink back.
+    s.run("layout.update", &json!({"element": legend, "color": null})).unwrap();
+    assert_eq!(ink(&s, legend), None);
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(ink(&s, legend), Some(Rgba::new(0x33, 0x44, 0x55, 0x80)));
+    // Refused, and nothing changes.
+    let before = s.project.layouts[li].clone();
+    for (cmd, p) in [
+        ("layout.update", json!({"element": added[2], "color": "white"})),
+        ("layout.update", json!({"element": added[3], "color": 7, "x": 1})),
+        ("layout.addElement", json!({"kind": "colorbar", "color": "#12"})),
+    ] {
+        let err = s.run(cmd, &p).unwrap_err();
+        assert!(err.contains("color must be"), "{p}: {err}");
+    }
+    assert_eq!(s.project.layouts[li], before);
+    // Locked, a colour and a null are both changes.
+    s.run("layout.update", &json!({"element": legend, "locked": true})).unwrap();
+    for p in [json!({"element": legend, "color": "#000000"}), json!({"element": legend, "color": null})] {
+        assert!(s.run("layout.update", &p).is_err_and(|e| e.contains("locked")), "{p}");
+    }
+}
+
 #[test]
 fn locked_layout_elements_take_no_change_until_unlocked() {
     use rustgis_map::layout::ElementKind;
@@ -48312,472 +48523,18 @@ fn the_thread_setting_is_reserved() {
     assert!(!spec.mutates, "no undo step");
 }
 
-/// A folder in the temp directory that the test owns and that is removed however it ends.
-#[cfg(not(target_arch = "wasm32"))]
-struct CancelDir(std::path::PathBuf);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl CancelDir {
-    /// The folder `{prefix}-{process id}` in the temp directory, empty and created.
-    fn new(prefix: &str) -> CancelDir {
-        let dir = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        CancelDir(dir)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for CancelDir {
-    /// Removes the folder and what the test left in it.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// The sample project with what the background commands read: a DEM and what is made of it, training
-/// squares, an imagery workspace, a two-class scene with its training polygons, a layout, a report
-/// and a Shapefile layer with an edit to publish. Files go in `dir`. Returns it with the DEM's name.
-#[cfg(not(target_arch = "wasm32"))]
-fn cancel_world(dir: &std::path::Path) -> (Session, String) {
-    let out = |f: &str| dir.join(f).display().to_string();
-    let mut s = world();
-    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
-    let dem = s.map().layers.iter().find(|l| l.is_raster()).unwrap().name.clone();
-    // What some of them read: a later DEM, a slope, training squares, an imagery workspace, a
-    // two-class scene with its training polygons, and a layout.
-    s.run("raster.function", &json!({"layer": dem, "function": "bandMath", "expression": "b1 + 10", "name": "dem_later"})).unwrap();
-    s.run("raster.function", &json!({"layer": dem, "function": "slope", "name": "dem_slope"})).unwrap();
-    s.run("layer.template", &json!({"template": "polygons", "name": "Squares"})).unwrap();
-    for (name, x) in [("low", 10.002), ("high", 10.018)] {
-        let square = [[x, 45.018], [x + 0.004, 45.018], [x + 0.004, 45.022], [x, 45.022], [x, 45.018]];
-        let geometry = json!({"type": "Polygon", "coordinates": [square]});
-        s.run("edit.addFeature", &json!({"layer": "Squares", "geometry": geometry, "attributes": {"name": name}})).unwrap();
-    }
-    s.run("imagery.workspace", &json!({"kind": "ortho", "name": "Valley", "images": [dem, "dem_later"]})).unwrap();
-    s.run("imagery.workspaceOptions", &json!({"name": "Valley", "cellSize": 0.002})).unwrap();
-    s.run("layer.addDataBytes", &json!({"fileName": "scene.tif", "data": two_class_b64()})).unwrap();
-    let training = json!({"type": "FeatureCollection", "features": [
-        {"type": "Feature", "properties": {"class": "water"}, "geometry": {"type": "Polygon", "coordinates": [[[10.002, 45.002], [10.015, 45.002], [10.015, 45.035], [10.002, 45.035], [10.002, 45.002]]]}},
-        {"type": "Feature", "properties": {"class": "field"}, "geometry": {"type": "Polygon", "coordinates": [[[10.025, 45.002], [10.038, 45.002], [10.038, 45.035], [10.025, 45.035], [10.025, 45.002]]]}}]});
-    s.run("layer.addDataText", &json!({"fileName": "training.geojson", "text": training.to_string()})).unwrap();
-    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "blank"})).unwrap();
-    s.run("layout.addFrame", &json!({"x": 20, "y": 20, "w": 150, "h": 150})).unwrap();
-    // A layer read from a Shapefile, edited, to publish.
-    s.run("share.exportLayer", &json!({"layer": "Cities", "path": out("towns.shp")})).unwrap();
-    s.run("layer.addData", &json!({"path": out("towns.shp"), "name": "towns"})).unwrap();
-    s.run("edit.setValue", &json!({"layer": "towns", "row": 0, "field": "name", "value": "Renamed"})).unwrap();
-    s.run("report.new", &json!({"layer": "Cities"})).unwrap();
-    // A standalone table to export ranked and limited.
-    s.run("layer.addDataText", &json!({"fileName": "ranks.csv", "text": "name,score\na,1\nb,3\n"})).unwrap();
-    (s, dem)
-}
-
-/// The commands that make a raster in the background, with parameters that run on [`cancel_world`].
-#[cfg(not(target_arch = "wasm32"))]
-fn cancel_rasters(dem: &str) -> Vec<(&'static str, Value)> {
-    vec![
-        ("analysis.viewshed", json!({"layer": dem, "lon": 10.0055, "lat": 45.0395, "height": 2})),
-        ("analysis.interpolate", json!({"layer": "Cities", "field": "pop_max"})),
-        (
-            "analysis.suitability",
-            json!({"criteria": [
-                {"layer": dem, "ranges": [[0, 250, 1], [250, 1000, 10]], "weight": 2},
-                {"layer": "dem_slope", "ranges": [[0, 5, 10], [5, 90, 1]], "weight": 1}]}),
-        ),
-        ("raster.function", json!({"layer": dem, "function": "hillshade"})),
-        ("raster.functionChain", json!({"layer": dem, "steps": [{"function": "slope"}, {"function": "threshold", "value": 10}]})),
-        ("raster.classify", json!({"layer": dem, "classes": 3})),
-        ("raster.classifySupervised", json!({"layer": dem, "training": "Squares", "classField": "name"})),
-        ("raster.change", json!({"before": dem, "after": "dem_later", "method": "difference"})),
-        ("raster.index", json!({"layer": dem, "index": "ndvi", "nir": 1, "red": 1})),
-        ("raster.process", json!({"layer": dem, "operation": "resample", "factor": 4})),
-        ("imagery.mosaic", json!({"name": "Valley"})),
-        (
-            "dl.classify",
-            json!({"layer": "scene", "training": "training", "classField": "class", "bands": [1, 2], "epochs": 30, "model": "landcover"}),
-        ),
-        // Cancelled before the index is read: nothing reaches the network.
-        ("embeddings.similarity", json!({"dataset": "alphaearth", "point": [10.01, 45.01], "bbox": [10.0, 45.0, 10.02, 45.02]})),
-        ("embeddings.change", json!({"dataset": "alphaearth", "bbox": [10.0, 45.0, 10.02, 45.02]})),
-        // Cancelled before a band's file is read: nothing reaches the network.
-        (
-            "stac.addBands",
-            json!({"item": {"type": "Feature", "id": "scene", "bbox": [10.0, 45.0, 10.02, 45.02], "properties": {"datetime": "2024-06-01T00:00:00Z"},
-                "assets": {
-                    "red": {"href": "https://example.org/red.tif", "type": "image/tiff; application=geotiff; profile=cloud-optimized", "eo:bands": [{"common_name": "red"}]},
-                    "green": {"href": "https://example.org/green.tif", "type": "image/tiff; application=geotiff; profile=cloud-optimized", "eo:bands": [{"common_name": "green"}]},
-                    "blue": {"href": "https://example.org/blue.tif", "type": "image/tiff; application=geotiff; profile=cloud-optimized", "eo:bands": [{"common_name": "blue"}]}}},
-                "bbox": [10.0, 45.0, 10.02, 45.02]}),
-        ),
-        // The same: an index reads two files and nothing reaches the network.
-        (
-            "stac.addIndex",
-            json!({"item": {"type": "Feature", "id": "scene", "bbox": [10.0, 45.0, 10.02, 45.02], "properties": {"datetime": "2024-06-01T00:00:00Z"},
-                "assets": {
-                    "red": {"href": "https://example.org/red.tif", "type": "image/tiff; application=geotiff; profile=cloud-optimized", "eo:bands": [{"common_name": "red"}]},
-                    "nir": {"href": "https://example.org/nir.tif", "type": "image/tiff; application=geotiff; profile=cloud-optimized", "eo:bands": [{"common_name": "nir"}]}}},
-                "index": "ndvi", "bbox": [10.0, 45.0, 10.02, 45.02]}),
-        ),
-    ]
-}
-
-/// The exports that run in the background, writing into `out`, with parameters that run on
-/// [`cancel_world`].
-#[cfg(not(target_arch = "wasm32"))]
-fn cancel_exports(out: &dyn Fn(&str) -> String, dem: &str) -> Vec<(&'static str, Value)> {
-    vec![
-        ("data.convert", json!({"layer": "Cities", "format": "geojson", "path": out("converted.geojson")})),
-        ("share.exportLayer", json!({"layer": "Cities", "path": out("cities.geojson")})),
-        (
-            "share.exportTable",
-            json!({"table": "ranks", "path": out("ranks.csv"), "sort": [{"field": "score", "descending": true}], "limit": 1}),
-        ),
-        ("share.exportRaster", json!({"layer": dem, "path": out("dem.tif")})),
-        ("share.exportMap", json!({"path": out("map.png"), "width": 320, "height": 200})),
-        ("map.exportOrbit", json!({"path": out("orbit.zip"), "frames": 3, "width": 96, "height": 64})),
-        ("layout.export", json!({"path": out("layout.pdf"), "dpi": 72})),
-        ("report.export", json!({"path": out("report.pdf"), "dpi": 72})),
-        ("source.publish", json!({"layer": "towns"})),
-    ]
-}
-
-/// The tools whose work grows past a second or two on real data: buffers, overlays, joins, hulls,
-/// densities and interpolation. A new long tool is added here (AGENTS.md › Never hold the window).
-#[cfg(not(target_arch = "wasm32"))]
-fn cancel_tools(dem: &str) -> Vec<(&'static str, Value)> {
-    vec![
-        ("buffer", json!({"input": "Cities", "distance": 100})),
-        ("dissolve", json!({"input": "Countries"})),
-        ("spatialJoin", json!({"target": "Cities", "join": "Countries"})),
-        ("clip", json!({"input": "Rivers", "clip": "Countries"})),
-        ("erase", json!({"input": "Rivers", "erase": "Countries"})),
-        ("intersect", json!({"input": "Rivers", "overlay": "Countries"})),
-        ("identity", json!({"input": "Rivers", "overlay": "Countries"})),
-        ("union", json!({"input": "Lakes", "overlay": "Countries"})),
-        ("symmetricalDifference", json!({"input": "Lakes", "overlay": "Countries"})),
-        ("update", json!({"input": "Countries", "update": "Lakes"})),
-        ("split", json!({"input": "Rivers", "split": "Countries"})),
-        ("simplify", json!({"input": "Countries", "tolerance": 1})),
-        ("countPoints", json!({"polygons": "Countries", "points": "Cities"})),
-        ("convexHull", json!({"input": "Countries", "group": "None", "output": "Hulls_each"})),
-        ("convexHull", json!({"input": "Countries", "group": "All", "output": "Hulls_all"})),
-        ("kernelDensity", json!({"input": "Cities", "crs": "EPSG:3857"})),
-        ("kriging", json!({"input": "Cities", "field": "pop_max"})),
-        ("tabulateArea", json!({"raster": dem, "zones": "Countries"})),
-    ]
-}
-
-/// A long command stops when it is cancelled while it runs (#1562): every command the app runs
-/// on another thread (its exports and the commands that make a raster) and the long-running tools
-/// look at the Cancel flag in their work, not only before it starts. Their control is cancelled
-/// as soon as the work starts ([`rustgis_analysis::control::Control::cancelled_once_started`]),
-/// so no timing is involved: a run that never looks finishes and is caught by its count of looks.
+/// Every registered long command looks at Cancel in its work, without timing.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn long_commands_stop_when_cancelled_while_they_run() {
-    use rustgis_analysis::control::Control;
-    let dir = CancelDir::new("rustgis-cancel");
-    let out = |f: &str| dir.0.join(f).display().to_string();
-    let (mut s, dem) = cancel_world(&dir.0);
-
-    // What didn't stop, and how often it looked.
-    let mut kept_going = Vec::new();
-    let mut note = |what: &str, result: Result<(), String>, control: &Control| {
-        let stopped = result.as_ref().is_err_and(|e| e.contains("cancelled"));
-        if !stopped || control.looked() == 0 {
-            kept_going.push(format!("{what}: {result:?}, looked {} times", control.looked()));
-        }
-    };
-
-    let rasters = cancel_rasters(&dem);
-    // Every command that runs in the background is here, and only those.
-    fn listed<'a>(l: &[(&'a str, Value)]) -> std::collections::BTreeSet<&'a str> {
-        l.iter().map(|(c, _)| *c).collect()
-    }
-    let registered = crate::cmd::workflows::IN_BACKGROUND.iter().map(|(c, ..)| *c).collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(listed(&rasters), registered, "add a new background raster command here");
-    for (command, p) in &rasters {
-        let run = crate::cmd::workflows::raster_start(&mut s, command, p).unwrap_or_else(|e| panic!("{command}: {e}"));
-        let id = run.id;
-        let control = Control::cancelled_once_started();
-        note(command, run.run(&control).map(|_| ()), &control);
-        crate::cmd::workflows::raster_abandon(&mut s, id);
-    }
-
-    let exports = cancel_exports(&out, &dem);
-    let registered = crate::cmd::exports::IN_BACKGROUND.iter().map(|(c, ..)| *c).collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(listed(&exports), registered, "add a new background export here");
-    for (command, p) in &exports {
-        let run = crate::cmd::exports::export_start(&mut s, command, p).unwrap_or_else(|e| panic!("{command}: {e}"));
-        let control = Control::cancelled_once_started();
-        note(command, run.run(&control).map(|_| ()), &control);
-    }
-
-    // The Add Service dialog replays supplied metadata off the desktop frame too.
-    let params = json!({"url":"https://maps.example.org/dataset","type":"ogcapi","text":"{\"collections\":[]}"});
-    for command in ["service.layers", "service.add"] {
-        let read = crate::cmd::reads::read_ahead(&mut s, command, &params).unwrap();
-        assert!(read.reads());
-        let control = Control::cancelled_once_started();
-        note(command, read.run(&control).map(|_| ()), &control);
-    }
-
-    // Shape fitting uses the same cancellable read queue, without modifying its source.
-    {
-        let mut shapes = Session::new(Project::default());
-        let id = shapes.map_mut().add_dataset(rustgis_data::Dataset::new("Conversion", rustgis_data::GeometryType::Polygon, vec![]));
-        shapes.active_layer = Some(id);
-        shapes.run("edit.enable", &json!({"on":true})).unwrap();
-        shapes.run("edit.addBox", &json!({"box":{"center":[0,0],"width":100,"height":60,"angle":25}})).unwrap();
-        let read =
-            crate::cmd::reads::read_ahead(&mut shapes, "edit.previewShapeConversion", &json!({"layer":id,"row":0,"kind":"rotatedBox"}))
-                .unwrap();
-        let control = Control::cancelled_once_started();
-        note("edit.previewShapeConversion", read.run(&control).map(|_| ()), &control);
-    }
-
-    // Column Statistics counts every row of a layer on a thread of its own in the desktop app.
-    {
-        let read = crate::cmd::reads::read_ahead(&mut s, "table.statistics", &json!({"layer": "Cities", "field": "pop_max"})).unwrap();
-        assert!(read.reads());
-        let control = Control::cancelled_once_started();
-        note("table.statistics", read.run(&control).map(|_| ()), &control);
-    }
-
-    // A Zarr point series is read on a thread of its own by the Time Series pane (#2282).
-    {
-        let (dir, path) = zarr_store_over_time("cancel-series");
-        let run = crate::cmd::zarr::series_start(&s, &json!({"path": path, "variable": "t", "lon": 1.0, "lat": 30.0})).unwrap();
-        let control = Control::cancelled_once_started();
-        note("zarr.series", run.run(&control).map(|_| ()), &control);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    s.run("layer.addDataText", &json!({"fileName": "calc.csv", "text": "n,day\n1,x\n2,y\n"})).unwrap();
-    s.run("edit.enable", &json!({"on": true})).unwrap();
-    let edits = [
-        ("edit.setValue", json!({"table": "calc", "row": 0, "field": "n", "value": 3})),
-        ("edit.addFeature", json!({"table": "calc", "attributes": {"n": 3}})),
-        ("edit.addField", json!({"table": "calc", "name": "extra", "type": "text"})),
-        ("edit.deleteField", json!({"table": "calc", "field": "day"})),
-        ("edit.convertField", json!({"table": "calc", "field": "day", "type": "date"})),
-        ("edit.calculateField", json!({"table": "calc", "field": "n", "expression": "n * 2"})),
-    ];
-    assert_eq!(listed(&edits), crate::cmd::edit::TABLE_EDITS.iter().map(|(id, ..)| *id).collect(), "add a new table worker here");
-    for (command, p) in edits {
-        let read = crate::cmd::reads::read_ahead(&mut s, command, &p).unwrap();
-        assert!(read.reads());
-        let control = Control::cancelled_once_started();
-        note(command, read.run(&control).map(|_| ()), &control);
-        let script = json!({"script": format!("{command} {p}")});
-        let read = crate::cmd::reads::read_ahead(&mut s, "script.run", &script).unwrap();
-        assert!(read.reads());
-        let control = Control::cancelled_once_started();
-        note(command, read.run(&control).map(|_| ()), &control);
-    }
-
-    let params = json!({"layer":"Cities", "field":"name", "type":"date", "format":"%m/%d/%Y"});
-    let read = crate::cmd::reads::read_ahead(&mut s, "edit.convertField", &params).unwrap();
-    assert!(read.reads());
-    let control = Control::cancelled_once_started();
-    note("layer date conversion", read.run(&control).map(|_| ()), &control);
-
-    // Replacement validation can now scan temporal fields as well as probing geometry.
-    let mut dates = rustgis_data::Dataset::new(
-        "dates",
-        rustgis_data::GeometryType::Point,
-        vec![rustgis_data::Field::new("day", rustgis_data::FieldType::Date)],
-    );
-    dates.push(
-        Some(rustgis_data::Geometry::Point(rustgis_data::Coord::new(0.0, 0.0))),
-        vec![rustgis_data::Value::parse("2024-02-29", rustgis_data::FieldType::Date)],
-    );
-    let replacement = out("cancel-repair-source.fgb");
-    std::fs::write(&replacement, rustgis_data::source::fgb::write(&dates).unwrap()).unwrap();
-    let id = s.run("layer.addData", &json!({"path": replacement, "stream": true})).unwrap()["layer"].as_u64().unwrap();
-    let read = crate::cmd::reads::read_ahead(&mut s, "layer.repairSource", &json!({"layer": id, "path": replacement})).unwrap();
-    assert!(read.reads());
-    let control = Control::cancelled_once_started();
-    note("layer.repairSource", read.run(&control).map(|_| ()), &control);
-    std::fs::remove_file(replacement).unwrap();
-
-    let tools = cancel_tools(&dem);
-    for (tool, params) in &tools {
-        // The parameters are good: a run that isn't cancelled succeeds.
-        s.run("gp.run", &json!({"tool": tool, "params": params})).unwrap_or_else(|e| panic!("{tool}: {e}"));
-        let run = crate::cmd::gp::tool_start(&mut s, tool, params).unwrap_or_else(|e| panic!("{tool}: {e}"));
-        let id = run.id;
-        let control = Control::cancelled_once_started();
-        let done = run.run(&control);
-        // The result is kept, then `gp.finish` applies it (or says why it can't), as in the app.
-        let finished = crate::cmd::gp::tool_complete(&mut s, id, done).and_then(|()| s.run("gp.finish", &json!({"id": id})).map(|_| ()));
-        // With its parameters: a tool listed twice (convexHull) is told apart.
-        note(&format!("{tool} {params}"), finished, &control);
-    }
-    assert!(kept_going.is_empty(), "these ran on after Cancel:\n{}", kept_going.join("\n"));
+    cancellation::long_commands(false);
 }
 
-/// What Cancel leaves behind (#1562): each command that runs in the background (the rasters, the
-/// exports and the long tools of [`long_commands_stop_when_cancelled_while_they_run`]) is cancelled
-/// at its 1st, 2nd, 3rd… look at the flag ([`Control::cancelled_at_look`]) and the session, the
-/// folder and the next run are looked at. Cancel must leave the project, its undo steps and the
-/// files as they were, and the same command run again must work and undo like a first run. The
-/// commands that read from the network (`embeddings.*`) aren't here: nothing offline runs them to
-/// the end.
-///
-/// The first looks are tried in turn up to [`LOOKS`], and the command's last, which has the most
-/// done (a long command has hundreds: a look for each feature). A command ends the sweep when it
-/// finishes before reaching the look.
+/// Cancel at every existing work check, then verify the session, files and immediate retry.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn cancelling_at_each_check_leaves_nothing_behind() {
-    use rustgis_analysis::control::Control;
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-    /// The looks tried one by one, from the first.
-    const LOOKS: u64 = 3;
-    let dir = CancelDir::new("rustgis-cancel-state");
-    let out = |f: &str| dir.0.join(f).display().to_string();
-    let (mut s, dem) = cancel_world(&dir.0);
-    // The project (but for the counters undo moves on to redraw the layers), its undo steps and
-    // what waits to be applied; and the folder's files.
-    /// Takes the counters of how often a layer's geometry changed out of a serialized project.
-    fn without_revisions(v: &mut Value) {
-        match v {
-            Value::Object(m) => {
-                m.remove("geometry_rev");
-                m.values_mut().for_each(without_revisions);
-            }
-            Value::Array(a) => a.iter_mut().for_each(without_revisions),
-            _ => {}
-        }
-    }
-    let state = |s: &Session| {
-        let mut project = serde_json::to_value(&s.project).unwrap();
-        without_revisions(&mut project);
-        (project, s.undo_depth(), s.pending.len(), s.plugin_runs.len(), s.raster_runs.len())
-    };
-    let files = || -> BTreeMap<String, Vec<u8>> {
-        let read = std::fs::read_dir(&dir.0).unwrap();
-        read.map(|e| e.unwrap())
-            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap_or_default()))
-            .collect()
-    };
-    let mut problems = Vec::new();
-    // Each family runs and applies a command as the app does; `adds` is whether a finished run
-    // adds an undo step. `fresh` builds the world again before each run, for a command whose
-    // finished run can't be undone and leaves nothing for the next to do (publishing an edit).
-    type Attempt<'a> = &'a dyn Fn(&mut Session, &Arc<Control>) -> Result<(), String>;
-    let mut sweep = |s: &mut Session, what: &str, adds: bool, fresh: bool, attempt: Attempt| {
-        let renew = |s: &mut Session| {
-            if fresh {
-                *s = cancel_world(&dir.0).0;
-            }
-        };
-        renew(s);
-        // How many looks a whole run takes.
-        let counting = Control::cancelled_at_look(u64::MAX);
-        let before = state(s);
-        if let Err(e) = attempt(s, &counting) {
-            problems.push(format!("{what}: a run that isn't cancelled failed: {e}"));
-            return;
-        }
-        let total = counting.looked();
-        if adds {
-            while s.undo_depth() > before.1 {
-                s.undo();
-            }
-        }
-        for n in (1..=total.min(LOOKS)).chain([total]) {
-            renew(s);
-            let (before, held) = (state(s), files());
-            let control = Control::cancelled_at_look(n);
-            let result = attempt(s, &control);
-            if result.is_ok() {
-                // Finished before its `n`th look: nothing more to cancel.
-                if adds {
-                    s.undo();
-                }
-                break;
-            }
-            let e = result.unwrap_err();
-            if !e.contains("cancelled") {
-                problems.push(format!("{what}, look {n} of {total}: failed instead of stopping: {e}"));
-            }
-            if state(s) != before {
-                problems.push(format!("{what}, look {n} of {total}: Cancel changed the session"));
-            }
-            if files() != held {
-                problems.push(format!("{what}, look {n} of {total}: Cancel changed the files in the folder"));
-            }
-            match attempt(s, &Control::new()) {
-                Err(e) => problems.push(format!("{what}, look {n} of {total}: it can't be run again: {e}")),
-                Ok(()) if adds => {
-                    if s.undo_depth() != before.1 + 1 {
-                        problems.push(format!(
-                            "{what}, look {n} of {total}: run again, its undo steps went from {} to {}, not by 1",
-                            before.1,
-                            s.undo_depth()
-                        ));
-                    }
-                    while s.undo_depth() > before.1 {
-                        s.undo();
-                    }
-                    let mut after = state(s);
-                    // Table ids are never reused: undo keeps the counter (see the standalone-table removal regression).
-                    after.0["next_table_id"] = before.0["next_table_id"].clone();
-                    if after != before {
-                        problems.push(format!("{what}, look {n} of {total}: undoing the run again doesn't give the project back"));
-                    }
-                }
-                Ok(()) => {}
-            }
-        }
-    };
-
-    // Embeddings and STAC bands read from the network, which no offline run finishes (the cancel test
-    // above runs them cancelled, before anything is sent).
-    for (command, p) in
-        cancel_rasters(&dem).into_iter().filter(|(c, _)| !c.starts_with("embeddings.") && !matches!(*c, "stac.addBands" | "stac.addIndex"))
-    {
-        let attempt = |s: &mut Session, control: &Arc<Control>| {
-            let run = crate::cmd::workflows::raster_start(s, command, &p)?;
-            let id = run.id;
-            match run.run(control) {
-                Ok(made) => {
-                    crate::cmd::workflows::raster_land(s, id, made)?;
-                    let mut ran = p.clone();
-                    ran["ran"] = json!(id);
-                    s.run(command, &ran).map(|_| ())
-                }
-                Err(e) => {
-                    crate::cmd::workflows::raster_abandon(s, id);
-                    Err(e)
-                }
-            }
-        };
-        sweep(&mut s, command, true, false, &attempt);
-    }
-    for (command, p) in cancel_exports(&out, &dem) {
-        let attempt = |s: &mut Session, control: &Arc<Control>| {
-            let run = crate::cmd::exports::export_start(s, command, &p)?;
-            let started = run.started();
-            crate::cmd::exports::export_land(s, started, run.run(control)).map(|_| ())
-        };
-        sweep(&mut s, command, false, command == "source.publish", &attempt);
-    }
-    for (tool, params) in cancel_tools(&dem) {
-        let attempt = |s: &mut Session, control: &Arc<Control>| {
-            let run = crate::cmd::gp::tool_start(s, tool, &params)?;
-            let id = run.id;
-            let done = run.run(control);
-            crate::cmd::gp::tool_complete(s, id, done)?;
-            s.run("gp.finish", &json!({"id": id})).map(|_| ())
-        };
-        sweep(&mut s, &format!("{tool} {params}"), true, false, &attempt);
-    }
-    assert!(problems.is_empty(), "Cancel left behind:\n{}", problems.join("\n"));
+    cancellation::long_commands(true);
 }
 
 /// A GeoLibre step of a model is worked out on the copy and taken by the run here, as a built-in
@@ -51755,13 +51512,24 @@ fn a_save_refuses_coordinates_that_arent_numbers_and_keeps_the_file() {
     let layer = s.map_mut().layer_mut(id).unwrap();
     layer.dataset.push(Some(Geometry::Line(vec![vec![Coord::new(0.0, 10.0), Coord::new(f64::NAN, 10.5)]])), vec![]);
     layer.dataset.push(Some(Geometry::Point(Coord::new(f64::INFINITY, 0.0))), vec![]);
+    // Ids that aren't their rows (2 and 3), as after deletions: they're named by id, as the
+    // attribute table shows them.
+    assert_eq!(layer.dataset.features.len(), 3);
+    layer.dataset.features = layer
+        .dataset
+        .features
+        .iter()
+        .zip([1, 20, 30])
+        .map(|(f, id)| {
+            let mut f = f.clone();
+            f.id = id;
+            f
+        })
+        .collect();
     layer.touch_geometry();
-    // Named by their ids, as the attribute table shows them.
-    let ids: Vec<String> = layer.dataset.features.iter().skip(1).map(|f| f.id.to_string()).collect();
-    let said = format!("2 feature(s) in 'ways' (ids {}) have a coordinate that isn't a number", ids.join(", "));
     for ((cmd, file), was) in saves.iter().zip(&before) {
         let e = s.run(cmd, &json!({"path": path(file)})).unwrap_err();
-        assert!(e.contains(&said), "{cmd}: {e}");
+        assert!(e.contains("2 feature(s) in 'ways' (ids 20, 30) have a coordinate that isn't a number"), "{cmd}: {e}");
         assert_eq!(&std::fs::read(path(file)).unwrap(), was, "{cmd} kept the file as it was");
     }
     // Their geometry gone, the features save and open again.

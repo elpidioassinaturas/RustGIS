@@ -1055,6 +1055,7 @@
         "enum": [
           "terrain-block",
           "terrain-water",
+          "terrain-water-shore",
           "shaded-relief-effects",
           "normalized-legend-urls",
           "field-origin",
@@ -1062,7 +1063,9 @@
           "shaded-relief-light",
           "table-export-order",
           "tabulate-intersection-unit",
-          "layout-element-background"
+          "layout-element-background",
+          "picture-markers",
+          "layout-element-ink"
         ],
         "type": "string"
       },
@@ -1129,6 +1132,7 @@
   "x-rustgis-capabilities": [
     "terrain-block",
     "terrain-water",
+    "terrain-water-shore",
     "shaded-relief-effects",
     "normalized-legend-urls",
     "field-origin",
@@ -1136,7 +1140,9 @@
     "shaded-relief-light",
     "table-export-order",
     "tabulate-intersection-unit",
-    "layout-element-background"
+    "layout-element-background",
+    "picture-markers",
+    "layout-element-ink"
   ],
   "x-rustgis-reads-format": 2,
   "x-rustgis-writes-format": 2

@@ -226,7 +226,7 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
 
 /// The Web Data services shown in the Web Data pane, by the `ui.dialog` name that opens them, and
 /// their titles.
-const WEB_DATA: [(&str, &str); 16] = [
+const WEB_DATA: [(&str, &str); 17] = [
     ("opendata", "Search Open Data"),
     ("stac", "STAC Search"),
     ("dataCubes", "Data Cubes"),
@@ -241,6 +241,7 @@ const WEB_DATA: [(&str, &str); 16] = [
     ("femaNfhl", "FEMA NFHL"),
     ("fieldsOfTheWorld", "Fields of the World"),
     ("earthaccess", "NASA Earthaccess"),
+    ("copernicus", "Copernicus Data Space"),
     ("nldi", "USGS NLDI"),
     ("embeddings", "Satellite Embeddings"),
 ];
@@ -275,6 +276,7 @@ fn web_data(app: &mut RustGisApp, ui: &mut Ui) {
         "femaNfhl" => crate::webdataui::fema_nfhl(app, ui),
         "fieldsOfTheWorld" => crate::webdataui::fields_of_the_world(app, ui),
         "earthaccess" => crate::earthaccessui::pane(app, ui),
+        "copernicus" => crate::copernicusui::pane(app, ui),
         "nldi" => crate::nldiui::pane(app, ui),
         "embeddings" => crate::embeddingsui::pane(app, ui),
         _ => crate::opendataui::dialog(app, ui),
@@ -6101,7 +6103,12 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                 } else {
                     (tl!("Add Stroke"), tl!("Stack another stroke on top"))
                 };
-                let add = ui.add_enabled(strokes.len() < MAX_STROKES, egui::Button::new(label).small());
+                // A point's first mark is its symbol's marker and later ones copy the top one; no mark
+                // can be an image yet (a file's is kept, but not edited).
+                let image = (points && strokes.is_empty() && matches!(base.marker, Marker::Picture(_)))
+                    || rustgis_engine::map::symbology::strokes_have_pictures(&strokes, |_| true);
+                let add = ui.add_enabled(strokes.len() < MAX_STROKES && !image, egui::Button::new(label).small());
+                let add = if image { add.on_disabled_hover_text(tl!("An image marker takes no marks yet")) } else { add };
                 if add.on_hover_text(tip).clicked() {
                     let mut next = strokes.clone();
                     // The first stroke stands for the symbol's own; later ones copy the top one. A
