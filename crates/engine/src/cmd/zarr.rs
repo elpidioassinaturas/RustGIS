@@ -1562,11 +1562,13 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let (series, notes) = series_start(s, p)?.read()?;
+        // What reading it said is said though the read then fails, as it was before #2282.
+        let mut notes = Vec::new();
+        let series = series_start(s, p)?.read(&mut notes);
         for n in notes {
             s.warn(n);
         }
-        Ok(series)
+        series
     }
 }
 
@@ -1615,16 +1617,18 @@ impl SeriesTally {
 impl SeriesRun {
     /// Reads the series under `control`: its count is the steps read of those asked, and Cancel
     /// stops it before its next batch of reads, with no series. Gives the series as `zarr.series`
-    /// answers it, and what reading it said.
-    pub fn run(&self, control: &std::sync::Arc<rustgis_analysis::control::Control>) -> Result<(Value, Vec<String>), String> {
-        rustgis_analysis::run_under("Time Series at a Point", control, || self.read())
+    /// answers it, and what reading it said, which a read that fails said too.
+    pub fn run(&self, control: &std::sync::Arc<rustgis_analysis::control::Control>) -> (Result<Value, String>, Vec<String>) {
+        let mut notes = Vec::new();
+        let series = rustgis_analysis::run_under("Time Series at a Point", control, || self.read(&mut notes));
+        (series, notes)
     }
 
-    /// Reads the series on this thread, looking at the run's Cancel (if any) between batches.
-    fn read(&self) -> Result<(Value, Vec<String>), String> {
+    /// Reads the series on this thread, looking at the run's Cancel (if any) between batches;
+    /// what reading it says goes in `notes` as it is found, so an error after it doesn't lose it.
+    fn read(&self, notes: &mut Vec<String>) -> Result<Value, String> {
         let (lon, lat) = (self.lon, self.lat);
         let mut src = self.src.clone();
-        let mut notes = Vec::new();
         let check = &mut |_: usize| rustgis_data::progress::check().map_err(|_| "cancelled".to_string());
         check(0)?;
         let store = if is_web(&src.root) {
@@ -1705,8 +1709,9 @@ impl SeriesRun {
                 .map_err(|e| crate::sources::message_with_address(&src.root, &e.to_string()))?;
             chunks.extend(store_parts(&src.root, &inner, &mut before)?);
         }
-        // Cancelled during the last batch: nothing is decoded, so no part of a series is given.
-        rustgis_data::progress::check().map_err(|_| "cancelled".to_string())?;
+        // The last batch counted as read once it is, before decoding; cancelled during it, nothing
+        // is decoded, so no part of a series is given.
+        before(0)?;
         let values = zarr::assemble_series(&store, &plan, &chunks).map_err(|e| e.to_string())?;
         let picked = &dates[from..from + count];
         let labels: Vec<String> = picked.iter().map(|d| rustgis_data::time::format(*d, "YYYY-MM-DD HH:mm")).collect();
@@ -1716,7 +1721,7 @@ impl SeriesRun {
             "variable": var, "units": units, "dimension": dim, "lon": lon, "lat": lat, "row": row, "col": col,
             "dates": picked, "labels": labels, "values": values,
         });
-        Ok((series, notes))
+        Ok(series)
     }
 }
 

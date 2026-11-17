@@ -50751,6 +50751,26 @@ fn a_zarr_series_of_a_sharded_variable_reads_only_the_cells_chunks() {
     assert_eq!(from_dir.unwrap()["values"], json!([204.0, 1204.0]));
 }
 
+/// What reading a Zarr series says (here, the grid taken as WGS 84) is said though the read then
+/// fails (the point outside the grid), by the script's `zarr.series` and by the pane's
+/// `SeriesRun::run` alike, as it was before the read moved off the window (#2282).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_series_says_its_notes_though_the_read_fails() {
+    let (dir, path) = zarr_store_over_time("notes-on-error");
+    let outside = json!({"path": path, "variable": "t", "lon": 100.0, "lat": 80.0});
+    let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
+    let err = s.run("zarr.series", &outside);
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(err.as_ref().is_err_and(|e| e.contains("outside")), "{err:?}");
+    assert!(said.iter().any(|n| n.contains("WGS 84")), "the grid note is said: {said:?}");
+    let (read, notes) = crate::cmd::zarr::series_start(&s, &outside).unwrap().run(&rustgis_analysis::control::Control::stoppable());
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(read.as_ref().is_err_and(|e| e.contains("outside")), "{read:?}");
+    assert!(notes.iter().any(|n| n.contains("WGS 84")), "the pane gets the note too: {notes:?}");
+}
+
 /// A point's series read off the window (opengeos/RustGIS#2282): `SeriesRun::run` gives what
 /// `zarr.series` answers a script, counts the steps read, and Cancel stops it between batches of
 /// requests. A batch already sent finishes, no batch after it is asked, and a cancelled read
@@ -50783,7 +50803,8 @@ fn a_zarr_series_read_off_the_window_stops_between_batches() {
     let answer = script.run("zarr.series", &p).unwrap();
     let (p, _log) = serve();
     let control = Control::stoppable();
-    let (series, notes) = crate::cmd::zarr::series_start(&s, &p).unwrap().run(&control).unwrap();
+    let (series, notes) = crate::cmd::zarr::series_start(&s, &p).unwrap().run(&control);
+    let series = series.unwrap();
     assert_eq!(series["values"], answer["values"]);
     assert_eq!(series["dates"], answer["dates"]);
     assert_eq!(series["values"][129], json!(12908.0));
@@ -50793,14 +50814,14 @@ fn a_zarr_series_read_off_the_window_stops_between_batches() {
     // Its looks at Cancel, counted on a whole run.
     let (p, _log) = serve();
     let counting = Control::cancelled_at_look(u64::MAX);
-    crate::cmd::zarr::series_start(&s, &p).unwrap().run(&counting).unwrap();
+    crate::cmd::zarr::series_start(&s, &p).unwrap().run(&counting).0.unwrap();
     let looks = counting.looked();
     assert!(looks >= 4, "a look before each batch: {looks}");
     let mut seen = Vec::new();
     for n in 1..=looks {
         let (p, log) = serve();
         let control = Control::cancelled_at_look(n);
-        let got = crate::cmd::zarr::series_start(&s, &p).unwrap().run(&control);
+        let (got, _) = crate::cmd::zarr::series_start(&s, &p).unwrap().run(&control);
         assert!(got.as_ref().is_err_and(|e| e.contains("cancelled")), "look {n}: {got:?}");
         let asked = chunks(&log);
         // Whole batches only: the one under way when Cancel came finished, none after it.

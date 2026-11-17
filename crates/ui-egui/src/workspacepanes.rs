@@ -505,9 +505,10 @@ pub struct SeriesReading {
     pub result: std::sync::Arc<std::sync::Mutex<Option<SeriesResult>>>,
 }
 
-/// A series read on its thread, as `zarr.series` answers it, and what reading it said.
+/// A series read on its thread, as `zarr.series` answers it, and what reading it said (a read
+/// that fails said it too).
 #[cfg(not(target_arch = "wasm32"))]
-pub type SeriesResult = Result<(Value, Vec<String>), String>;
+pub type SeriesResult = (Result<Value, String>, Vec<String>);
 
 /// Starts reading the series at `at` under the Time Series pane's layer on a thread of its own: a
 /// wrong request is said at once, and the read lands through [`land_series`].
@@ -529,7 +530,7 @@ fn start_series(app: &mut RustGisApp, at: rustgis_engine::geom::Coord) {
     let spawned = std::thread::Builder::new().name("zarr-series".into()).spawn(move || {
         let _diagnostics = diagnostics.enter();
         let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(&control)))
-            .unwrap_or_else(|_| Err(tl!("The time series failed unexpectedly").to_string()));
+            .unwrap_or_else(|_| (Err(tl!("The time series failed unexpectedly").to_string()), Vec::new()));
         if let Ok(mut g) = result.lock() {
             *g = Some(out);
         }
@@ -551,9 +552,15 @@ fn start_series(app: &mut RustGisApp, at: rustgis_engine::geom::Coord) {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn land_series(app: &mut RustGisApp) -> bool {
     let Some(r) = &app.ws.series_reading else { return false };
-    let Some(res) = r.result.lock().ok().and_then(|mut g| g.take()) else { return true };
+    let Some((res, notes)) = r.result.lock().ok().and_then(|mut g| g.take()) else { return true };
     let (cancelled, opened) = (r.control.is_cancelled(), r.opened);
     app.ws.series_reading = None;
+    // What reading it said, though it then failed; not for a read cancelled or of another project.
+    if !cancelled && opened == app.session.opened {
+        for n in notes {
+            app.session.warn(n);
+        }
+    }
     match res {
         _ if cancelled => {
             app.ws.message = Some((tl!("The time series was cancelled: nothing was added to the chart").to_string(), false));
@@ -562,10 +569,7 @@ pub fn land_series(app: &mut RustGisApp) -> bool {
             app.ws.message =
                 Some((tl!("The time series finished after another project was opened, so it wasn't added").to_string(), false));
         }
-        Ok((series, notes)) => {
-            for n in notes {
-                app.session.warn(n);
-            }
+        Ok(series) => {
             app.ws.series.push(series);
             let excess = app.ws.series.len().saturating_sub(MAX_SERIES);
             app.ws.series.drain(..excess);
