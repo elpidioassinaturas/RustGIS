@@ -56,6 +56,30 @@ Select a layer in Layers and open **Style › Symbology** (or the Symbology pane
   first. Closing the pane or selecting another layer drops the retry.
 - **Proportional Symbols**: point size grows with a numeric field, chosen as for Graduated Colors.
 
+A point layer of Unique Values or Graduated Colors can also be sized by a number field, its classes
+keeping their colours: **Size by**, under **Rotation**, picks the field. Choose **Use field range**
+to apply its detected bounds, or enter the **Values** drawn smallest and largest and click
+**Apply**. Explicit bounds work even when the field is constant or has no values yet. Set the
+**Sizes** they take (points), and the
+**Scaling**: **By area**, as Proportional Symbols grow, or **By radius**, the size in a straight
+line with the value, as GeoLibre and MapLibre size circles. Values past either end take that end's
+size; a feature whose value is empty or not a number keeps its class's size. A final size of zero
+draws no marker. A web style or web layer shared from it draws the classes' sizes, and says so;
+while its points are aggregated into bins, the bins are drawn instead, and that is said too.
+The legend lists the
+classes, then the smallest, middle and largest size. Switching to another renderer keeps the
+setting unused, for when you switch back; a **Size** by expression, if set, wins over it. By
+command:
+
+```text
+layer.sizeBy={"layer":"Earthquakes","field":"mag","min":2.5,"max":7.5,"minSize":4,"maxSize":36,"scaling":"radius"}
+layer.sizeBy={"layer":"Earthquakes","field":null}
+```
+
+A project, map or layer file containing this setting declares format 2 and the
+`classified-point-size` capability. Readers that cannot keep it refuse the file. Files without
+the setting don't list it; removing the last mapping removes the requirement.
+
 A point's **Shape** is a circle, square, triangle, diamond or star, or a **Character**: any
 character of an installed font, picked under **Font**, as map signs often are (a symbol font's
 church, tree or mine). Its **Size** is the font's size, and the character sits as QGIS draws a
@@ -609,8 +633,13 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
   in view, centred on the line and kept upright, and may run past its ends by about a letter; a
   line too short for its text, or (curved) one bending more than 25° from one character to the
   next, is left unlabelled. A text over 200 characters long is set straight rather than
-  curved. Points and polygons with these placements are labelled as automatic
-  (`labels.placement={"layer": "Rivers", "position": "curved"}`).
+  curved. Points with these placements, and polygons placed parallel, are labelled as automatic
+  (`labels.placement={"layer": "Rivers", "position": "curved"}`). A polygon placed **Curved**
+  has its label on one line along its centre line, the longest path down the middle of its part
+  in view, as a lake's or a valley's name follows its shape: from its middle, else as near it as
+  the text fits, with the polygon at least half the text's height either side and the centre
+  line trimmed short of its tips. A polygon too short, narrow or sharply bent for its text is
+  labelled as automatic (`labels.placement={"layer": "Lakes", "position": "curved"}`).
 - **Other places round points**: a point's label whose place another label takes tries the
   other places round the point, corners first (above right, above left, below right, below left,
   right, left, above, below, leaving out its own), and goes to the first where
@@ -628,6 +657,17 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
   the setting does nothing there or at a position off the line. Off by default, for the same reason
   as round points, and Lock keeps the place each label took
   (`labels.placement={"layer": "Rivers", "position": "curved", "otherPositions": true}`).
+- **Names that fit their line**: a Curved label with `"fit": "auto"` is fitted to the room its
+  line gives, as hand-lettered maps name streams. A name that can't follow the line anywhere it is
+  tried is abbreviated (whole words: Córrego → Cór., Ribeirão → Rib., Rio → R., Creek → Cr.,
+  River → R., Arroyo → Ao., from a built-in English, Portuguese and Spanish list, or the class's
+  own `"abbreviations"`, which go first) and tried again; still too long, it is left out. A name
+  that takes more than a third of the line goes on its straightest stretch rather than at the
+  middle: the stretch whose ends are farthest apart for its length. With other places along the
+  line on, the next straightest stretches are its other places. Text size by a stream's
+  importance (a Strahler order or a class field) comes from label classes or `labels.by` `"size"`
+  (`labels.placement={"layer": "Rivers", "position": "curved", "fit": "auto", "abbreviations":
+  {"Creek": "Ck"}}`).
 - **Lock** keeps the labelled features fixed while you pan and zoom; **Pause** stops drawing
   labels for faster navigation; **View Unplaced** draws the labels that didn't fit in red. They
   apply to the whole map, so they are on the ribbon (Labeling › Map Labeling), not in the pane.

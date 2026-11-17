@@ -26,6 +26,8 @@ impl FeatureSource for Chunks {
             skipped: 0,
             unread_dates: Vec::new(),
             rounded_dates: Vec::new(),
+            null_text: Vec::new(),
+            notes: Vec::new(),
         })
     }
     fn streams_chunks(&self) -> bool {
@@ -107,6 +109,8 @@ fn complete_chunks_preserve_painter_order_filters_transparency_labels_and_select
                 skipped: 0,
                 unread_dates: Vec::new(),
                 rounded_dates: Vec::new(),
+                null_text: Vec::new(),
+                notes: Vec::new(),
             })
         }
         fn streams_chunks(&self) -> bool {
@@ -549,6 +553,7 @@ fn layout_export_keeps_all_drawn_legend_classes() {
             exclude: vec![],
             columns: 1,
             labels: Default::default(),
+            color: None,
         },
     );
     let expected = layout::render(&page, &mut [base.clone()], 96.0, &layout::PageInfo::default()).unwrap();
@@ -856,6 +861,8 @@ fn pitched_mixed_sources_keep_windows_and_pending_on_the_owner() {
                 skipped: 0,
                 unread_dates: Vec::new(),
                 rounded_dates: Vec::new(),
+                null_text: Vec::new(),
+                notes: Vec::new(),
             })
         }
     }

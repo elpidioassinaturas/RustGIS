@@ -151,7 +151,11 @@ tone. The relief's ramp colours them at the water's level. A tilted view adds a 
 where the flat water would reflect the sun toward the eye, it goes toward white, broad and faint,
 so it shines a little on the sun's side. `"glint"` sets how much, 0 (none) to 1 (white at the
 brightest point), 0.3 by default. The sun is the first Shaded Relief layer drawn at the view's centre (its azimuth and altitude; shown, within its scale range and its groups'), or from the north-west at 45° without one. A flat view, seen from straight
-above, has no glint.
+above, has no glint. The water is darker along its shore, flat or tilted: a band a few pixels
+wide inside each lake's outline and around its islands, drawn over the water layer's fill,
+toward black at the outline and fading inward, as relief artists draw the edge of a lake.
+`"shore"` sets how dark it is at the outline, 0 (none) to 1 (black), 0.35 by default. It is
+drawn with the water layer, so it shows only where that layer is drawn.
 
 <figure markdown="span">
   ![Mount Rainier in USGS imagery draped over Terrarium elevation tiles, tilted 65°](https://assets.rustgis.app/images/terrain.webp)
@@ -264,6 +268,27 @@ itself is UTM. On the map of another body than the Earth the readout shows *No U
 `ui.coordinateFormat={"format":"utm"}` (`decimal`, `dms`, `utm` or `mgrs`); without `format`
 it steps to the next one. A saved format this version doesn't know, say from a newer RustGIS,
 reads as decimal degrees with a notice, and stays saved until you pick a format.
+
+`map.convertPosition` gives a place in all of these forms at once, without moving the map, for
+scripts, Python and the AI Assistant. It takes the place as `map.goToXY` does: `lon` and `lat`
+(numbers, or degrees, minutes and seconds), or a `position` written in any form the search box
+reads, and says what it assumed the same way. It answers with `lon` and `lat`, `decimal` and
+`dms` as the readout writes them, `grid` (`utm`, or `ups` in the polar areas), the reference in
+`utm` or `ups` (whichever `grid` names; the other is `null`), the UTM `zone` and latitude `band`
+(`null` in UPS), `hemisphere`, `easting` and `northing` in meters, and `mgrs` spaced as the
+readout writes it and `mgrsCompact` in one word. `digits` (0 to 5, 5 by default) sets the MGRS
+precision, from 100 km to 1 m. As in the readouts, the `utm` and `ups` text round to the meter
+while MGRS truncates, so the two can differ by a meter; `easting` and `northing` give the place
+to the millimeter (truncated). Every key is always there, `null` where it has no value; on
+another body's map the grids are `null`, and `note` says why.
+
+```
+rustgis-cli run --cmd 'map.convertPosition={"position":"18TWL8395907350"}'
+```
+
+```python
+s.run("map.convertPosition", {"lon": -74.006, "lat": 40.7128})["utm"]  # '18north 583959 4507351'
+```
 
 The [search box](#navigating) takes the same grid references, in any case (polar references have
 their own rules, below):

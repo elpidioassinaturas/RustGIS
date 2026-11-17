@@ -73,6 +73,7 @@ pub const READ_FORMAT: u32 = 2;
 pub const CAPABILITIES: &[&str] = &[
     "terrain-block",
     "terrain-water",
+    "terrain-water-shore",
     "shaded-relief-effects",
     "normalized-legend-urls",
     "field-origin",
@@ -81,9 +82,15 @@ pub const CAPABILITIES: &[&str] = &[
     "table-export-order",
     "tabulate-intersection-unit",
     "layout-element-background",
+    SIZE_BY_CAPABILITY,
     "picture-markers",
+    "layout-element-ink",
+    "field-generation",
+    "crs-wkt",
     "zarr-window",
 ];
+/// Independent marker sizes alongside classified point colours (`Layer::size_by`).
+pub(crate) const SIZE_BY_CAPABILITY: &str = "classified-point-size";
 /// The most entries a document's `requires` may list: past it the document is refused without
 /// the rest being read.
 pub(crate) const MAX_REQUIRES: usize = 256;
@@ -589,6 +596,11 @@ pub struct Job {
 pub struct FieldOrigin {
     pub project: String,
     pub area: String,
+    /// The area's [`OfflineArea::generation`] when the package was made. Bring Back accepts the
+    /// package only while the area still has it. Empty for a package made before packages carried
+    /// one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub generation: String,
 }
 
 pub(crate) fn field_id() -> Result<String, String> {
@@ -615,6 +627,12 @@ pub struct OfflineArea {
     pub created: f64,
     #[serde(default)]
     pub synced: f64,
+    /// Which state of the area its field packages were made from: given when a package is first
+    /// made of the area, and replaced at every sync or Bring Back. A package comes back only while
+    /// the area still has the one it was made with, so a second copy of a package, or a second
+    /// return, can't undo or repeat what the first brought home. Empty until a package is made.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub generation: String,
     /// The snapshot: the map's feature layers holding the features meeting the extent.
     #[cfg_attr(feature = "schema", schemars(with = "crate::schema::Open"))]
     pub data: Map,
@@ -1422,12 +1440,15 @@ impl Project {
                 // The camera is in the lost projection's units: start from the whole world.
                 m.camera = rustgis_map::Camera::world();
             }
-            // A terrain water's glint from 0 to 1, as `map.terrain` checks it: another value (a hand
-            // edit, or a newer file) is brought into that range, and said.
+            // A terrain water's glint and shore band from 0 to 1, as `map.terrain` checks them:
+            // another value (a hand edit, or a newer file) is brought into that range, and said.
             if let Some(w) = m.view.terrain.as_mut().and_then(|t| t.water.as_mut()) {
                 let g = w.glint;
                 w.glint = if g.is_finite() { g.clamp(0.0, 1.0) } else { rustgis_map::view::WATER_GLINT };
                 done.water_glint.add(usize::from(w.glint != g), &m.name);
+                let d = w.shore;
+                w.shore = if d.is_finite() { d.clamp(0.0, 1.0) } else { rustgis_map::view::WATER_SHORE };
+                done.water_shore.add(usize::from(w.shore != d), &m.name);
             }
             m.camera.clamp();
             // The time slider's window and dated tile addresses, before the addresses are checked.
@@ -1679,8 +1700,15 @@ impl Project {
         })?;
         let mut area_ids = std::collections::HashSet::new();
         if (!p.origin_id.is_empty() && !valid_field_id(&p.origin_id))
-            || p.field_origin.as_ref().is_some_and(|origin| !valid_field_id(&origin.project) || !valid_field_id(&origin.area))
-            || p.offline_areas.iter().any(|area| !area.id.is_empty() && (!valid_field_id(&area.id) || !area_ids.insert(area.id.as_str())))
+            || p.field_origin.as_ref().is_some_and(|origin| {
+                !valid_field_id(&origin.project)
+                    || !valid_field_id(&origin.area)
+                    || (!origin.generation.is_empty() && !valid_field_id(&origin.generation))
+            })
+            || p.offline_areas.iter().any(|area| {
+                (!area.id.is_empty() && (!valid_field_id(&area.id) || !area_ids.insert(area.id.as_str())))
+                    || (!area.generation.is_empty() && !valid_field_id(&area.generation))
+            })
         {
             return Err("not a RustGIS project: an offline field identity is invalid or duplicated".into());
         }
@@ -2069,6 +2097,7 @@ struct Repaired {
     content_settings: Tally,
     projection_lost: Tally,
     water_glint: Tally,
+    water_shore: Tally,
     /// A map whose projection was lost has bookmarks, which stay in that projection's units.
     bookmarks_kept: bool,
     tile_addresses: Tally,
@@ -2188,6 +2217,12 @@ impl Repaired {
             ReadPart::Maps,
             t,
             message("{n} terrain water glint(s) outside 0 to 1 brought into that range {when} (in {places})", t, vec![]),
+        );
+        let t = &self.water_shore;
+        say(
+            ReadPart::Maps,
+            t,
+            message("{n} terrain water shore band(s) outside 0 to 1 brought into that range {when} (in {places})", t, vec![]),
         );
         let t = &self.projection_lost;
         let bookmarks = if self.bookmarks_kept {
@@ -2365,7 +2400,7 @@ impl Durable for Project {
             p.child(Owner::Map(i), v);
         }
         for (i, v) in offline_areas.iter().enumerate() {
-            let OfflineArea { id: _, name: _, map: _, extent: _, created: _, synced: _, data } = v;
+            let OfflineArea { id: _, name: _, map: _, extent: _, created: _, synced: _, generation: _, data } = v;
             p.child(Owner::Area(i), data);
         }
         for (i, v) in tables.iter().enumerate() {

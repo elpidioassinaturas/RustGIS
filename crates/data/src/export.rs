@@ -50,6 +50,9 @@ pub struct Exported {
     /// Per field of the layer, date-times of the source rounded to the microsecond as it was read
     /// ([`crate::source::Batch::rounded_dates`], said by [`crate::source::rounded_dates_note`]).
     pub rounded_dates: Vec<usize>,
+    /// Per field of the layer, text values `<Null>` the source read as null
+    /// ([`crate::source::Batch::null_text`], said by [`crate::source::null_text_note`]).
+    pub null_text: Vec<usize>,
     /// Per field of the layer, date-times a GeoPackage holds in UTC rather than at their own
     /// offset ([`crate::io::offset_dates`]; empty for the other formats).
     pub utc_dates: Vec<usize>,
@@ -61,6 +64,9 @@ pub struct Exported {
     pub written_values: Vec<usize>,
     /// GeoParquet timestamp representation changes counted during export.
     pub date_messages: Vec<String>,
+    /// What reading the source lost or assumed besides the counts above
+    /// ([`crate::source::Batch::notes`]), said as they are.
+    pub read_notes: Vec<String>,
 }
 
 /// Writes every feature of `src` to `path` in the format of its extension, in `crs` (see
@@ -145,6 +151,8 @@ fn write_chunks_as(
     let mut csv = crate::io::CsvLosses::default();
     let mut unread_dates = Vec::new();
     let mut rounded_dates = Vec::new();
+    let mut null_text = Vec::new();
+    let mut read_notes = Vec::new();
     let mut utc_dates = Vec::new();
     let mut fine_dates = Vec::new();
     let mut written_values = Vec::new();
@@ -189,6 +197,8 @@ fn write_chunks_as(
         skipped = batch.skipped;
         unread_dates = batch.unread_dates;
         rounded_dates = batch.rounded_dates;
+        null_text = batch.null_text;
+        read_notes = batch.notes;
         Ok(())
     };
     let mut table = None;
@@ -240,10 +250,12 @@ fn write_chunks_as(
             csv,
             unread_dates,
             rounded_dates,
+            null_text,
             utc_dates,
             fine_dates,
             written_values,
             date_messages,
+            read_notes,
         },
         table,
     ))

@@ -187,6 +187,8 @@ fn read_filtered(
             skipped: summary.skipped,
             unread_dates: summary.unread_dates,
             rounded_dates: summary.rounded_dates,
+            null_text: summary.null_text,
+            notes: summary.notes,
         },
         areas,
     ))

@@ -525,7 +525,7 @@ pub static TOOLS: &[ToolSpec] = &[
         summary: "Selects features with a SQL where clause, e.g. pop_est > 1000000.",
         params: &[
             P { name: "input", label: "Input Rows", kind: K::Layer, required: true, default: "", help: "" },
-            P { name: "where", label: "Where Clause", kind: K::Text, required: true, default: "", help: "" },
+            P { name: "where", label: "Where Clause", kind: K::Expression, required: true, default: "", help: "" },
         ],
         run: select_by_attributes,
     },
@@ -587,7 +587,7 @@ pub static TOOLS: &[ToolSpec] = &[
                 kind: K::Fields { input: "input" },
                 required: false,
                 default: "",
-                help: "Groups records by the combination of these fields' values. Scripts and the AI Assistant can give several fields as a list.",
+                help: "Groups records by the combination of these fields' values; with no statistics and no Statistics Field, each group's row counts its records (FREQUENCY). Scripts and the AI Assistant can give several fields as a list.",
             },
             SEPARATOR,
         ],
@@ -695,7 +695,7 @@ pub static TOOLS: &[ToolSpec] = &[
         summary: "Copies the (selected) features of a layer to a new layer.",
         params: &[
             P { name: "input", label: "Input Features", kind: K::Layer, required: true, default: "", help: "" },
-            P { name: "where", label: "Expression", kind: K::Text, required: false, default: "", help: "" },
+            P { name: "where", label: "Expression", kind: K::Expression, required: false, default: "", help: "" },
             P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
         ],
         run: export_features,
@@ -5567,20 +5567,22 @@ const MAX_SEPARATOR: usize = 256;
 /// Summary Statistics: a row for each group of records sharing the case fields' values, holding
 /// the case fields, `FREQUENCY` (the group's records) and each requested statistic as
 /// `<STAT>_<field>`. Without `statistics`, `field` takes COUNT, SUM, MEAN, MIN, MAX and STD, its
-/// values read as numbers whatever its type, as before the statistics list.
+/// values read as numbers whatever its type, as before the statistics list. With case fields and
+/// neither, each group's row has only `FREQUENCY`: a count of records by group.
 fn summary_statistics(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     use crate::stats::{self, Request, Stat};
     let ds = input(inp, p, "input")?;
     let mut requests = stats::parse_requests(ds, p.get("statistics"))?;
-    let field_only = requests.is_empty();
+    let cases = key_fields(ds, p.get("case"), "Case Field")?;
+    let field = s(p, "field").trim();
+    let field_only = requests.is_empty() && !field.is_empty();
     // A Statistics Field is read as numbers, except a date field: its values are dates, which give
     // a count and the earliest and latest, not sums.
     let mut as_numbers = field_only;
+    if requests.is_empty() && field.is_empty() && cases.is_empty() {
+        return Err("give the statistics to compute, a Statistics Field, or Case Fields to count records by".into());
+    }
     if field_only {
-        let field = s(p, "field").trim();
-        if field.is_empty() {
-            return Err("give the statistics to compute, or a Statistics Field".into());
-        }
         let fi = find_field_case_insensitive(ds, field)?;
         let stats: &[Stat] = if ds.fields.get(fi).is_some_and(|f| f.ty.is_temporal()) {
             as_numbers = false;
@@ -5590,7 +5592,6 @@ fn summary_statistics(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> 
         };
         requests = stats.iter().map(|&stat| Request { field: fi, stat }).collect();
     }
-    let cases = key_fields(ds, p.get("case"), "Case Field")?;
     let separator = concatenate_separator(p)?;
     let mut fields: Vec<Field> = cases.iter().filter_map(|&c| ds.fields.get(c).cloned()).collect();
     fields.push(Field::new("FREQUENCY", FieldType::Integer));
@@ -5609,6 +5610,8 @@ fn summary_statistics(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> 
     let mut rounded = Rounded::new(requests.len());
     rounded.count_texts(ds, &rs, &requests, as_numbers)?;
     for group in stats::group_rows(ds, &rs, &cases) {
+        // A count by case fields alone has no statistic to check Cancel between groups.
+        crate::control::check()?;
         let mut row = group.key;
         row.push(stats::count(group.rows.len()));
         row.extend(statistic_values(ds, &group.rows, &requests, as_numbers, separator, &mut rounded)?);
@@ -10113,6 +10116,23 @@ mod tests {
         }
     }
 
+    /// A tool's where clause is an expression, for the Script to complete as one; no other
+    /// parameter is.
+    #[test]
+    fn where_clauses_are_expressions() {
+        let mut expressions: Vec<String> = TOOLS
+            .iter()
+            .flat_map(|t| t.params.iter().filter(|p| p.kind == K::Expression).map(move |p| format!("{} {}", t.id, p.name)))
+            .collect();
+        expressions.sort_unstable();
+        assert_eq!(expressions, ["exportFeatures where", "selectByAttributes where"]);
+        for t in TOOLS {
+            for p in t.params.iter().filter(|p| p.name == "where") {
+                assert_eq!(p.kind, K::Expression, "{}", t.id);
+            }
+        }
+    }
+
     /// `touches_files` in rustgis-engine lets tasks, models and notebooks from files set a built-in
     /// tool's `output` when it names a new layer. Layer outputs remain plain text; the explicit
     /// `vectorToPmtiles` file output is handled separately by the engine.
@@ -10207,7 +10227,7 @@ mod tests {
                     Err(_) => match param.kind {
                         K::Number => serde_json::json!(1),
                         K::Bool => serde_json::json!(false),
-                        K::Text => serde_json::json!("a"),
+                        K::Text | K::Expression => serde_json::json!("a"),
                         K::Choice(c) => serde_json::json!(c.first().copied().unwrap_or_default()),
                         K::Field | K::NumericField | K::CoordinateField => serde_json::json!("v"),
                         K::PolygonLayer => serde_json::json!("polys"),
@@ -14562,12 +14582,26 @@ mod tests {
         assert_eq!(names, ["FREQUENCY", "SUM_value"]);
     }
 
+    /// Case fields alone count records by group: each row has the case fields and FREQUENCY, as a
+    /// count by month needs, without a statistic added only to get past a refusal.
+    #[test]
+    fn summary_statistics_counts_by_case_fields_alone() {
+        let m = parcels();
+        let out = layer(crate::run("summaryStatistics", &m, &serde_json::json!({"input": "parcels", "case": "zone"})).unwrap());
+        let names: Vec<&str> = out.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["zone", "FREQUENCY"]);
+        assert_eq!(column(&out, "FREQUENCY"), [Value::Int(1), Value::Int(1), Value::Int(4)]);
+        // An empty statistics list and an empty Statistics Field, as the Tools pane sends them, count too.
+        let pane = serde_json::json!({"input": "parcels", "case": ["zone"], "statistics": [], "field": ""});
+        assert_eq!(layer(crate::run("summaryStatistics", &m, &pane).unwrap()).features, out.features);
+    }
+
     /// Calls that can't be answered are refused with a message naming the problem.
     #[test]
     fn summary_statistics_rejects_bad_requests() {
         let m = parcels();
         for (p, says) in [
-            (serde_json::json!({"input": "parcels"}), "give the statistics"),
+            (serde_json::json!({"input": "parcels"}), "or Case Fields to count records by"),
             (serde_json::json!({"input": "parcels", "statistics": [{"field": "owner", "statistic": "MEAN"}]}), "needs a numeric field"),
             (serde_json::json!({"input": "parcels", "statistics": [{"field": "value", "statistic": "TOTAL"}]}), "must be one of"),
             (serde_json::json!({"input": "parcels", "field": "value", "case": ["zone", "ZONE"]}), "listed twice"),
