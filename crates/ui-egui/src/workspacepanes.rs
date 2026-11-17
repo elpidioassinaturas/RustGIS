@@ -548,15 +548,23 @@ fn start_series(app: &mut RustGisApp, at: rustgis_engine::geom::Coord) {
 
 /// A series that has been read, added to the chart (or its error kept for the pane): called every
 /// frame, whatever pane is in view. A cancelled read adds nothing, not even a series it finished
-/// as it was cancelled, and says so. `true` while one is still reading.
+/// as it was cancelled, and says so; one still reading when another project opens is cancelled
+/// there and then, so it neither fetches for a project that's gone nor holds the new one's pane.
+/// `true` while one is still reading.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn land_series(app: &mut RustGisApp) -> bool {
     let Some(r) = &app.ws.series_reading else { return false };
+    if r.opened != app.session.opened {
+        r.control.cancel();
+        app.ws.series_reading = None;
+        app.ws.message = Some((tl!("The time series was stopped: another project was opened").to_string(), false));
+        return false;
+    }
     let Some((res, notes)) = r.result.lock().ok().and_then(|mut g| g.take()) else { return true };
-    let (cancelled, opened) = (r.control.is_cancelled(), r.opened);
+    let cancelled = r.control.is_cancelled();
     app.ws.series_reading = None;
-    // What reading it said, though it then failed; not for a read cancelled or of another project.
-    if !cancelled && opened == app.session.opened {
+    // What reading it said, though it then failed; not for a read that was cancelled.
+    if !cancelled {
         for n in notes {
             app.session.warn(n);
         }
@@ -564,10 +572,6 @@ pub fn land_series(app: &mut RustGisApp) -> bool {
     match res {
         _ if cancelled => {
             app.ws.message = Some((tl!("The time series was cancelled: nothing was added to the chart").to_string(), false));
-        }
-        _ if opened != app.session.opened => {
-            app.ws.message =
-                Some((tl!("The time series finished after another project was opened, so it wasn't added").to_string(), false));
         }
         Ok(series) => {
             app.ws.series.push(series);
@@ -1452,5 +1456,26 @@ mod tests {
         assert_eq!(script["values"], json!([8.0, 108.0, 208.0]));
         assert_eq!(h.state().ws.series[0]["values"], script["values"]);
         assert_eq!(h.state().ws.series[0]["dates"], script["dates"]);
+        // Another project opened while a read waits on the store: the read is cancelled at once,
+        // its pane free again, though the store still holds its chunks.
+        h.state_mut().ws.series.clear();
+        set_gate(false);
+        let asked_before = asked.load(std::sync::atomic::Ordering::Relaxed);
+        pick(h.state_mut());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while asked.load(std::sync::atomic::Ordering::Relaxed) <= asked_before && std::time::Instant::now() < deadline {
+            h.run_steps(1);
+            std::thread::yield_now();
+        }
+        let control = h.state().ws.series_reading.as_ref().map(|r| r.control.clone()).expect("the second read runs");
+        h.state_mut().session.opened += 1;
+        h.run_steps(1);
+        assert!(control.is_cancelled(), "opening another project cancels the read");
+        assert!(h.state().ws.series_reading.is_none(), "the new project's pane isn't held");
+        let said = h.state().ws.message.clone();
+        assert!(said.as_ref().is_some_and(|(m, err)| m.contains("another project") && !err), "{said:?}");
+        set_gate(true);
+        h.run_steps(2);
+        assert!(h.state().ws.series.is_empty(), "nothing from the old project lands");
     }
 }
