@@ -182,6 +182,9 @@ pub(super) fn long_commands(boundaries: bool) {
         assert!(control.looked() > 0, "zarr.series never looks at Cancel");
         let _ = std::fs::remove_dir_all(store);
     }
+    // Automatic size bounds scan the numeric field on that queue too.
+    s.run("layer.symbology", &json!({"layer": "Cities", "type": "unique", "field": "name"})).unwrap();
+    exercise(&s, "layer.sizeBy", &json!({"layer": "Cities", "field": "pop_max"}), Kind::Read, &dir.0, boundaries);
 
     s.run("layer.addDataText", &json!({"fileName": "calc.csv", "text": "n,day\n1,01/02/2024\n2,02/03/2024\n"})).unwrap();
     s.run("edit.enable", &json!({"on": true})).unwrap();
