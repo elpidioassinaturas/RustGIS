@@ -105,6 +105,11 @@ pub(crate) async fn form_request(url: &str, form: Option<&str>, still: Option<ca
         let resp: web_sys::Response =
             wasm_bindgen_futures::JsFuture::from(promise).await.map_err(|_| format!("couldn't reach {who}"))?.dyn_into().map_err(err)?;
         let status = resp.status();
+        // A server error says nothing of the request: its answer isn't read, so a large or unreadable
+        // one still reports the status.
+        if status >= 500 {
+            return Ok((status, Vec::new()));
+        }
         let length = resp.headers().get("content-length").ok().flatten().and_then(|l| l.parse::<usize>().ok());
         if length.is_some_and(|n| n > MAX_ANSWER) {
             return Err(format!("{who}'s answer is too large"));

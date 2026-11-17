@@ -55,7 +55,9 @@ pub fn sign_in(username: String, password: String, totp: String, slot: Slot<Resu
 
 /// Renews the sign-in's access token when `url` is on a CDSE data host and the token is about to
 /// expire (one renewal at a time; the fetches meanwhile use the token, still valid for a minute).
-/// A refused renewal ends the sign-in; an unreachable host keeps it and is tried again later.
+/// A refused renewal ends the sign-in; an unreachable host keeps it and is tried again later. An
+/// answer that lands after the fetch was cancelled is still kept: the server may have spent the
+/// refresh token, and `renewal_done` changes nothing for a sign-in replaced or ended since.
 pub async fn renew_if_due(url: &str, still: Option<cache::Still>) {
     if !copernicus::is_data_host(url) || RENEWING.get() || cache::check_still(&still).is_err() {
         return;
@@ -70,9 +72,6 @@ pub async fn renew_if_due(url: &str, still: Option<cache::Still>) {
     }
     RENEWING.set(true);
     let _renewing = Renewing;
-    let answer = crate::arcgis::form_request(&r.endpoint, Some(&r.body), still.clone(), WHO).await;
-    if cache::check_still(&still).is_err() {
-        return;
-    }
+    let answer = crate::arcgis::form_request(&r.endpoint, Some(&r.body), still, WHO).await;
     copernicus::renewal_done(&r, answer.as_ref().map(|(status, body)| (*status, body.as_slice())).map_err(String::clone));
 }
