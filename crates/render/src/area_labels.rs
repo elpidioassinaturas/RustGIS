@@ -22,20 +22,30 @@ use crate::line_labels::{self, Line};
 pub(super) const MAX_SIDE: usize = 160;
 
 /// About the most outline vertices projected: more are dropped evenly, as finer detail than a cell
-/// is lost on the grid anyway. A ring keeps at least three points and its shape, so many small
-/// rings (a multipolygon's islands, holes) can keep more than this.
+/// is lost on the grid anyway. A small ring is kept whole and a longer one keeps its shape, so many
+/// small rings (a multipolygon's islands, holes) can keep more than this.
 const MAX_VERTICES: usize = 20_000;
 
-/// Every `every`th point of `ring` (at `xy`), but at least three of it, so a small hole or island
-/// next to a long outline keeps its place, and fewer dropped while that would lose half its area,
-/// so a ring dense along one side is not left a line with no inside (#2295).
+/// A ring with fewer points than this is never thinned: a small hole or island keeps every corner.
+const KEEP_WHOLE: usize = 64;
+
+/// Every `every`th point of `ring` (at `xy`), but all of a ring of fewer than [`KEEP_WHOLE`] points
+/// and at least three of a longer one, so a small hole or island next to a long outline keeps its
+/// place and its corners, and fewer dropped while that would lose half its area, so a ring dense
+/// along one side is not left a line with no inside (#2295).
 fn thin<T: Copy>(ring: &[T], every: usize, xy: impl Fn(&T) -> (f64, f64)) -> Vec<T> {
+    // The area within every `step`th point (the shoelace sum, back to the first point).
     let area = |step: usize| {
-        let points: Vec<(f64, f64)> = ring.iter().step_by(step).map(&xy).collect();
-        let twice: f64 = points.iter().zip(points.iter().cycle().skip(1)).map(|(a, b)| a.0 * b.1 - b.0 * a.1).sum();
-        twice.abs() / 2.0
+        let mut points = ring.iter().step_by(step).map(&xy);
+        let Some(first) = points.next() else { return 0.0 };
+        let (mut prev, mut twice) = (first, 0.0);
+        for p in points.chain(std::iter::once(first)) {
+            twice += prev.0 * p.1 - p.0 * prev.1;
+            prev = p;
+        }
+        f64::abs(twice) / 2.0
     };
-    let mut step = every.min(ring.len() / 3).max(1);
+    let mut step = if ring.len() < KEEP_WHOLE { 1 } else { every.min(ring.len() / 3).max(1) };
     if step > 1 {
         let whole = area(1);
         while step > 1 && area(step) < whole / 2.0 {
@@ -242,8 +252,11 @@ pub(super) fn centre_line(rings: &[Vec<(f32, f32)>], w: f32, h: f32, half_width:
     let end = cells.len().checked_sub(keep(&cells) + 1)?;
     cells.reverse();
     // Of what is left, the longest stretch where the polygon is wide enough all along: a narrow
-    // neck between two wide parts (a dumbbell) is never under the text (#2295).
-    let cells = cells.get(start..=end)?.split(|i| deep(i) * cell < half_width).max_by_key(|run| run.len()).filter(|run| run.len() >= 2)?;
+    // neck between two wide parts (a dumbbell) is never under the text (#2295). A cell at depth `d`
+    // is `d` cells from the middle of the nearest outside cell, and the outline runs somewhere
+    // between the two: only `d - 1` cells of it are sure to be inside.
+    let wide = |i: &usize| (deep(i) - 1.0) * cell >= half_width;
+    let cells = cells.get(start..=end)?.split(|i| !wide(i)).max_by_key(|run| run.len()).filter(|run| run.len() >= 2)?;
     // Cell centres, softened over two cells either side so the grid's steps don't turn the text.
     let pts: Vec<(f32, f32)> = cells.iter().map(|i| (ox + ((i % nx) as f32 + 0.5) * cell, oy + ((i / nx) as f32 + 0.5) * cell)).collect();
     let soft: Vec<(f32, f32)> = (0..pts.len())
@@ -464,6 +477,39 @@ mod tests {
         // With text thin enough for the neck, the line runs from end to end.
         let through = centre_line(&[dumbbell], 1000.0, 1000.0, 2.0).expect("end to end");
         assert!(through.iter().any(|p| p.0 < 250.0) && through.iter().any(|p| p.0 > 350.0), "{through:?}");
+    }
+
+    /// A small hole is kept whole when its outer ring is thinned: one point in five of it would be
+    /// a triangle of half its area, without its lower corners.
+    #[test]
+    fn a_small_hole_keeps_its_corners() {
+        // 100 000 points round a 600 × 100 rectangle, and a 15-point hole across its upper half,
+        // with a point at each corner.
+        let n = 25_000;
+        let mut outer: Vec<(f32, f32)> = (0..n).map(|i| (i as f32 * 600.0 / n as f32, 0.0)).collect();
+        outer.extend((0..n).map(|i| (600.0, i as f32 * 100.0 / n as f32)));
+        outer.extend((0..n).map(|i| (600.0 - i as f32 * 600.0 / n as f32, 100.0)));
+        outer.extend((0..n).map(|i| (0.0, 100.0 - i as f32 * 100.0 / n as f32)));
+        let mut hole: Vec<(f32, f32)> = (0..=5).map(|i| (50.0 + i as f32 * 100.0, 10.0)).collect();
+        hole.extend((0..9).map(|i| (550.0 - i as f32 * 62.5, 50.0)));
+        assert_eq!(hole.len(), 15);
+        let every = every(outer.len() + hole.len());
+        let kept = thin(&hole, every, |p| (f64::from(p.0), f64::from(p.1)));
+        assert!(kept.contains(&(50.0, 50.0)) && kept.contains(&(550.0, 50.0)), "{kept:?}");
+        let line = centre_line(&[outer, hole], 1000.0, 1000.0, 4.0).expect("below the hole");
+        assert!(line.iter().filter(|p| (100.0..500.0).contains(&p.0)).all(|p| p.1 > 55.0), "{line:?}");
+    }
+
+    /// A rectangle 10 points tall is too narrow for text 12 points tall, though its middle row of
+    /// cells is two cells (7.5 points) deep on the grid: the outline may be nearly a cell nearer.
+    #[test]
+    fn a_band_just_too_narrow_gives_no_line() {
+        let thin_band = vec![(0.0, 0.0), (600.0, 0.0), (600.0, 10.0), (0.0, 10.0)];
+        let line = centre_line(std::slice::from_ref(&thin_band), 1000.0, 1000.0, 6.0);
+        assert!(line.is_none(), "{line:?}");
+        // Text thin enough for it gets a line down its middle.
+        let line = centre_line(&[thin_band], 1000.0, 1000.0, 3.0).expect("down its middle");
+        assert!(line.iter().all(|p| (p.1 - 5.0).abs() < 2.0), "{line:?}");
     }
 
     #[test]
