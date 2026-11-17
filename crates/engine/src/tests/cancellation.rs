@@ -173,7 +173,8 @@ pub(super) fn long_commands(boundaries: bool) {
     // A Zarr point series is read on a thread of its own by the Time Series pane (#2282). It isn't
     // one of the queues above and changes nothing in the project, so it keeps first-check coverage.
     {
-        let (store, path) = zarr_store_over_time("cancel-series");
+        // A store per mode: both run in one test process, and each removes its store when done.
+        let (store, path) = zarr_store_over_time(if boundaries { "cancel-series-boundaries" } else { "cancel-series-first" });
         let run = crate::cmd::zarr::series_start(&s, &json!({"path": path, "variable": "t", "lon": 1.0, "lat": 30.0})).unwrap();
         let control = Control::cancelled_once_started();
         let result = run.run(&control);
