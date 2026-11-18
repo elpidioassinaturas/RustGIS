@@ -5309,10 +5309,16 @@ fn render_frame(
                                         }
                                     }
                                     // Spread over `stretch` of the line, the middle first; where it
-                                    // can't follow the line, close-set.
+                                    // can't follow the line, close-set. With a repeat that names the
+                                    // line more than once, only on a line more than two spread names
+                                    // long, so close-set repeats still go beside it; on a shorter one
+                                    // the repeats stay close-set, as without spreading.
                                     let stretch = class.stretch.unwrap_or(rustgis_map::symbology::DEFAULT_LABEL_STRETCH);
-                                    if let Some(wide) = line_labels::spread_gap(&advances, close_gap, line.length(), stretch) {
-                                        let len = line_labels::curved_len(&advances, wide);
+                                    let repeated = line_labels::repeats(line.length(), repeat).len() > 1;
+                                    if let Some(wide) = line_labels::spread_gap(&advances, close_gap, line.length(), stretch)
+                                        && let len = line_labels::curved_len(&advances, wide)
+                                        && !(repeated && line.length() <= 2.0 * len)
+                                    {
                                         let tried =
                                             locked_at.map_or_else(|| line_labels::positions(line.length(), len, overrun), |at| vec![at]);
                                         let wide_at = follows(&advances, wide, tried);
@@ -5361,8 +5367,8 @@ fn render_frame(
                                     ));
                                 } else {
                                     // Fitted without a repeat: on the best place it follows. Spread
-                                    // with a repeat: there, and close-set at the repeats clear of it
-                                    // when the line is more than two spread labels long.
+                                    // with a repeat (a line more than two spread labels long): there,
+                                    // and close-set at the repeats clear of it.
                                     let along: Vec<(usize, f32, f32)> = match (&fitted, repeat) {
                                         (Some(at), None) => at.first().map(|d| (0, *d, gap)).into_iter().collect(),
                                         (Some(at), Some(_)) if spread => {
@@ -5372,7 +5378,6 @@ fn render_frame(
                                             let clear = (wide + close) / 2.0 + size;
                                             let others = line_labels::repeats_clear_of(line.length(), repeat, first, clear)
                                                 .into_iter()
-                                                .filter(|_| line.length() > 2.0 * wide)
                                                 .map(|(i, d)| (i, d, close_gap));
                                             std::iter::once((0, first, gap)).chain(others).collect()
                                         }
@@ -12563,6 +12568,16 @@ mod tests {
         let mid = view.width as f32 / 2.0;
         assert!((wide[0].x - mid).abs() < 1.0, "spread at the middle: {}", wide[0].x);
         assert!(narrow.iter().all(|l| (span(l) - close).abs() < 1.0 && (l.x - mid).abs() > 390.0));
+        // At 0.6 the name's line is too short for two spread names: it keeps its repeats,
+        // close-set as without `fit`.
+        m.layer_mut(id).unwrap().labels.default.stretch = None;
+        let r = render(&mut m, &view).unwrap();
+        let fitted: Vec<&PlacedLabel> = r.labels.iter().filter(|l| l.text == name).collect();
+        let full = line_labels::curved_len(&advances(name), 0.0) - ends(name);
+        assert!(fitted.len() > 1 && fitted.iter().all(|l| (span(l) - full).abs() < 1.0), "{} labels", fitted.len());
+        m.layer_mut(id).unwrap().labels.default.fit = rustgis_map::symbology::LabelFit::Off;
+        let r = render(&mut m, &view).unwrap();
+        assert_eq!(r.labels.iter().filter(|l| l.text == name).count(), fitted.len());
     }
 
     #[test]
