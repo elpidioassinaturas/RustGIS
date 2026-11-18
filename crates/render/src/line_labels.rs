@@ -546,6 +546,10 @@ pub(super) fn curved_off(
 /// The most labels a line repeats a label in (the one at its middle among them).
 pub(super) const MAX_REPEATS: usize = 32;
 
+/// The index of the close-set repeat at a line's middle when a spread label went off it (#2265):
+/// 0 is the spread label's, and [`repeats`] numbers none this high.
+pub(super) const MIDDLE_REPEAT: usize = 2 * MAX_REPEATS + 1;
+
 /// Where along a line `total` points long a label is centred, each with its repeat's index: its
 /// middle (0), and with `repeat`, every that many points either side of it (odd indices before
 /// the middle, even ones after), nearest first, at most [`MAX_REPEATS`]. A place too near an
@@ -569,7 +573,9 @@ pub(super) fn repeats(total: f32, repeat: Option<f32>) -> Vec<(usize, f32)> {
 
 /// The places of [`repeats`] at least `clear` from `at` (where a spread label is, #2265), with
 /// their indices, nearest the middle first: those nearer are skipped before counting, so a short
-/// repeat still names the line beyond the spread label. At most [`MAX_REPEATS`] less one.
+/// repeat still names the line beyond the spread label. The middle is among them when the spread
+/// label is clear of it and the repeat names the line more than once, as [`MIDDLE_REPEAT`]. At
+/// most [`MAX_REPEATS`] less one.
 pub(super) fn repeats_clear_of(total: f32, repeat: Option<f32>, at: f32, clear: f32) -> Vec<(usize, f32)> {
     let mut out = Vec::new();
     let Some(step) = repeat.filter(|r| r.is_finite() && *r > 0.0) else { return out };
@@ -577,6 +583,10 @@ pub(super) fn repeats_clear_of(total: f32, repeat: Option<f32>, at: f32, clear: 
         return out;
     }
     let (mid, step) = (f64::from(total) / 2.0, f64::from(step));
+    // (A repeat longer than half the line names it once: the spread label is that one.)
+    if step <= mid && (f64::from(at) - mid).abs() >= f64::from(clear) {
+        out.push((MIDDLE_REPEAT, total / 2.0));
+    }
     // Each side's repeats nearer `at` than `clear`: those whose count from the middle is between.
     let near =
         |side: f64| ((side * (f64::from(at) - mid) - f64::from(clear)) / step, (side * (f64::from(at) - mid) + f64::from(clear)) / step);
@@ -951,10 +961,15 @@ mod tests {
     #[test]
     fn repeats_clear_of_a_spread_label_are_counted_beyond_it() {
         let filtered = |at: f32, clear: f32| -> Vec<(usize, f32)> {
-            repeats(1000.0, Some(100.0)).into_iter().filter(|(i, d)| *i > 0 && (d - at).abs() >= clear).collect()
+            let middle = repeats(1000.0, Some(100.0)).into_iter().map(|(i, d)| (if i == 0 { MIDDLE_REPEAT } else { i }, d));
+            middle.filter(|(_, d)| (d - at).abs() >= clear).collect()
         };
         assert_eq!(repeats_clear_of(1000.0, Some(100.0), 500.0, 150.0), filtered(500.0, 150.0));
+        // Off the middle and clear of it: the middle is named close-set too, first.
         assert_eq!(repeats_clear_of(1000.0, Some(100.0), 300.0, 150.0), filtered(300.0, 150.0));
+        assert_eq!(repeats_clear_of(1000.0, Some(100.0), 300.0, 150.0)[0], (MIDDLE_REPEAT, 500.0));
+        assert!(repeats_clear_of(1000.0, Some(100.0), 400.0, 150.0).iter().all(|(i, _)| *i != MIDDLE_REPEAT));
+        assert_eq!(repeats_clear_of(1000.0, Some(600.0), 300.0, 150.0), vec![], "named once: the spread label");
         assert_eq!(repeats_clear_of(1000.0, None, 500.0, 150.0), vec![]);
         // A short step: the nearest 32 would all be near the middle, the ones beyond it go.
         let short = repeats_clear_of(1000.0, Some(5.0), 500.0, 122.0);
