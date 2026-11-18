@@ -4427,9 +4427,11 @@ fn add_url_as_given(s: &mut Session, p: &Value) -> CmdResult {
     if s.leave_downloads {
         // A data cube's GeoTIFF (`"cube"`, as `stac.addCube` adds them) is a tile layer whose
         // tiles are read in place on later frames: nothing waits, so it is added now, its header
-        // unread, as in the browser (#2418). Left to the app, no tile layer would come.
-        let tiff = is_tiff_url(url) || super::b(p, "cog").unwrap_or(false);
-        if b(p, "cube") == Some(true) && tiff && !scan && !super::b(p, "whole").unwrap_or(false) {
+        // unread, as in the browser (#2418). Left to the app, no tile layer would come. One that
+        // isn't cloud-optimised says so as the map draws it (its header's error, as any tile
+        // layer's). The address is a web one (`web_address` above).
+        let tiff = is_tiff_url(url) || b(p, "cog").unwrap_or(false);
+        if b(p, "cube") == Some(true) && tiff && !scan && !b(p, "whole").unwrap_or(false) {
             return add_cog(s, p, url, false);
         }
         // The address as the app downloads it (trimmed): the request, its download and the

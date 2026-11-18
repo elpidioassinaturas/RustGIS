@@ -26721,7 +26721,8 @@ fn a_stac_data_cube_on_the_time_slider() {
 /// A plugin's command in the app (`leave_downloads`) adds a STAC data cube as the command line
 /// does (#2418): a tile layer per grid tile, its files read in place with nothing left to the app,
 /// and the slider over their dates; `cube.open` with a STAC entry goes the same way. A file whose
-/// address doesn't name a GeoTIFF is left to the app, and the refusal says so.
+/// address doesn't name a GeoTIFF is left to the app, and the refusal says so; one that isn't
+/// cloud-optimised is added, and the map drawing it says so.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_stac_data_cube_from_a_plugin_command_in_the_app() {
@@ -26780,6 +26781,38 @@ fn a_stac_data_cube_from_a_plugin_command_in_the_app() {
     assert!(e.contains("left to the app to download") && !e.contains("not a cloud-optimised"), "{e}");
     assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
     assert!(s.take_url_requests().is_empty(), "the failed command's request is taken back with it");
+    // A file that isn't cloud-optimised is added all the same (its header isn't read on the
+    // frame); its header's read fails, and the map drawing it says why, as for any tile layer.
+    let gt = rustgis_data::raster::GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: 0.5, pixel_height: -0.5 };
+    let crs = rustgis_data::raster::Crs::LonLat;
+    let plain =
+        rustgis_data::raster::Raster::new("p", 2, 2, vec![vec![1.0; 4]], gt, crs, None, rustgis_data::raster::ColorHint::Gray, "Float32")
+            .unwrap();
+    let (stripped, _) = serve_ranges(rustgis_data::raster::geotiff::write(&plain, 0).unwrap());
+    let one = item("p1", "P", "2024-01-01", "p1.tif").replace(&format!("{cog}/"), &format!("{stripped}/"));
+    let stripped_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{one}]}}"#))], 2);
+    let mut flat = Session::new(Project::default());
+    flat.leave_downloads = true;
+    let mut q = cube.clone();
+    q["url"] = json!(format!("{stripped_api}/v1"));
+    let r = flat.run("stac.addCube", &q).unwrap();
+    assert_eq!(r["layers"], 1, "{r}");
+    let address = flat.map().tiles.iter().find(|t| !t.time_urls.is_empty()).map(|t| t.url.clone()).unwrap_or_default();
+    assert!(address.contains(&format!("{stripped}/p1.tif")), "{address}");
+    let e = crate::render::rustgis_tiles::cog::info_blocking(&address).err().unwrap_or_default();
+    assert!(e.contains(crate::render::rustgis_tiles::cog::NOT_COG), "{e}");
+    // A GeoTIFF export says the tile layers that failed (on the ground a gap looks like data).
+    let tif = std::env::temp_dir().join(format!("rustgis-2418-{}.tif", std::process::id()));
+    flat.zoom_to(&rustgis_geom::Extent::new(10.0, 45.0, 11.0, 46.0));
+    let n = flat.notices.len();
+    let _ = flat.run("share.exportMap", &json!({"path": tif.display().to_string()}));
+    std::fs::remove_file(&tif).ok();
+    let now = crate::render::rustgis_tiles::cog::info(&address).map(|i| i.is_some());
+    assert!(
+        flat.notices[n..].iter().any(|n| n.text.contains(crate::render::rustgis_tiles::cog::NOT_COG)),
+        "{now:?} {:?}",
+        &flat.notices[n..]
+    );
 }
 
 /// An entry that gives no range, as JAXA Earth's don't, is added with one from a sample of its
