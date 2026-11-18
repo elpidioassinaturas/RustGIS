@@ -13394,7 +13394,7 @@ fn terrain_block_water_needs_the_terrains_water_and_a_depth() {
     let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
     let square = |x: f64| json!([[[x, 45.0], [x + 0.01, 45.0], [x + 0.01, 45.01], [x, 45.01], [x, 45.0]]]);
     let lakes = json!({"type": "FeatureCollection", "features": [
-        {"type": "Feature", "properties": {"prof": 12.0, "nome": "a"}, "geometry": {"type": "Polygon", "coordinates": square(10.0)}},
+        {"type": "Feature", "properties": {"prof": 12.0, "fundo": 3.0, "nome": "a"}, "geometry": {"type": "Polygon", "coordinates": square(10.0)}},
         {"type": "Feature", "properties": {"prof": null, "nome": "b"}, "geometry": {"type": "Polygon", "coordinates": square(10.02)}},
     ]});
     let data = base64::engine::general_purpose::STANDARD.encode(lakes.to_string().as_bytes());
@@ -13449,6 +13449,20 @@ fn terrain_block_water_needs_the_terrains_water_and_a_depth() {
     assert_eq!(v["block"]["water"], json!(null));
     let saved = serde_json::to_value(&s.project).unwrap();
     assert!(!saved["requires"].as_array().unwrap().contains(&json!("terrain-block-water")));
+    // Deleting the field the depths came from keeps the block's depth for all the water, else takes
+    // the water out of the walls, said both ways.
+    for (water, field, left, said) in [
+        (json!({"field": "fundo", "depth": 5}), "fundo", json!({"depth": 5.0}), "all of it 5 m deep"),
+        (json!({"field": "prof"}), "prof", json!(null), "show no water"),
+    ] {
+        s.run("map.terrain", &json!({"block": {"water": water}})).unwrap();
+        let mark = s.notice_mark();
+        s.run("edit.deleteField", &json!({"layer": lagos, "field": field})).unwrap();
+        let b = s.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).unwrap();
+        assert_eq!(serde_json::to_value(&b.water).unwrap(), left, "{field}");
+        let notes: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        assert!(notes.iter().any(|t| t.contains(field) && t.contains(said)), "{notes:?}");
+    }
 }
 
 /// A 40×40 lon/lat DEM near (10°E, 45°N): a hill in the middle, with a wall to its east.
