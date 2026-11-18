@@ -679,16 +679,17 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
   that takes more than a third of the line goes on its straightest stretch rather than at the
   middle: the stretch whose ends are farthest apart for its length. With other places along the
   line on, the next straightest stretches are its other places. On a line with room to spare
-  (more than three times the name), the letters are spread, more as the room grows, until on a
-  line six times the name or longer they cover `"stretch"` of it (`labels.style`, 0.1 to 1;
-  0.6 by default), at most three letters' widths apart. Where the spread name can't follow the
-  line, it is set close. A spread name follows a smoother course, so it can also go where the
-  close-set name was too bent to follow. With a `repeat`, a line more than two spread names
-  long gets the spread name at its middle and the close-set name at the repeats clear of it, as
-  a river is named along its valley and again toward its ends. Text size by a stream's
-  importance (a Strahler order or a class field) comes from label classes or `labels.by` `"size"`
-  (`labels.placement={"layer": "Rivers", "position": "curved", "fit": "auto", "abbreviations":
-  {"Creek": "Ck"}}`).
+  (more than three times the name), the letters are spread, more as the room grows, toward
+  `"stretch"` of the line (`labels.style`, 0.1 to 1; 0.6 by default), which they reach on a line
+  six times the name or longer. They are never more than three letters' widths apart, so on a
+  much longer line the name covers less. A spread name is tried at the middle first, then farther
+  along; where it can't follow the line, it is set close. A spread name follows a smoother
+  course, so it can also go where the close-set name was too bent to follow. With a `repeat`, a
+  line more than two spread names long gets the spread name at its middle and the close-set name
+  at the repeats clear of it, as a river is named along its valley and again toward its ends.
+  Text size by a stream's importance (a Strahler order or a class field) comes from label classes
+  or `labels.by` `"size"` (`labels.placement={"layer": "Rivers", "position": "curved", "fit":
+  "auto", "abbreviations": {"Creek": "Ck"}}`).
 - **Lock** keeps the labelled features fixed while you pan and zoom; **Pause** stops drawing
   labels for faster navigation; **View Unplaced** draws the labels that didn't fit in red. They
   apply to the whole map, so they are on the ribbon (Labeling › Map Labeling), not in the pane.

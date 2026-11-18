@@ -5265,10 +5265,11 @@ fn render_frame(
                                 let (mut chars, mut advances) = measure(&text);
                                 // Fitted to its line (#2265): abbreviated when the full name can't
                                 // follow it anywhere it is tried, set on its straightest stretches
-                                // when it takes more than a third of it, and spread when the line
-                                // has room to spare. The places it can follow, best first; none:
-                                // placed as without `fit`. A spread name follows a smoother course
-                                // (#2259), so it may go where the close-set one couldn't.
+                                // when it takes more than a third of it, and spread (the middle
+                                // first) when the line has room to spare. The places it can
+                                // follow, best first; none: placed as without `fit`. A spread
+                                // name follows a smoother course (#2259), so it may go where the
+                                // close-set one couldn't.
                                 let mut fitted: Option<Vec<f32>> = None;
                                 // Its letter spacing, and the close-set one (its own) when spread.
                                 let close_gap = spacing * 1.33;
