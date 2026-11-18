@@ -5267,7 +5267,8 @@ fn render_frame(
                                 // follow it anywhere it is tried, set on its straightest stretches
                                 // when it takes more than a third of it, and spread when the line
                                 // has room to spare. The places it can follow, best first; none:
-                                // placed as without `fit`.
+                                // placed as without `fit`. A spread name follows a smoother course
+                                // (#2259), so it may go where the close-set one couldn't.
                                 let mut fitted: Option<Vec<f32>> = None;
                                 // Its letter spacing, and the close-set one (its own) when spread.
                                 let close_gap = spacing * 1.33;
@@ -5368,9 +5369,9 @@ fn render_frame(
                                             let (wide, close) =
                                                 (line_labels::curved_len(&advances, gap), line_labels::curved_len(&advances, close_gap));
                                             let clear = (wide + close) / 2.0 + size;
-                                            let others = line_labels::repeats(line.length(), repeat)
+                                            let others = line_labels::repeats_clear_of(line.length(), repeat, first, clear)
                                                 .into_iter()
-                                                .filter(|(i, d)| *i > 0 && (d - first).abs() >= clear && line.length() > 2.0 * wide)
+                                                .filter(|_| line.length() > 2.0 * wide)
                                                 .map(|(i, d)| (i, d, close_gap));
                                             std::iter::once((0, first, gap)).chain(others).collect()
                                         }

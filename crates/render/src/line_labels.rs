@@ -37,7 +37,18 @@ pub(super) fn spread_gap(advances: &[f32], gap: f32, room: f32, stretch: f32) ->
     }
     let grown = len + ((ratio - 3.0) / 3.0).min(1.0) * (stretch * room - len);
     let widest = 3.0 * advances.iter().sum::<f32>() / n as f32;
-    let wide = (gap + (grown - len) / (n - 1) as f32).min(widest);
+    let mut wide = gap + (grown - len) / (n - 1) as f32;
+    // Steps closed up to nothing by a negative gap open only once the gap passes them: solved on
+    // the same steps as `curved_len`, between none and every step open.
+    if advances[..n - 1].iter().any(|a| a + gap <= 0.0) {
+        let (mut lo, mut hi) = (gap, advances.iter().map(|a| -a).fold(gap, f32::max) + (grown - len));
+        for _ in 0..40 {
+            let g = (lo + hi) / 2.0;
+            if curved_len(advances, g) < grown { lo = g } else { hi = g }
+        }
+        wide = hi;
+    }
+    let wide = wide.min(widest);
     (wide - gap > 0.01).then_some(wide)
 }
 
@@ -556,6 +567,36 @@ pub(super) fn repeats(total: f32, repeat: Option<f32>) -> Vec<(usize, f32)> {
     out
 }
 
+/// The places of [`repeats`] at least `clear` from `at` (where a spread label is, #2265), with
+/// their indices, nearest the middle first: those nearer are skipped before counting, so a short
+/// repeat still names the line beyond the spread label. At most [`MAX_REPEATS`] less one.
+pub(super) fn repeats_clear_of(total: f32, repeat: Option<f32>, at: f32, clear: f32) -> Vec<(usize, f32)> {
+    let mut out = Vec::new();
+    let Some(step) = repeat.filter(|r| r.is_finite() && *r > 0.0) else { return out };
+    if !(total.is_finite() && at.is_finite() && clear.is_finite()) {
+        return out;
+    }
+    let (mid, step) = (f64::from(total) / 2.0, f64::from(step));
+    // Each side's repeats nearer `at` than `clear`: those whose count from the middle is between.
+    let near =
+        |side: f64| ((side * (f64::from(at) - mid) - f64::from(clear)) / step, (side * (f64::from(at) - mid) + f64::from(clear)) / step);
+    let sides = [(-1.0, near(-1.0)), (1.0, near(1.0))];
+    let mut k = 1.0f64;
+    while k * step <= mid && out.len() < MAX_REPEATS - 1 {
+        let mut past = f64::INFINITY;
+        for (n, (side, (lo, hi))) in sides.into_iter().enumerate() {
+            if k > lo && k < hi {
+                past = past.min(hi.ceil());
+            } else if out.len() < MAX_REPEATS - 1 {
+                out.push(((k as usize).saturating_mul(2).saturating_sub(1).saturating_add(n), (mid + side * k * step) as f32));
+            }
+        }
+        // Both sides near it: on past the nearer end of the two stretches.
+        k = if past.is_finite() && sides.iter().all(|(_, (lo, hi))| k > *lo && k < *hi) { past.max(k + 1.0) } else { k + 1.0 };
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,8 +923,8 @@ mod tests {
         assert_eq!(abbreviated("Creek Fundo\n", &own).as_deref(), Some("Ck Fdo.\n"));
     }
 
-    /// Straightest first, none within half the text of another; a line no longer than the text,
-    /// its middle (#2265).
+    /// Spread (#2265) only past three times the text, growing to `stretch` of the line at six,
+    /// at most three letters apart; on the same clamped steps as `curved_len` with a negative gap.
     #[test]
     fn a_fitted_label_is_spread_only_where_its_line_has_room_to_spare() {
         let advances = [10.0; 5];
@@ -899,8 +940,35 @@ mod tests {
         assert_eq!(spread_gap(&advances, 0.0, 10_000.0, 0.6), Some(30.0));
         assert_eq!(spread_gap(&advances, 0.0, 400.0, 0.1), None);
         assert_eq!(spread_gap(&[10.0], 0.0, 400.0, 0.6), None);
+        // A gap closing a step up to nothing: the spread still covers `stretch` of the line.
+        let tight = [1.0, 10.0, 1.0];
+        let wide = spread_gap(&tight, -5.0, 36.0, 0.6).unwrap();
+        assert!((curved_len(&tight, wide) - 0.6 * 36.0).abs() < 0.01, "{wide}");
     }
 
+    /// The repeats clear of a spread label (#2265): as [`repeats`] beyond it, the nearer ones
+    /// skipped before counting, so a short repeat still names the line toward its ends.
+    #[test]
+    fn repeats_clear_of_a_spread_label_are_counted_beyond_it() {
+        let filtered = |at: f32, clear: f32| -> Vec<(usize, f32)> {
+            repeats(1000.0, Some(100.0)).into_iter().filter(|(i, d)| *i > 0 && (d - at).abs() >= clear).collect()
+        };
+        assert_eq!(repeats_clear_of(1000.0, Some(100.0), 500.0, 150.0), filtered(500.0, 150.0));
+        assert_eq!(repeats_clear_of(1000.0, Some(100.0), 300.0, 150.0), filtered(300.0, 150.0));
+        assert_eq!(repeats_clear_of(1000.0, None, 500.0, 150.0), vec![]);
+        // A short step: the nearest 32 would all be near the middle, the ones beyond it go.
+        let short = repeats_clear_of(1000.0, Some(5.0), 500.0, 122.0);
+        assert_eq!(short.len(), MAX_REPEATS - 1);
+        assert!(short.iter().all(|(_, d)| (d - 500.0).abs() >= 122.0), "{short:?}");
+        assert_eq!(short[..2], [(49, 375.0), (50, 625.0)], "indices as repeats numbers them");
+        let mut indices: Vec<usize> = short.iter().map(|r| r.0).collect();
+        indices.dedup();
+        assert_eq!(indices.len(), short.len(), "every index once");
+        assert!(repeats_clear_of(1000.0, Some(1e-30), 500.0, 122.0).len() < MAX_REPEATS);
+    }
+
+    /// Straightest first, none within half the text of another; a line no longer than the text,
+    /// its middle (#2265).
     #[test]
     fn the_straightest_stretches_come_first() {
         // A zigzag 200 points long, then 200 points straight.
