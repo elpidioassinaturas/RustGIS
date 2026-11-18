@@ -6459,6 +6459,13 @@ fn a_fitted_labels_stretch_is_set_with_its_text() {
     let notes = said(&damaged);
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].contains(&format!("{layers} label stretch setting(s)")), "{}", notes[0]);
+    // A saved fitted river (`label_fit_stretch.rgis`): fit, its own abbreviations and stretch
+    // read back as saved, saying nothing.
+    let mut saved = Project::from_json(include_str!("../../../schema/fixtures/label_fit_stretch.rgis")).unwrap();
+    let class = &saved.maps[0].layers[0].labels.default;
+    assert_eq!((class.fit, class.stretch, class.repeat), (rustgis_map::symbology::LabelFit::Auto, Some(0.3), Some(200.0)));
+    assert_eq!(class.abbreviations.get("Ribeirão").map(String::as_str), Some("Rib."));
+    assert!(saved.take_read_notices(&crate::project::ALL_PARTS).is_empty());
     s.run("labels.style", &json!({"layer": "Rivers", "stretch": null})).unwrap();
     assert_eq!(stretch(&s), None);
 }
