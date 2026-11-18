@@ -12928,6 +12928,26 @@ fn terrain_block_water_needs_the_terrains_water_and_a_depth() {
     let mark = s.notice_mark();
     s.run("map.terrain", &json!({"block": {"water": {"field": "prof", "depth": 5}}})).unwrap();
     assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("no depth")));
+    // Nor when the layer's definition query leaves the lake without a value out: it draws no water.
+    if let Some(l) = s.map_mut().layers.iter_mut().find(|l| l.name == lagos) {
+        l.definition_query = Some("nome = 'a'".into());
+    }
+    let mark = s.notice_mark();
+    s.run("map.terrain", &json!({"block": {"water": {"field": "prof"}}})).unwrap();
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("no depth")));
+    // The terrain's water can't go, or become a layer without the field, under the block's water:
+    // refused, the terrain as it was.
+    let sea = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"nome": "c"}, "geometry": {"type": "Polygon", "coordinates": square(10.03)}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(sea.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "mar.geojson", "data": data})).unwrap();
+    let before = s.map().view.terrain.clone();
+    for (water, said) in [(json!(false), "take the block's water off"), (json!({"layer": "mar"}), "has no field 'prof'")] {
+        let e = s.run("map.terrain", &json!({"water": water})).unwrap_err();
+        assert!(e.contains(said), "{water}: {e}");
+        assert_eq!(s.map().view.terrain, before, "{water}");
+    }
     let v = s.run("map.terrain", &json!({"block": {"water": false}})).unwrap();
     assert_eq!(v["block"]["water"], json!(null));
     let saved = serde_json::to_value(&s.project).unwrap();

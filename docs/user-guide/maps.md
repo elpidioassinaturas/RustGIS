@@ -135,17 +135,20 @@ polygon layer of that name comes back. A plain `"walls": "#RRGGBB"` takes the la
 With water on the terrain (below), `"block": {"water": {"depth": 12}}` shows it in the walls'
 section: where the box's edge runs inside a water polygon (the first in the layer's rows where
 they overlap, among the features its definition query keeps), the wall shows a band of water from
-the water's level down to its floor, over the walls' colours, in the water layer's fill colour
-(opaque: a section is opaque), lit as the wall is and darker with depth, half as bright at the full
+the water's level down to its floor, over the walls' colours, in the water layer's solid fill (the
+topmost of its fill layers; one partly transparent laid over a light blue, as a section is opaque),
+lit as the wall is and darker with depth, half as bright at the full
 depth, with a line at the level and one along the floor as dark as the shore band. A DEM holds the
 water's surface, not its bed, so the depth is given: `"depth"` in metres for every water body, or
 `"field": "prof"` names a numeric field of the water layer holding each one's depth (`"depth"` then
 serves the rows with no value). Both are stretched by the exaggeration, and the floor goes no lower
 than the base. The floor follows the shore: no depth at the shoreline, the full depth from about
 the shore band's width in (a few pixels at the view's centre), so the section shows a basin, not a
-cliff. A water body with no depth, or no level, shows none, and setting the block says how many
-have no value in the field. These depths are schematic unless they come from a field: say so in the
-figure's caption. `"water": false` takes the water out of the walls.
+cliff. A water body with no depth, or no level, shows none, and setting the block or the water says
+how many of those its definition query keeps have no value in the field. These depths are schematic
+unless they come from a field: say so in the figure's caption. `"water": false` in the block takes
+the water out of the walls; while it is there, taking the terrain's water off, or giving it a layer
+without the depth field, is refused.
 
 **Water** on the terrain lies flat: `map.terrain` with `{"water": {"layer": "Lakes"}}` names a
 polygon layer of water bodies, and inside each polygon the ground is level, at the lowest height

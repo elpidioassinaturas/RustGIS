@@ -49,7 +49,7 @@ pub fn commands() -> Vec<C> {
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .params(r#"{"mode": "none"|"distance", "distance"?: metres from the view's centre}"#),
         C::new("map.terrain", "Terrain", "View › Scene", terrain).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
-            r##"{"layer"?: a DEM raster layer (heights in metres; without layer or tiles, and no terrain yet, the active layer when it is a raster) | "tiles"?: elevation tile URL with {z}/{x}/{y}, "encoding"?: "terrarium"|"mapbox" (tiles; default terrarium), "exaggeration"?: 0 to 20 (default 1, or the terrain's), "block"?: a block diagram {"extent"?: "layer" (the DEM's extent, default) | [xmin, ymin, xmax, ymax] in map units (needed over tiles), "depth"?: metres from the lowest ground to the base (default half the relief, at least 100), "walls"?: "#RRGGBB" (default #C8B89A)}, or false to take it off (default: as it was), "water"?: water bodies drawn flat at their level {"layer": a polygon layer, "level"?: a numeric field of levels in metres (default: each polygon's lowest height along its shore), "glint"?: 0 to 1, how brightly a tilted view's water shines where it reflects the sun toward the eye (default 0.3; 0: none), "shore"?: 0 to 1, how dark the band along the water's shore is at the outline, fading a few pixels inside it (default 0.35; 0: none)}, or false to take it off (default: as it was), "off"?: true}"##,
+            r##"{"layer"?: a DEM raster layer (heights in metres; without layer or tiles, and no terrain yet, the active layer when it is a raster) | "tiles"?: elevation tile URL with {z}/{x}/{y}, "encoding"?: "terrarium"|"mapbox" (tiles; default terrarium), "exaggeration"?: 0 to 20 (default 1, or the terrain's), "block"?: a block diagram {"extent"?: "layer" (the DEM's extent, default) | [xmin, ymin, xmax, ymax] in map units (needed over tiles), "depth"?: metres from the lowest ground to the base (default half the relief, at least 100), "walls"?: "#RRGGBB" (default #C8B89A), "water"?: the terrain's water shown in the walls' section {"depth"?: metres from the level to the floor, "field"?: a numeric field of the water layer holding each one's depth} (one of them needed), or false}, or false to take it off (default: as it was), "water"?: water bodies drawn flat at their level {"layer": a polygon layer, "level"?: a numeric field of levels in metres (default: each polygon's lowest height along its shore), "glint"?: 0 to 1, how brightly a tilted view's water shines where it reflects the sun toward the eye (default 0.3; 0: none), "shore"?: 0 to 1, how dark the band along the water's shore is at the outline, fading a few pixels inside it (default 0.35; 0: none)}, or false to take it off (default: as it was), "off"?: true}"##,
         ),
         C::new("map.exportOrbit", "Export Orbit", "View › Scene", |s, p| super::exports::write_here(s, p, "map.exportOrbit")).inputs(orbit_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
@@ -442,7 +442,7 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         Some(Value::Null | Value::Bool(false)) => Some(None),
         Some(Value::Bool(true)) => Some(Some(terrain_block(s, &serde_json::Map::new())?)),
         Some(Value::Object(b)) => Some(Some(terrain_block(s, b)?)),
-        Some(_) => return Err("block is an object {\"extent\"?, \"depth\"?, \"walls\"?}, or false to take it off".into()),
+        Some(_) => return Err("block is an object {\"extent\"?, \"depth\"?, \"walls\"?, \"water\"?}, or false to take it off".into()),
     };
     // Left out (or null, as for the exaggeration), the water stays as it was; false takes it off
     // (#1915).
@@ -643,22 +643,29 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         }
         return Err(e);
     }
-    // The water a block's walls cut (#2317), when this call sets it: the terrain's water, and the
-    // depth field a numeric field of its layer. How many of its polygons have no depth is said.
+    // The water a block's walls cut (#2317), when this call sets the block or the terrain's water
+    // (a block kept from before is checked against new water too): the terrain's water, and the
+    // depth field a numeric field of its layer. How many of the polygons its definition query
+    // keeps have no depth is said.
     let mut no_depth = None;
-    if let Some(bw) = block.as_ref().and_then(|b| b.as_ref()).and_then(|b| b.water.as_ref()) {
+    let block_water = t.block.as_ref().and_then(|b| b.water.as_ref()).filter(|_| block.is_some() || water.is_some());
+    if let Some(bw) = block_water {
         let checked = (|| {
-            let w = t.water.as_ref().ok_or("block's water shows the terrain's water in the walls: give the terrain a water layer too")?;
+            let w = t.water.as_ref().ok_or(
+                "block's water shows the terrain's water in the walls: give the terrain a water layer, or take the block's water off (\"block\": {\"water\": false})",
+            )?;
             let l = m.layer_by_name(&w.layer).ok_or_else(|| format!("no layer '{}'", w.layer))?;
             let Some(f) = &bw.field else { return Ok(None) };
-            let i = l.dataset.field_index(f).ok_or_else(|| format!("'{}' has no field '{f}'", l.name))?;
-            if !l.dataset.fields[i].ty.is_numeric() {
+            let i = l.dataset.field_index(f).ok_or_else(|| format!("'{}' has no field '{f}' (the block's water depths)", l.name))?;
+            if !l.dataset.fields.get(i).is_some_and(|field| field.ty.is_numeric()) {
                 return Err(format!("block's water field '{f}' isn't numeric (depths in metres)"));
             }
-            let missing = |ft: &rustgis_data::Feature| {
-                ft.attrs.get(i).and_then(rustgis_data::Value::as_f64).is_none_or(|d| !d.is_finite() || d <= 0.0)
+            let keep = l.query_rows(&l.dataset);
+            let missing = |(row, ft): &(usize, &rustgis_data::Feature)| {
+                keep.as_ref().is_none_or(|k| k.get(*row).copied().unwrap_or(false))
+                    && ft.attrs.get(i).and_then(rustgis_data::Value::as_f64).is_none_or(|d| !d.is_finite() || d <= 0.0)
             };
-            let n = if bw.depth.is_some() { 0 } else { l.dataset.features.iter().filter(|ft| missing(ft)).count() };
+            let n = if bw.depth.is_some() { 0 } else { l.dataset.features.iter().enumerate().filter(missing).count() };
             Ok((n > 0).then(|| (n, l.name.clone(), f.clone())))
         })();
         match checked {
@@ -686,7 +693,7 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     }
     if let Some((n, layer, field)) = no_depth {
         let (polygons, have) = if n == 1 { ("1 polygon".to_string(), "has") } else { (format!("{n} polygons"), "have") };
-        s.notify(format!("Block: {polygons} of '{layer}' {have} no depth in '{field}', so the walls show no water there"), false);
+        s.notify(format!("Block: {polygons} of '{layer}' {have} no depth in '{field}', so a wall crossing them shows no water"), false);
     }
     // When the water is set, what its levels left out is said, with how many.
     if let Some(name) = water_layer {
