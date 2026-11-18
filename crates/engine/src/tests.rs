@@ -12905,11 +12905,15 @@ fn a_projects_water_on_a_streamed_layer_is_dropped_as_it_opens() {
     let inside = rustgis_geom::lonlat_to_merc(Coord::new(10.015, 45.015));
     let ground = rustgis_render::terrain::Ground::of(s.map(), &v.camera).unwrap();
     assert!(ground.height(inside).is_some_and(|h| (h - 500.0).abs() > 1.0), "{:?}", ground.height(inside));
+    // A saved project naming it (the schema fixture `terrain_water_streamed.rgis`, the layer's
+    // file embedded) opens without the water, and says so.
+    let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_water_streamed.rgis")).unwrap();
     let mut opened = Session::new(Project::default());
-    crate::cmd::project::reset_to(&mut opened, s.project.clone());
+    crate::cmd::project::reset_to(&mut opened, saved);
+    assert!(opened.map().layer_by_name("lagos_perto").is_some_and(|l| l.is_streamed()));
     assert_eq!(opened.map().view.terrain.as_ref().map(|t| t.water.is_none()), Some(true));
-    let said = format!("the terrain's water layer '{lagos}' is read a view at a time, so the water was dropped");
-    assert!(opened.notices.iter().any(|n| n.text.contains(&said)), "{:?}", opened.notices);
+    let said = "Map: the terrain's water layer 'lagos_perto' is read a view at a time, so the water was dropped";
+    assert!(opened.notices.iter().any(|n| n.text.contains(said)), "{:?}", opened.notices);
     // Loaded whole, the same project keeps its water, and says nothing of it.
     s.run("layer.loadAll", &json!({"layer": lagos})).unwrap();
     s.run("map.terrain", &json!({"water": {"layer": lagos, "level": "nivel"}})).unwrap();

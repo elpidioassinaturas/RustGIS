@@ -508,22 +508,76 @@ fn water_layer(map: &Map) -> Option<(&rustgis_map::Layer, Option<&str>)> {
     Some((layer, w.level.as_deref()))
 }
 
-/// The rows of the water `layer` its fill draws in a view of `camera` on `map` (#2305): those its
-/// definition query, the time slider's window and the display filters at the view's scale keep,
-/// within the map's view distance, as the layer's drawing keeps them. A lake the layer doesn't
-/// draw is neither flat, lit flat nor banded. `None` when it draws every row.
+/// The rows of the water `layer` a view of `camera` on `map` draws (#2305): those its definition
+/// query, the time slider's window and the display filters at the view's scale keep, within the
+/// map's view distance, as the layer's fill keeps them. A lake the layer doesn't draw is neither
+/// flat, lit flat nor banded. `None` when it draws every row.
+///
+/// The layer's own visibility and scale range don't count: its lakes stay on the ground with the
+/// layer hidden, as the terrain's Shaded Relief draws the water whether the layer is shown or not.
+/// A tilted view has one water for all its bands, read at the view's scale and from its centre,
+/// where each band's fill reads at its own scale and from its own centre: a display filter whose
+/// scale limit falls between them, or the view distance, can keep a lake in a band that the water
+/// left out, or the reverse.
 fn drawn_rows(map: &Map, layer: &rustgis_map::Layer, camera: &Camera) -> Option<Vec<bool>> {
-    let query = layer.definition_query.as_deref().is_some_and(|q| !q.trim().is_empty());
-    let timed = layer.time.as_ref().is_some_and(|t| t.window.is_some());
-    if !query && !timed && layer.display_filters.is_empty() && map.view.clip_distance.is_none() {
+    let query = layer.definition_query.as_deref().filter(|q| !q.trim().is_empty());
+    let time = layer.time.as_ref().and_then(|t| Some((t.field.clone(), t.window?)));
+    if query.is_none() && time.is_none() && layer.display_filters.is_empty() && map.view.clip_distance.is_none() {
         return None;
     }
-    let mut rows = layer.drawn_rows(map.ground_res_at(camera) / rustgis_geom::PIXEL_M);
+    let scale = map.ground_res_at(camera) / rustgis_geom::PIXEL_M;
+    let key = KeptKey {
+        rows: layer.dataset.features.allocation_key(),
+        fields: layer.dataset.fields.clone(),
+        query: query.map(str::to_string),
+        time,
+        filters: layer.display_filters.iter().filter(|f| f.applies(scale)).map(|f| f.where_.clone()).collect(),
+    };
+    let cached = KEPT_ROWS.lock().ok().and_then(|k| k.iter().find(|(k, _)| k.same(&key)).map(|(_, rows)| rows.clone()));
+    let kept = cached.unwrap_or_else(|| {
+        let rows = Arc::new(layer.drawn_rows(scale));
+        if let Ok(mut k) = KEPT_ROWS.lock() {
+            k.retain(|(k, _)| k.rows.strong_count() > 0 && !k.same(&key));
+            if k.len() >= KEPT {
+                k.remove(0);
+            }
+            k.push((key, rows.clone()));
+        }
+        rows
+    });
+    let mut rows = Vec::clone(&kept);
     if let Some(d) = map.view.clip_distance {
         crate::within_view_distance(&mut rows, &layer.dataset, camera.center_lonlat(), d);
     }
     rows.contains(&false).then_some(rows)
 }
+
+/// What a water layer's query, time window and display filters were read for in [`drawn_rows`]:
+/// `Ground::of` runs a few times a frame, and each reads them over every row, so they are read
+/// again only when one of these changes.
+struct KeptKey {
+    rows: Weak<Vec<Feature>>,
+    fields: Vec<rustgis_data::Field>,
+    query: Option<String>,
+    /// The time binding's field and window.
+    time: Option<(String, (f64, f64))>,
+    /// The `where` of each display filter that applies at the view's scale.
+    filters: Vec<String>,
+}
+
+impl KeptKey {
+    fn same(&self, o: &KeptKey) -> bool {
+        self.rows.ptr_eq(&o.rows)
+            && self.rows.strong_count() > 0
+            && self.fields == o.fields
+            && self.query == o.query
+            && self.time == o.time
+            && self.filters == o.filters
+    }
+}
+
+/// The rows the last few [`KeptKey`]s kept (before the view distance), as many as [`LAST`] keeps.
+static KEPT_ROWS: Mutex<Vec<(KeptKey, Arc<Vec<bool>>)>> = Mutex::new(Vec::new());
 
 /// How many polygons of `map`'s water layer, as a view of `camera` draws it, [`Water::build`]
 /// reads at wider steps than half `ground`'s cell, worked out from their shapes alone: no height
@@ -896,6 +950,11 @@ mod tests {
         }
         lagos(&mut m).definition_query = Some("nivel > 0".into());
         assert_eq!(flat(&m), (false, true, 0), "the query keeps the reservoir only");
+        // The rows the query kept are kept for the next view, not for edited features.
+        lagos(&mut m).dataset.features[0].attrs[0] = rustgis_data::Value::Float(3000.0);
+        assert_eq!(flat(&m), (true, true, 0), "the pond given a level: the query keeps it");
+        lagos(&mut m).dataset.features[0].attrs[0] = rustgis_data::Value::Null;
+        assert_eq!(flat(&m), (false, true, 0));
         lagos(&mut m).definition_query = None;
         assert_eq!(flat(&m), (true, true, 1), "the query taken off: the water read again");
         let filter =
