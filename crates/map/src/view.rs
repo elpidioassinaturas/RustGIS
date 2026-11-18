@@ -225,6 +225,24 @@ pub struct TerrainBlock {
     /// straight down (schematic: no dip or thickness). None: the walls are `walls` all along.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub walls_layer: Option<String>,
+    /// The terrain's water in the walls' section (#2317): where the box's edge runs inside a
+    /// water polygon, a band of water from its level down to its floor. None: the walls rise to
+    /// the water's level as ground.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub water: Option<BlockWater>,
+}
+
+/// How deep the water a block diagram's walls cut through is (#2317). A DEM holds the water's
+/// surface, not its bed, so the depth is given: schematic unless it comes from a field.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BlockWater {
+    /// Metres from the level down to the floor, before exaggeration: every water body's, or
+    /// those with no value of `field`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<f64>,
+    /// A numeric field of the terrain's water layer holding each water body's depth (metres).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
 }
 
 /// The least depth (metres, before exaggeration) of a block diagram's base below its lowest
@@ -268,6 +286,16 @@ impl TerrainBlock {
         }
         if self.walls.a() != 255 {
             return Err("block's walls is an opaque colour, #RRGGBB".into());
+        }
+        if let Some(w) = &self.water {
+            if w.depth.is_none() && w.field.is_none() {
+                return Err("block's water needs a depth (metres) or a field of the water layer holding them".into());
+            }
+            if let Some(d) = w.depth
+                && !(d.is_finite() && (0.0..=BLOCK_MAX_DEPTH).contains(&d))
+            {
+                return Err(format!("block's water depth is metres, 0 to {BLOCK_MAX_DEPTH:.0}"));
+            }
         }
         Ok(())
     }

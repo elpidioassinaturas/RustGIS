@@ -304,8 +304,8 @@ fn walk(s: &mut Session, p: &Value) -> CmdResult {
 /// the values checked by [`rustgis_map::view::TerrainBlock::check`] (as a saved project's are),
 /// and the walls' layer as the water's is ([`polygon_layer`]).
 fn terrain_block(s: &Session, b: &serde_json::Map<String, Value>) -> Result<rustgis_map::view::TerrainBlock, String> {
-    if let Some(k) = b.keys().find(|k| !matches!(k.as_str(), "extent" | "depth" | "walls")) {
-        return Err(format!("block has no '{k}' (extent, depth, walls)"));
+    if let Some(k) = b.keys().find(|k| !matches!(k.as_str(), "extent" | "depth" | "walls" | "water")) {
+        return Err(format!("block has no '{k}' (extent, depth, walls, water)"));
     }
     let extent = match b.get("extent") {
         None | Some(Value::Null) => None,
@@ -343,7 +343,28 @@ fn terrain_block(s: &Session, b: &serde_json::Map<String, Value>) -> Result<rust
         }
         other => (color(other)?, None),
     };
-    let block = rustgis_map::view::TerrainBlock { extent, depth, walls, walls_layer };
+    // The water in the walls' section (#2317): its depth, or the water layer's field holding it
+    // (checked against the terrain's water once that is known, in `terrain`).
+    let water = match b.get("water") {
+        None | Some(Value::Null | Value::Bool(false)) => None,
+        Some(Value::Object(w)) => {
+            if let Some(k) = w.keys().find(|k| !matches!(k.as_str(), "depth" | "field")) {
+                return Err(format!("block's water has no '{k}' (depth, field)"));
+            }
+            let depth = match w.get("depth") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(v.as_f64().ok_or("block's water depth is metres, 0 to 20000")?),
+            };
+            let field = match w.get("field") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(f)) if !f.trim().is_empty() => Some(f.trim().to_string()),
+                Some(_) => return Err("block's water field is a numeric field of the water layer".into()),
+            };
+            Some(rustgis_map::view::BlockWater { depth, field })
+        }
+        Some(_) => return Err("block's water is {\"depth\"?, \"field\"?}, or false".into()),
+    };
+    let block = rustgis_map::view::TerrainBlock { extent, depth, walls, walls_layer, water };
     block.check()?;
     Ok(block)
 }
@@ -578,7 +599,7 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
             Some(l) => json!({"color": b.walls.hex(), "layer": l}),
             None => json!(b.walls.hex()),
         };
-        json!({"extent": extent, "extent_from": from, "depth": b.depth, "walls": walls})
+        json!({"extent": extent, "extent_from": from, "depth": b.depth, "walls": walls, "water": b.water})
     });
     if matches!(t.source, TerrainSource::Layer(_)) && t.block.is_some() && dem_box.is_none() {
         out["block"]["pendingDem"] = json!(true);
@@ -622,6 +643,34 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         }
         return Err(e);
     }
+    // The water a block's walls cut (#2317), when this call sets it: the terrain's water, and the
+    // depth field a numeric field of its layer. How many of its polygons have no depth is said.
+    let mut no_depth = None;
+    if let Some(bw) = block.as_ref().and_then(|b| b.as_ref()).and_then(|b| b.water.as_ref()) {
+        let checked = (|| {
+            let w = t.water.as_ref().ok_or("block's water shows the terrain's water in the walls: give the terrain a water layer too")?;
+            let l = m.layer_by_name(&w.layer).ok_or_else(|| format!("no layer '{}'", w.layer))?;
+            let Some(f) = &bw.field else { return Ok(None) };
+            let i = l.dataset.field_index(f).ok_or_else(|| format!("'{}' has no field '{f}'", l.name))?;
+            if !l.dataset.fields[i].ty.is_numeric() {
+                return Err(format!("block's water field '{f}' isn't numeric (depths in metres)"));
+            }
+            let missing = |ft: &rustgis_data::Feature| {
+                ft.attrs.get(i).and_then(rustgis_data::Value::as_f64).is_none_or(|d| !d.is_finite() || d <= 0.0)
+            };
+            let n = if bw.depth.is_some() { 0 } else { l.dataset.features.iter().filter(|ft| missing(ft)).count() };
+            Ok((n > 0).then(|| (n, l.name.clone(), f.clone())))
+        })();
+        match checked {
+            Ok(n) => no_depth = n,
+            Err(e) => {
+                if let Some(old) = old_terrain {
+                    m.view.terrain = Some(old);
+                }
+                return Err(format!("{e} (Terrain stays as it was)"));
+            }
+        }
+    }
     let heights_from = match &t.source {
         TerrainSource::Layer(n) => Some(n.clone()),
         TerrainSource::Tiles { .. } => None,
@@ -634,6 +683,10 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
                 .to_string(),
             false,
         );
+    }
+    if let Some((n, layer, field)) = no_depth {
+        let (polygons, have) = if n == 1 { ("1 polygon".to_string(), "has") } else { (format!("{n} polygons"), "have") };
+        s.notify(format!("Block: {polygons} of '{layer}' {have} no depth in '{field}', so the walls show no water there"), false);
     }
     // When the water is set, what its levels left out is said, with how many.
     if let Some(name) = water_layer {

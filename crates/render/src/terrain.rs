@@ -15,7 +15,7 @@ use rustgis_tiles::template::{self, TileId};
 
 mod water;
 
-pub(crate) use water::{Glint, Water, paint_shore};
+pub(crate) use water::{Glint, SHORE_PX, Water, paint_shore};
 
 /// Cells along each side of a tilted view's band laid over the relief while the map moves (the
 /// drape, `tilt_drape` in the app): few enough to lay out every frame.
@@ -254,6 +254,11 @@ impl Ground {
     /// ground toward the poles): a height over it is in map units.
     pub fn per_unit(&self, m: Coord) -> f64 {
         per_unit(m, self.body)
+    }
+
+    /// How much the heights are stretched (`Terrain::exaggeration`, as read).
+    pub(crate) fn exaggeration(&self) -> f64 {
+        self.exaggeration
     }
 
     /// Where the Web Mercator point `m` falls on the ground's grid, in its cells (column, row):
@@ -629,6 +634,7 @@ mod tests {
             depth: Some(1000.0),
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            water: None,
         };
         m.view.terrain = Some(rustgis_map::view::Terrain {
             source: rustgis_map::view::TerrainSource::Layer("dem".into()),
@@ -672,6 +678,7 @@ mod tests {
             depth: Some(300.0),
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            water: None,
         };
         m.view.terrain = Some(rustgis_map::view::Terrain {
             source: rustgis_map::view::TerrainSource::Tiles {

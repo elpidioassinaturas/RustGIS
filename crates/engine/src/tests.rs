@@ -8451,6 +8451,7 @@ fn terrain_block_is_checked_kept_and_taken_off() {
             depth: None,
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            water: None,
         }),
         water: None,
     });
@@ -8561,6 +8562,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: None,
+                water: None,
             }),
             water: None,
         });
@@ -8581,6 +8583,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: None,
+                water: None,
             }),
             water: None,
         });
@@ -8605,6 +8608,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: None,
+                water: None,
             }),
             water: None,
         });
@@ -12787,12 +12791,19 @@ fn terrain_block_is_read_back_from_a_saved_project() {
             depth: Some(150.0),
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            water: None,
         })
     );
     // Its walls coloured by a polygon layer (`terrain_block_walls.rgis`), the layer kept by name.
     let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_block_walls.rgis")).unwrap();
     let block = saved.maps[0].view.terrain.as_ref().and_then(|t| t.block.clone()).unwrap();
     assert_eq!((block.walls, block.walls_layer.as_deref()), (rustgis_map::Rgba::rgb(128, 96, 64), Some("geologia")));
+    // With the water in its walls (#2317, `terrain_block_water_v2.rgis`), which it requires.
+    let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_block_water_v2.rgis")).unwrap();
+    let block = saved.maps[0].view.terrain.as_ref().and_then(|t| t.block.clone()).unwrap();
+    assert_eq!(block.water, Some(rustgis_map::view::BlockWater { depth: Some(8.0), field: Some("prof".into()) }));
+    let again = serde_json::to_value(&saved).unwrap();
+    assert_eq!(again["requires"], json!(["terrain-block", "terrain-water", "terrain-block-water"]));
 }
 
 /// A block's walls coloured by a polygon layer (#1914): the layer checked before anything changes,
@@ -12875,6 +12886,52 @@ fn terrain_block_walls_follow_a_polygon_layer() {
     assert!(said.iter().any(|t| t.starts_with("Terrain turned off")), "{said:?}");
     assert!(!said.iter().any(|t| t.contains("walls layer")), "{said:?}");
     assert!(s.map().view.terrain.is_none());
+}
+
+#[test]
+fn terrain_block_water_needs_the_terrains_water_and_a_depth() {
+    // #2317: the water a block's walls cut through, deep by a number or a numeric field.
+    use base64::Engine;
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+    let square = |x: f64| json!([[[x, 45.0], [x + 0.01, 45.0], [x + 0.01, 45.01], [x, 45.01], [x, 45.0]]]);
+    let lakes = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"prof": 12.0, "nome": "a"}, "geometry": {"type": "Polygon", "coordinates": square(10.0)}},
+        {"type": "Feature", "properties": {"prof": null, "nome": "b"}, "geometry": {"type": "Polygon", "coordinates": square(10.02)}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(lakes.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "lagos.geojson", "data": data})).unwrap();
+    let lagos = s.map().layers.iter().find(|l| !l.is_raster()).map(|l| l.name.clone()).unwrap();
+    for (water, terrain_water, said) in [
+        (json!({}), json!({"layer": lagos}), "needs a depth"),
+        (json!({"depth": -1}), json!({"layer": lagos}), "0 to 20000"),
+        (json!({"depth": 5, "bed": "x"}), json!({"layer": lagos}), "has no 'bed'"),
+        (json!({"field": "nome"}), json!({"layer": lagos}), "isn't numeric"),
+        (json!({"field": "x"}), json!({"layer": lagos}), "has no field 'x'"),
+        (json!({"depth": 5}), json!(null), "give the terrain a water layer"),
+        (json!(3), json!({"layer": lagos}), "or false"),
+    ] {
+        let e = s.run("map.terrain", &json!({"layer": dem, "water": terrain_water, "block": {"water": water}})).unwrap_err();
+        assert!(e.contains(said), "{water}: {e}");
+        assert!(s.map().view.terrain.is_none(), "{water}: refused whole");
+    }
+    // By a field: the lake with no value is said; reported and saved with the project.
+    let mark = s.notice_mark();
+    let v = s.run("map.terrain", &json!({"layer": dem, "water": {"layer": lagos}, "block": {"water": {"field": "prof"}}})).unwrap();
+    assert_eq!(v["block"]["water"], json!({"field": "prof"}));
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("1 polygon of") && t.contains("no depth in 'prof'")), "{said:?}");
+    let saved = serde_json::to_value(&s.project).unwrap();
+    assert!(saved["requires"].as_array().unwrap().contains(&json!("terrain-block-water")), "{}", saved["requires"]);
+    // With a depth for those, nothing is said; `false` takes the water out of the walls.
+    let mark = s.notice_mark();
+    s.run("map.terrain", &json!({"block": {"water": {"field": "prof", "depth": 5}}})).unwrap();
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("no depth")));
+    let v = s.run("map.terrain", &json!({"block": {"water": false}})).unwrap();
+    assert_eq!(v["block"]["water"], json!(null));
+    let saved = serde_json::to_value(&s.project).unwrap();
+    assert!(!saved["requires"].as_array().unwrap().contains(&json!("terrain-block-water")));
 }
 
 /// A 40×40 lon/lat DEM near (10°E, 45°N): a hill in the middle, with a wall to its east.
