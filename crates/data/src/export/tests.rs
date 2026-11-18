@@ -94,6 +94,7 @@ impl FeatureSource for Runs {
             unread_dates: Vec::new(),
             rounded_dates: Vec::new(),
             null_text: Vec::new(),
+            notes: Vec::new(),
         })
     }
     fn visits_chunks(&self) -> bool {
@@ -129,6 +130,20 @@ fn an_explicit_export_format_ignores_case_and_the_filename() {
             assert_eq!(text, crate::io::to_csv(&ds).unwrap());
         }
     }
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn a_streamed_csv_counts_guarded_values_across_chunks() {
+    let d = folder("csv-guarded");
+    let mut ds = Dataset::new("places", GeometryType::None, vec![Field::new("value", FieldType::Text)]);
+    for value in ["-007", "-093.1445780", "=SUM(A1)"] {
+        ds.push_next(None, vec![Value::Text(value.into())]);
+    }
+    let path = d.join("places.csv");
+    let exported = write_chunks_in(&Runs::new(&ds, 1), &ds, &path, Crs::LonLat, 1).unwrap();
+    assert_eq!(exported.csv.guarded, [2]);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "value\n'-007\n-093.1445780\n'=SUM(A1)\n");
     std::fs::remove_dir_all(d).unwrap();
 }
 
@@ -203,7 +218,11 @@ fn a_streamed_export_writes_what_a_whole_export_writes() {
                     unfit,
                     beyond_web_mercator: 0,
                     // Counted over the chunks as the whole layer counts it.
-                    csv: if ext == "csv" { crate::io::CsvLosses::of(&whole.features, whole.geometry_type) } else { Default::default() },
+                    csv: if ext == "csv" {
+                        crate::io::CsvLosses::of(&whole.features, whole.geometry_type, &whole.fields).unwrap()
+                    } else {
+                        Default::default()
+                    },
                     unread_dates: Vec::new(),
                     rounded_dates: Vec::new(),
                     null_text: Vec::new(),
@@ -211,6 +230,7 @@ fn a_streamed_export_writes_what_a_whole_export_writes() {
                     fine_dates: if ext == "gpkg" { crate::io::fine_dates(whole.features.iter(), &whole.fields) } else { Vec::new() },
                     written_values: if ext == "fgb" { crate::io::written_values(whole.features.iter(), &whole.fields) } else { Vec::new() },
                     date_messages: Vec::new(),
+                    read_notes: Vec::new(),
                 };
                 assert_eq!(streamed, expected, "{what}");
                 let (a, b) = (read_back(&a), read_back(&b));

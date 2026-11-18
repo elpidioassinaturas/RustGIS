@@ -195,6 +195,14 @@ pub const TOOL_FILE_PURPOSE: &str = "toolfile:";
 /// Marks a returned shortcut picker file; cancellation leaves no pending routing state.
 pub const SHORTCUT_PICK: &str = "\u{1}shortcuts:";
 
+/// Starts the name of a script file the shell's `"script"` picker put in the inbox, for the
+/// Script pane's Load….
+pub const SCRIPT_PICK: &str = "\u{1}script:";
+
+/// The largest script file the Script pane's Load… reads, as the assistant's command file; the
+/// browser's shell refuses a larger one before reading it.
+pub const SCRIPT_FILE_MAX_BYTES: usize = 1024 * 1024;
+
 /// Maximum portable shortcut document size: saved overrides plus room for version metadata.
 pub const SHORTCUT_FILE_MAX_BYTES: usize = keymap::MAX_PREF_BYTES + 100;
 
@@ -248,6 +256,10 @@ pub(crate) struct UnderWay {
     /// How far a whole file's download has come; `None` for a window's read, which isn't counted.
     pub progress: Option<std::sync::Arc<rustgis_engine::render::rustgis_tiles::cache::Progress>>,
 }
+
+/// Where a PDF download's bytes and drawn page land ([`UiState::page_reads`]).
+#[cfg(not(target_arch = "wasm32"))]
+type PageRead = Slot<Result<(Vec<u8>, rustgis_engine::data::raster::Raster), String>>;
 
 /// See [`UiState::window_reads`].
 #[cfg(not(target_arch = "wasm32"))]
@@ -763,6 +775,12 @@ pub struct UiState {
     pub start_with: StartWith,
     /// Whether a file holding several layers asks which to add (#934), or adds them all.
     pub ask_layers: bool,
+    /// Whether datum grids a coordinate system needs are downloaded from PROJ's grid server
+    /// (#2032 A4): off unless turned on, as it reaches a server.
+    pub download_grids: bool,
+    /// Whether raster tiles and single pictures are fetched for a HiDPI display's own pixels
+    /// (#2390): on unless turned off.
+    pub sharp_tiles: bool,
     /// Key combinations the native menu bar keeps for itself (macOS: Quit, Close Window, Hide…):
     /// a shortcut on one would never reach the app, so the shortcut editor refuses them.
     pub reserved_shortcuts: Vec<egui::KeyboardShortcut>,
@@ -807,6 +825,7 @@ pub struct UiState {
     pub hidden_tabs: Vec<String>,
     /// Extra Quick Access Toolbar commands.
     pub quick_access: Vec<String>,
+    pub(crate) history_jump: Option<chrome::HistoryJump>,
     /// Whether a layout's PDF georeferences its map frames (Layout › Export › Georeference PDF).
     pub(crate) pdf_georeference: bool,
     /// The native title bar the header is drawn into; set by the desktop app on macOS.
@@ -863,6 +882,16 @@ pub struct UiState {
     /// its project was closed.
     #[cfg(not(target_arch = "wasm32"))]
     pub window_reads: Vec<WindowRead>,
+    /// PDF downloads whose page is being drawn on a thread before it is added (#2336): the
+    /// download, where its bytes and page land, and whether it was cancelled (or its project
+    /// closed). They take their turns with the windows' reads, and count against their limit.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) page_reads: Vec<(serviceui::Landed, PageRead, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// PDF downloads waiting for a place among [`UiState::page_reads`] (past
+    /// [`MAX_WINDOW_READS`] reads under way), oldest first: the download, its bytes, and its page
+    /// to draw ([`rustgis_engine::cmd::raster::download_page`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) page_queue: Vec<(serviceui::Landed, Vec<u8>, (String, Option<String>, bool))>,
     /// Service layers whose features are being read page by page (an ArcGIS layer's description
     /// first).
     pub service_pages: Vec<serviceui::PageRead>,
@@ -1027,6 +1056,8 @@ impl Default for UiState {
             worldview_fetch: None,
             start_with: StartWith::Sample,
             ask_layers: true,
+            download_grids: false,
+            sharp_tiles: true,
             reserved_shortcuts: Vec::new(),
             choosing: Vec::new(),
             last_project: None,
@@ -1065,6 +1096,10 @@ impl Default for UiState {
             cog_probes: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             window_reads: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            page_reads: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            page_queue: Vec::new(),
             service_pages: Vec::new(),
             link_zoomed: false,
             service: None,
@@ -1110,6 +1145,7 @@ impl Default for UiState {
             geolibre_zarr: Vec::new(),
             hidden_tabs: Vec::new(),
             quick_access: Vec::new(),
+            history_jump: None,
             pdf_georeference: true,
             titlebar: None,
             pane_sets: Vec::new(),
@@ -1469,6 +1505,9 @@ impl RustGisApp {
         let mut s = session;
         // A time slider move doesn't wait for a Zarr step to be read (#1291 step 3).
         s.zarr_off_frame = cfg!(not(target_arch = "wasm32"));
+        // This front end has the Download Datum Grids setting, so a note about a missing grid can
+        // point to it.
+        s.offers_grid_downloads = true;
         if s.active_layer.is_none() {
             s.active_layer = s.map().layers.first().map(|l| l.id);
         }
@@ -1627,6 +1666,10 @@ impl RustGisApp {
         }
         self.ui.last_project = self.services.load_pref.as_ref().and_then(|load| load("last_project")).filter(|p| !p.trim().is_empty());
         self.ui.ask_layers = self.services.load_pref.as_ref().and_then(|load| load("ask_file_layers")).is_none_or(|v| v != "off");
+        self.ui.download_grids = self.services.load_pref.as_ref().and_then(|load| load("download_datum_grids")).is_some_and(|v| v == "on");
+        rustgis_engine::grids::set_enabled(self.ui.download_grids);
+        self.ui.sharp_tiles = self.services.load_pref.as_ref().and_then(|load| load("sharp_tiles")).is_none_or(|v| v != "off");
+        rustgis_engine::render::rustgis_tiles::template::set_sharp(self.ui.sharp_tiles);
         // A stored projection this version can't use means Web Mercator.
         if let Some(code) = self.services.load_pref.as_ref().and_then(|load| load("start_projection"))
             && let Ok(p) = rustgis_engine::map::Projection::from_code(&code)
@@ -1783,8 +1826,7 @@ impl RustGisApp {
         }
         let found = [CjkRegion::SimplifiedChinese, CjkRegion::Japanese, CjkRegion::Korean].into_iter().find_map(cjk_font);
         if let Some((bytes, index)) = found {
-            let mut face = egui::FontData::from_static(bytes);
-            face.index = *index;
+            let face = theme::installed_face(bytes, *index, true);
             self.extra_fonts.push(("cjk-fallback".into(), std::sync::Arc::new(face), None));
         }
     }
@@ -1797,8 +1839,7 @@ impl RustGisApp {
             return;
         }
         if let Some((bytes, index)) = rustgis_engine::render::fonts::symbol_font() {
-            let mut face = egui::FontData::from_static(bytes);
-            face.index = *index;
+            let face = theme::installed_face(bytes, *index, false);
             self.extra_fonts.push(("symbol-fallback".into(), std::sync::Arc::new(face), None));
         }
     }
@@ -1839,8 +1880,7 @@ impl RustGisApp {
         }
         self.fonts_requested.push(name.clone());
         if let Some((bytes, index)) = script_font(region) {
-            let mut face = egui::FontData::from_static(bytes);
-            face.index = *index;
+            let face = theme::installed_face(bytes, *index, matches!(region, rustgis_engine::render::fonts::ScriptFont::Cjk(_)));
             self.extra_fonts.push((name, std::sync::Arc::new(face), Some(region)));
             self.fonts_dirty = true;
         } else if let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(region)) {
@@ -2005,11 +2045,16 @@ impl RustGisApp {
     /// Opens a file from the inbox: one the `"text"` picker marked ([`DELIMITED_PICK`]) opens Add
     /// Delimited Text for it, or is read with a script's options; one the tool file picker marked
     /// ([`TOOL_FILE_PICK`]) goes to the Tools pane. Source-CRS picks carry [`SHAPEFILE_PICK`];
-    /// shortcut picks carry [`SHORTCUT_PICK`] and open the validated merge preview; DXF picks
+    /// shortcut picks carry [`SHORTCUT_PICK`] and open the validated merge preview; script picks
+    /// carry [`SCRIPT_PICK`] and open in the Script pane; DXF picks
     /// carry [`DXF_PICK`] and open Import DXF.
     pub fn open_picked(&mut self, name: &str, bytes: &[u8]) -> Result<Value, String> {
         if name.starts_with(SHORTCUT_PICK) {
             return shortcutfile::picked(self, bytes);
+        }
+        if let Some(name) = name.strip_prefix(SCRIPT_PICK) {
+            // An answer with no name is a cancelled picker.
+            return if name.is_empty() { Ok(Value::Null) } else { analysispane::script_picked(self, name, bytes) };
         }
         if let Some(name) = name.strip_prefix(TOOL_FILE_PICK) {
             panes::received_file(self, name, bytes);
@@ -2245,6 +2290,7 @@ impl RustGisApp {
             // Save As changed the document even when it began clean. Offering a download
             // cannot confirm that this renamed document reached a file.
             self.session.mark_unsaved();
+            self.ui.history_jump = None;
         }
         // On Android the file is written once the user has chosen its place, and the shell
         // says then whether it was.
@@ -2815,6 +2861,11 @@ impl RustGisApp {
                 // Search shows no answer.
                 let mark = self.session.notice_mark();
                 return exportjob::start(self, "source.publish", params).inspect_err(|e| self.command_failed(id, e, mark));
+            }
+            // A block's model waits for elevation tiles and draws its texture (#2319).
+            if id == "map.exportBlock" {
+                let mark = self.session.notice_mark();
+                return exportjob::start(self, "map.exportBlock", params).inspect_err(|e| self.command_failed(id, e, mark));
             }
             // Ordering and writing a standalone table grows with its rows, like Export Features.
             if id == "share.exportTable" {
@@ -3576,6 +3627,40 @@ impl RustGisApp {
                 }
                 return Ok(json!({"on": self.ui.ask_layers}));
             }
+            // Whether datum grids are downloaded from PROJ's grid server (#2032 A4).
+            "ui.datumGrids" => {
+                // Without `on` it toggles; a value that isn't true or false is refused.
+                self.ui.download_grids = match p.get("on") {
+                    None | Some(Value::Null) => !self.ui.download_grids,
+                    Some(v) => v.as_bool().ok_or("on must be true or false")?,
+                };
+                rustgis_engine::grids::set_enabled(self.ui.download_grids);
+                // Turned on: the grids the systems in use already lack are got now, not only those
+                // a note says later.
+                if self.ui.download_grids {
+                    self.session.want_grids_in_use();
+                }
+                if let Some(save) = &self.services.save_pref {
+                    save("download_datum_grids", if self.ui.download_grids { "on" } else { "off" });
+                }
+                return Ok(json!({"on": self.ui.download_grids}));
+            }
+            // Whether raster tiles are sharp on a HiDPI display (#2390).
+            "ui.sharpTiles" => {
+                // Without `on` it toggles; a value that isn't true or false is refused.
+                self.ui.sharp_tiles = match p.get("on") {
+                    None | Some(Value::Null) => !self.ui.sharp_tiles,
+                    Some(v) => v.as_bool().ok_or("on must be true or false")?,
+                };
+                rustgis_engine::render::rustgis_tiles::template::set_sharp(self.ui.sharp_tiles);
+                if let Some(save) = &self.services.save_pref {
+                    save("sharp_tiles", if self.ui.sharp_tiles { "on" } else { "off" });
+                }
+                // The map and an open layout page are drawn again with tiles at the new detail.
+                self.map.invalidate();
+                self.layout.redraw();
+                return Ok(json!({"on": self.ui.sharp_tiles}));
+            }
             "ui.recover" => return autosave::recover(self, p),
             "ui.startup" => {
                 // `project` (#377) or, as before, `blank`; `project` wins when both are given.
@@ -4173,6 +4258,8 @@ impl RustGisApp {
                         // Rasters GDAL reads (every one it is asked to read).
                         #[cfg(not(target_arch = "wasm32"))]
                         rustgis_engine::data::raster::gdal::EXTENSIONS,
+                        // PDF pages, GeoPDFs placed by their coordinates, where this build reads them (#2336).
+                        if rustgis_engine::data::raster::PDF_PAGES { &["pdf"][..] } else { &[][..] },
                     ]
                     .concat(),
                     tl!("Vector and raster data"),
@@ -4887,8 +4974,7 @@ impl RustGisApp {
                     dbf_notes.push(format!("{name}: {} rows couldn't be read and were left out", lost.rows));
                 }
                 dbf_notes.extend(rustgis_engine::cmd::share::read_notes(&name, &l.name, &lost));
-                // CSV holds a point a row, GPX a name for each feature and no areas.
-                dbf_notes.extend(io::export_losses_notes(ds, &ext, io::name_field(ds), &name));
+                dbf_notes.extend(io::export_losses_notes(ds, &ext, io::name_field(ds), &name).map_err(|e| e.to_string())?);
                 if let Some(note) = io::left_out_note(&name, &ext, left_out) {
                     self.session.notify(note, false);
                 }
@@ -5408,6 +5494,11 @@ impl RustGisApp {
                     q[k] = v.clone();
                 }
             }
+            // A PDF's page may be given as a number too (#2336): any other value is passed on as
+            // given, for `layer.addDownload` to refuse rather than open the first page.
+            if let Some(v) = p.get("layer").filter(|v| !v.is_null() && !v.is_string()) {
+                q["layer"] = v.clone();
+            }
             // How the bytes are read, as `layer.addData` takes it (a command asking by
             // address, such as a plugin's: the dialog gives none of these).
             for k in ["x", "y", "wkt", "delimiter", "paperSpace", "blocks", "stream", "as"] {
@@ -5577,8 +5668,58 @@ impl RustGisApp {
         for (id, url, mut p, r) in landed {
             let origin = connectiontree::take_origin_key(&mut p);
             match r {
-                Ok(bytes) => self.add_landed(serviceui::Landed { id, url, params: p, origin }, bytes),
+                Ok(bytes) => {
+                    let landed = serviceui::Landed { id, url, params: p, origin };
+                    // A PDF's page is drawn on a thread first, so a large one doesn't hold the window.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(page) = rustgis_engine::cmd::raster::download_page(&landed.url, &landed.params, &bytes) {
+                        self.draw_page(landed, bytes, page);
+                        continue;
+                    }
+                    self.add_landed(landed, bytes);
+                }
                 Err(e) => self.landed_failed(id, &url, &p, e),
+            }
+        }
+        // PDF pages drawn on threads, added with their downloads' bytes.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut drawn = Vec::new();
+            for (landed, slot, left) in std::mem::take(&mut self.ui.page_reads) {
+                let read = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                match read {
+                    Some(r) => drawn.push((landed, r)),
+                    None => {
+                        left.store(!self.session.download_under_way(landed.id), std::sync::atomic::Ordering::Relaxed);
+                        self.ui.page_reads.push((landed, slot, left));
+                    }
+                }
+            }
+            for (landed, r) in drawn {
+                match r {
+                    Ok((bytes, page)) => {
+                        let current = self.session.download_landed_page(landed.id, bytes, page);
+                        self.add_download(landed, current);
+                    }
+                    Err(e) => self.landed_failed(landed.id, &landed.url, &landed.params, e),
+                }
+            }
+            // One waiting whose project was closed meanwhile is given up, and said, rather than
+            // drawn for nothing while it holds the turn.
+            let (waiting, gone): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut self.ui.page_queue).into_iter().partition(|(l, ..)| self.session.download_under_way(l.id));
+            self.ui.page_queue = waiting;
+            for (landed, ..) in gone {
+                let why = tl!("given up before its page was drawn: its project was closed, or more than 64 downloads started after it");
+                self.landed_failed(landed.id, &landed.url, &landed.params, why.to_string());
+            }
+            // Those waiting take the places freed, oldest first.
+            while !self.ui.page_queue.is_empty() && self.ui.page_reads.len() + self.ui.window_reads.len() < MAX_WINDOW_READS {
+                let (landed, bytes, page) = self.ui.page_queue.remove(0);
+                // Not started (no thread to be had): it waits at the front for a later frame.
+                if !self.draw_page(landed, bytes, page) {
+                    break;
+                }
             }
         }
         // Windows read on threads, added as a download is.
@@ -5618,7 +5759,10 @@ impl RustGisApp {
         };
         let downloads = self.ui.downloads.iter().map(|d| shown(d.id, &d.url, Some(&d.progress)));
         #[cfg(not(target_arch = "wasm32"))]
-        let downloads = downloads.chain(self.ui.window_reads.iter().map(|(id, url, ..)| shown(*id, url, None)));
+        let downloads = downloads
+            .chain(self.ui.window_reads.iter().map(|(id, url, ..)| shown(*id, url, None)))
+            .chain(self.ui.page_reads.iter().map(|(l, ..)| shown(l.id, &l.url, None)))
+            .chain(self.ui.page_queue.iter().map(|(l, ..)| shown(l.id, &l.url, None)));
         let mut under_way: Vec<_> = downloads.collect();
         under_way.sort_by_key(|d| d.id);
         under_way
@@ -5640,6 +5784,21 @@ impl RustGisApp {
             let (_, url, p, _, left) = self.ui.window_reads.remove(i);
             left.store(true, std::sync::atomic::Ordering::Relaxed);
             Some((url, p))
+        });
+        // A PDF page waiting for its turn gives it up; one being drawn is left to finish, its
+        // page dropped (drawing a page is one step that can't be stopped).
+        #[cfg(not(target_arch = "wasm32"))]
+        let cancelled = cancelled.or_else(|| {
+            let i = self.ui.page_reads.iter().position(|(l, ..)| l.id == id)?;
+            let (landed, _, left) = self.ui.page_reads.remove(i);
+            left.store(true, std::sync::atomic::Ordering::Relaxed);
+            Some((landed.url, landed.params))
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        let cancelled = cancelled.or_else(|| {
+            let i = self.ui.page_queue.iter().position(|(l, ..)| l.id == id)?;
+            let (landed, ..) = self.ui.page_queue.remove(i);
+            Some((landed.url, landed.params))
         });
         let Some((url, mut p)) = cancelled else { return };
         connectiontree::take_origin_key(&mut p);
@@ -5676,7 +5835,8 @@ impl RustGisApp {
         seen: Option<[f64; 4]>,
     ) -> Result<Value, String> {
         let asked = rustgis_engine::cmd::layer::window_asked_in(&self.session, p, seen).and_then(|asked| {
-            if self.ui.window_reads.len() >= MAX_WINDOW_READS {
+            // PDF pages being drawn take places too.
+            if self.ui.window_reads.len() + self.ui.page_reads.len() >= MAX_WINDOW_READS {
                 return Err(i18n::fmt(
                     "{url}: {count} windows are being read already: ask again once one has been added",
                     &[("url", &rustgis_engine::sources::address_in_message(&url)), ("count", &MAX_WINDOW_READS.to_string())],
@@ -5753,6 +5913,57 @@ impl RustGisApp {
         let id = claim.unwrap_or_else(|| self.session.download_started());
         self.ui.window_reads.push((id, url, q, slot, left));
         Ok(Value::Null)
+    }
+
+    /// Draws a downloaded PDF's page on a thread ([`rustgis_engine::cmd::raster::read_download_page`]),
+    /// to be added with its bytes once drawn ([`UiState::page_reads`]). `page`: its file name, page
+    /// and whether it is placed ([`download_page`]). Drawn one at a time with the windows' reads;
+    /// past [`MAX_WINDOW_READS`] under way, or where the OS gives no thread, it waits in
+    /// [`UiState::page_queue`] and is tried again each frame: held, listed under way and
+    /// cancellable, until a thread can be had (never drawn on the frame, and the download isn't
+    /// lost). Whether it started now. Cancel takes it
+    /// off the list and gives up its turn; a drawing under way (one step the renderer can't stop)
+    /// finishes, its page dropped.
+    ///
+    /// [`download_page`]: rustgis_engine::cmd::raster::download_page
+    #[cfg(not(target_arch = "wasm32"))]
+    fn draw_page(&mut self, landed: serviceui::Landed, bytes: Vec<u8>, (name, page, place): (String, Option<String>, bool)) -> bool {
+        if self.ui.page_reads.len() + self.ui.window_reads.len() >= MAX_WINDOW_READS {
+            self.ui.page_queue.push((landed, bytes, (name, page, place)));
+            return false;
+        }
+        let asked = (name.clone(), page.clone(), place);
+        let slot: PageRead = Slot::default();
+        let land = slot.clone();
+        let left = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leaving = left.clone();
+        // Kept here too, so a thread the OS refuses doesn't take the download with it.
+        let bytes = std::sync::Arc::new(bytes);
+        let mine = bytes.clone();
+        let spawned = std::thread::Builder::new().name("pdf-page".into()).spawn(move || {
+            let read = match window_turn(&leaving) {
+                // On a thread no command's catch reaches: a bug must not leave it running forever.
+                Some(_turn) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rustgis_engine::cmd::raster::read_download_page(&name, &bytes, page.as_deref(), place)
+                }))
+                .unwrap_or_else(|_| Err(tl!("Drawing the PDF's page failed unexpectedly").to_string())),
+                None => Err(tl!("given up before its page was drawn: it was cancelled, or its project was closed").to_string()),
+            };
+            let bytes = std::sync::Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone());
+            *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(read.map(|r| (bytes, r)));
+        });
+        match spawned {
+            Ok(_) => {
+                drop(mine);
+                self.ui.page_reads.push((landed, slot, left));
+            }
+            Err(_) => {
+                let bytes = std::sync::Arc::try_unwrap(mine).unwrap_or_else(|shared| (*shared).clone());
+                self.ui.page_queue.insert(0, (landed, bytes, asked));
+                return false;
+            }
+        }
+        true
     }
 
     /// Adds a download that landed (`layer.addDownload`), named in Recent after the connection it
@@ -6169,9 +6380,9 @@ impl RustGisApp {
         if self.session.plugin_retries_waiting() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        // A window's read lands after its last tile, with nothing to wake the frame.
+        // A window's read, or a PDF page's drawing, lands with nothing to wake the frame.
         #[cfg(not(target_arch = "wasm32"))]
-        if !self.ui.window_reads.is_empty() {
+        if !self.ui.window_reads.is_empty() || !self.ui.page_reads.is_empty() || !self.ui.page_queue.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Zarr steps the time slider moved to, read off the frame, show once they land.
@@ -6355,6 +6566,15 @@ impl RustGisApp {
         for (name, bytes) in arrived {
             let _ = self.open_picked(&name, &bytes);
         }
+        // A script file for the Script pane's Load…, opened with the context its undo needs; said,
+        // not dropped, if something in the inbox started a run meanwhile.
+        if let Some(script) = self.workflow.script_picked.take() {
+            if analysispane::script_running(self) {
+                self.session.notify(tl!("Wait for the run to finish").to_string(), true);
+            } else {
+                analysispane::open_script(self, ctx, script);
+            }
+        }
         // Files dropped on the desktop window arrive as paths. (The web shell reads browser drops
         // asynchronously and passes them through the inbox instead.)
         if !cfg!(target_arch = "wasm32") {
@@ -6456,6 +6676,7 @@ impl RustGisApp {
         self.themes_revision
     }
 
+    /// Draws the current workspace and processes toolbar actions once the interface fonts are ready.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _diagnostics = self.session.diagnostics.enter();
         // See `logic`.
@@ -6475,12 +6696,13 @@ impl RustGisApp {
         fieldmenu::play(self, &ctx);
         chrome::shortcuts(self, &ctx);
         panes::follow_layer_filter(self);
-        // A Zarr summary, a trend, a workflow, an export or a read running on its thread lands
+        // A Zarr summary or point series, a trend, a workflow, an export or a read running on its thread lands
         // whatever is in view, the File menu's backstage too, so a project saved there holds it
         // (all are looked at: `|`, not `||`), and the frames go on while one runs so it's taken
         // when it ends.
         #[cfg(not(target_arch = "wasm32"))]
         if workspacepanes::land_summary(self)
+            | workspacepanes::land_series(self)
             | analysispane::land_trend(self)
             | analysispane::land_job(self)
             | exportjob::land(self)
@@ -6545,6 +6767,8 @@ impl RustGisApp {
             self.sent_title = title;
         }
         pluginstart::frame_drawn(self, &ctx);
+        // Cancel, save prompts and any project changes from UI controls take effect first.
+        chrome::advance_history_jump(self, &ctx);
         // CJK text this frame drew with no face for it: the next frame's `logic` deals with it
         // (`ensure_data_cjk_font`), so there must be a next frame, though no input comes.
         if rustgis_engine::render::fonts::peek_missing_cjk().iter().any(|s| !self.cjk_scripts_handled.contains(s)) {
@@ -7417,6 +7641,84 @@ mod record_tests {
         held.lock().unwrap().pop().unwrap()(Ok(br#"{"type":"Point","coordinates":[1,2]}"#.to_vec()));
         app.poll_data_downloads();
         assert!(app.session.map().layer_by_name("Cancelled download").is_none());
+    }
+
+    /// A PDF download's page waiting for its turn to be drawn is cancelled like a download: taken
+    /// off the list at once, said cancelled, and not added when its turn comes (#2336).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_cancelled_pdf_page_isnt_added_when_its_turn_comes() {
+        use rustgis_engine::render::rustgis_tiles::cache;
+        use std::sync::{Arc, Mutex};
+        let _turn = crate::fetching::turn();
+        struct Fetcher;
+        impl Drop for Fetcher {
+            fn drop(&mut self) {
+                cache::clear_fetcher();
+            }
+        }
+        let held = Arc::new(Mutex::new(Vec::<cache::Done>::new()));
+        let callbacks = held.clone();
+        cache::set_fetcher(move |_, done| callbacks.lock().unwrap().push(done));
+        let _fetcher = Fetcher;
+        // A one-page PDF of a 72 × 36 point page, with its cross-reference table.
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 36] >>",
+        ];
+        let mut pdf = String::from("%PDF-1.7\n");
+        let mut at = Vec::new();
+        for (i, o) in objects.iter().enumerate() {
+            at.push(pdf.len());
+            pdf.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+        }
+        let xref = pdf.len();
+        pdf.push_str("xref\n0 4\n0000000000 65535 f \n");
+        for a in at {
+            pdf.push_str(&format!("{a:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"));
+        let late = pdf.clone().into_bytes();
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.addUrl", json!({"url": "https://cancel.invalid/sheet.pdf", "name": "Cancelled sheet"})).unwrap();
+        // The page waits for its turn while this test holds it.
+        let reading = crate::WINDOW_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        held.lock().unwrap().pop().unwrap()(Ok(pdf.into_bytes()));
+        app.poll_data_downloads();
+        assert_eq!(app.ui.page_reads.len(), 1, "drawn off the frame");
+        let under_way = app.downloads_under_way();
+        assert!(under_way.len() == 1 && under_way[0].shown.contains("sheet.pdf"), "{under_way:?}");
+        app.cancel_download(under_way[0].id);
+        assert!(app.ui.page_reads.is_empty() && app.downloads_under_way().is_empty());
+        let said = |n: &rustgis_engine::Notice| n.text.contains("sheet.pdf") && n.text.contains("cancelled");
+        assert!(app.session.notices.iter().any(said), "{:?}", app.session.notices);
+        drop(reading);
+        for _ in 0..10 {
+            app.poll_data_downloads();
+            std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: the given-up draw's thread lands into a slot no list holds
+        }
+        assert!(app.session.map().layer_by_name("Cancelled sheet").is_none());
+        // A page drawn already when Cancel comes isn't added either.
+        app.run("ui.addUrl", json!({"url": "https://cancel.invalid/late.pdf", "name": "Late sheet"})).unwrap();
+        held.lock().unwrap().pop().unwrap()(Ok(late));
+        app.poll_data_downloads();
+        assert_eq!(app.ui.page_reads.len(), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.ui.page_reads.first().is_some_and(|(_, slot, _)| slot.lock().unwrap().is_none()) {
+            assert!(std::time::Instant::now() < deadline, "the page wasn't drawn");
+            std::thread::sleep(std::time::Duration::from_millis(20)); // test-wait: the drawing thread's result, which has no signal of its own
+        }
+        app.cancel_download(app.downloads_under_way()[0].id);
+        app.poll_data_downloads();
+        assert!(app.session.map().layer_by_name("Late sheet").is_none() && app.ui.page_reads.is_empty());
+        // A page asked for by number reaches the download as it was asked.
+        app.run("ui.addUrl", json!({"url": "https://cancel.invalid/paged.pdf", "layer": 2})).unwrap();
+        let asked = app.ui.downloads.last().map(|d| d.params.clone()).unwrap();
+        assert_eq!(asked["layer"], json!(2), "{asked}");
+        app.run("ui.addUrl", json!({"url": "https://cancel.invalid/odd.pdf", "layer": 2.5})).unwrap();
+        let asked = app.ui.downloads.last().map(|d| d.params.clone()).unwrap();
+        assert_eq!(asked["layer"], json!(2.5), "passed on, to be refused: {asked}");
     }
 
     /// The next window is read only once the frame has taken the last: a frame that stalls holds
@@ -8959,5 +9261,58 @@ mod touch_tests {
         // Already on it: nothing changes.
         app.run("ui.touchInterface", Value::Null).unwrap();
         assert!(app.chrome.is_some());
+    }
+}
+
+#[cfg(test)]
+mod datum_grid_setting_tests {
+    use super::RustGisApp;
+    use rustgis_engine::{Project, Session};
+    use serde_json::json;
+
+    /// Sharp tiles on HiDPI displays (#2390) are on by default, kept as a choice, read at start
+    /// and turned off by it; a value that isn't true or false is refused.
+    #[test]
+    fn sharp_tiles_are_a_kept_choice_on_by_default() {
+        let saved = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = saved.clone();
+        let services = crate::Services {
+            load_pref: Some(Box::new(|k| (k == "sharp_tiles").then(|| "off".to_string()))),
+            save_pref: Some(Box::new(move |k, v| log.lock().unwrap().push((k.to_string(), v.to_string())))),
+            ..crate::Services::default()
+        };
+        let mut app = RustGisApp::new(Session::new(Project::default())).with_services(services);
+        // The setting itself is shared by the tests running beside this one: only the choice is
+        // looked at, and it is left on.
+        assert!(!app.ui.sharp_tiles, "read at start");
+        assert_eq!(app.run("ui.sharpTiles", json!({"on": true})).unwrap(), json!({"on": true}));
+        assert_eq!(saved.lock().unwrap().last().cloned(), Some(("sharp_tiles".to_string(), "on".to_string())));
+        for junk in [json!({"on": "false"}), json!({"on": 0})] {
+            assert!(app.run("ui.sharpTiles", junk).is_err());
+            assert!(app.ui.sharp_tiles);
+        }
+        // Without a choice kept: on.
+        assert!(RustGisApp::new(Session::new(Project::default())).ui.sharp_tiles);
+    }
+
+    /// Downloading datum grids is off unless turned on (it reaches a server), and the choice is
+    /// kept as a preference. Turned on only by `rustgis-engine`'s own test, which reaches no
+    /// network: here, where other tests run beside it, it stays off.
+    #[test]
+    fn downloading_datum_grids_is_a_kept_choice_off_by_default() {
+        let mut app = RustGisApp::new(Session::new(Project::default()));
+        let saved = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = saved.clone();
+        app.services.save_pref = Some(Box::new(move |k, v| log.lock().unwrap().push((k.to_string(), v.to_string()))));
+        assert!(!app.ui.download_grids);
+        assert!(!rustgis_engine::grids::enabled());
+        assert_eq!(app.run("ui.datumGrids", json!({"on": false})).unwrap(), json!({"on": false}));
+        assert_eq!(saved.lock().unwrap().last().cloned(), Some(("download_datum_grids".to_string(), "off".to_string())));
+        // A value that isn't true or false is refused and changes nothing.
+        for junk in [json!({"on": "true"}), json!({"on": 1}), json!({"on": [true]})] {
+            assert!(app.run("ui.datumGrids", junk).is_err());
+            assert!(!app.ui.download_grids && !rustgis_engine::grids::enabled());
+        }
+        assert_eq!(saved.lock().unwrap().len(), 1);
     }
 }

@@ -41,7 +41,7 @@ pub struct Exported {
     /// Vertices beyond 85.05° north or south, written at 85.05° by an export in Web Mercator,
     /// where it ends (0 in another system). See [`crate::web_mercator_moved_note`].
     pub beyond_web_mercator: usize,
-    /// Geometry a CSV can't hold, counted over all chunks (none for the other formats).
+    /// Geometry and text changed by CSV export, counted over all chunks.
     pub csv: crate::io::CsvLosses,
     /// Per field of the layer, values of the source's date fields that weren't dates, so are
     /// written as null ([`crate::source::Batch::unread_dates`], said by
@@ -64,6 +64,9 @@ pub struct Exported {
     pub written_values: Vec<usize>,
     /// GeoParquet timestamp representation changes counted during export.
     pub date_messages: Vec<String>,
+    /// What reading the source lost or assumed besides the counts above
+    /// ([`crate::source::Batch::notes`]), said as they are.
+    pub read_notes: Vec<String>,
 }
 
 /// Writes every feature of `src` to `path` in the format of its extension, in `crs` (see
@@ -149,6 +152,7 @@ fn write_chunks_as(
     let mut unread_dates = Vec::new();
     let mut rounded_dates = Vec::new();
     let mut null_text = Vec::new();
+    let mut read_notes = Vec::new();
     let mut utc_dates = Vec::new();
     let mut fine_dates = Vec::new();
     let mut written_values = Vec::new();
@@ -179,7 +183,7 @@ fn write_chunks_as(
             total = total.saturating_add(chunk.len());
             null_numbers = null_numbers.saturating_add(numbers_written_as_null(&chunk, &layer.fields, ext));
             if ext == "csv" {
-                csv += crate::io::CsvLosses::of(&chunk, geometry_type);
+                csv += crate::io::CsvLosses::of(&chunk, geometry_type, &layer.fields)?;
             }
             if ext == "gpkg" {
                 crate::source::add_unread_dates(&mut utc_dates, &crate::io::offset_dates(chunk.iter(), &layer.fields));
@@ -194,6 +198,7 @@ fn write_chunks_as(
         unread_dates = batch.unread_dates;
         rounded_dates = batch.rounded_dates;
         null_text = batch.null_text;
+        read_notes = batch.notes;
         Ok(())
     };
     let mut table = None;
@@ -250,6 +255,7 @@ fn write_chunks_as(
             fine_dates,
             written_values,
             date_messages,
+            read_notes,
         },
         table,
     ))

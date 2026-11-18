@@ -81,12 +81,14 @@ pub const CAPABILITIES: &[&str] = &[
     "shaded-relief-light",
     "table-export-order",
     "tabulate-intersection-unit",
+    "tabulate-intersection-empty-zones",
     "layout-element-background",
     SIZE_BY_CAPABILITY,
     "picture-markers",
     "layout-element-ink",
     "field-generation",
     "crs-wkt",
+    "zarr-window",
 ];
 /// Independent marker sizes alongside classified point colours (`Layer::size_by`).
 pub(crate) const SIZE_BY_CAPABILITY: &str = "classified-point-size";
