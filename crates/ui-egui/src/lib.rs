@@ -195,6 +195,14 @@ pub const TOOL_FILE_PURPOSE: &str = "toolfile:";
 /// Marks a returned shortcut picker file; cancellation leaves no pending routing state.
 pub const SHORTCUT_PICK: &str = "\u{1}shortcuts:";
 
+/// Starts the name of a script file the shell's `"script"` picker put in the inbox, for the
+/// Script pane's Load….
+pub const SCRIPT_PICK: &str = "\u{1}script:";
+
+/// The largest script file the Script pane's Load… reads, as the assistant's command file; the
+/// browser's shell refuses a larger one before reading it.
+pub const SCRIPT_FILE_MAX_BYTES: usize = 1024 * 1024;
+
 /// Maximum portable shortcut document size: saved overrides plus room for version metadata.
 pub const SHORTCUT_FILE_MAX_BYTES: usize = keymap::MAX_PREF_BYTES + 100;
 
@@ -766,6 +774,9 @@ pub struct UiState {
     /// Whether datum grids a coordinate system needs are downloaded from PROJ's grid server
     /// (#2032 A4): off unless turned on, as it reaches a server.
     pub download_grids: bool,
+    /// Whether raster tiles and single pictures are fetched for a HiDPI display's own pixels
+    /// (#2390): on unless turned off.
+    pub sharp_tiles: bool,
     /// Key combinations the native menu bar keeps for itself (macOS: Quit, Close Window, Hide…):
     /// a shortcut on one would never reach the app, so the shortcut editor refuses them.
     pub reserved_shortcuts: Vec<egui::KeyboardShortcut>,
@@ -810,6 +821,7 @@ pub struct UiState {
     pub hidden_tabs: Vec<String>,
     /// Extra Quick Access Toolbar commands.
     pub quick_access: Vec<String>,
+    pub(crate) history_jump: Option<chrome::HistoryJump>,
     /// Whether a layout's PDF georeferences its map frames (Layout › Export › Georeference PDF).
     pub(crate) pdf_georeference: bool,
     /// The native title bar the header is drawn into; set by the desktop app on macOS.
@@ -1041,6 +1053,7 @@ impl Default for UiState {
             start_with: StartWith::Sample,
             ask_layers: true,
             download_grids: false,
+            sharp_tiles: true,
             reserved_shortcuts: Vec::new(),
             choosing: Vec::new(),
             last_project: None,
@@ -1128,6 +1141,7 @@ impl Default for UiState {
             geolibre_zarr: Vec::new(),
             hidden_tabs: Vec::new(),
             quick_access: Vec::new(),
+            history_jump: None,
             pdf_georeference: true,
             titlebar: None,
             pane_sets: Vec::new(),
@@ -1650,6 +1664,8 @@ impl RustGisApp {
         self.ui.ask_layers = self.services.load_pref.as_ref().and_then(|load| load("ask_file_layers")).is_none_or(|v| v != "off");
         self.ui.download_grids = self.services.load_pref.as_ref().and_then(|load| load("download_datum_grids")).is_some_and(|v| v == "on");
         rustgis_engine::grids::set_enabled(self.ui.download_grids);
+        self.ui.sharp_tiles = self.services.load_pref.as_ref().and_then(|load| load("sharp_tiles")).is_none_or(|v| v != "off");
+        rustgis_engine::render::rustgis_tiles::template::set_sharp(self.ui.sharp_tiles);
         // A stored projection this version can't use means Web Mercator.
         if let Some(code) = self.services.load_pref.as_ref().and_then(|load| load("start_projection"))
             && let Ok(p) = rustgis_engine::map::Projection::from_code(&code)
@@ -1806,8 +1822,7 @@ impl RustGisApp {
         }
         let found = [CjkRegion::SimplifiedChinese, CjkRegion::Japanese, CjkRegion::Korean].into_iter().find_map(cjk_font);
         if let Some((bytes, index)) = found {
-            let mut face = egui::FontData::from_static(bytes);
-            face.index = *index;
+            let face = theme::installed_face(bytes, *index, true);
             self.extra_fonts.push(("cjk-fallback".into(), std::sync::Arc::new(face), None));
         }
     }
@@ -1820,8 +1835,7 @@ impl RustGisApp {
             return;
         }
         if let Some((bytes, index)) = rustgis_engine::render::fonts::symbol_font() {
-            let mut face = egui::FontData::from_static(bytes);
-            face.index = *index;
+            let face = theme::installed_face(bytes, *index, false);
             self.extra_fonts.push(("symbol-fallback".into(), std::sync::Arc::new(face), None));
         }
     }
@@ -1862,8 +1876,7 @@ impl RustGisApp {
         }
         self.fonts_requested.push(name.clone());
         if let Some((bytes, index)) = script_font(region) {
-            let mut face = egui::FontData::from_static(bytes);
-            face.index = *index;
+            let face = theme::installed_face(bytes, *index, matches!(region, rustgis_engine::render::fonts::ScriptFont::Cjk(_)));
             self.extra_fonts.push((name, std::sync::Arc::new(face), Some(region)));
             self.fonts_dirty = true;
         } else if let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(region)) {
@@ -2028,11 +2041,16 @@ impl RustGisApp {
     /// Opens a file from the inbox: one the `"text"` picker marked ([`DELIMITED_PICK`]) opens Add
     /// Delimited Text for it, or is read with a script's options; one the tool file picker marked
     /// ([`TOOL_FILE_PICK`]) goes to the Tools pane. Source-CRS picks carry [`SHAPEFILE_PICK`];
-    /// shortcut picks carry [`SHORTCUT_PICK`] and open the validated merge preview; DXF picks
+    /// shortcut picks carry [`SHORTCUT_PICK`] and open the validated merge preview; script picks
+    /// carry [`SCRIPT_PICK`] and open in the Script pane; DXF picks
     /// carry [`DXF_PICK`] and open Import DXF.
     pub fn open_picked(&mut self, name: &str, bytes: &[u8]) -> Result<Value, String> {
         if name.starts_with(SHORTCUT_PICK) {
             return shortcutfile::picked(self, bytes);
+        }
+        if let Some(name) = name.strip_prefix(SCRIPT_PICK) {
+            // An answer with no name is a cancelled picker.
+            return if name.is_empty() { Ok(Value::Null) } else { analysispane::script_picked(self, name, bytes) };
         }
         if let Some(name) = name.strip_prefix(TOOL_FILE_PICK) {
             panes::received_file(self, name, bytes);
@@ -2268,6 +2286,7 @@ impl RustGisApp {
             // Save As changed the document even when it began clean. Offering a download
             // cannot confirm that this renamed document reached a file.
             self.session.mark_unsaved();
+            self.ui.history_jump = None;
         }
         // On Android the file is written once the user has chosen its place, and the shell
         // says then whether it was.
@@ -3621,6 +3640,22 @@ impl RustGisApp {
                     save("download_datum_grids", if self.ui.download_grids { "on" } else { "off" });
                 }
                 return Ok(json!({"on": self.ui.download_grids}));
+            }
+            // Whether raster tiles are sharp on a HiDPI display (#2390).
+            "ui.sharpTiles" => {
+                // Without `on` it toggles; a value that isn't true or false is refused.
+                self.ui.sharp_tiles = match p.get("on") {
+                    None | Some(Value::Null) => !self.ui.sharp_tiles,
+                    Some(v) => v.as_bool().ok_or("on must be true or false")?,
+                };
+                rustgis_engine::render::rustgis_tiles::template::set_sharp(self.ui.sharp_tiles);
+                if let Some(save) = &self.services.save_pref {
+                    save("sharp_tiles", if self.ui.sharp_tiles { "on" } else { "off" });
+                }
+                // The map and an open layout page are drawn again with tiles at the new detail.
+                self.map.invalidate();
+                self.layout.redraw();
+                return Ok(json!({"on": self.ui.sharp_tiles}));
             }
             "ui.recover" => return autosave::recover(self, p),
             "ui.startup" => {
@@ -6528,6 +6563,15 @@ impl RustGisApp {
         for (name, bytes) in arrived {
             let _ = self.open_picked(&name, &bytes);
         }
+        // A script file for the Script pane's Load…, opened with the context its undo needs; said,
+        // not dropped, if something in the inbox started a run meanwhile.
+        if let Some(script) = self.workflow.script_picked.take() {
+            if analysispane::script_running(self) {
+                self.session.notify(tl!("Wait for the run to finish").to_string(), true);
+            } else {
+                analysispane::open_script(self, ctx, script);
+            }
+        }
         // Files dropped on the desktop window arrive as paths. (The web shell reads browser drops
         // asynchronously and passes them through the inbox instead.)
         if !cfg!(target_arch = "wasm32") {
@@ -6629,6 +6673,7 @@ impl RustGisApp {
         self.themes_revision
     }
 
+    /// Draws the current workspace and processes toolbar actions once the interface fonts are ready.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _diagnostics = self.session.diagnostics.enter();
         // See `logic`.
@@ -6719,6 +6764,8 @@ impl RustGisApp {
             self.sent_title = title;
         }
         pluginstart::frame_drawn(self, &ctx);
+        // Cancel, save prompts and any project changes from UI controls take effect first.
+        chrome::advance_history_jump(self, &ctx);
         // CJK text this frame drew with no face for it: the next frame's `logic` deals with it
         // (`ensure_data_cjk_font`), so there must be a next frame, though no input comes.
         if rustgis_engine::render::fonts::peek_missing_cjk().iter().any(|s| !self.cjk_scripts_handled.contains(s)) {
@@ -9219,6 +9266,31 @@ mod datum_grid_setting_tests {
     use super::RustGisApp;
     use rustgis_engine::{Project, Session};
     use serde_json::json;
+
+    /// Sharp tiles on HiDPI displays (#2390) are on by default, kept as a choice, read at start
+    /// and turned off by it; a value that isn't true or false is refused.
+    #[test]
+    fn sharp_tiles_are_a_kept_choice_on_by_default() {
+        let saved = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = saved.clone();
+        let services = crate::Services {
+            load_pref: Some(Box::new(|k| (k == "sharp_tiles").then(|| "off".to_string()))),
+            save_pref: Some(Box::new(move |k, v| log.lock().unwrap().push((k.to_string(), v.to_string())))),
+            ..crate::Services::default()
+        };
+        let mut app = RustGisApp::new(Session::new(Project::default())).with_services(services);
+        // The setting itself is shared by the tests running beside this one: only the choice is
+        // looked at, and it is left on.
+        assert!(!app.ui.sharp_tiles, "read at start");
+        assert_eq!(app.run("ui.sharpTiles", json!({"on": true})).unwrap(), json!({"on": true}));
+        assert_eq!(saved.lock().unwrap().last().cloned(), Some(("sharp_tiles".to_string(), "on".to_string())));
+        for junk in [json!({"on": "false"}), json!({"on": 0})] {
+            assert!(app.run("ui.sharpTiles", junk).is_err());
+            assert!(app.ui.sharp_tiles);
+        }
+        // Without a choice kept: on.
+        assert!(RustGisApp::new(Session::new(Project::default())).ui.sharp_tiles);
+    }
 
     /// Downloading datum grids is off unless turned on (it reaches a server), and the choice is
     /// kept as a preference. Turned on only by `rustgis-engine`'s own test, which reaches no

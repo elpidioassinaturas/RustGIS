@@ -1438,6 +1438,11 @@ list syntax, and check the tool's own help for what a weight field left blank me
   become standalone tables; text reports appear in the tool's messages.
 - LiDAR and other inputs RustGIS doesn't open as layers take a file path, read like Add Data
   reads one. Outputs are written to a fresh scratch folder and loaded from there.
+- **Output Name** names the new layer, as on the built-in tools; left empty, the layer takes the
+  tool's name (in English). A tool with several outputs adds each output's name to it
+  (`Flow streams`, `Flow basins`). A name a layer or table already has gets a number
+  (`Contours 2`), and a name you typed that gets one is said in the messages. From the command
+  line it is the same `output` key: `"params":{"input":"dem","output":"Slope 30 m"}`.
 - Each run is a separate `geolibre` process, so a tool that fails can't take RustGIS down.
 - From the command line: `gp.run={"tool":"geolibre:slope","params":{"input":"dem"}}`;
   `gp.tools` lists every tool's parameters, `gp.geolibre` shows the runner in use and
@@ -1574,7 +1579,11 @@ read, **Copy** for one and **Copy All** for the run, and why it stopped, if it d
 empties the pane: the script, its results, the count (the next run is Run #1 again) and the
 Details window. It asks nothing: the box keeps the focus, so Ctrl+Z (⌘+Z) brings the script back;
 after a click elsewhere, Ctrl+Z undoes in the project instead, so click into the box first. It is
-off with nothing to clear, and while a run is under way. Opening a
+off with nothing to clear, and while a run is under way. **Load…**, off then too, reads a script
+from a file (a `.txt` file in the browser; any file on the desktop and phone) in place of the pane's, emptying its
+results as Clear does, and Ctrl+Z (⌘+Z) brings the old script back; in the browser it uses the
+browser's file picker. A file that isn't UTF-8 text, or is over 1 MB, is refused with a notice
+naming it, and the script stays. Opening a
 project (New, Open, the sample, a template, or the same one again), from the app, a script, the
 assistant or an agent, starts the pane blank: the script, its results, the count and the Details
 window go with the old project. A script that opens a project itself stays, with its results, as
@@ -1625,10 +1634,15 @@ as the line's JSON needs it (`"Big \"lakes\""`).
 In the string of a key that takes an expression (its type is `sql` or `expression` in the
 command's help: `"where"` in `select.byAttributes`, `"expression"` in `edit.calculateField`,
 `labels.by`'s keys…; in a `gp.run` line, a tool's expression, such as `selectByAttributes`'s
-`"where"`), the list is the one [Calculate Field](expressions.md#calculate-field) shows, anywhere
-in the string: the fields of the line's layer or table (in `gp.run`, of the tool's input, before
-or after it), the functions, the variables and the keywords that fit, with the same help beside.
-Where the line names no layer it can find, it offers the language's words without fields.
+`"where"`; in a `task.addStep` line's `"params"`, the step's command's), the list is the one
+[Calculate Field](expressions.md#calculate-field) shows, anywhere in the string: the fields of
+the line's layer or table, the active layer without one (in `gp.run`, of the tool's input,
+before or after it; in `task.addStep`, of the layer or table its `"params"` give, the active
+layer without one), the functions, the variables and the keywords that fit, with the same help
+beside. Where the line names a layer it can't find, or a tool has no input, it offers the
+language's words without fields. A
+layer's name with escapes (`"Big \"lakes\""`) is read as the name it writes, for these lists and
+the field lists alike.
 Accepting one writes it as the string needs it, the rest of the string left as written: a field
 begun with an escaped quote is closed with one (`"where": "\"Pop Est\""`), and a function comes
 with its brackets, the cursor inside. A key inside another key's objects, such as a display
