@@ -10,7 +10,7 @@ use rustgis_render::terrain::{self, Ground};
 use serde_json::{Value, json};
 
 use super::{f, ps};
-use crate::{CmdResult, Session};
+use crate::Session;
 
 /// The texture's pixels on the block's longer side when none is given, and the range allowed.
 const TEXTURE: f64 = 4096.0;
@@ -53,8 +53,11 @@ fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-/// `map.exportBlock`: the map's block diagram written to `path` as a 3D model.
-pub(super) fn export(s: &mut Session, p: &Value) -> CmdResult {
+/// `map.exportBlock`'s reading of the session (the path, the texture's size, a copy of the map
+/// with its block), and the work that writes the model: on a thread of its own from the app, with
+/// progress and Cancel, as an export is (`exports::IN_BACKGROUND`), since it waits for elevation
+/// tiles and draws a texture of up to 8192 pixels a side.
+pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work, String> {
     if cfg!(target_arch = "wasm32") {
         return Err("exporting a block needs the desktop app".into());
     }
@@ -74,58 +77,71 @@ pub(super) fn export(s: &mut Session, p: &Value) -> CmdResult {
     let Some(t) = map.view.terrain.as_ref() else {
         return Err("the map has no terrain: set one with map.terrain, with a \"block\"".into());
     };
-    if t.block.is_none() {
+    let Some(b) = t.block.as_ref() else {
         return Err("the map's terrain has no block diagram: set one with map.terrain's \"block\"".into());
-    }
-    let walls_layer = t.block.as_ref().and_then(|b| b.walls_layer.clone());
+    };
+    let walls_layer = b.walls_layer.is_some();
     let exaggeration = t.exaggeration;
-    let (ground, block, model) = read_ground(&map, texture)?;
-    let terrain::Block { x0, y0, x1, y1, .. } = block;
-    // The map drawn top down over the box, without the terrain (its light, water glint and
-    // walls are the 3D viewer's to draw): its layers and labels, no scale bar or credits.
-    let (bw, bh) = (x1 - x0, y1 - y0);
-    let res = bw.max(bh) / texture.round();
-    let (tw, th) = ((bw / res).round().max(1.0), (bh / res).round().max(1.0));
-    map.view.terrain = None;
-    let mut camera = rustgis_map::Camera::new(Coord::new((x0 + x1) / 2.0, (y0 + y1) / 2.0), res);
-    camera.clamp();
-    let view = rustgis_render::View { width: tw, height: th, pixels_per_point: 1.0, camera, sky: false };
-    let placed = rustgis_render::render_placed(&mut map, &view)?;
-    let png = placed.pixmap.encode_png().map_err(|e| e.to_string())?;
-    let (nx, ny) = model.grid;
-    let (meshes, missing) = (model.meshes, model.missing);
-    let walls = block.walls;
-    let k = ground.per_unit(Coord::new((x0 + x1) / 2.0, (y0 + y1) / 2.0));
-    let sw = rustgis_geom::merc_to_lonlat(Coord::new(x0, y0));
-    let extras = json!({
-        "origin": [sw.x, sw.y],
-        "units": "metres east (x), up (y) and south (z) of the block's south-west corner (longitude, latitude); heights above sea level, exaggerated",
-        "exaggeration": exaggeration,
-        "metresPerMercatorUnit": k,
-        "credits": placed.credits,
-    });
-    let bytes = gltf(&meshes, &png, walls, glb, extras)?;
-    rustgis_data::io::write_atomic(std::path::Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
-    for gap in &placed.gaps {
-        s.warn(format!("{path}: the texture: {gap}"));
-    }
-    if missing > 0 {
-        s.warn(format!("{path}: {missing} point(s) of the ground have no height and stand at 0, as the map draws them"));
-    }
-    if model.pending {
-        s.warn(format!("{path}: elevation tiles were still on their way, so part of the ground is coarser or at 0: export again once the map has drawn them"));
-    }
-    if walls_layer.is_some() {
-        s.notify(format!("{path}: the walls are their plain colour: walls coloured by a layer aren't in the model yet"), false);
-    }
-    s.notify_written(
-        format!(
-            "Exported the block to {path}: the ground with the map as its texture, the walls and the base; the view's sky, fog, light and shadows are left to the 3D viewer"
-        ),
-        false,
-    );
-    let triangles: usize = meshes.iter().map(|m| m.tris.len() / 3).sum();
-    Ok(json!({"path": path, "bytes": bytes.len(), "texture": [tw as u32, th as u32], "grid": [nx, ny], "triangles": triangles}))
+    Ok(Box::new(move || {
+        let mut notes = Vec::new();
+        let written = (|| {
+            rustgis_data::progress::check().map_err(|e| e.to_string())?;
+            let (ground, block, model) = read_ground(&map, texture)?;
+            rustgis_data::progress::check().map_err(|e| e.to_string())?;
+            let terrain::Block { x0, y0, x1, y1, .. } = block;
+            // The map drawn top down over the box without the terrain (its light, water glint and
+            // walls are the 3D viewer's to draw) nor the effects that belong to a view (weather,
+            // the sun's light, camera effects): its layers and labels, no scale bar or credits.
+            let (bw, bh) = (x1 - x0, y1 - y0);
+            let res = bw.max(bh) / texture.round();
+            let (tw, th) = ((bw / res).round().max(1.0), (bh / res).round().max(1.0));
+            map.view.terrain = None;
+            let fx = &mut map.view.effects;
+            (fx.weather, fx.sun_time, fx.vignette, fx.tilt_shift, fx.grain) = (rustgis_map::view::Weather::None, None, false, false, false);
+            let camera = rustgis_map::Camera::new(Coord::new((x0 + x1) / 2.0, (y0 + y1) / 2.0), res);
+            let view = rustgis_render::View { width: tw, height: th, pixels_per_point: 1.0, camera, sky: false };
+            let placed = rustgis_render::render_placed(&mut map, &view)?;
+            rustgis_data::progress::check().map_err(|e| e.to_string())?;
+            let png = placed.pixmap.encode_png().map_err(|e| e.to_string())?;
+            let k = ground.per_unit(Coord::new((x0 + x1) / 2.0, (y0 + y1) / 2.0));
+            let sw = rustgis_geom::merc_to_lonlat(Coord::new(x0, y0));
+            let extras = json!({
+                "origin": [sw.x, sw.y],
+                "units": "metres east (x), up (y) and south (z) of the block's south-west corner (longitude, latitude); heights above sea level, exaggerated",
+                "exaggeration": exaggeration,
+                "metresPerMercatorUnit": k,
+                "credits": placed.credits,
+            });
+            let bytes = gltf(&model.meshes, &png, block.walls, glb, extras)?;
+            rustgis_data::progress::check().map_err(|e| e.to_string())?;
+            rustgis_data::io::write_atomic(std::path::Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
+            let warn = rustgis_data::diagnostics::Severity::Warning;
+            for gap in &placed.gaps {
+                notes.push((warn, format!("{path}: the texture: {gap}")));
+            }
+            if model.missing > 0 {
+                notes.push((
+                    warn,
+                    format!("{path}: {} point(s) of the ground have no height and stand at 0, as the map draws them", model.missing),
+                ));
+            }
+            if model.pending {
+                notes.push((warn, format!("{path}: elevation tiles were still on their way, so part of the ground is coarser or at 0: export again once the map has drawn them")));
+            }
+            let info = rustgis_data::diagnostics::Severity::Info;
+            if walls_layer {
+                notes.push((info, format!("{path}: the walls are their plain colour: walls coloured by a layer aren't in the model yet")));
+            }
+            notes.push((info, format!("{path}: the ground with the map as its texture, the walls and the base; the view's sky, fog, light and shadows are left to the 3D viewer")));
+            let triangles: usize = model.meshes.iter().map(|m| m.tris.len() / 3).sum();
+            let (nx, ny) = model.grid;
+            Ok(json!({"path": path, "bytes": bytes.len(), "texture": [tw as u32, th as u32], "grid": [nx, ny], "triangles": triangles}))
+        })();
+        if written.is_err() {
+            notes.clear();
+        }
+        super::exports::drawn(std::slice::from_ref(&map), notes, written, path)
+    }))
 }
 
 /// The model's meshes (ground, walls, base), the ground's grid, and what it is short of.
@@ -152,8 +168,12 @@ fn read_ground(map: &rustgis_map::Map, texture: f64) -> Result<(Ground, terrain:
             let pending = ground.pending();
             return Ok((ground, block, Model { pending, ..model }));
         }
-        rustgis_render::rustgis_tiles::cache::wait_for_news_unless(drawn_at, left.min(web_time::Duration::from_secs(30)), cancelled);
-        rustgis_data::progress::check().map_err(|e| e.to_string())?;
+        // Built again only once a tile has come: news of none (the wait ran out) waits on.
+        while rustgis_render::rustgis_tiles::cache::generation() == drawn_at && !TILE_WAIT.saturating_sub(start.elapsed()).is_zero() {
+            let left = TILE_WAIT.saturating_sub(start.elapsed());
+            rustgis_render::rustgis_tiles::cache::wait_for_news_unless(drawn_at, left.min(web_time::Duration::from_secs(30)), cancelled);
+            rustgis_data::progress::check().map_err(|e| e.to_string())?;
+        }
     }
 }
 

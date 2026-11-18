@@ -163,3 +163,15 @@ fn exporting_a_block_is_refused_without_one_and_with_wrong_settings() {
     }
     assert!(!std::path::Path::new(&out("none.glb")).exists() && !std::path::Path::new(&out("bad.glb")).exists());
 }
+
+#[test]
+fn the_texture_leaves_out_the_views_weather_and_camera_effects() {
+    let (mut s, _) = blocked();
+    let (plain, fogged) = (out("plain.glb"), out("fogged.glb"));
+    s.run("map.exportBlock", &json!({"path": plain, "texture": 256})).unwrap();
+    let fx = &mut s.map_mut().view.effects;
+    (fx.weather, fx.vignette, fx.grain) = (rustgis_map::view::Weather::Fog, true, true);
+    s.run("map.exportBlock", &json!({"path": fogged, "texture": 256})).unwrap();
+    assert_eq!(std::fs::read(&plain).unwrap(), std::fs::read(&fogged).unwrap(), "fog, vignette and grain stay out of the model");
+    assert_eq!(s.map().view.effects.weather, rustgis_map::view::Weather::Fog, "the map keeps its weather");
+}

@@ -198,8 +198,10 @@ the 3D viewer lights the model, so a hillshade layer shown on the map is the one
 Units are metres east (x), up (y) and south (z) of the box's south-west corner, scaled as at the
 box's centre, with heights above sea level times the exaggeration; the file's `extras` give the
 corner's longitude and latitude. The view's sky, fog and shadows aren't in the model, and walls
-coloured by a polygon layer come in their plain colour for now (said). It runs where it is
-called, to its end:
+coloured by a polygon layer come in their plain colour for now (said). In the desktop app it
+runs in the background, with the export and **Cancel** in the status bar (elevation tiles are
+waited for, up to a minute); from a script or the command line it runs to its end before it
+answers:
 
 ```bash
 rustgis-cli run --cmd 'project.open={"path":"massif.rgis"}' --cmd 'map.exportBlock={"path":"massif.glb","texture":4096}'
