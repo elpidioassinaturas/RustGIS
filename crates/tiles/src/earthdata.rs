@@ -144,6 +144,11 @@ pub fn has_token() -> bool {
     lock(token_store()).is_some()
 }
 
+/// Whether the token kept has expired, as its JWT says (it is forgotten when next used).
+pub fn token_expired() -> bool {
+    lock(token_store()).as_deref().is_some_and(|t| expired(t, now_secs()))
+}
+
 /// When the token kept expires (Unix seconds), as its JWT `exp` claim says, if it says.
 pub fn token_expiry() -> Option<i64> {
     lock(token_store()).as_deref().and_then(jwt_expiry)

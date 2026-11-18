@@ -327,9 +327,8 @@ pub fn big(
 /// The shared icon and label layout of large ribbon controls. A split button gives this only
 /// its primary region, keeping even a long translated label clear of the adjacent arrow.
 fn paint_big(ui: &Ui, r: Rect, icon: &str, label: &str, on: bool, menu: bool, t: &Tokens) {
-    let ic = Rect::from_center_size(pos2(r.center().x, r.min.y + 21.0), vec2(32.0, 32.0));
     let (c, a) = if on { (t.icon, t.accent) } else { (t.text_disabled, t.text_disabled) };
-    icons::paint(ui.painter(), ic, icon, c, a);
+    icons::paint(ui.painter(), big_icon_rect(r), icon, c, a);
     let mut lines = label.split('\n').peekable();
     let mut y = r.min.y + 42.0;
     while let Some(l) = lines.next() {
@@ -498,7 +497,7 @@ fn small_button(
     let (r, resp) = ui.allocate_exact_size(vec2(26.0 + tw, 22.0), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, on, if label.is_empty() { desc } else { label }));
     bg(ui, r, &resp, checked, &t);
-    let ic = Rect::from_center_size(pos2(r.min.x + 13.0, r.center().y), vec2(18.0, 18.0));
+    let ic = small_icon_rect(r);
     let (c, a) = if on { (t.icon, t.accent) } else { (t.text_disabled, t.text_disabled) };
     icons::paint(ui.painter(), ic, icon, c, a);
     if !label.is_empty() {
@@ -599,12 +598,34 @@ const MENU_ICON_W: f32 = 22.0;
 
 /// A menu row that runs a command (disabled when the command is).
 pub fn menu_item(ui: &mut Ui, app: &mut RustGisApp, icon: &str, label: &str, id: &str, params: Value) {
+    menu_item_response(ui, app, icon, label, id, params);
+}
+
+/// [`menu_item`], returning the row's response.
+pub fn menu_item_response(ui: &mut Ui, app: &mut RustGisApp, icon: &str, label: &str, id: &str, params: Value) -> Response {
     let on = enabled(app, id);
     let shortcut = crate::keymap::shortcut_text(ui.ctx(), app, id, &params);
-    if menu_row(ui, icon, tl!(label), &shortcut, on).clicked() {
+    let resp = menu_row(ui, icon, tl!(label), &shortcut, on);
+    if resp.clicked() {
         let _ = app.run_by_user(id, params);
         ui.close();
     }
+    resp
+}
+
+/// Where a menu row draws its icon.
+pub fn menu_icon_rect(ui: &Ui, resp: &Response) -> Rect {
+    Rect::from_center_size(resp.rect.left_center() + vec2(ui.spacing().button_padding.x + MENU_ICON_W / 2.0 - 2.0, 0.0), vec2(16.0, 16.0))
+}
+
+/// Where a large button draws its icon.
+pub fn big_icon_rect(r: Rect) -> Rect {
+    Rect::from_center_size(pos2(r.center().x, r.min.y + 21.0), vec2(32.0, 32.0))
+}
+
+/// Where a small button draws its icon.
+pub fn small_icon_rect(r: Rect) -> Rect {
+    Rect::from_center_size(pos2(r.min.x + 13.0, r.center().y), vec2(18.0, 18.0))
 }
 
 /// A menu row with an icon (empty for none) before an already translated label, and a shortcut
@@ -646,16 +667,7 @@ fn menu_icon(ui: &Ui, resp: &Response, icon: &str) {
         return;
     }
     let t = Tokens::get(ui.ctx());
-    icons::paint(
-        ui.painter(),
-        Rect::from_center_size(
-            resp.rect.left_center() + vec2(ui.spacing().button_padding.x + MENU_ICON_W / 2.0 - 2.0, 0.0),
-            vec2(16.0, 16.0),
-        ),
-        icon,
-        t.icon,
-        t.accent,
-    );
+    icons::paint(ui.painter(), menu_icon_rect(ui, resp), icon, t.icon, t.accent);
 }
 
 /// A ribbon group: controls laid out left to right over a centred label, with a separator.

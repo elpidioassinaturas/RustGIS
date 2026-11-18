@@ -3573,27 +3573,46 @@ fn plugin_entry(
 ) {
     use rustgis_engine::plugins::{Entry, Layout, command_id};
     let open = panel_open(app, &m.id);
-    let mut show = |icon: &str, label: &str, help: &str, id: &str, params: Value| {
+    // Draws the entry; returns the rectangle of its icon and the colour behind it.
+    let mut show = |icon: &str, label: &str, help: &str, id: &str, params: Value| -> (Rect, egui::Color32) {
         let label = if layout != Some(Layout::Large) && label.contains('\n') {
             std::borrow::Cow::Owned(label.replace('\n', " "))
         } else {
             std::borrow::Cow::Borrowed(label)
         };
         let checked = open && id == "ui.pane.plugin";
+        let ribbon = Tokens::get(ui.ctx()).ribbon;
         match layout {
             Some(Layout::Large) => {
-                big(ui, app, icon, &label, help, id, params, checked, false);
+                let resp = big(ui, app, icon, &label, help, id, params, checked, false);
+                (crate::widgets::big_icon_rect(resp.rect), ribbon)
             }
             Some(Layout::Small) => {
-                small(ui, app, icon, &label, help, id, params, checked);
+                let resp = small(ui, app, icon, &label, help, id, params, checked);
+                (crate::widgets::small_icon_rect(resp.rect), ribbon)
             }
-            None => menu_item(ui, app, icon, &label, id, params),
+            None => {
+                let resp = crate::widgets::menu_item_response(ui, app, icon, &label, id, params);
+                (crate::widgets::menu_icon_rect(ui, &resp), ui.visuals().window_fill())
+            }
         }
     };
     match m.entry(entry) {
         Some(Entry::Command(c)) => {
             let icon = if crate::icons::ALL.contains(&c.icon.as_str()) { c.icon.as_str() } else { "plugin" };
-            show(icon, m.translate(lang, &c.label), m.translate(lang, &c.help), &command_id(&m.id, &c.id), Value::Null);
+            let need = c.login.map(|l| (l, login_kept(l)));
+            let help = m.translate(lang, &c.help);
+            let help = match need {
+                Some((l, kept)) => {
+                    let gap = if help.is_empty() { "" } else { "\n\n" };
+                    std::borrow::Cow::Owned(format!("{help}{gap}{}", login_text(l, kept)))
+                }
+                None => std::borrow::Cow::Borrowed(help),
+            };
+            let (ic, behind) = show(icon, m.translate(lang, &c.label), &help, &command_id(&m.id, &c.id), Value::Null);
+            if let Some((_, kept)) = need {
+                login_key(ui, ic, kept, behind);
+            }
         }
         Some(Entry::Tool(t)) => {
             let name = m.translate(lang, &t.name);
@@ -3610,6 +3629,49 @@ fn plugin_entry(
         }
         None => {}
     }
+}
+
+/// Whether the sign-in `login` is kept: an Earthdata token that hasn't expired, for the session or
+/// remembered on this computer; a Copernicus Data Space sign-in, or one remembered; any ArcGIS
+/// session. Read from what the app keeps in memory, never from the system's credential store.
+fn login_kept(login: rustgis_engine::plugins::Login) -> bool {
+    use rustgis_engine::plugins::Login;
+    use rustgis_engine::render::rustgis_tiles::{arcgis_auth, copernicus, earthdata};
+    match login {
+        Login::Earthdata => {
+            if earthdata::has_token() {
+                !earthdata::token_expired()
+            } else {
+                earthdata::is_remembered()
+            }
+        }
+        Login::Copernicus => copernicus::signed_in().is_some() || copernicus::is_remembered_now() == Some(true),
+        Login::Arcgis => !arcgis_auth::list().is_empty(),
+    }
+}
+
+/// The tooltip line of a command that needs the sign-in `login`, `kept` or not.
+fn login_text(login: rustgis_engine::plugins::Login, kept: bool) -> String {
+    use rustgis_engine::plugins::Login;
+    let (what, place) = match login {
+        Login::Earthdata => (tl_raw!("the Earthdata Login token"), tl_raw!("Home › Add › Web Data › NASA Earthaccess")),
+        Login::Copernicus => (tl_raw!("a Copernicus Data Space sign-in"), tl_raw!("Home › Add › Web Data › Copernicus Data Space")),
+        Login::Arcgis => (tl_raw!("an ArcGIS sign-in"), tl_raw!("Home › Add › From Service")),
+    };
+    if kept {
+        crate::i18n::fmt("Needs {what}: kept.", &[("what", what)])
+    } else {
+        crate::i18n::fmt("Needs {what}, which isn't given: {place}.", &[("what", what), ("place", place)])
+    }
+}
+
+/// The key over the lower-right corner of a command's icon `ic`: green when its sign-in is kept,
+/// red when it is missing, on a disc of `behind`, the colour behind the button.
+fn login_key(ui: &Ui, ic: Rect, kept: bool, behind: egui::Color32) {
+    let fill = if kept { egui::Color32::from_rgb(0x1E, 0x9E, 0x4A) } else { egui::Color32::from_rgb(0xD6, 0x33, 0x33) };
+    let side = (ic.width() * 0.5).max(10.0);
+    let r = Rect::from_min_size(ic.max - vec2(side * 0.8, side * 0.8), vec2(side, side));
+    icons::key_badge(ui.painter(), r, fill, egui::Color32::from_gray(40), behind);
 }
 
 /// Popup entries always use menu rows; nested menus cascade rather than opening another ribbon.
@@ -5491,6 +5553,20 @@ fn language_menu(app: &mut RustGisApp, ui: &mut Ui) {
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
+
+    /// A plugin command's sign-in line says which sign-in, and where to give it when it's missing
+    /// (#2378).
+    #[test]
+    fn login_tooltip_names_the_sign_in_and_where_to_give_it() {
+        use rustgis_engine::plugins::Login;
+        assert_eq!(login_text(Login::Earthdata, true), "Needs the Earthdata Login token: kept.");
+        assert_eq!(
+            login_text(Login::Earthdata, false),
+            "Needs the Earthdata Login token, which isn't given: Home › Add › Web Data › NASA Earthaccess."
+        );
+        assert!(login_text(Login::Copernicus, false).ends_with("Home › Add › Web Data › Copernicus Data Space."));
+        assert!(login_text(Login::Arcgis, false).ends_with("Home › Add › From Service."));
+    }
 
     /// The sample with Cities selected, recording the steps run from here on.
     fn cities() -> RustGisApp {
