@@ -20,6 +20,10 @@ mod review_boundaries;
 mod table_statistics;
 
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "tests/block_model.rs"]
+mod block_model;
+
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "tests/write_notices.rs"]
 mod write_notices;
 
@@ -5720,6 +5724,7 @@ fn hostile_params_never_panic(shard: usize) {
                 | "share.exportMap"
                 | "time.export"
                 | "map.exportOrbit"
+                | "map.exportBlock"
                 | "share.exportLayer"
                 | "share.exportTable"
                 | "share.exportRaster"
