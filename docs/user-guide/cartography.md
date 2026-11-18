@@ -678,7 +678,13 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
   own `"abbreviations"`, which go first) and tried again; still too long, it is left out. A name
   that takes more than a third of the line goes on its straightest stretch rather than at the
   middle: the stretch whose ends are farthest apart for its length. With other places along the
-  line on, the next straightest stretches are its other places. Text size by a stream's
+  line on, the next straightest stretches are its other places. On a line with room to spare
+  (more than three times the name), the letters are spread, more as the room grows, until on a
+  line six times the name or longer they cover `"stretch"` of it (`labels.style`, 0.1 to 1;
+  0.6 by default), at most three letters' widths apart. Where the spread name can't follow the
+  line, it is set close. With a `repeat`, a line more than two spread names long gets the
+  spread name at its middle and the close-set name at the repeats clear of it, as a river is
+  named along its valley and again toward its ends. Text size by a stream's
   importance (a Strahler order or a class field) comes from label classes or `labels.by` `"size"`
   (`labels.placement={"layer": "Rivers", "position": "curved", "fit": "auto", "abbreviations":
   {"Creek": "Ck"}}`).

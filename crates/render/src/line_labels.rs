@@ -25,6 +25,22 @@ pub(super) fn curved_len(advances: &[f32], gap: f32) -> f32 {
     advances.iter().map(|a| step(*a)).sum::<f32>() - advances.last().map_or(0.0, |a| step(*a) - a)
 }
 
+/// The letter spacing (in `advances`' units) a fitted label is spread to along a line with `room`
+/// points of it in view (#2265): none while the text set `gap` apart takes a third of the room or
+/// more; from there it grows smoothly, until at a sixth or less of the room it covers `stretch`
+/// of it. At most three average letters' widths between letters.
+pub(super) fn spread_gap(advances: &[f32], gap: f32, room: f32, stretch: f32) -> Option<f32> {
+    let len = curved_len(advances, gap);
+    let (n, ratio) = (advances.len(), room / len);
+    if n < 2 || !(len > 0.0 && ratio.is_finite() && ratio > 3.0 && stretch.is_finite()) {
+        return None;
+    }
+    let grown = len + ((ratio - 3.0) / 3.0).min(1.0) * (stretch * room - len);
+    let widest = 3.0 * advances.iter().sum::<f32>() / n as f32;
+    let wide = (gap + (grown - len) / (n - 1) as f32).min(widest);
+    (wide - gap > 0.01).then_some(wide)
+}
+
 /// A line in screen points, with how far along it each vertex is.
 #[derive(Debug)]
 struct Path {
@@ -868,6 +884,23 @@ mod tests {
 
     /// Straightest first, none within half the text of another; a line no longer than the text,
     /// its middle (#2265).
+    #[test]
+    fn a_fitted_label_is_spread_only_where_its_line_has_room_to_spare() {
+        let advances = [10.0; 5];
+        let len = |gap: f32| curved_len(&advances, gap);
+        // Taking a third of the line or more: close-set.
+        assert_eq!(spread_gap(&advances, 0.0, 3.0 * len(0.0), 0.6), None);
+        // Then it grows smoothly with the room, and from six times the text covers `stretch` of it.
+        let gaps: Vec<f32> = [3.1, 4.0, 5.0, 6.0].iter().map(|r| spread_gap(&advances, 0.0, r * 50.0, 0.5).unwrap()).collect();
+        assert!(gaps.windows(2).all(|w| w[1] > w[0]), "{gaps:?}");
+        assert!(gaps[0] < 0.5, "{gaps:?}");
+        assert!((len(gaps[3]) - 0.5 * 300.0).abs() < 0.01, "{}", len(gaps[3]));
+        // Never more than three letters' widths apart, nor spread by a stretch under the text.
+        assert_eq!(spread_gap(&advances, 0.0, 10_000.0, 0.6), Some(30.0));
+        assert_eq!(spread_gap(&advances, 0.0, 400.0, 0.1), None);
+        assert_eq!(spread_gap(&[10.0], 0.0, 400.0, 0.6), None);
+    }
+
     #[test]
     fn the_straightest_stretches_come_first() {
         // A zigzag 200 points long, then 200 points straight.
