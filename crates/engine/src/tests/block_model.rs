@@ -175,3 +175,16 @@ fn the_texture_leaves_out_the_views_weather_and_camera_effects() {
     assert_eq!(std::fs::read(&plain).unwrap(), std::fs::read(&fogged).unwrap(), "fog, vignette and grain stay out of the model");
     assert_eq!(s.map().view.effects.weather, rustgis_map::view::Weather::Fog, "the map keeps its weather");
 }
+
+#[test]
+fn a_round_block_is_exported_as_its_box_with_a_notice_and_a_box_with_none() {
+    let (mut s, _) = blocked();
+    let round = |s: &crate::Session, mark| s.notices_since(mark).iter().filter(|n| n.text.contains("is round")).count();
+    let mark = s.notice_mark();
+    s.run("map.exportBlock", &json!({"path": out("box.glb"), "texture": 256})).unwrap();
+    assert_eq!(round(&s, mark), 0, "{:?}", s.notices_since(mark));
+    s.run("map.terrain", &json!({"block": {"extent": INSIDE, "shape": "circle"}})).unwrap();
+    let mark = s.notice_mark();
+    s.run("map.exportBlock", &json!({"path": out("round.glb"), "texture": 256})).unwrap();
+    assert_eq!(round(&s, mark), 1, "{:?}", s.notices_since(mark));
+}

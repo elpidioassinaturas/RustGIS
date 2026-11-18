@@ -10802,7 +10802,109 @@ fn a_publication_of_the_whole_globe_fills_its_frame() {
     let l = s.project.layouts.last().unwrap();
     assert!(r["locator"].is_string() && l.elements.iter().any(|e| e.name == "Scale Bar"));
     let warnings = r["warnings"].to_string();
-    assert!(!warnings.contains("the whole globe"), "{warnings}");
+    // Neither whole-globe notice (no scale bar, no locator).
+    assert!(!warnings.contains("the map shows the whole globe"), "{warnings}");
+}
+
+/// A globe locator moved off a polar area keeps the area on the disc (#2348): at the sizes where
+/// the nearest centre the camera draws would leave it behind the rim (a locator just large enough
+/// for the globe on the equator), it keeps the area in the middle, clipped, instead.
+#[test]
+fn a_globe_locator_never_hides_its_area_behind_the_rim() {
+    use rustgis_geom::Coord;
+    use rustgis_map::layout::{PT_PER_MM, frame_camera};
+    let mut m = rustgis_map::Map::new("Locator");
+    m.set_projection(rustgis_map::Projection::Globe);
+    let (area, side) = (Coord::new(20.0, 89.0), 40.0);
+    let (mut moved, mut hidden) = (0, 0);
+    // Steps of 0.2 %: the sizes that would hide it span about 1 % of the scale.
+    for i in 0..4000 {
+        let scale = 1e8 * 1.002f64.powi(i);
+        let (at, whole) = crate::cmd::layout::globe_locator_center(&m, area, scale, side);
+        let equator = frame_camera(&m, Coord::new(area.x, 0.0), scale, 0.0, 0.0).res < rustgis_map::camera::MAX_RES;
+        if whole {
+            let g = rustgis_map::globe::Globe::new(&frame_camera(&m, at, scale, 0.0, 0.0), side * PT_PER_MM, side * PT_PER_MM);
+            assert!(g.forward(area).is_some(), "1:{scale:.0}: the area behind the rim from {at:?}");
+            moved += usize::from(at != area);
+        } else {
+            assert_eq!(at, area, "1:{scale:.0}: a clipped locator keeps the area in the middle");
+            hidden += usize::from(equator);
+        }
+    }
+    assert!(moved > 0 && hidden > 0, "{moved} moved, {hidden} kept on the area though the equator fits");
+}
+
+/// A globe locator a little over the smallest globe the camera draws holds it whole at that limit,
+/// on the equator, and says nothing is clipped; one under it is clipped (#2348).
+#[test]
+fn a_globe_locator_at_the_camera_limit_is_whole_when_its_disc_fits() {
+    use rustgis_geom::Coord;
+    use rustgis_map::layout::{PT_PER_MM, frame_camera};
+    let mut m = rustgis_map::Map::new("Locator");
+    m.set_projection(rustgis_map::Projection::Globe);
+    // A scale past the camera's coarsest everywhere: the smallest globe it draws, on the equator.
+    let (area, scale) = (Coord::new(20.0, 30.0), 1e11);
+    let equator = Coord::new(area.x, 0.0);
+    let smallest = |side: f64| {
+        let cam = frame_camera(&m, equator, scale, 0.0, 0.0);
+        assert!(cam.res >= rustgis_map::camera::MAX_RES);
+        2.0 * rustgis_map::globe::Globe::new(&cam, side * PT_PER_MM, side * PT_PER_MM).disc_radius() / PT_PER_MM
+    };
+    let over = smallest(19.0) + 0.5;
+    assert_eq!(crate::cmd::layout::globe_locator_center(&m, area, scale, over), (equator, true), "a {over:.1} mm locator");
+    let under = smallest(19.0) - 0.5;
+    assert_eq!(crate::cmd::layout::globe_locator_center(&m, area, scale, under), (area, false), "a {under:.1} mm locator");
+}
+
+/// A publication's globe locator near a pole shows the globe whole in its circle (#2337): sized on
+/// the equator and centred as near the area as the camera draws it, not at the area's latitude,
+/// where the camera stops at its coarsest resolution and the disc came out larger than the circle.
+/// On a flat map with an Arctic extent, and on the globe seen whole with a locator asked for.
+#[test]
+fn a_globe_locator_near_a_pole_fits_its_circle() {
+    use rustgis_map::layout::{ElementKind, PT_PER_MM, frame_camera};
+    let mut s = world();
+    let fits = |s: &Session, case: &str| {
+        let l = s.project.layouts.last().unwrap();
+        let locator = l.elements.iter().find(|e| e.name == "Locator").unwrap_or_else(|| panic!("{case}: no locator"));
+        let ElementKind::MapFrame { map, center, scale, .. } = &locator.kind else { panic!() };
+        let m = s.project.maps.iter().find(|m| &m.name == map).unwrap();
+        let cam = frame_camera(m, *center, *scale, 0.0, 0.0);
+        assert!(cam.res < rustgis_map::camera::MAX_RES, "{case}: the camera at its coarsest, 1:{scale} at {center:?}");
+        let across = 2.0 * rustgis_map::globe::Globe::new(&cam, locator.w * PT_PER_MM, locator.h * PT_PER_MM).disc_radius() / PT_PER_MM;
+        assert!(across <= locator.w.min(locator.h), "{case}: a disc {across:.0} mm across in a {:.0} mm circle", locator.w);
+    };
+    let said = |r: &Value, start: &str| r["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).any(|w| w.starts_with(start));
+    // The locator centred where the map frame is.
+    let centred_with_the_map = |s: &Session, case: &str| {
+        let l = s.project.layouts.last().unwrap();
+        let centre = |n: &str| match l.elements.iter().find(|e| e.name == n).map(|e| &e.kind) {
+            Some(ElementKind::MapFrame { center, .. }) => *center,
+            _ => panic!("{case}: no {n}"),
+        };
+        assert_eq!(centre("Locator"), centre("Map Frame"), "{case}");
+    };
+    const MOVED: &str = "the globe locator is centred at";
+    const CLIPPED: &str = "the globe locator is too small";
+    let r = s.run("layout.publication", &json!({"profile": "a4-portrait", "extent": [10.0, 76.0, 30.0, 81.0]})).unwrap();
+    fits(&s, "Svalbard on a flat map");
+    assert!(said(&r, MOVED) && !said(&r, CLIPPED), "Svalbard: {}", r["warnings"]);
+    // A figure's locator, too small for the globe even on the equator: clipped wherever it is, it
+    // keeps the area in the middle and says so.
+    let r =
+        s.run("layout.publication", &json!({"profile": "figure-1col", "extent": [10.0, 83.0, 30.0, 84.0], "locator": "globe"})).unwrap();
+    assert!(said(&r, CLIPPED) && !said(&r, MOVED), "a figure's locator: {}", r["warnings"]);
+    centred_with_the_map(&s, "a figure's locator");
+    s.run("map.projection", &json!({"type": "globe"})).unwrap();
+    s.run("map.goToXY", &json!({"lon": 20.0, "lat": 84.0})).unwrap();
+    let r = s.run("layout.publication", &json!({"profile": "a4-portrait", "locator": "globe"})).unwrap();
+    fits(&s, "the whole globe at 84° N");
+    assert!(said(&r, MOVED) && !said(&r, CLIPPED), "the whole globe: {}", r["warnings"]);
+    // Away from the poles the locator stays centred on the area, as before, and says nothing.
+    let r = s.run("layout.publication", &json!({"profile": "a4-portrait", "extent": [-46.8, -11.6, -38.5, -2.2]})).unwrap();
+    fits(&s, "north-east Brazil");
+    assert!(!said(&r, MOVED) && !said(&r, CLIPPED), "north-east Brazil: {}", r["warnings"]);
+    centred_with_the_map(&s, "north-east Brazil");
 }
 
 /// Arrangements of a publication layout's surrounds (#1379): by name, corner by corner, the
@@ -51621,10 +51723,9 @@ fn a_zarr_window_reads_only_its_chunks_by_range() {
         "{:?}",
         s.notices_since(mark)
     );
-    // Refused: cells and bbox together, a window with time, cells that aren't whole, a window outside.
+    // Refused: cells and bbox together, cells that aren't whole, a window outside.
     for bad in [
         json!({"url": url, "variable": "v", "cells": [2, 1, 5, 4], "bbox": [2, 4, 4, 6]}),
-        json!({"url": url, "variable": "v", "cells": [2, 1, 5, 4], "time": true}),
         json!({"url": url, "variable": "v", "cells": [2, 1, 5.5, 4]}),
         json!({"url": url, "variable": "v", "cells": [2, 1, 50, 4]}),
         json!({"url": url, "variable": "v", "bbox": [100, 4, 110, 6]}),
@@ -51692,6 +51793,113 @@ fn a_zarr_series_of_a_sharded_variable_reads_only_the_cells_chunks() {
     let from_dir = s.run("zarr.series", &json!({"path": dir.join("s.zarr"), "variable": "v", "lon": 4.2, "lat": 1.2}));
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(from_dir.unwrap()["values"], json!([204.0, 1204.0]));
+}
+
+/// A window of a sharded Zarr variable follows the time slider (#1720: `aef-mosaic` is too large
+/// to read whole): each step reads its shard's index and then only the window's chunk, by range;
+/// the project keeps the window with the store, and a folder gives the same cells.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_window_follows_the_time_slider() {
+    let _cache = zarr_cache_lock();
+    // `v` (time 2, lat 4, lon 6; int16, `t·1000 + row·100 + col`) in shards of 1 × 4 × 6 holding
+    // chunks of 1 × 2 × 3, the index at the end; latitudes 3.5 down by 1, longitudes 0.5 up by 1.
+    let coord = |n: u64, attrs: Value| {
+        json!({"zarr_format": 3, "node_type": "array", "shape": [n], "data_type": "float64", "attributes": attrs,
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [n]}}, "codecs": [{"name": "bytes"}], "fill_value": 0})
+    };
+    let v = json!({"zarr_format": 3, "node_type": "array", "shape": [2, 4, 6], "data_type": "int16",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 4, 6]}},
+        "codecs": [{"name": "sharding_indexed", "configuration": {"chunk_shape": [1, 2, 3], "codecs": [{"name": "bytes"}],
+            "index_codecs": [{"name": "bytes"}, {"name": "crc32c"}], "index_location": "end"}}],
+        "fill_value": -1, "dimension_names": ["time", "lat", "lon"]});
+    let root = json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+        "v": v, "lat": coord(4, json!({"units": "degrees_north"})), "lon": coord(6, json!({"units": "degrees_east"})),
+        "time": coord(2, json!({"units": "days since 2000-01-01"}))}}});
+    let f64s = |v: Vec<f64>| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let mut files = vec![
+        ("zarr.json".to_string(), root.to_string().into_bytes()),
+        ("lat/c/0".to_string(), f64s((0..4).map(|i| 3.5 - i as f64).collect())),
+        ("lon/c/0".to_string(), f64s((0..6).map(|i| 0.5 + i as f64).collect())),
+        ("time/c/0".to_string(), f64s(vec![0.0, 366.0])),
+    ];
+    for t in 0..2u64 {
+        let (mut body, mut index) = (Vec::new(), Vec::new());
+        for (iy, ix) in [(0u64, 0u64), (0, 1), (1, 0), (1, 1)] {
+            index.extend([body.len() as u64, 12]);
+            for (r, c) in (0..2).flat_map(|r| (0..3).map(move |c| (r, c))) {
+                body.extend(((t * 1000 + (iy * 2 + r) * 100 + ix * 3 + c) as i16).to_le_bytes());
+            }
+        }
+        body.extend(index.iter().flat_map(|v| v.to_le_bytes()));
+        body.extend([0u8; 4]);
+        files.push((format!("v/c/{t}/0/0"), body));
+    }
+    let dir = std::env::temp_dir().join(format!("rustgis-zarr-window-time-{}", std::process::id()));
+    for (k, b) in &files {
+        let path = dir.join("s.zarr").join(k);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b).unwrap();
+    }
+    let (base, log) = serve_ranged_files(files.iter().map(|(k, b)| (format!("/s.zarr/{k}"), b.clone())).collect());
+    let url = format!("{base}/s.zarr");
+    let mut s = Session::new(Project::default());
+    // 3°E–6°E, 0°–2°N: columns 3–6 and rows 2–4, the shard's last chunk (bytes 36–47).
+    let id = s.run("layer.addZarr", &json!({"url": url, "variable": "v", "time": true, "bbox": [3.0, 0.0, 6.0, 2.0]})).unwrap()["layer"]
+        .as_u64()
+        .unwrap() as u32;
+    let cells = |s: &Session| {
+        let d = s.map().layer(id).and_then(|l| l.raster.as_ref()).and_then(|r| r.data.clone()).unwrap();
+        (d.width, d.height, d.bands[0].data.clone())
+    };
+    let step = |t: f32| (2..4).flat_map(|r| (3..6).map(move |c| t * 1000.0 + (r * 100 + c) as f32)).collect::<Vec<f32>>();
+    assert_eq!(cells(&s), (3, 2, step(0.0)));
+    s.run("time.goTo", &json!({"step": 1})).unwrap();
+    assert_eq!(cells(&s), (3, 2, step(1.0)));
+    let zt = s.map().layer(id).unwrap().raster.as_ref().unwrap().time_zarr.clone().unwrap();
+    assert_eq!(zt.window, Some([3, 2, 6, 4]));
+    // Each step: its shard's index, then the window's chunk; never a shard whole.
+    let asked: Vec<(String, String)> = log.lock().unwrap().clone();
+    for t in 0..2 {
+        let mut ranges: Vec<&str> = asked.iter().filter(|(p, _)| *p == format!("/s.zarr/v/c/{t}/0/0")).map(|(_, r)| r.as_str()).collect();
+        ranges.sort();
+        ranges.dedup();
+        assert_eq!(ranges, ["-68", "36-47"], "{asked:?}");
+    }
+    // Saved and opened again: the window is kept with the store, required by name, and read
+    // again at the step.
+    let text = serde_json::to_string(&s.project).unwrap();
+    assert!(text.contains("\"window\":[3,2,6,4]") && !text.contains("\"embedded\""), "{text}");
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap()["requires"], json!(["zarr-window"]));
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    let again = t.map().layers.iter().find_map(|l| l.raster.as_ref()?.data.clone()).unwrap();
+    assert_eq!((again.width, again.height, again.bands[0].data.clone()), (3, 2, step(1.0)));
+    // A window edited by hand to one cell wide isn't widened to the whole map: the step is
+    // refused, and said.
+    let mut u = Session::new(Project::default());
+    let mark = u.notice_mark();
+    let narrow = text.replace("\"window\":[3,2,6,4]", "\"window\":[3,2,4,4]");
+    let opened = u.run("project.openText", &json!({"text": narrow}));
+    let data = u.map().layers.iter().find_map(|l| l.raster.as_ref()?.data.clone());
+    assert!(data.is_none_or(|d| (d.width, d.height) != (6, 4)), "the whole map was read");
+    let said: Vec<String> = u.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(opened.is_err() || said.iter().any(|n| n.contains("2 × 2")), "{opened:?} {said:?}");
+    // A folder: the same cells, by cells.
+    let mut f = Session::new(Project::default());
+    let r = f.run("layer.addZarr", &json!({"path": dir.join("s.zarr"), "variable": "v", "time": true, "cells": [3, 2, 6, 4]}));
+    let got = r.as_ref().ok().and_then(|_| f.map().layers.iter().find_map(|l| l.raster.as_ref()?.data.clone()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let got = got.unwrap_or_else(|| panic!("{r:?}"));
+    assert_eq!((got.width, got.height, got.bands[0].data.clone()), (3, 2, step(0.0)));
+    // A window outside the grid, or under 2 × 2 cells, is refused before the slider is touched,
+    // as a still window is, not read as the whole map.
+    let mut g = Session::new(Project::default());
+    for cells in [json!([3, 2, 60, 4]), json!([3, 2, 4, 4]), json!([3, 3, 6, 4]), json!([100, 0, 101, 2])] {
+        let e = g.run("layer.addZarr", &json!({"url": url, "variable": "v", "time": true, "cells": cells})).unwrap_err();
+        assert!(e.contains("2 × 2"), "{cells}: {e}");
+        assert!(g.map().time.is_none() && g.map().layers.is_empty(), "{cells}");
+    }
 }
 
 /// What reading a Zarr series says (here, the grid taken as WGS 84) is said though the read then
@@ -52491,7 +52699,8 @@ fn a_globe_locator_says_what_simplifying_did() {
             .unwrap()
             .iter()
             .filter_map(|w| w.as_str())
-            .filter(|w| w.starts_with("the globe locator"))
+            // What simplifying did, not where the locator is centred (#2348).
+            .filter(|w| w.starts_with("the globe locator, simplifying"))
             .map(String::from)
             .collect::<Vec<_>>()
     };
