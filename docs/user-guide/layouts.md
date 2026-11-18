@@ -149,7 +149,12 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     layers held in the project. Streamed layers, rasters, points, lines and labels are left out.
     What simplifying changes or leaves alone there (a vertex past a pole taken to the pole, a
     polygon left as it was for a missing coordinate, or too intricate to simplify whole) is said
-    in the layout's warnings; one kept as it was because its ring would collapse is not.
+    in the layout's warnings; one kept as it was because its ring would collapse is not. The
+    globe is whole in its circle: near a pole, where it can't be drawn that small at the area's
+    latitude, it is centred as near the area as fits, the area still outlined on it, and the
+    warnings say so. A locator too small for the whole globe anywhere (a figure's, under about
+    20 mm), or one that would have to move so far that the area went behind the globe's rim,
+    stays centred on the area, its circle clipping the globe, which the warnings also say.
     It uses the map's basemap, not its web tiles, in a round frame, the globe
     nearly filling it and the area outlined in red; `"inset"` shows the surrounding region (about
     four times the area across) on the map itself, outlined the same way; `"none"` (a figure's
@@ -560,6 +565,23 @@ The locator outlines the main frame's changing extent as the series turns its pa
 more, with a warning. Split longer books' index data into layers of at most 500 features.
 `layout.export` with `"allPages":false` writes only the current PDF page; PNG and SVG always
 write the current page.
+
+### Mark the page's own feature
+
+Set [Symbols by Expression](cartography.md#symbols-by-expression) on the index layer. Use
+`$id = @page_feature_id` to give the current feature a heavier outline and draw the rest in gray.
+For an index layer called **Tracts**, the command is:
+
+```text
+layer.symbolBy={"layer":"Tracts","strokeWidth":"if($id = @page_feature_id, 3, 0.6)","stroke":"if($id = @page_feature_id, '#174a7e', '#9ca3af')","fill":"if($id = @page_feature_id, '#8bbce8', '#e5e7eb')"}
+```
+
+Use a style rather than a definition query: a definition query such as `$id = @page_feature_id`
+leaves the layer empty in the map view, where the variables are null. Step through the pages to see the
+style follow the index feature. The expression also works in a
+locator frame that shows the index layer. Feature IDs are local to each layer, so use the ID
+comparison on the index layer. Outside a series page the comparison never matches, and every
+feature gets the gray style.
 
 ## Reports
 

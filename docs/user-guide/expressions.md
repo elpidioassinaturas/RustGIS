@@ -84,10 +84,19 @@ operator: write `a < b AND b < c`, not `a < b < c`.
 | `TRUE`, `FALSE`, `NULL` | Booleans and the missing value |
 | `pop_est`, `"Pop Est"`, `!Pop Est!` | A field, by name, ignoring letter case; quote a name with spaces, punctuation or the name of a keyword (`"OR"`, `"null"`) |
 | `@map_scale`, `$scale` | The scale denominator of the map being drawn: set in [symbols](cartography.md#symbols-by-expression), [labels](cartography.md#labeling) and Unique Values classes by expression, null in queries and Calculate Field |
+| `@page_feature_id` | Integer id of the current [Map Series](layouts.md#map-series) index feature |
+| `@page_name` | Text shown as the current Map Series page name, with the same fallback as `{pageName}` |
+| `@page_number` | Current Map Series page number as an integer, starting at 1 |
 | `@row_number` | The feature's position in the layer, from 1 |
 | `$id` | The feature's id |
 | `$area`, `$perimeter` | A polygon's area in square metres (holes subtract) and the length of its rings in metres |
 | `$length` | A line's length in metres |
+
+The three page variables are available to symbols, labels, definition queries and display filters
+in every map frame on a series page. They are null outside a series page, including in the map
+view, tools and Calculate Field, so `$id = @page_feature_id` matches no feature there. A definition
+query such as `$id = @page_feature_id` therefore hides every feature in the map view and the
+Layers pane; to mark a page's feature, style it with Symbols by Expression instead.
 
 An unknown field, variable or function is an error that names it.
 
@@ -132,7 +141,8 @@ Rules shared by all of them:
   matches neither `pop > 100` nor `NOT pop > 100`; `IS NULL` tests for it. `AND` is false when
   either side is false and `OR` true when either side is true, whatever the other side is.
 - **Errors give null**: a division by zero, the square root of a negative number, a result too
-  large to represent.
+  large to represent. Where the result is stored (Calculate Field, calculation attribute rules),
+  a notice says how many rows an error made null, which error, and the first three of those rows.
 - **`IN`** compares with each value as `=` does; a `NULL` in the list matches nothing, so
   `x NOT IN (1, NULL)` is true for 2.
 - **As a condition**, a value that isn't true or false counts as true when it is a non-zero

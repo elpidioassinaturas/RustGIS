@@ -2,6 +2,7 @@
 
 mod check_geometry;
 mod geometry;
+mod network_analysis;
 mod repair_geometry;
 mod tabulate_area;
 
@@ -270,6 +271,124 @@ pub static TOOLS: &[ToolSpec] = &[
             P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
         ],
         run: near,
+    },
+    ToolSpec {
+        id: "serviceArea",
+        name: "Service Area",
+        toolbox: "Analysis › Network",
+        summary: "Finds the lines reachable within one or more travel costs of points, along a line network.",
+        params: &[
+            P {
+                name: "network",
+                label: "Network Lines",
+                kind: K::VectorLayer,
+                required: true,
+                default: "",
+                help: "A line layer. Lines join where their vertices meet.",
+            },
+            P {
+                name: "facilities",
+                label: "Facilities",
+                kind: K::PointLayer,
+                required: true,
+                default: "",
+                help: "The points to measure from. Each is moved onto the nearest line.",
+            },
+            P {
+                name: "breaks",
+                label: "Breaks",
+                kind: K::Text,
+                required: true,
+                default: "\"1, 2, 5\"",
+                help: "Costs to stop at, separated by commas, in the units below. Each part of a line is labelled with the band it lies in and the facility nearest to it.",
+            },
+            P { name: "units", label: "Units", kind: K::Choice(UNITS), required: false, default: "\"Kilometers\"", help: "" },
+            P {
+                name: "costField",
+                label: "Cost Field",
+                kind: K::NumericField,
+                required: false,
+                default: "",
+                help: "Multiplies each line's length, so breaks count weighted distance. Empty counts the length alone; 0 or less closes a line.",
+            },
+            P {
+                name: "snapDistance",
+                label: "Snap Distance (m)",
+                kind: K::Number,
+                required: false,
+                default: "1000",
+                help: "How far a facility may be moved onto the network, in metres. Farther ones are left out.",
+            },
+            P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
+        ],
+        run: network_analysis::service_area,
+    },
+    ToolSpec {
+        id: "odCostMatrix",
+        name: "OD Cost Matrix",
+        toolbox: "Analysis › Network",
+        summary: "Measures the cost and length of the cheapest way along a line network from each origin to each destination.",
+        params: &[
+            P {
+                name: "network",
+                label: "Network Lines",
+                kind: K::VectorLayer,
+                required: true,
+                default: "",
+                help: "A line layer. Lines join where their vertices meet.",
+            },
+            P {
+                name: "origins",
+                label: "Origins",
+                kind: K::PointLayer,
+                required: true,
+                default: "",
+                help: "Each is moved onto the nearest line.",
+            },
+            P {
+                name: "destinations",
+                label: "Destinations",
+                kind: K::PointLayer,
+                required: true,
+                default: "",
+                help: "Each is moved onto the nearest line.",
+            },
+            P { name: "units", label: "Units", kind: K::Choice(UNITS), required: false, default: "\"Kilometers\"", help: "" },
+            P {
+                name: "costField",
+                label: "Cost Field",
+                kind: K::NumericField,
+                required: false,
+                default: "",
+                help: "Multiplies each line's length. Empty counts the length alone; 0 or less closes a line.",
+            },
+            P {
+                name: "cutoff",
+                label: "Cutoff",
+                kind: K::Number,
+                required: false,
+                default: "",
+                help: "Leaves out destinations costing more than this, in the units above. Empty: no limit.",
+            },
+            P {
+                name: "count",
+                label: "Destinations to Find",
+                kind: K::Number,
+                required: false,
+                default: "",
+                help: "Keeps only this many of the cheapest destinations from each origin. Empty: all.",
+            },
+            P {
+                name: "snapDistance",
+                label: "Snap Distance (m)",
+                kind: K::Number,
+                required: false,
+                default: "1000",
+                help: "How far an origin or destination may be moved onto the network, in metres. Farther ones are left out.",
+            },
+            P { name: "output", label: "Output Name", kind: K::Text, required: false, default: "", help: "" },
+        ],
+        run: network_analysis::od_cost_matrix,
     },
     ToolSpec {
         id: "convexHull",
@@ -2360,9 +2479,12 @@ fn overlay_on(inp: &dyn Inputs, p: &Json, op: Overlay, threads: Option<usize>) -
                 let rest = if inputs.is_empty() {
                     from_multipolygon(&z.poly)
                 } else {
-                    let polys: Vec<MultiPolygon<f64>> =
-                        inputs.iter().filter_map(|r| ds.features.get(*r)?.geometry.as_ref()).filter_map(to_multipolygon).collect();
-                    from_multipolygon(&z.poly.difference(&union_all(polys.iter().flat_map(|m| m.0.iter()))))
+                    let polygons =
+                        inputs.iter().filter_map(|r| ds.features.get(*r)?.geometry.as_ref()).filter_map(to_multipolygon).flat_map(|m| m.0);
+                    // A redundant union rounds a lone polygon's vertices. That can open a
+                    // passage where it touches the zone boundary, joining separate pieces.
+                    let cover = mask_of(MultiPolygon::new(polygons.collect()));
+                    from_multipolygon(&z.poly.difference(&cover))
                 };
                 Ok::<_, String>(rest)
             },

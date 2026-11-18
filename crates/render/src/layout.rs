@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::Canvas;
 use rustgis_data::GeometryType;
+use rustgis_data::query::{Env, SeriesPage};
 use rustgis_geom::{Coord, Extent};
 use rustgis_map::layout::{
     ArrowStyle, ColorScale, ElementKind, FrameShape, Grid, GridKind, INK, Layout, LineHead, MAX_LEGEND_COLUMNS, Orientation, PT_PER_MM,
@@ -24,6 +25,21 @@ pub struct PageInfo {
     pub pages: usize,
     /// The map series page's name.
     pub page_name: String,
+}
+
+/// Takes the series page's expression values before any frame changes a streamed layer's
+/// drawing window. An ordinary layout or a missing index row has no page variables.
+pub fn series_env(layout: &Layout, maps: &[Map]) -> Env {
+    let page = || {
+        let row = layout.series.as_ref()?.page;
+        let (layer, field) = layout.series_index(maps)?;
+        Some(std::sync::Arc::new(SeriesPage {
+            feature_id: layer.dataset.features.get(row)?.id,
+            name: rustgis_map::layout::series_page_name(layer, field, row),
+            number: row + 1,
+        }))
+    };
+    Env { page: page(), ..Env::default() }
 }
 
 /// Largest page drawn, in pixels per side and in all (less in the browser, where memory is
@@ -113,7 +129,8 @@ fn render_pending_inner(
     let (w, h, k) = page_geometry(layout, dpi);
     let bounds = tiny_skia::IntRect::from_xywh(0, 0, w, h)?;
     let mut pending = PagePending::default();
-    let pm = draw_page(layout, maps, info, k, bounds, None, None, (&mut pending, wait_legends), source_error)?.into_pixmap();
+    let env = series_env(layout, maps);
+    let pm = draw_page(layout, maps, (info, &env), k, bounds, None, None, (&mut pending, wait_legends), source_error)?.into_pixmap();
     Some((pm, pending))
 }
 
@@ -147,8 +164,10 @@ fn render_drawing_inner(
     let (w, h, k) = page_geometry(layout, dpi);
     let bounds = tiny_skia::IntRect::from_xywh(0, 0, w, h)?;
     let mut pictured = Vec::new();
-    let drawing = draw_page(layout, maps, info, k, bounds, None, Some(&mut pictured), (&mut PagePending::default(), true), source_error)?
-        .into_drawing()?;
+    let env = series_env(layout, maps);
+    let drawing =
+        draw_page(layout, maps, (info, &env), k, bounds, None, Some(&mut pictured), (&mut PagePending::default(), true), source_error)?
+            .into_drawing()?;
     Some((drawing, pictured))
 }
 
@@ -257,11 +276,11 @@ pub(crate) fn render_element(
     id: u32,
     maps: &mut [Map],
     dpi: f64,
-    info: &PageInfo,
+    page: (&PageInfo, &Env),
     source_error: &mut Option<String>,
 ) -> Option<Option<(Pixmap, [f64; 4])>> {
     let Some((bounds, k, mm)) = element_bounds(layout, id, dpi)? else { return Some(None) };
-    let pm = draw_page(layout, maps, info, k, bounds, Some(id), None, (&mut PagePending::default(), true), source_error)?.into_pixmap();
+    let pm = draw_page(layout, maps, page, k, bounds, Some(id), None, (&mut PagePending::default(), true), source_error)?.into_pixmap();
     Some(Some((pm, mm)))
 }
 
@@ -273,12 +292,12 @@ pub(crate) fn record_element(
     id: u32,
     maps: &mut [Map],
     dpi: f64,
-    info: &PageInfo,
+    page: (&PageInfo, &Env),
     pictured: &mut Vec<(u32, String)>,
     source_error: &mut Option<String>,
 ) -> Option<Option<(crate::vector::Drawing, [f64; 4], f64)>> {
     let Some((bounds, k, mm)) = element_bounds(layout, id, dpi)? else { return Some(None) };
-    let drawing = draw_page(layout, maps, info, k, bounds, Some(id), Some(pictured), (&mut PagePending::default(), true), source_error)?
+    let drawing = draw_page(layout, maps, page, k, bounds, Some(id), Some(pictured), (&mut PagePending::default(), true), source_error)?
         .into_drawing()?;
     Some(Some((drawing, mm, k)))
 }
@@ -306,7 +325,7 @@ fn element_bounds(layout: &Layout, id: u32, dpi: f64) -> Option<Option<(tiny_ski
 fn draw_page(
     layout: &Layout,
     maps: &mut [Map],
-    info: &PageInfo,
+    (info, env): (&PageInfo, &Env),
     k: f64,
     bounds: tiny_skia::IntRect,
     element: Option<u32>,
@@ -348,9 +367,9 @@ fn draw_page(
             let view = View { width: fw, height: fh, pixels_per_point: 1.0, camera: cam, sky: false };
             let lonlat = crate::view_lonlat(map, &view);
             let scale = map.ground_res_at(&cam) / rustgis_geom::PIXEL_M;
-            map.sync_sources(&lonlat, scale, true);
+            map.sync_sources_with(&lonlat, scale, true, env);
             let mut failed_source = None;
-            let Some(entries) = complete_shown_legends(map, scale, *show_no_data, &mut failed_source) else {
+            let Some(entries) = complete_shown_legends(map, scale, *show_no_data, &mut failed_source, env) else {
                 *source_error = failed_source_error(map, failed_source);
                 return None;
             };
@@ -383,8 +402,7 @@ fn draw_page(
                 // clear of the grid's labels.
                 let grid = grid.as_ref().map(|g| (g, layout.decimal_comma));
                 let mut failed_source = None;
-                let Some(mut frame_pm) =
-                    frame_canvas(map, cam, fw, fh, fppp, pm.is_recording(), &mut pending.frames, grid, &mut failed_source)
+                let Some(mut frame_pm) = frame_canvas(map, &view, pm.is_recording(), &mut pending.frames, grid, &mut failed_source, env)
                 else {
                     if frame_requires_complete(map, &view) {
                         *source_error = failed_source_error(map, failed_source);
@@ -399,7 +417,7 @@ fn draw_page(
                     frame_pm.overflowed() || pm.recorded_cost().saturating_add(frame_pm.recorded_cost()) > crate::vector::max_cost();
                 if frame_pm.is_recording()
                     && too_large
-                    && let Some(pixels) = frame_canvas(map, cam, fw, fh, fppp, false, &mut pending.frames, grid, &mut None)
+                    && let Some(pixels) = frame_canvas(map, &view, false, &mut pending.frames, grid, &mut None, env)
                 {
                     frame_pm = pixels;
                     if let Some(list) = record.as_deref_mut() {
@@ -411,7 +429,8 @@ fn draw_page(
                 {
                     let ring = frame_outline_lonlat(om, &other.2, other.3, other.4);
                     if let Some(map) = maps.get(mi) {
-                        outline_lonlat(&mut frame_pm, map, &view, &ring, *extent_color, *extent_width as f32);
+                        let from_globe = om.projection.is_globe();
+                        outline_lonlat(&mut frame_pm, map, &view, &ring, from_globe, *extent_color, *extent_width as f32);
                     }
                 }
                 // Whole pixels, so the clipped image and its outline line up.
@@ -651,7 +670,8 @@ fn draw_page(
 pub fn frame_map(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64) -> Result<Pixmap, String> {
     let revisions = crate::archive_revisions([&*map]);
     let mut failed_source = None;
-    let result = frame_canvas(map, camera, w, h, ppp, false, &mut false, None, &mut failed_source).map(Canvas::into_pixmap);
+    let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
+    let result = frame_canvas(map, &view, false, &mut false, None, &mut failed_source, &Env::default()).map(Canvas::into_pixmap);
     revisions.finish(map, failed_source, result, "could not draw the map frame")
 }
 
@@ -662,32 +682,32 @@ pub fn frame_map(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp
 /// still on their way (in the browser, which doesn't wait for them).
 fn frame_canvas(
     map: &mut Map,
-    camera: rustgis_map::Camera,
-    w: f64,
-    h: f64,
-    ppp: f64,
+    view: &View,
     record: bool,
     pending: &mut bool,
     grid: Option<(&Grid, bool)>,
     failed_source: &mut Option<u64>,
+    env: &Env,
 ) -> Option<Canvas> {
-    let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
     // Why its layers were drawn without their cast shadows is kept for the page's caller (see
     // `crate::shadows_said`).
-    let (img, shadows) = crate::frame_with_shadows_to_come(|| {
-        if record { crate::render_complete_recorded(map, &view, failed_source) } else { crate::complete(map, &view, false, failed_source) }
-    });
+    let (img, shadows) = crate::frame_with_shadows_to_come(|| crate::complete(map, view, record, failed_source, env));
     let img = img?;
     *pending |= img.tiles_pending || img.data_pending || shadows;
-    Some(finish_frame(img, ppp, grid.map(|(g, comma)| (&*map, &view, g, comma))))
+    Some(finish_frame(img, view.pixels_per_point, grid.map(|(g, comma)| (&*map, view, g, comma))))
 }
 
 /// [`frame_map`] without waiting for tiles still on their way, for a preview drawn while the
 /// interface waits: a pan's preview, whose size is more than the frame's for the overscan slid
 /// under the pointer.
 pub fn frame_map_preview(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64) -> Option<Pixmap> {
+    frame_map_preview_with(map, camera, w, h, ppp, &Env::default())
+}
+
+/// Map preview during a layout pan, using the same expression context as its page.
+pub fn frame_map_preview_with(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64, env: &Env) -> Option<Pixmap> {
     let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
-    crate::render(map, &view).map(|img| finish_frame(img, ppp, None).into_pixmap())
+    crate::render_cpu(map, &view, false, false, &mut None, env).map(|img| finish_frame(img, ppp, None).into_pixmap())
 }
 
 /// A rendered frame map with its labels, its `grid` (drawn on `map` in `view`, with a decimal
@@ -877,8 +897,9 @@ fn shape_path(shape: &FrameShape, r: Rect) -> Option<tiny_skia::Path> {
     }
 }
 
-/// The lon/lat outline of what a frame shows.
-fn frame_outline_lonlat(map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) -> Vec<Coord> {
+/// The lon/lat outline of what a frame shows, `None` where an edge of a frame on the globe is off
+/// the disc: the outline breaks there rather than cutting across the globe.
+fn frame_outline_lonlat(map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) -> Vec<Option<Coord>> {
     let mut ring = Vec::new();
     let n = 16;
     let edge = |t: f64, side: usize| match side {
@@ -887,16 +908,37 @@ fn frame_outline_lonlat(map: &Map, cam: &rustgis_map::Camera, w: f64, h: f64) ->
         2 => ((1.0 - t) * w, h),
         _ => (0.0, (1.0 - t) * h),
     };
+    // A frame on the globe is read through the globe as it draws it (#2348), with a gap where an
+    // edge runs off the disc: one that shows the globe whole has no edge on it, and no outline.
+    let globe = map.projection.is_globe().then(|| rustgis_map::globe::Globe::new(cam, w, h));
+    // Its longitudes kept continuous, a turn added or taken where they cross ±180°, so on a flat
+    // frame the outline doesn't jump across the map there.
+    let mut last: Option<f64> = None;
+    let near = |c: Coord, last: Option<f64>| match last {
+        Some(p) => Coord::new(c.x + 360.0 * ((p - c.x) / 360.0).round(), c.y),
+        None => c,
+    };
     for side in 0..4 {
         for i in 0..n {
             let (sx, sy) = edge(i as f64 / n as f64, side);
-            if let Some(c) = map.to_lonlat(cam.to_map(sx, sy, w, h)) {
-                ring.push(c);
+            match &globe {
+                Some(g) => {
+                    let c = g.inverse(sx, sy).map(|c| near(c, last));
+                    if let Some(c) = c {
+                        last = Some(c.x);
+                    }
+                    ring.push(c);
+                }
+                None => {
+                    if let Some(c) = map.to_lonlat(cam.to_map(sx, sy, w, h)) {
+                        ring.push(Some(c));
+                    }
+                }
             }
         }
     }
     if let Some(f) = ring.first().copied() {
-        ring.push(f);
+        ring.push(f.map(|c| near(c, last)));
     }
     ring
 }
@@ -1154,15 +1196,39 @@ fn frame_viewport(
 }
 
 /// Strokes the ring `ring` (longitude, latitude) on a frame's map `width` points wide: another
-/// frame's extent, as an extent indicator shows it.
-fn outline_lonlat(pm: &mut Canvas, map: &Map, view: &View, ring: &[Coord], color: Rgba, width: f32) {
+/// frame's extent, as an extent indicator shows it, broken at each `None`. `from_globe`: the ring
+/// is a frame on the globe's, its longitudes run on across ±180° rather than kept in a world.
+fn outline_lonlat(pm: &mut Canvas, map: &Map, view: &View, ring: &[Option<Coord>], from_globe: bool, color: Rgba, width: f32) {
     let ppp = view.pixels_per_point as f32;
+    // On a globe, through the globe as the frame draws it, breaking behind its horizon (#2348):
+    // through the flat camera the outline lands off the area once it is away from the centre.
+    let globe = map.projection.is_globe().then(|| rustgis_map::globe::Globe::new(&view.camera, view.width, view.height));
+    // A frame on the globe's ring on a flat map, which doesn't wrap: the whole ring a turn east or
+    // west if that brings the middle of its longitudes nearer the frame's centre, as they run on
+    // from its first point (#2348), which can be on the other side of ±180° from it. One shift for
+    // all keeps it in one piece. A flat frame's ring is drawn where it is. Not handled: a globe
+    // frame around a pole, whose ring spans a whole turn, so a stretch of it stays off the world.
+    let (west, east) = ring.iter().flatten().fold((f64::INFINITY, f64::NEG_INFINITY), |(w, e), c| (w.min(c.x), e.max(c.x)));
+    let shift = match (from_globe && globe.is_none() && west <= east, map.to_lonlat(view.camera.center)) {
+        (true, Some(mid)) => 360.0 * ((mid.x - (west + east) / 2.0) / 360.0).round(),
+        _ => 0.0,
+    };
     let mut pb = PathBuilder::new();
     let mut first = true;
     for c in ring {
-        let Some(m) = map.to_map(*c) else { continue };
-        // A tilted frame's outline breaks where it passes behind the eye.
-        let Some((x, y)) = view.camera.try_to_screen(m, view.width, view.height) else {
+        let Some(c) = c else {
+            first = true;
+            continue;
+        };
+        let at = match &globe {
+            Some(g) => g.forward(*c),
+            None => match map.to_map(Coord::new(c.x + shift, c.y)) {
+                // A tilted frame's outline breaks where it passes behind the eye.
+                Some(m) => view.camera.try_to_screen(m, view.width, view.height),
+                None => continue,
+            },
+        };
+        let Some((x, y)) = at else {
             first = true;
             continue;
         };
@@ -1904,11 +1970,11 @@ fn scale_bar(
 /// layer that draws nothing there isn't listed. The scale is the one the renderer draws the frame
 /// at (the one its layers' scale ranges and display filters see), not the paper scale `{scale}`
 /// prints, so the legend follows what the frame actually shows.
-fn shown_legends(map: &Map, scale: f64, show_no_data: bool) -> Vec<(u32, Vec<LegendEntry>)> {
+fn shown_legends(map: &Map, scale: f64, show_no_data: bool, env: &Env) -> Vec<(u32, Vec<LegendEntry>)> {
     map.layers
         .iter()
         .filter(|l| map.draws_at(l, scale) && legend_lists(l))
-        .filter_map(|l| layer_shown(l, scale, show_no_data).map(|entries| (l.id, entries)))
+        .filter_map(|l| layer_shown(l, scale, show_no_data, env).map(|entries| (l.id, entries)))
         .collect()
 }
 
@@ -1922,13 +1988,13 @@ pub fn legend_lists(l: &rustgis_map::Layer) -> bool {
 /// What a layer a legend lists draws at 1:`scale` ([`rustgis_map::Layer::shown_legend`]); for a
 /// classified raster, the classes it holds ([`raster_classes`]). `None` when it draws nothing
 /// there.
-fn layer_shown(l: &rustgis_map::Layer, scale: f64, show_no_data: bool) -> Option<Vec<LegendEntry>> {
+fn layer_shown(l: &rustgis_map::Layer, scale: f64, show_no_data: bool, env: &Env) -> Option<Vec<LegendEntry>> {
     if l.is_raster() {
         return raster_classes(l, false).filter(|classes| l.in_scale_range(scale) && !classes.is_empty());
     }
-    let mut entries = l.shown_legend(scale)?;
+    let mut entries = l.shown_legend_with(scale, env)?;
     if show_no_data {
-        entries.extend(l.renderer.no_data_legend(&l.dataset, Some(&l.drawn_rows(scale))));
+        entries.extend(l.renderer.no_data_legend(&l.dataset, Some(&l.drawn_rows_with(scale, env))));
     }
     Some(entries)
 }
@@ -1961,18 +2027,20 @@ fn complete_shown_legends(
     scale: f64,
     show_no_data: bool,
     failed_source: &mut Option<u64>,
+    env: &Env,
 ) -> Option<Vec<(u32, Vec<LegendEntry>)>> {
     *failed_source = None;
     if !map.layers.iter().any(|l| l.source.as_ref().and_then(|s| s.chunk_source()).is_some()) {
-        return Some(shown_legends(map, scale, show_no_data));
+        return Some(shown_legends(map, scale, show_no_data, env));
     }
+    let style_env = env.at_scale(Some(scale));
     let wanted: Vec<usize> =
         map.layers.iter().enumerate().filter(|(_, l)| map.draws_at(l, scale) && legend_lists(l)).map(|(i, _)| i).collect();
     let mut out = Vec::new();
     for index in wanted {
         let layer = map.layers.get_mut(index)?;
         let Some(source) = layer.source.as_ref().and_then(|s| s.chunk_source()) else {
-            if let Some(entries) = layer_shown(layer, scale, show_no_data) {
+            if let Some(entries) = layer_shown(layer, scale, show_no_data, env) {
                 out.push((layer.id, entries));
             }
             continue;
@@ -2000,11 +2068,11 @@ fn complete_shown_legends(
         chunk.clear_cache();
         let result = crate::visit_complete(source.as_ref(), &mut |features| {
             chunk.dataset.features = features.into();
-            let rows = chunk.drawn_rows(scale);
+            let rows = chunk.drawn_rows_with(scale, env);
             if show_no_data && no_data.is_none() {
                 no_data = chunk.renderer.no_data_legend(&chunk.dataset, Some(&rows));
             }
-            let classer = by_expression.then(|| chunk.renderer.classer(&chunk.dataset, Some(scale)));
+            let classer = by_expression.then(|| chunk.renderer.classer_with(&chunk.dataset, style_env.clone()));
             for row in rows.iter().enumerate().filter_map(|(row, keep)| keep.then_some(row)) {
                 any = true;
                 if let Some(c) = &classer {
@@ -2040,7 +2108,7 @@ fn complete_shown_legends(
         }
         if any {
             // (A sample of the classes seen: classed again at this scale, by expression.)
-            let mut entries = layer.with_size_legend(layer.renderer.legend_at(&sample, &[], Some(scale)));
+            let mut entries = layer.with_size_legend(layer.renderer.legend_with(&sample, &[], style_env.clone()));
             entries.extend(no_data);
             out.push((layer.id, entries));
         }
@@ -2616,7 +2684,7 @@ pub fn legend_sizes_with_no_data_mm(
     show_no_data: bool,
     (exclude, labels): (&[String], &BTreeMap<String, String>),
 ) -> Option<[(f64, f64); MAX_LEGEND_COLUMNS]> {
-    let drawn = if all_classes { None } else { Some(complete_shown_legends(map, scale, show_no_data, &mut None)?) };
+    let drawn = if all_classes { None } else { Some(complete_shown_legends(map, scale, show_no_data, &mut None, &Env::default())?) };
     let rows = legend_rows(map, drawn.as_deref(), &LegendOptions { show_no_data, hide_other, exclude, labels, scale });
     let mm = 25.4 / 96.0;
     Some(std::array::from_fn(|i| {
@@ -3324,6 +3392,92 @@ pub fn map_index(maps: &[rustgis_map::Map], name: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
+    /// Both map frames share the index feature, even though the locator draws a different map.
+    /// A page using expressions draws exactly like the same page with its values written inline.
+    #[test]
+    fn series_style_follows_the_index_feature_in_both_frames() {
+        use rustgis_data::{Dataset, Feature, Field, FieldType, Geometry, Value};
+        use rustgis_map::layout::MapSeries;
+
+        let mut ds = Dataset::new("Tracts", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+        for (x, id, name) in [(-0.18, 71, "West"), (0.04, 295, "East")] {
+            let ring = [(x, -0.06), (x + 0.14, -0.06), (x + 0.14, 0.06), (x, 0.06), (x, -0.06)];
+            ds.features.push(Feature {
+                id,
+                geometry: Some(Geometry::Polygon(vec![vec![ring.map(|(x, y)| Coord::new(x, y)).to_vec()]])),
+                attrs: vec![Value::Text(name.into())],
+            });
+        }
+        let mut main = Map::new("Main");
+        let mut locator = Map::new("Locator");
+        main.add_dataset(ds.clone());
+        locator.add_dataset(ds);
+        let mut maps = [main, locator];
+        let mut layout = Layout::new("Atlas", 140.0, 75.0);
+        let [frame, _] = std::array::from_fn(|i| {
+            let m = &maps[i];
+            let frame = serde_json::from_value(serde_json::json!({"MapFrame": {
+                "map": m.name, "center": {"x": 0, "y": 0}, "scale": 1_000_000
+            }}))
+            .unwrap();
+            layout.add(&m.name, (5.0 + i as f64 * 70.0, 5.0, 60.0, 65.0), frame)
+        });
+        let base = render(&layout, &mut maps, 72.0, &PageInfo::default()).unwrap();
+        layout.series = Some(MapSeries { frame, layer: "Tracts".into(), name_field: "name".into(), margin: 0.1, page: 0 });
+        let info = PageInfo::default();
+        let unchanged = render(&layout, &mut maps, 72.0, &info).unwrap();
+        assert_eq!(base.data(), unchanged.data());
+
+        let style = |maps: &mut [Map], id: &str, name: &str, number: &str| {
+            for (i, map) in maps.iter_mut().enumerate() {
+                let layer = map.layers.first_mut().unwrap();
+                let page_feature = format!("$id = {id}");
+                layer.definition_query = Some(format!("{number} > 0"));
+                layer.symbol_by.stroke_width = Some(format!("if({page_feature}, 3, 0.6)"));
+                if i == 0 {
+                    layer.symbol_by.fill = Some(format!("if({page_feature}, '#8bbce8', '#e5e7eb')"));
+                } else {
+                    // The locator keeps the two classes by a rule expression and filters by page.
+                    let mut renderer = rustgis_map::Renderer::unique(
+                        &layer.dataset,
+                        &[],
+                        "name",
+                        rustgis_map::Ramp::Harbour,
+                        rustgis_map::Symbol::default_for(GeometryType::Polygon, 0),
+                    )
+                    .unwrap();
+                    let rustgis_map::Renderer::Unique { expression, .. } = &mut renderer else { panic!() };
+                    *expression = Some(format!("CASE WHEN {page_feature} THEN 'West' ELSE 'East' END"));
+                    layer.renderer = renderer;
+                    layer.display_filters = vec![rustgis_map::effects::DisplayFilter {
+                        name: "Current tract".into(),
+                        min_scale: None,
+                        max_scale: None,
+                        where_: page_feature.clone(),
+                    }];
+                }
+                layer.labels.enabled = true;
+                layer.labels.default.where_ = Some(page_feature);
+                layer.labels.default.by.text = Some(format!("{name} || ' ' || {number}"));
+            }
+        };
+        let mut previous = base;
+        for (row, id, name) in [(0, "71", "'West'"), (1, "295", "'East'")] {
+            layout.series.as_mut().unwrap().page = row;
+            style(&mut maps, "@page_feature_id", "@page_name", "@page_number");
+            let (page, _) = render_pending(&layout, &mut maps, 72.0, &info).unwrap();
+            let svg = crate::svg::layout_svg(&layout, &mut maps, 72.0, &info).unwrap().0;
+            style(&mut maps, id, name, &(row + 1).to_string());
+            let mut ordinary = layout.clone();
+            ordinary.series = None;
+            let expected = render(&ordinary, &mut maps, 72.0, &info).unwrap();
+            assert!(page.data() == expected.data(), "series page {} differs from the literal expressions", row + 1);
+            assert_ne!(page.data(), previous.data());
+            assert_eq!(svg, crate::svg::layout_svg(&ordinary, &mut maps, 72.0, &info).unwrap().0);
+            previous = page;
+        }
+    }
+
     /// A legend's, colorbar's, table's or chart's ink colours its text and lines (#2257). Without
     /// one, they draw in dark grey as before, a table on its white cells; with one, a table has no
     /// white cells, only its header and stripes in a tint of the ink.
@@ -3399,7 +3553,7 @@ mod tests {
         .unwrap();
         let fallback = l.renderer.symbol_for(&l.dataset, 2);
         let listed = |map: &mut Map, all: bool, show: bool| {
-            let drawn = (!all).then(|| complete_shown_legends(map, 1e6, show, &mut None).unwrap());
+            let drawn = (!all).then(|| complete_shown_legends(map, 1e6, show, &mut None, &Env::default()).unwrap());
             let opts = LegendOptions { show_no_data: show, hide_other: true, exclude: &[], labels: &NO_LABELS, scale: 1e6 };
             legend_rows(map, drawn.as_deref(), &opts)
                 .into_iter()
@@ -4492,7 +4646,7 @@ mod tests {
             (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| pm.pixel(x, y).is_some_and(|p| p.red() < 200))).max().unwrap_or(0)
         };
         let depth = |map: &Map, drawn: Option<&[(u32, Vec<LegendEntry>)]>, hide_other: bool| depth_without(map, drawn, hide_other, &[]);
-        let drawn = shown_legends(&map, 1e6, false);
+        let drawn = shown_legends(&map, 1e6, false, &Env::default());
         assert_eq!(drawn.len(), 1, "the empty layer draws nothing: {drawn:?}");
         let (shown, all) = (depth(&map, Some(&drawn), false), depth(&map, None, false));
         // The drawn legend is two rows (the layer's heading and "a"); every class makes it six
@@ -4545,7 +4699,7 @@ mod tests {
         {
             classes.retain(|(k, _)| k != "a");
         }
-        let drawn = shown_legends(&map, 1e6, false);
+        let drawn = shown_legends(&map, 1e6, false, &Env::default());
         assert!(depth(&map, Some(&drawn), false) > 0, "<all other values> alone is listed");
         assert_eq!(depth(&map, Some(&drawn), true), 0, "and hidden, the layer is left out");
         // So is one whose drawn features all fall in a fully transparent <all other values>,
@@ -4559,7 +4713,7 @@ mod tests {
             }
         };
         set_other_alpha(&mut map, 0);
-        let drawn = shown_legends(&map, 1e6, false);
+        let drawn = shown_legends(&map, 1e6, false, &Env::default());
         assert_eq!(depth(&map, Some(&drawn), false), 0, "the invisible fallback stands for nothing");
         set_other_alpha(&mut map, 255);
         // A class that bears the fallback's name is a class: hiding the fallback keeps it.
@@ -4576,7 +4730,7 @@ mod tests {
         if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts) {
             l.dataset.features.iter_mut().for_each(|f| f.attrs = vec![Value::Text(rustgis_map::symbology::OTHER_VALUES.into())]);
         }
-        let drawn = shown_legends(&map, 1e6, false);
+        let drawn = shown_legends(&map, 1e6, false, &Env::default());
         assert!(depth(&map, Some(&drawn), true) > 0, "the class named like the fallback is still listed");
         // A Graduated layer with no classes still shows its plain swatch, as before #207.
         if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts) {
@@ -4798,7 +4952,7 @@ mod tests {
         };
         let want = ["[Land cover]", "Forest", "2", "3", "4", "5"];
         assert_eq!(labels(&legend_rows(&map, None, &opts)), want);
-        let drawn = shown_legends(&map, 1e6, false);
+        let drawn = shown_legends(&map, 1e6, false, &Env::default());
         assert_eq!(labels(&legend_rows(&map, Some(&drawn), &opts)), want);
         // Its swatches are the pane's colours.
         let pane: Vec<Rgba> = map.layers[0]
@@ -4828,14 +4982,14 @@ mod tests {
         let exclude = ["land cover".to_string()];
         assert!(legend_rows(&map, None, &LegendOptions { exclude: &exclude, ..opts }).is_empty());
         map.layers[0].visible = false;
-        assert!(shown_legends(&map, 1e6, false).is_empty());
+        assert!(shown_legends(&map, 1e6, false, &Env::default()).is_empty());
         assert!(legend_rows(&map, None, &opts).is_empty());
         // A raster on a ramp: a colorbar keys it, the legend doesn't list it.
         let ramp = ramp_map(
             rustgis_map::raster::RasterRenderer::Stretch { band: 0, ramp: rustgis_map::Ramp::Harbour, invert: false },
             rustgis_map::raster::Stretch::MinMax,
         );
-        assert!(legend_rows(&ramp, None, &opts).is_empty() && shown_legends(&ramp, 1e6, false).is_empty());
+        assert!(legend_rows(&ramp, None, &opts).is_empty() && shown_legends(&ramp, 1e6, false, &Env::default()).is_empty());
     }
 
     /// A drawn legend fills each class's swatch with its colour, under the raster's name.
@@ -5254,6 +5408,241 @@ Elaboração: RustGIS",
         assert_eq!(inset_pixels(&thin, INDICATOR_COLOR), 0, "no red once restyled");
         let (t, w) = (inset_pixels(&thin, blue), inset_pixels(&thick, blue));
         assert!(t > 0 && w > 3 * t, "a wider outline covers more: {t} at 1 pt, {w} at 6 pt");
+    }
+
+    /// On a globe, the extent indicator is drawn where the globe shows the area, also away from
+    /// the disc's centre (#2348): through the flat camera, Svalbard 18° north of the centre came out
+    /// half as far again up, nearly 5 mm off on a 50 mm locator.
+    #[test]
+    fn an_extent_indicator_on_a_globe_lands_on_the_area() {
+        use rustgis_map::layout::{INDICATOR_COLOR, INDICATOR_WIDTH, frame_camera};
+        let (area, at, scale) = (Coord::new(20.0, 78.0), Coord::new(20.0, 60.0), 2e8);
+        let mut globe = Map::new("g");
+        globe.set_projection(rustgis_map::Projection::Globe);
+        let maps = || [Map::new("m"), globe.clone()];
+        let frame = |map: &str, center, scale, extent_of| ElementKind::MapFrame {
+            map: map.into(),
+            center,
+            scale,
+            shape: FrameShape::Rectangle,
+            grid: None,
+            extent_of,
+            extent_color: INDICATOR_COLOR,
+            extent_width: INDICATOR_WIDTH,
+            bearing: 0.0,
+            pitch: 0.0,
+        };
+        let mut l = Layout::new("Layout", 100.0, 100.0);
+        let main = l.add("Main", (60.0, 60.0, 30.0, 30.0), frame("m", area, 2e7, None));
+        l.add("Locator", (5.0, 5.0, 50.0, 50.0), frame("g", at, scale, Some(main)));
+        let pm = render(&l, &mut maps(), 96.0, &PageInfo::default()).unwrap();
+        // Where the globe draws the area, in pixels on the page.
+        let side = 50.0 * PT_PER_MM;
+        let g = rustgis_map::globe::Globe::new(&frame_camera(&globe, at, scale, 0.0, 0.0), side, side);
+        let (x, y) = g.forward(area).unwrap();
+        // At 96 dpi a layout point is a pixel.
+        let expected = (5.0 * PT_PER_MM + x, 5.0 * PT_PER_MM + y);
+        // The red pixels' middle, inside the locator.
+        let px_mm = PT_PER_MM;
+        let red: Vec<(f64, f64)> = ((5.0 * px_mm) as u32..(55.0 * px_mm) as u32)
+            .flat_map(|y| ((5.0 * px_mm) as u32..(55.0 * px_mm) as u32).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let (r, g, b) = rgb(&pm, x, y);
+                r > 180 && g < 90 && b < 90
+            })
+            .map(|(x, y)| (f64::from(x), f64::from(y)))
+            .collect();
+        assert!(!red.is_empty(), "no extent indicator on the globe");
+        let n = red.len() as f64;
+        let mid = (red.iter().map(|p| p.0).sum::<f64>() / n, red.iter().map(|p| p.1).sum::<f64>() / n);
+        let off = ((mid.0 - expected.0).powi(2) + (mid.1 - expected.1).powi(2)).sqrt() / px_mm;
+        assert!(off < 1.5, "the indicator's middle {mid:?} is {off:.1} mm from the area at {expected:?}");
+    }
+
+    /// A frame on the globe is outlined by what it shows of the globe (#2348): zoomed in on Iceland,
+    /// around Iceland on a globe locator; seen whole, with no edge on the disc, not at all (through
+    /// the flat camera its edges were read as a flat world, a line drawn across the locator).
+    #[test]
+    fn a_frame_on_the_globe_is_outlined_by_what_it_shows() {
+        use rustgis_map::layout::{INDICATOR_COLOR, INDICATOR_WIDTH, frame_camera};
+        let mut globe = Map::new("g");
+        globe.set_projection(rustgis_map::Projection::Globe);
+        let frame = |center, scale, extent_of| ElementKind::MapFrame {
+            map: "g".into(),
+            center,
+            scale,
+            shape: FrameShape::Rectangle,
+            grid: None,
+            extent_of,
+            extent_color: INDICATOR_COLOR,
+            extent_width: INDICATOR_WIDTH,
+            bearing: 0.0,
+            pitch: 0.0,
+        };
+        let (at, scale) = (Coord::new(-20.0, 55.0), 2e8);
+        // The red pixels inside the locator (5–55 mm), with the source frame on `center` at 1:`main`.
+        let red = |center: Coord, main: f64| {
+            let mut l = Layout::new("Layout", 100.0, 100.0);
+            // 40 mm across: near the equator, wider than the smallest globe the camera draws there.
+            let source = l.add("Main", (58.0, 58.0, 40.0, 40.0), frame(center, main, None));
+            l.add("Locator", (5.0, 5.0, 50.0, 50.0), frame(at, scale, Some(source)));
+            let pm = render(&l, &mut [globe.clone()], 96.0, &PageInfo::default()).unwrap();
+            let k = PT_PER_MM;
+            ((5.0 * k) as u32..(55.0 * k) as u32)
+                .flat_map(|y| ((5.0 * k) as u32..(55.0 * k) as u32).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let (r, g, b) = rgb(&pm, x, y);
+                    r > 180 && g < 90 && b < 90
+                })
+                .map(|(x, y)| (f64::from(x), f64::from(y)))
+                .collect::<Vec<_>>()
+        };
+        let iceland = red(Coord::new(-19.0, 65.0), 2e7);
+        assert!(!iceland.is_empty(), "no outline of the zoomed-in frame");
+        let n = iceland.len() as f64;
+        let mid = (iceland.iter().map(|p| p.0).sum::<f64>() / n, iceland.iter().map(|p| p.1).sum::<f64>() / n);
+        let side = 50.0 * PT_PER_MM;
+        let g = rustgis_map::globe::Globe::new(&frame_camera(&globe, at, scale, 0.0, 0.0), side, side);
+        let (x, y) = g.forward(Coord::new(-19.0, 65.0)).unwrap();
+        let expected = (5.0 * PT_PER_MM + x, 5.0 * PT_PER_MM + y);
+        let off = ((mid.0 - expected.0).powi(2) + (mid.1 - expected.1).powi(2)).sqrt() / PT_PER_MM;
+        assert!(off < 1.5, "the outline's middle {mid:?} is {off:.1} mm from Iceland at {expected:?}");
+        let whole = red(Coord::new(-20.0, 10.0), 4e8);
+        assert!(whole.is_empty(), "the globe seen whole outlined by {} red pixels", whole.len());
+    }
+
+    /// A frame on the globe whose sides run off the disc is outlined by its top and bottom edges
+    /// only, broken where they leave the disc, not joined by a line across the globe (#2348).
+    #[test]
+    fn a_frame_partly_off_the_globe_is_outlined_without_a_chord() {
+        use rustgis_map::layout::{INDICATOR_COLOR, INDICATOR_WIDTH, frame_camera};
+        let mut globe = Map::new("g");
+        globe.set_projection(rustgis_map::Projection::Globe);
+        let frame = |center, scale, extent_of| ElementKind::MapFrame {
+            map: "g".into(),
+            center,
+            scale,
+            shape: FrameShape::Rectangle,
+            grid: None,
+            extent_of,
+            extent_color: INDICATOR_COLOR,
+            extent_width: INDICATOR_WIDTH,
+            bearing: 0.0,
+            pitch: 0.0,
+        };
+        let center = Coord::new(-20.0, 0.0);
+        // The source frame, 40 × 20 mm: a scale whose disc is taller than the frame, its sides in
+        // the sky beside the disc, and its corners too.
+        let (sw, sh) = (40.0, 20.0);
+        let disc = |scale: f64| {
+            let cam = frame_camera(&globe, center, scale, 0.0, 0.0);
+            rustgis_map::globe::Globe::new(&cam, sw * PT_PER_MM, sh * PT_PER_MM).disc_radius() / PT_PER_MM
+        };
+        let source_scale = (1..400).map(|i| f64::from(i) * 1e6).find(|&s| disc(s) < 0.5 * sw - 3.0).unwrap();
+        assert!(disc(source_scale) > 0.5 * sh + 2.0, "a disc {:.1} mm across", 2.0 * disc(source_scale));
+        let (at, scale) = (center, 2.0 * source_scale);
+        let mut l = Layout::new("Layout", 100.0, 100.0);
+        let source = l.add("Main", (55.0, 70.0, sw, sh), frame(center, source_scale, None));
+        l.add("Locator", (5.0, 5.0, 50.0, 50.0), frame(at, scale, Some(source)));
+        let pm = render(&l, &mut [globe.clone()], 96.0, &PageInfo::default()).unwrap();
+        let red = |x: u32, y: u32| {
+            let (r, g, b) = rgb(&pm, x, y);
+            r > 180 && g < 90 && b < 90
+        };
+        let k = PT_PER_MM;
+        let (x0, x1) = ((5.0 * k) as u32, (55.0 * k) as u32);
+        let inked = (x0..x1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| red(x, y)).count();
+        assert!(inked > 0, "no outline of the frame");
+        // The row through the source frame's centre, between its top and bottom edges: crossed only
+        // by a chord.
+        let side = 50.0 * k;
+        let g = rustgis_map::globe::Globe::new(&frame_camera(&globe, at, scale, 0.0, 0.0), side, side);
+        let (_, cy) = g.forward(center).unwrap();
+        let row = (5.0 * k + cy).round() as u32;
+        let crossed: Vec<u32> = (row - 2..=row + 2).flat_map(|y| (x0..x1).filter(move |&x| red(x, y))).collect();
+        assert!(crossed.is_empty(), "the outline crosses the middle of the globe at {crossed:?}");
+    }
+
+    /// A frame on the globe across the antimeridian, outlined on a flat frame, stays one small box
+    /// near the flat frame's centre (#2348): its edge's longitudes kept continuous, not jumping from
+    /// 179.5° to -179.5° and drawing a line across the flat map, and brought to the flat frame's side
+    /// of ±180° when they start on the other.
+    #[test]
+    fn a_globe_frame_across_the_antimeridian_is_outlined_in_one_piece() {
+        use rustgis_map::layout::{INDICATOR_COLOR, INDICATOR_WIDTH};
+        let mut globe = Map::new("g");
+        globe.set_projection(rustgis_map::Projection::Globe);
+        let frame = |map: &str, center, scale, extent_of| ElementKind::MapFrame {
+            map: map.into(),
+            center,
+            scale,
+            shape: FrameShape::Rectangle,
+            grid: None,
+            extent_of,
+            extent_color: INDICATOR_COLOR,
+            extent_width: INDICATOR_WIDTH,
+            bearing: 0.0,
+            pitch: 0.0,
+        };
+        // The globe frame's centre and the flat locator's: on 180°, and a frame on -179° whose
+        // first point (its top-left corner) is on the +180° side, on a locator on -175°.
+        for (source_at, locator_at) in [(180.0, 180.0), (-179.0, -175.0)] {
+            let mut l = Layout::new("Layout", 100.0, 100.0);
+            // 40 mm at 1:20M, about 800 km across: 4 mm on the locator at 1:200M.
+            let source = l.add("Main", (58.0, 58.0, 40.0, 40.0), frame("g", Coord::new(source_at, 0.0), 2e7, None));
+            l.add("Locator", (5.0, 5.0, 50.0, 50.0), frame("m", Coord::new(locator_at, 0.0), 2e8, Some(source)));
+            let pm = render(&l, &mut [globe.clone(), Map::new("m")], 96.0, &PageInfo::default()).unwrap();
+            let k = PT_PER_MM;
+            let (x0, x1) = ((5.0 * k) as u32, (55.0 * k) as u32);
+            let red: Vec<(u32, u32)> = (x0..x1)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let (r, g, b) = rgb(&pm, x, y);
+                    r > 180 && g < 90 && b < 90
+                })
+                .collect();
+            assert!(!red.is_empty(), "{source_at}° on {locator_at}°: no outline of the frame");
+            let middle = 30.0 * k;
+            let far =
+                red.iter().filter(|&&(x, y)| (f64::from(x) - middle).abs() > 6.0 * k || (f64::from(y) - middle).abs() > 6.0 * k).count();
+            assert_eq!(far, 0, "{source_at}° on {locator_at}°: {far} of {} red pixels more than 6 mm from the middle", red.len());
+        }
+    }
+
+    /// A flat frame wider than the world, outlined on another flat frame, is drawn where it is
+    /// (#2348): its first point past -180° doesn't move it a turn east, so both its sides show.
+    #[test]
+    fn a_flat_frame_wider_than_the_world_is_outlined_where_it_is() {
+        use rustgis_map::layout::{INDICATOR_COLOR, INDICATOR_WIDTH};
+        let frame = |center, scale, extent_of| ElementKind::MapFrame {
+            map: "m".into(),
+            center,
+            scale,
+            shape: FrameShape::Rectangle,
+            grid: None,
+            extent_of,
+            extent_color: INDICATOR_COLOR,
+            extent_width: INDICATOR_WIDTH,
+            bearing: 0.0,
+            pitch: 0.0,
+        };
+        let at = Coord::new(0.0, 0.0);
+        let mut l = Layout::new("Layout", 200.0, 120.0);
+        // 80 mm at 1:529M on the equator: about 380° of longitude, -190° to 190°.
+        let source = l.add("Main", (5.0, 5.0, 80.0, 20.0), frame(at, 5.29e8, None));
+        // 90 mm at 1:593M: about 480°, so both of the source's sides are in it.
+        l.add("Locator", (100.0, 5.0, 90.0, 60.0), frame(at, 5.93e8, Some(source)));
+        let pm = render(&l, &mut [Map::new("m")], 96.0, &PageInfo::default()).unwrap();
+        let k = PT_PER_MM;
+        let red = |x: u32, y: u32| {
+            let (r, g, b) = rgb(&pm, x, y);
+            r > 180 && g < 90 && b < 90
+        };
+        let (top, bottom) = ((5.0 * k) as u32, (65.0 * k) as u32);
+        let middle = 145.0 * k;
+        let side = |xs: std::ops::Range<u32>| xs.flat_map(|x| (top..bottom).map(move |y| (x, y))).filter(|&(x, y)| red(x, y)).count();
+        let (west, east) = (side((100.0 * k) as u32..(middle - 10.0 * k) as u32), side((middle + 10.0 * k) as u32..(190.0 * k) as u32));
+        assert!(west > 0 && east > 0, "the outline's sides: {west} red pixels west of the middle, {east} east");
     }
 
     fn rgb(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
@@ -6786,7 +7175,7 @@ Elaboração: RustGIS",
         };
         assert!(at(30.0) && !at(-30.0), "turned clockwise");
         // Alone, the element's picture holds no background.
-        let (alone, _) = render_element(&l, id, &mut [], 96.0, &PageInfo::default(), &mut None).unwrap().unwrap();
+        let (alone, _) = render_element(&l, id, &mut [], 96.0, (&PageInfo::default(), &Env::default()), &mut None).unwrap().unwrap();
         assert!(alone.pixels().iter().all(|c| c.alpha() == 0 || c.green() > 0), "no red in the element's own picture");
     }
 }

@@ -27,6 +27,7 @@ Formats](data-formats.md).
 | GeoTIFF and cloud-optimised GeoTIFF (`.tif`, `.tiff`) | Yes | Yes |
 | ASCII grid (`.asc`, with an optional `.prj`) | Yes | No |
 | Unreferenced TIFF and PNG scans; JPEG with `"as": "scan"` | Yes | GeoTIFF after georeferencing |
+| PDF pages: GeoPDFs placed by their coordinates, other pages as scans | Yes (desktop, command line and Python) | GeoTIFF after georeferencing |
 | Through GDAL: JPEG 2000, ERDAS Imagine, SRTM HGT, DTED, NetCDF, HDF, ENVI, SAGA… | Yes (desktop, when GDAL is installed) | No |
 | Web tiles: XYZ/TMS/WMS rasters, Mapbox Vector Tiles, MapLibre styles, PMTiles and MBTiles archives | Yes | Yes (Imagery › Create Hosted Imagery) |
 | RustGIS project (`.rgis`; older `.rgisx` files open too) | Yes | Yes |
@@ -103,16 +104,20 @@ ones from, with the coordinate system (such as `EPSG:2263`) and the separator (c
 the columns again); `info.fileColumns` lists them for scripts. Add Data finds them itself
 (columns named like longitude/latitude, including GTFS `stop_lon`/`stop_lat`, easting/northing or
 geometry, and EWKT's `SRID=`). With no projected coordinate system or explicit column choices,
-a specific longitude/latitude pair is preferred over generic X/Y when it gives in-range,
-non-0,0 positions on at least as many rows as the first pair gives finite positions.
-That pair is used for the whole file.
+RustGIS compares complete longitude/latitude and X/Y pairs regardless of column order.
+X/Y includes planar aliases such as easting/northing. RustGIS counts in-range, non-0,0 positions
+for each pair, preferring longitude/latitude when the counts are equal and nonzero.
+That pair is used for the whole file. Automatic detection keeps X/Y and longitude/latitude
+separate. If it finds candidate names for both axes but no matching pair or WKT column,
+the file opens as a table with a notice naming the candidates so you can choose x and y.
 The published aliases `Longitude Decimal Degrees`/`Latitude Decimal Degrees` and
-`Longitutde`/`Lattitude` are recognised too. The dialog checks the first 1,000 rows of delimited
-text, or every row of a spreadsheet, to pick defaults. It recomputes unchanged defaults when you
+`Longitutde`, `Longtitude` and `Lattitude` are recognised too. The dialog checks the first 1,000 rows
+of delimited text, or every row of a spreadsheet, to pick defaults. It recomputes unchanged defaults when you
 leave the coordinate-system box or press Enter; columns you picked stay picked. With a projected
 coordinate system, defaults prefer X/Y or easting/northing columns when the file also has
 longitude/latitude columns.
-Add Data checks all rows. Coordinates still outside degree ranges are counted in a
+If you leave the suggested columns untouched, Add Data checks all rows before choosing the pair.
+Coordinates still outside degree ranges are counted in a
 notice. Points placed at exactly 0,0 are also counted in a notice: these often mean missing
 coordinates, but the points are kept. A CSV without coordinate columns, or a layer without geometry, opens as a
 standalone table, listed under the map in Layers; right-click it to open or remove it. Tables
@@ -1033,6 +1038,10 @@ databases). For non-database kinds, pass that response text as `answer` with the
 to parse it without a network request. Database kinds ignore `answer` and test through their
 driver. An anonymous S3 test needs at least one named bucket.
 
+**Test** does not send service requests to XYZ URL templates with tile coordinates
+(`{z}/{x}/{y}`, also `{zoom}` or `{-y}`). To add one to the map, use
+**Home › Add › Basemap › Add Tile Layer…** (`map.addTiles`) instead.
+
 `connection.browse` lists what a connection offers, a level at a time: database roots list the
 schemas returned by their provider; opening a schema lists its spatial tables. Services list their
 layers, catalogues their records with the services and files they link to, STAC APIs their
@@ -1693,9 +1702,12 @@ coordinates, read whole, so it takes grids of up to 4,000,000 cells a side; a lo
 size. A box reaching past the grid is read within it, and says so; one over a longitude grid's
 edge (0°/360°, or ±180°) is refused: give a box on each side (one round the whole globe is the
 whole grid); `raster.zarrInfo` with
-`"bbox"` gives the cells a box covers (`window.cells`). A window is at least 2 × 2 cells (a box within one cell is widened to two, and says so), and
-doesn't follow the time slider yet. A window is kept in the project as a GeoTIFF, as a web
-store's slice is, also from a folder.
+`"bbox"` gives the cells a box covers (`window.cells`). A window is at least 2 × 2 cells (a box within one cell is widened to two, and says so). A window
+is kept in the project as a GeoTIFF, as a web store's slice is, also from a folder; with
+`"time": true` it follows the time slider instead, each step reading only the window, and the
+project keeps the window's cells with the store. A grid whose axes aren't named or measured as
+longitude, but whose store gives a geographic system, takes a box or a point written either way
+round the globe too, as it is drawn.
 
 **Follow the time slider** (desktop; `layer.addZarr` with `"time": true`) adds the variable as one
 layer whose step is the time slider's. The slider turns on over the variable's dates when it is

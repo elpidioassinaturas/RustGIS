@@ -21,7 +21,7 @@ pub const MAX_LAYER_NAME: usize = 200;
 pub fn commands() -> Vec<C> {
     vec![
         C::new("layer.addData", "Add Data", "Home › Add", add_data).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
-            .params(r#"{"path": string, "name"?: string, "layer"?: "GeoPackage, GDAL, DuckDB or DXF layer", "paperSpace"?: "bool: a DXF's layout entities too", "blocks"?: "bool: a DXF's block (图块) contents, true by default", "stream"?: bool, "as"?: "scan" (a TIFF, PNG or JPEG, even a photo or a GeoTIFF, as a picture with no coordinates), "crs"?: "EPSG:… (or WKT) for Shapefile coordinates (overrides .prj), a CSV, a DXF (which never says), a CityJSON or CityGML model (it replaces the system a model file names; in a zip, it is used for a model naming none RustGIS knows), or a GDAL or DuckDB file that doesn't say (GDAL takes an authority code such as EPSG:2263 or the exact names WGS84, WGS72, NAD27, NAD83, not WKT or a file)", "x"?: "CSV x/longitude column", "y"?: "CSV y/latitude column", "wkt"?: "CSV WKT geometry column", "delimiter"?: ","|";"|"\\t"|"|"}"#),
+            .params(r#"{"path": string, "name"?: string, "layer"?: "GeoPackage, GDAL, DuckDB or DXF layer, or a PDF's page number (the first when left out or blank)", "paperSpace"?: "bool: a DXF's layout entities too", "blocks"?: "bool: a DXF's block (图块) contents, true by default", "stream"?: bool, "as"?: "scan" (a TIFF, PNG, JPEG or PDF page, even a photo, a GeoTIFF or a GeoPDF, as a picture with no coordinates), "crs"?: "EPSG:… (or WKT) for Shapefile coordinates (overrides .prj), a CSV, a DXF (which never says), a CityJSON or CityGML model (it replaces the system a model file names; in a zip, it is used for a model naming none RustGIS knows), or a GDAL or DuckDB file that doesn't say (GDAL takes an authority code such as EPSG:2263 or the exact names WGS84, WGS72, NAD27, NAD83, not WKT or a file)", "x"?: "CSV x/longitude column", "y"?: "CSV y/latitude column", "wkt"?: "CSV WKT geometry column", "delimiter"?: ","|";"|"\\t"|"|"}"#),
         C::new("layer.addPhotos", "Add Photos", "Home › Add", add_photos).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"paths"?: [JPEG photo files], "folder"?: "a folder of photos (every JPEG in it)", "name"?: "the layer (default Photos; photos join it when it exists)"}"#,
         ),
@@ -387,7 +387,7 @@ pub fn commands() -> Vec<C> {
         .params(r#"{"layer"?, "field"?: numeric field name|null (each marker sized by its value, keeping its Unique Values or Graduated Colors class's colours; null: the classes' own sizes; left out: the mapping's field, to change its other settings), "min"?: number (the value drawn smallest; default the field's smallest, or the mapping's), "max"?: number (the value drawn largest, above min; default the field's largest, or the mapping's), "minSize"?: points (default 4, or the mapping's), "maxSize"?: points (default 24, or the mapping's), "scaling"?: "area"|"radius" (area: the marker's area grows with the value, as Proportional Symbols; radius: its size grows in a straight line, as MapLibre's; default area, or the mapping's)} (values past min or max take the end's size; a null or non-numeric value keeps its class's size)"#),
         C::new("layer.symbolBy", "Symbol by Expression", "Style › Drawing", symbol_by).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(need_feature_layer)
-            .params(r#"{"layer"?, "size"?: expression|null (a point's marker size in points), "fill"?: expression|null (the fill colour: '#RRGGBB', a CSS colour name or 'r,g,b[,a]' as color_rgb gives it), "stroke"?: expression|null (the outline colour, a line's colour), "strokeWidth"?: expression|null (the outline's width in points, a line's width), "angle"?: expression|null (point layers: each marker turned by it, in degrees clockwise, in place of layer.markerRotation's field)} (each expression in the language of queries, per feature, @map_scale the map's scale; a key left out keeps its expression, null or "" removes it; where an expression gives null the symbol's own value is drawn)"#),
+            .params(r#"{"layer"?, "size"?: expression|null (a point's marker size in points), "fill"?: expression|null (the fill colour: '#RRGGBB', a CSS colour name or 'r,g,b[,a]' as color_rgb gives it), "stroke"?: expression|null (the outline colour, a line's colour), "strokeWidth"?: expression|null (the outline's width in points, a line's width), "angle"?: expression|null (point layers: each marker turned by it, in degrees clockwise, in place of layer.markerRotation's field)} (each expression in the language of queries, per feature, @map_scale the map's scale, @page_feature_id, @page_name and @page_number the map series page (null off a series page); a key left out keeps its expression, null or "" removes it; where an expression gives null the symbol's own value is drawn)"#),
         C::new("layer.strokeLevels", "Stroke Levels", "Style › Drawing", |s, p| {
             let on = b(p, "on").ok_or("on is true or false")?;
             let id = s.layer_id(p)?;
@@ -1956,7 +1956,9 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
         return add_photos(s, &json!({"paths": [path], "name": name}));
     }
     if rustgis_data::raster::is_raster_name(path) {
-        return super::raster::add_path(s, path, ps(p, "name").map(str::trim).filter(|n| !n.is_empty()), scan);
+        let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty());
+        let page = super::raster::pdf_page(path, p)?;
+        return super::raster::add_path(s, path, name, page.as_deref(), scan);
     }
     // A Zarr store's folder: its first variable, or the one "layer" names.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2120,7 +2122,7 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
         }
         let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
         if meta.len() > super::raster::MAX_UPLOAD_BYTES as u64 {
-            return Err(format!("{path} is too large to open"));
+            return Err(rustgis_data::io::file_size_error(path, super::raster::MAX_UPLOAD_BYTES as u64));
         }
         let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
         let full = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
@@ -2193,7 +2195,7 @@ fn is_city_model_path(path: &str) -> bool {
 fn read_layers_file(p: &Value, path: &str) -> LayersRead {
     let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
     if meta.len() > super::raster::MAX_UPLOAD_BYTES as u64 {
-        return Err(format!("{path} is too large to open"));
+        return Err(rustgis_data::io::file_size_error(path, super::raster::MAX_UPLOAD_BYTES as u64));
     }
     let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
     let full = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
@@ -2237,7 +2239,7 @@ fn dxf_reads(
     crs: Option<rustgis_data::raster::Crs>,
 ) -> Result<Vec<rustgis_data::io::LayerRead>, String> {
     if bytes.len() as u64 > rustgis_data::io::MAX_BYTES {
-        return Err(format!("{name} is too large to open"));
+        return Err(rustgis_data::io::file_size_error(name, rustgis_data::io::MAX_BYTES));
     }
     let opts = rustgis_data::dxf::Options {
         crs,
@@ -2256,7 +2258,7 @@ fn dxf_reads(
 fn read_sheet_file(p: &Value, path: &str) -> WholeRead {
     let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
     if meta.len() > super::raster::MAX_UPLOAD_BYTES as u64 {
-        return Err(format!("{path} is too large to open"));
+        return Err(rustgis_data::io::file_size_error(path, super::raster::MAX_UPLOAD_BYTES as u64));
     }
     let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
     // Read from disk: the table keeps the workbook's path, so an export can't replace it.
@@ -2271,14 +2273,14 @@ fn read_whole(p: &Value, path: &str) -> WholeRead {
         let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
         // The limit the text readers keep without options too.
         if meta.len() > rustgis_data::io::MAX_BYTES {
-            return Err(format!("{path} is too large to open"));
+            return Err(rustgis_data::io::file_size_error(path, rustgis_data::io::MAX_BYTES));
         }
         rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))
     })?;
     if let Some(read) = delimited {
         return Ok(read);
     }
-    let read = || rustgis_data::io::read_path(Path::new(path)).map_err(|e| format!("{path}: {e}"));
+    let read = || rustgis_data::io::read_path(Path::new(path)).map_err(|e| whole_read_error(path, e));
     // A file its edits can be written back to: the files as read, to compare with before then.
     #[cfg(not(target_arch = "wasm32"))]
     if rustgis_data::sync::is_syncable(path) {
@@ -2356,8 +2358,10 @@ pub(crate) fn add_data_ahead(p: &Value) -> Option<super::reads::ReadWork> {
         return None;
     }
     if rustgis_data::raster::is_raster_name(&path) {
-        let key = super::raster::read_key(&path, scan);
-        return Some(ahead(NAME, key, move || super::raster::read_raster_as(&path, scan)));
+        // A page that isn't one is refused when the command runs.
+        let page = super::raster::pdf_page(&path, p).ok()?;
+        let key = super::raster::read_key(&path, page.as_deref(), scan);
+        return Some(ahead(NAME, key, move || super::raster::read_raster_as(&path, page.as_deref(), scan)));
     }
     if rustgis_data::raster::zarr::is_store(Path::new(&path)) {
         return None;
@@ -2770,7 +2774,7 @@ fn file_layers(s: &mut Session, p: &Value) -> CmdResult {
     if rustgis_data::sheets::is_sheet_name(path) {
         let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
         if meta.len() > super::raster::MAX_UPLOAD_BYTES as u64 {
-            return Err(format!("{path} is too large to open"));
+            return Err(rustgis_data::io::file_size_error(path, super::raster::MAX_UPLOAD_BYTES as u64));
         }
         let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
         let layers = rustgis_data::sheets::sheet_names(&bytes).map_err(err)?;
@@ -2785,7 +2789,7 @@ fn file_layers(s: &mut Session, p: &Value) -> CmdResult {
     if rustgis_data::dxf::is_dxf_name(path) {
         let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
         if meta.len() > rustgis_data::io::MAX_BYTES {
-            return Err(format!("{path} is too large to open"));
+            return Err(rustgis_data::io::file_size_error(path, rustgis_data::io::MAX_BYTES));
         }
         let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
         let layers = rustgis_data::dxf::layers(path, &bytes).map_err(err)?;
@@ -2798,7 +2802,7 @@ fn file_layers(s: &mut Session, p: &Value) -> CmdResult {
     if rustgis_data::io::is_multi_layer_name(path) || model_json {
         let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
         if meta.len() > super::raster::MAX_UPLOAD_BYTES as u64 {
-            return Err(format!("{path} is too large to open"));
+            return Err(rustgis_data::io::file_size_error(path, super::raster::MAX_UPLOAD_BYTES as u64));
         }
         let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
         let zip = path.to_ascii_lowercase().ends_with(".zip");
@@ -3953,7 +3957,7 @@ pub fn columns_in_file(path: &str, p: &Value) -> CmdResult {
     let limit = if sheet { super::raster::MAX_UPLOAD_BYTES as u64 } else { rustgis_data::io::MAX_BYTES };
     let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
     if meta.len() > limit {
-        return Err(format!("{path} is too large to open"));
+        return Err(rustgis_data::io::file_size_error(path, limit));
     }
     if rustgis_data::io::is_gzip_text_name(path) {
         let reader = rustgis_data::provenance::open(path).map_err(|e| format!("{path}: {e}"))?;
@@ -4043,6 +4047,13 @@ fn read_delimited(
     read_delimited_bytes(p, name, &bytes()?).map(Some)
 }
 
+/// Adds file context to a reader error. A size refusal already names the file it could not read,
+/// which may be a sidecar of the requested file.
+fn whole_read_error(path: &str, error: rustgis_data::DataError) -> String {
+    let message = error.to_string();
+    if rustgis_data::io::file_size_error_args(&message).is_some() { message } else { format!("{path}: {message}") }
+}
+
 /// Reads local/uploaded delimited bytes with the same options and CRS notices on every path.
 pub(crate) fn read_delimited_bytes(
     p: &Value,
@@ -4050,7 +4061,7 @@ pub(crate) fn read_delimited_bytes(
     bytes: &[u8],
 ) -> Result<(rustgis_data::Dataset, rustgis_data::ReadReport), String> {
     let opts = csv_options(p)?.unwrap_or_default();
-    let (ds, mut report) = rustgis_data::io::read_delimited_bytes(name, bytes, &opts).map_err(|e| format!("{name}: {e}"))?;
+    let (ds, mut report) = rustgis_data::io::read_delimited_bytes(name, bytes, &opts).map_err(|e| whole_read_error(name, e))?;
     if let (Some(text), Some(crs)) = (ps(p, "crs"), opts.crs)
         && let Some(note) = rustgis_data::raster::wkt::typed_crs_note(text, crs)
     {
@@ -5831,7 +5842,12 @@ fn add_download(s: &mut Session, p: &Value) -> CmdResult {
         url_file_name(&url, &bytes).map_err(|e| crate::sources::message_with_address(&url, &e))?
     };
     let left_out = parts_left_out(&url, &bytes, p);
-    let r = super::raster::add_named_bytes(s, p, name, bytes, b(p, "zoom"))?;
+    // A PDF's page the app drew off the frame as it landed (#2336).
+    #[cfg(not(target_arch = "wasm32"))]
+    let drawn = s.landed_pages.iter().position(|(d, _)| *d == id).map(|i| s.landed_pages.remove(i).1);
+    #[cfg(target_arch = "wasm32")]
+    let drawn = None;
+    let r = super::raster::add_named_bytes_read(s, p, name, bytes, b(p, "zoom"), drawn)?;
     if let Some(n) = left_out {
         s.notify(n, false);
     }
@@ -6733,6 +6749,35 @@ pub(crate) fn external_dataset_selector(command: &str) -> bool {
 mod tests {
     use crate::Session;
     use serde_json::json;
+
+    /// Refuses a sparse KML before reading its bytes, with the same advice when listing its layers.
+    #[test]
+    fn oversized_kml_reports_limit_and_alternatives() {
+        let dir = std::env::temp_dir().join(format!("rustgis-kml-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("permits.kml");
+        let limit = crate::cmd::raster::MAX_UPLOAD_BYTES as u64;
+        std::fs::File::create(&path).unwrap().set_len(limit + 1).unwrap();
+        let params = json!({"path": path});
+        let path = path.to_str().unwrap();
+        let mut session = Session::new(crate::Project::default());
+        let check = |error: String| {
+            let limit = (limit >> 20).to_string();
+            assert_eq!(
+                rustgis_data::io::file_size_error_args(&error),
+                Some((path, limit.as_str(), rustgis_data::io::FileSizeAdvice::Vector)),
+                "{error}"
+            );
+            assert!(error.contains("Split it into smaller files") && error.contains("FlatGeobuf"), "{error}");
+        };
+        for command in ["layer.addData", "info.fileLayers"] {
+            check(session.run(command, &params).unwrap_err());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        check(super::read_layers_file(&params, path).err().unwrap());
+        assert!(session.map().layers.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A URL a web document restricted to public addresses stays restricted when a later request
     /// comes from a local origin: its blocking download goes through the public agent, which
