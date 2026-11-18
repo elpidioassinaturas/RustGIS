@@ -282,18 +282,23 @@ fn tooltip_for(app: &RustGisApp, resp: Response, title: &str, desc: &str, id: &s
 }
 
 fn bg(ui: &Ui, r: Rect, resp: &Response, checked: bool, t: &Tokens) {
-    let fill = if resp.is_pointer_button_down_on() {
-        t.pressed
-    } else if checked {
-        t.checked
-    } else if resp.hovered() {
-        t.hover
-    } else {
-        return;
-    };
+    let Some(fill) = bg_fill(resp, checked, t) else { return };
     ui.painter().rect_filled(r, CornerRadius::same(6), fill);
     if checked {
         ui.painter().rect_stroke(r, CornerRadius::same(6), Stroke::new(1.0, t.accent.gamma_multiply(0.55)), egui::StrokeKind::Inside);
+    }
+}
+
+/// The fill a ribbon button paints behind its icon in `resp`'s state, if any (none at rest).
+pub fn bg_fill(resp: &Response, checked: bool, t: &Tokens) -> Option<egui::Color32> {
+    if resp.is_pointer_button_down_on() {
+        Some(t.pressed)
+    } else if checked {
+        Some(t.checked)
+    } else if resp.hovered() {
+        Some(t.hover)
+    } else {
+        None
     }
 }
 
@@ -594,12 +599,23 @@ fn small_menu_with(
 pub fn row_button(ui: &mut Ui, on: bool, button: egui::Button<'_>, expand: f32) -> Response {
     let under = ui.painter().add(egui::Shape::Noop);
     let resp = ui.add_enabled(on, button);
-    if on && (resp.hovered() || resp.is_pointer_button_down_on()) {
-        let t = Tokens::get(ui.ctx());
-        let fill = if resp.is_pointer_button_down_on() { t.pressed } else { t.hover };
+    if let Some(fill) = row_fill(on, &resp, &Tokens::get(ui.ctx())) {
         ui.painter().set(under, egui::Shape::rect_filled(resp.rect.expand2(vec2(expand, 0.0)), CornerRadius::same(5), fill));
     }
     resp
+}
+
+/// The highlight a menu row paints under itself in `resp`'s state, if any (none at rest or disabled).
+pub fn row_fill(on: bool, resp: &Response, t: &Tokens) -> Option<egui::Color32> {
+    if !on {
+        None
+    } else if resp.is_pointer_button_down_on() {
+        Some(t.pressed)
+    } else if resp.hovered() {
+        Some(t.hover)
+    } else {
+        None
+    }
 }
 
 /// Room for a menu row's icon before its label.

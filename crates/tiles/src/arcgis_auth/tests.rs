@@ -6,6 +6,27 @@ fn grant(token: &str, expires_at: i64) -> Grant {
     Grant { access_token: token.into(), refresh_token: Some("refresh".into()), expires_at, username: "ana".into() }
 }
 
+/// A session counts as kept while it renews itself or hasn't expired, as requests see it (#2378).
+#[test]
+fn a_session_past_its_expiry_with_no_renewal_is_not_kept() {
+    let session = |expires_at: i64, refresh: Option<&str>| Session {
+        portal: "https://kept.example.org/portal".into(),
+        client_id: "client".into(),
+        username: "ana".into(),
+        access_token: "synthetic".into(),
+        expires_at,
+        refresh_token: refresh.map(str::to_string),
+        scopes: Vec::new(),
+        retry_at: 0,
+    };
+    let now = 1_000;
+    assert!(session(now + 60, None).usable(now));
+    assert!(!session(now, None).usable(now));
+    assert!(session(now - 60, Some("refresh")).usable(now));
+    // A token given with an address has no known expiry.
+    assert!(session(i64::MAX, None).usable(now));
+}
+
 /// Raw account identity stays in memory and follows the effective selection, including absence.
 #[test]
 fn permission_transport_account_identity_binds_exact_selected_credentials() {

@@ -876,6 +876,7 @@ mod tests {
         set_token(Some(LASTING)).unwrap();
         assert!(has_token());
         assert_eq!(token_expiry(), Some(4_000_000_000));
+        assert!(!token_expired());
         assert_eq!(authorization(DATA).as_deref(), Some(format!("Bearer {LASTING}").as_str()));
         assert_eq!(authorization("https://urs.earthdata.nasa.gov/a"), None);
         assert_eq!(authorization("https://d1.cloudfront.net/a.tif"), None);
@@ -887,6 +888,10 @@ mod tests {
         // Not a JWT: kept, with no expiry.
         set_token(Some("abc")).unwrap();
         assert_eq!(token_expiry(), None);
+        assert!(!token_expired());
+        // An expired token is kept until it is next used; the ribbon's key shows it isn't usable.
+        set_token(Some(EXPIRED)).unwrap();
+        assert!(has_token() && token_expired());
         set_token(Some("  ")).unwrap();
         assert!(!has_token());
     }

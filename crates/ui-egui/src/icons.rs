@@ -224,7 +224,6 @@ fn maneuver(p: &P, kind: &str) {
     }
 }
 
-/// Paints icon `name` into `r`. `ink` draws outlines, `accent` the colour parts.
 /// A key filled with `fill` and outlined with `ink`, on a disc of `backdrop` that keeps it clear of
 /// the icon it sits on: a command's sign-in, kept (green) or missing (red).
 pub fn key_badge(painter: &Painter, r: Rect, fill: Color32, ink: Color32, backdrop: Color32) {
@@ -243,6 +242,7 @@ pub fn key_badge(painter: &Painter, r: Rect, fill: Color32, ink: Color32, backdr
     p.circle(7.0, 7.0, 1.6, Some(backdrop), None);
 }
 
+/// Paints icon `name` into `r`. `ink` draws outlines, `accent` the colour parts.
 pub fn paint(painter: &Painter, r: Rect, name: &str, ink: Color32, accent: Color32) {
     let p = P { p: painter, r, ink, acc: accent };
     let green = Color32::from_rgb(0x16, 0x9A, 0x5A);

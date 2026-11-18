@@ -3532,7 +3532,13 @@ fn plugins_tab(app: &mut RustGisApp, ui: &mut Ui) {
             for c in &m.commands {
                 let icon = if crate::icons::ALL.contains(&c.icon.as_str()) { c.icon.as_str() } else { "plugin" };
                 let id = rustgis_engine::plugins::command_id(&m.id, &c.id);
-                big(ui, app, icon, m.translate(lang, &c.label), m.translate(lang, &c.help), &id, Value::Null, false, false);
+                let (help, kept) = login_help(ui.ctx(), c.login, m.translate(lang, &c.help));
+                let resp = big(ui, app, icon, m.translate(lang, &c.label), &help, &id, Value::Null, false, false);
+                if let Some(kept) = kept {
+                    let t = Tokens::get(ui.ctx());
+                    let behind = crate::widgets::bg_fill(&resp, false, &t).unwrap_or(t.ribbon);
+                    login_key(ui, crate::widgets::big_icon_rect(resp.rect), kept, behind);
+                }
             }
             for t in &m.tools {
                 let id = rustgis_engine::plugins::command_id(&m.id, &t.id);
@@ -3573,44 +3579,41 @@ fn plugin_entry(
 ) {
     use rustgis_engine::plugins::{Entry, Layout, command_id};
     let open = panel_open(app, &m.id);
-    // Draws the entry; returns the rectangle of its icon and the colour behind it.
-    let mut show = |icon: &str, label: &str, help: &str, id: &str, params: Value| -> (Rect, egui::Color32) {
+    // For the sign-in state: `show` borrows `ui` until its last use.
+    let ctx = ui.ctx().clone();
+    // Draws the entry; returns the rectangle of its icon and the colour behind it. A menu row shows
+    // `help` only with `tip` (a command's sign-in line), as other menu rows show none.
+    let mut show = |icon: &str, label: &str, help: &str, id: &str, params: Value, tip: bool| -> (Rect, egui::Color32) {
         let label = if layout != Some(Layout::Large) && label.contains('\n') {
             std::borrow::Cow::Owned(label.replace('\n', " "))
         } else {
             std::borrow::Cow::Borrowed(label)
         };
         let checked = open && id == "ui.pane.plugin";
-        let ribbon = Tokens::get(ui.ctx()).ribbon;
+        let t = Tokens::get(ui.ctx());
         match layout {
             Some(Layout::Large) => {
                 let resp = big(ui, app, icon, &label, help, id, params, checked, false);
-                (crate::widgets::big_icon_rect(resp.rect), ribbon)
+                (crate::widgets::big_icon_rect(resp.rect), crate::widgets::bg_fill(&resp, checked, &t).unwrap_or(t.ribbon))
             }
             Some(Layout::Small) => {
                 let resp = small(ui, app, icon, &label, help, id, params, checked);
-                (crate::widgets::small_icon_rect(resp.rect), ribbon)
+                (crate::widgets::small_icon_rect(resp.rect), crate::widgets::bg_fill(&resp, checked, &t).unwrap_or(t.ribbon))
             }
             None => {
                 let resp = crate::widgets::menu_item_response(ui, app, icon, &label, id, params);
-                (crate::widgets::menu_icon_rect(ui, &resp), ui.visuals().window_fill())
+                let resp = if tip { resp.on_hover_text(help) } else { resp };
+                let behind = crate::widgets::row_fill(resp.enabled(), &resp, &t).unwrap_or(ui.visuals().window_fill());
+                (crate::widgets::menu_icon_rect(ui, &resp), behind)
             }
         }
     };
     match m.entry(entry) {
         Some(Entry::Command(c)) => {
             let icon = if crate::icons::ALL.contains(&c.icon.as_str()) { c.icon.as_str() } else { "plugin" };
-            let need = c.login.map(|l| (l, login_kept(l)));
-            let help = m.translate(lang, &c.help);
-            let help = match need {
-                Some((l, kept)) => {
-                    let gap = if help.is_empty() { "" } else { "\n\n" };
-                    std::borrow::Cow::Owned(format!("{help}{gap}{}", login_text(l, kept)))
-                }
-                None => std::borrow::Cow::Borrowed(help),
-            };
-            let (ic, behind) = show(icon, m.translate(lang, &c.label), &help, &command_id(&m.id, &c.id), Value::Null);
-            if let Some((_, kept)) = need {
+            let (help, kept) = login_help(&ctx, c.login, m.translate(lang, &c.help));
+            let (ic, behind) = show(icon, m.translate(lang, &c.label), &help, &command_id(&m.id, &c.id), Value::Null, kept.is_some());
+            if let Some(kept) = kept {
                 login_key(ui, ic, kept, behind);
             }
         }
@@ -3621,33 +3624,57 @@ fn plugin_entry(
             } else {
                 std::borrow::Cow::Borrowed(name)
             };
-            show("toolbox", &label, m.translate(lang, &t.summary), "ui.gp.open", json!({"tool": command_id(&m.id, &t.id)}));
+            show("toolbox", &label, m.translate(lang, &t.summary), "ui.gp.open", json!({"tool": command_id(&m.id, &t.id)}), false);
         }
         Some(Entry::Panel(d)) => {
             let (icon, label, help) = panel_button(m, d, lang);
-            show(icon, &label, &help, "ui.pane.plugin", json!({"id": m.id}));
+            show(icon, &label, &help, "ui.pane.plugin", json!({"id": m.id}), false);
         }
         None => {}
     }
 }
 
-/// Whether the sign-in `login` is kept: an Earthdata token that hasn't expired, for the session or
-/// remembered on this computer; a Copernicus Data Space sign-in, or one remembered; any ArcGIS
-/// session. Read from what the app keeps in memory, never from the system's credential store.
-fn login_kept(login: rustgis_engine::plugins::Login) -> bool {
+/// A plugin command's `help` with, when it needs the sign-in `login`, a line saying which and
+/// whether it is kept; and whether it is, for its key.
+fn login_help<'a>(
+    ctx: &egui::Context,
+    login: Option<rustgis_engine::plugins::Login>,
+    help: &'a str,
+) -> (std::borrow::Cow<'a, str>, Option<bool>) {
+    let Some(login) = login else { return (std::borrow::Cow::Borrowed(help), None) };
+    let kept = login_kept(ctx, login);
+    let gap = if help.is_empty() { "" } else { "\n\n" };
+    (std::borrow::Cow::Owned(format!("{help}{gap}{}", login_text(login, kept))), Some(kept))
+}
+
+/// Whether the sign-in `login` is kept: an Earthdata token that hasn't expired (one remembered on
+/// this computer is read at launch); a Copernicus Data Space sign-in, or one remembered; an ArcGIS
+/// session that renews itself or hasn't expired. Read from what the app keeps in memory, never
+/// from the system's credential store, and once a frame however many buttons ask.
+fn login_kept(ctx: &egui::Context, login: rustgis_engine::plugins::Login) -> bool {
     use rustgis_engine::plugins::Login;
     use rustgis_engine::render::rustgis_tiles::{arcgis_auth, copernicus, earthdata};
-    match login {
-        Login::Earthdata => {
-            if earthdata::has_token() {
-                !earthdata::token_expired()
-            } else {
-                earthdata::is_remembered()
-            }
-        }
-        Login::Copernicus => copernicus::signed_in().is_some() || copernicus::is_remembered_now() == Some(true),
-        Login::Arcgis => !arcgis_auth::list().is_empty(),
+    let id = egui::Id::unique("plugin_login_kept");
+    let pass = ctx.cumulative_pass_nr();
+    let slot = match login {
+        Login::Earthdata => 0,
+        Login::Copernicus => 1,
+        Login::Arcgis => 2,
+    };
+    let mut known = ctx.data(|d| d.get_temp::<(u64, [Option<bool>; 3])>(id)).filter(|(p, _)| *p == pass).map_or([None; 3], |(_, k)| k);
+    if let Some(kept) = known[slot] {
+        return kept;
     }
+    let kept = match login {
+        // A remembered token is read into the session at launch; remembered with none in the
+        // session means one that expired or was damaged and couldn't be deleted.
+        Login::Earthdata => earthdata::has_token() && !earthdata::token_expired(),
+        Login::Copernicus => copernicus::signed_in().is_some() || copernicus::is_remembered_now() == Some(true),
+        Login::Arcgis => arcgis_auth::kept(),
+    };
+    known[slot] = Some(kept);
+    ctx.data_mut(|d| d.insert_temp(id, (pass, known)));
+    kept
 }
 
 /// The tooltip line of a command that needs the sign-in `login`, `kept` or not.

@@ -230,10 +230,11 @@ cargo build --release --target wasm32-unknown-unknown
 - `commands[].login`: the sign-in the command's data needs, one RustGIS keeps for the user:
   `earthdata` (an Earthdata Login token), `copernicus` (a Copernicus Data Space sign-in) or
   `arcgis` (an ArcGIS session). On the plugin's tab, the command's button and menu row show a key
-  over their icon: green while that sign-in is kept (an Earthdata token that hasn't expired, a
-  sign-in remembered on this computer included), red while it is missing; the tooltip says which
-  sign-in and where to give it. The command still runs either way, so it should still say what's
-  missing. Any other value refuses the plugin; RustGIS versions before it ignore the field.
+  over their icon: green while that sign-in is kept (an Earthdata token or an ArcGIS session that
+  hasn't expired or renews itself, a sign-in remembered on this computer included), red while it
+  is missing; the tooltip says which sign-in and where to give it. The command still runs either
+  way, so it should still say what's missing. Any other value refuses the plugin; RustGIS versions
+  before it ignore the field.
 - Tool parameter `kind`s: `layer`, `vectorLayer`, `polygonLayer`, `pointLayer`, `field`,
   `numericField`, `number`, `text`, `choice` (with 1 to 64 `choices`), `bool` and `file` (see
   [File parameters](#file-parameters)). Each has `name`, `label`, optional `help`, `required`
