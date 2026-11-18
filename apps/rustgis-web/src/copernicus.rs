@@ -58,8 +58,8 @@ pub fn sign_in(username: String, password: String, totp: String, slot: Slot<Resu
 /// Renews the sign-in's access token when `url` is on a CDSE data host and the token is about to
 /// expire (one renewal at a time; the fetches meanwhile use the token while it is still valid, and
 /// once it has expired, the page left idle, wait for the renewal, as on the desktop, rather than
-/// go without it and be refused). A refused renewal ends the sign-in; an unreachable host keeps it and is tried again later. An
-/// answer that lands after the fetch was cancelled is still kept: the server may have spent the
+/// go without it and be refused). A refused renewal ends the sign-in; an unreachable host keeps
+/// it and is tried again later. An answer that lands after the fetch was cancelled is still kept: the server may have spent the
 /// refresh token, and `renewal_done` changes nothing for a sign-in replaced or ended since.
 pub async fn renew_if_due(url: &str, still: Option<cache::Still>) {
     if !copernicus::is_data_host(url) || cache::check_still(&still).is_err() {
