@@ -436,6 +436,8 @@ fn ring_length(r: &[Coord]) -> f64 {
 #[derive(Clone)]
 struct Key {
     rows: Weak<Vec<Feature>>,
+    /// The rows the layer draws ([`drawn_rows`]): `None` for all of them.
+    drawn: Option<Vec<bool>>,
     layer: String,
     level: Option<String>,
     heights: HeightsKey,
@@ -450,6 +452,7 @@ enum HeightsKey {
 impl Key {
     fn same(&self, o: &Key) -> bool {
         self.rows.ptr_eq(&o.rows)
+            && self.drawn == o.drawn
             && self.layer == o.layer
             && self.level == o.level
             && match (&self.heights, &o.heights) {
@@ -462,7 +465,8 @@ impl Key {
     }
 }
 
-/// The waters read last, kept while their layer, field and heights stay the same: a view drawn as
+/// The waters read last, kept while their layer, the rows it draws, field and heights stay the
+/// same: a view drawn as
 /// the map moves reads no shore again. One read over elevation tiles with a shore tile missing is
 /// read again after its `retry` ([`RETRY_MISSING`] or the tile cache's wait).
 static LAST: Mutex<Vec<(Key, Arc<Water>, web_time::Instant)>> = Mutex::new(Vec::new());
@@ -476,11 +480,15 @@ fn still_good(water: &Water, read_at: web_time::Instant) -> bool {
 }
 
 /// A water layer's polygons in Web Mercator, each part of a multipolygon on its own, with the
-/// level its row gives in the `level` field, when it does.
-fn polygons(layer: &rustgis_map::Layer, level: Option<&str>) -> Vec<(Vec<Vec<Coord>>, Option<f64>)> {
+/// level its row gives in the `level` field, when it does: those of the rows `drawn` keeps (all
+/// without it).
+fn polygons(layer: &rustgis_map::Layer, level: Option<&str>, drawn: Option<&[bool]>) -> Vec<(Vec<Vec<Coord>>, Option<f64>)> {
     let field = level.and_then(|f| layer.dataset.field_index(f));
     let mut polygons = Vec::new();
-    for ft in layer.dataset.features.iter() {
+    for (row, ft) in layer.dataset.features.iter().enumerate() {
+        if drawn.is_some_and(|d| !d.get(row).copied().unwrap_or(false)) {
+            continue;
+        }
         let Some(Geometry::Polygon(parts)) = &ft.geometry else { continue };
         let given = field.and_then(|i| ft.attrs.get(i)).and_then(rustgis_data::Value::as_f64).filter(|v| v.is_finite());
         for rings in parts {
@@ -491,18 +499,38 @@ fn polygons(layer: &rustgis_map::Layer, level: Option<&str>) -> Vec<(Vec<Vec<Coo
     polygons
 }
 
-/// The water layer named by `map`'s terrain, when it is a polygon layer there.
+/// The water layer named by `map`'s terrain, when it is a polygon layer there holding all its
+/// polygons: not one read a view at a time, whose rows are the view's (#2305; `map.terrain`
+/// refuses it, and a project naming it drops the water as it opens).
 fn water_layer(map: &Map) -> Option<(&rustgis_map::Layer, Option<&str>)> {
     let w = map.view.terrain.as_ref()?.water.as_ref()?;
-    let layer = map.layer_by_name(&w.layer).filter(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon)?;
+    let layer = map.layer_by_name(&w.layer).filter(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon && !l.is_streamed())?;
     Some((layer, w.level.as_deref()))
 }
 
-/// How many polygons of `map`'s water layer [`Water::build`] reads at wider steps than half
-/// `ground`'s cell, worked out from their shapes alone: no height is read (nor a tile asked for).
-pub(super) fn coarse_shores(map: &Map, ground: &Ground) -> usize {
+/// The rows of the water `layer` its fill draws in a view of `camera` on `map` (#2305): those its
+/// definition query, the time slider's window and the display filters at the view's scale keep,
+/// within the map's view distance, as the layer's drawing keeps them. A lake the layer doesn't
+/// draw is neither flat, lit flat nor banded. `None` when it draws every row.
+fn drawn_rows(map: &Map, layer: &rustgis_map::Layer, camera: &Camera) -> Option<Vec<bool>> {
+    let query = layer.definition_query.as_deref().is_some_and(|q| !q.trim().is_empty());
+    let timed = layer.time.as_ref().is_some_and(|t| t.window.is_some());
+    if !query && !timed && layer.display_filters.is_empty() && map.view.clip_distance.is_none() {
+        return None;
+    }
+    let mut rows = layer.drawn_rows(map.ground_res_at(camera) / rustgis_geom::PIXEL_M);
+    if let Some(d) = map.view.clip_distance {
+        crate::within_view_distance(&mut rows, &layer.dataset, camera.center_lonlat(), d);
+    }
+    rows.contains(&false).then_some(rows)
+}
+
+/// How many polygons of `map`'s water layer, as a view of `camera` draws it, [`Water::build`]
+/// reads at wider steps than half `ground`'s cell, worked out from their shapes alone: no height
+/// is read (nor a tile asked for).
+pub(super) fn coarse_shores(map: &Map, camera: &Camera, ground: &Ground) -> usize {
     let Some((layer, level)) = water_layer(map) else { return 0 };
-    let polygons = polygons(layer, level);
+    let polygons = polygons(layer, level, drawn_rows(map, layer, camera).as_deref());
     let (perimeter, unread) = shores(&polygons);
     let (_, wider) = shore_step(cell_size(ground).map(|c| c / 2.0), perimeter / MAX_SHORE_SAMPLES as f64);
     if wider { unread } else { 0 }
@@ -515,12 +543,13 @@ fn shores(polygons: &[(Vec<Vec<Coord>>, Option<f64>)]) -> (f64, usize) {
     (unread.clone().flat_map(|(rings, _)| rings).map(|r| ring_length(r)).sum(), unread.count())
 }
 
-/// The water of `map`'s terrain over `ground` (its heights, before the water is set), when it
-/// names a polygon layer there.
-pub(super) fn of(map: &Map, ground: &Ground) -> Option<Arc<Water>> {
+/// The water of `map`'s terrain over `ground` (its heights, before the water is set) in a view
+/// of `camera`, when it names a polygon layer there: the polygons that view draws.
+pub(super) fn of(map: &Map, camera: &Camera, ground: &Ground) -> Option<Arc<Water>> {
     let (layer, level) = water_layer(map)?;
     let key = Key {
         rows: layer.dataset.features.allocation_key(),
+        drawn: drawn_rows(map, layer, camera),
         layer: layer.name.clone(),
         level: level.map(str::to_string),
         heights: match &ground.heights {
@@ -533,7 +562,7 @@ pub(super) fn of(map: &Map, ground: &Ground) -> Option<Arc<Water>> {
     {
         return Some(water.clone());
     }
-    let water = Arc::new(Water::build(polygons(layer, level), ground, MAX_SHORE_SAMPLES));
+    let water = Arc::new(Water::build(polygons(layer, level, key.drawn.as_deref()), ground, MAX_SHORE_SAMPLES));
     if let Ok(mut last) = LAST.lock() {
         last.retain(|(k, _, _)| k.rows.strong_count() > 0 && !k.same(&key));
         if last.len() >= KEPT {
@@ -848,6 +877,39 @@ mod tests {
         assert_eq!(Ground::of(&m, &camera).unwrap().water_unlevelled(), 0);
     }
 
+    #[test]
+    fn a_lake_its_layer_doesnt_draw_leaves_the_ground_as_it_is() {
+        // #2305: the water is the rows its layer draws, as the layer's fill is: a lake its
+        // definition query, a display filter or the view distance leaves out is neither flat
+        // (nor lit flat, nor banded: they go by this water).
+        let at = |lon, lat| lonlat_to_merc(Coord::new(lon, lat));
+        let (mut m, camera) = hill_with_water(Some("nivel"));
+        let (lake, reservoir) = (at(0.25, 0.0), at(-0.4, -0.4));
+        let flat = |m: &Map| {
+            let g = Ground::of(m, &camera).unwrap();
+            let on_dem = g.height(lake) == g.raw_height(lake).map(|h| h * 2.0);
+            (!on_dem, g.height(reservoir) == Some(2468.0), g.water_unlevelled())
+        };
+        assert_eq!(flat(&m), (true, true, 1), "every row: the pond off the DEM is counted");
+        fn lagos(m: &mut Map) -> &mut rustgis_map::Layer {
+            m.layers.iter_mut().find(|l| l.name == "lagos").unwrap()
+        }
+        lagos(&mut m).definition_query = Some("nivel > 0".into());
+        assert_eq!(flat(&m), (false, true, 0), "the query keeps the reservoir only");
+        lagos(&mut m).definition_query = None;
+        assert_eq!(flat(&m), (true, true, 1), "the query taken off: the water read again");
+        let filter =
+            |min_scale| rustgis_map::effects::DisplayFilter { name: "f".into(), min_scale, max_scale: None, where_: "nivel > 0".into() };
+        lagos(&mut m).display_filters = vec![filter(None)];
+        assert_eq!(flat(&m), (false, true, 0), "a display filter keeps the reservoir only");
+        lagos(&mut m).display_filters = vec![filter(Some(1000.0))];
+        assert_eq!(flat(&m), (true, true, 1), "a filter for closer in doesn't apply at this scale");
+        lagos(&mut m).display_filters.clear();
+        // The reservoir's nearest corner is about 35 km from the view's centre, the lake's 50 km.
+        m.view.clip_distance = Some(40_000.0);
+        assert_eq!(flat(&m), (false, true, 0), "the view distance leaves the lake out");
+    }
+
     /// Every overlapping lake used to occupy every one of the 256² grid cells: 16,384 simple
     /// polygons attempted a billion references. The grids share a budget while retaining the
     /// first overlapping polygon's level and ordinary containment.
@@ -1055,7 +1117,7 @@ mod tests {
             body: 1.0,
             water: None,
         };
-        let water = of(&m, &ground).unwrap();
+        let water = of(&m, &m.camera, &ground).unwrap();
         assert!(!ground.pending());
         assert_eq!(water.retry, Some(cache::RETRY), "a failed tile: asked again after the cache's wait");
         // Frames drawn within that wait take this read (no shore is read again); one after it
@@ -1068,7 +1130,7 @@ mod tests {
         }
         // A tile still on its way: read again soon.
         *ground_pending(&ground).unwrap().borrow_mut() = true;
-        let soon = Water::build(polygons(water_layer(&m).unwrap().0, None), &ground, MAX_SHORE_SAMPLES);
+        let soon = Water::build(polygons(water_layer(&m).unwrap().0, None, None), &ground, MAX_SHORE_SAMPLES);
         assert_eq!(soon.retry, Some(RETRY_MISSING));
         assert!(soon.waits_for_tiles() && !water.waits_for_tiles());
     }
@@ -1123,15 +1185,15 @@ mod tests {
 
     #[test]
     fn a_water_read_while_tiles_came_keeps_the_next_frame_waiting() {
-        let (m, _) = hill_with_water(None);
+        let (m, camera) = hill_with_water(None);
         // Read while shore tiles were on their way: kept for a second.
         let mut first = zoom_one(true);
-        first.attach_water(&m);
+        first.attach_water(&m, &camera);
         assert!(first.water.as_ref().unwrap().waits_for_tiles());
         // The next frame takes it from the cache and reads no tile inside its lakes: its heights
         // are still pending, so a frame or an export goes on waiting for the levels.
         let mut next = zoom_one(false);
-        next.attach_water(&m);
+        next.attach_water(&m, &camera);
         assert!(next.pending(), "a cached water waiting for tiles leaves the frame pending");
         // A read with nothing on its way leaves the frame as it is.
         let (dem, camera) = hill_with_water(None);
@@ -1171,6 +1233,7 @@ mod tests {
     fn tiles_of_another_encoding_are_other_heights() {
         let key = |encoding| Key {
             rows: Weak::new(),
+            drawn: None,
             layer: "lagos".into(),
             level: None,
             heights: HeightsKey::Tiles { url: "https://e.com/{z}/{x}/{y}.png".into(), encoding, zoom: 9 },
