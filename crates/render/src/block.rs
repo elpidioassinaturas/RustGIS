@@ -479,7 +479,7 @@ fn units(layer: &rustgis_map::Layer, b: &Block) -> Units {
         }
     }
     let side_units = |i: usize| {
-        // The side as a line: across it as far beyond it as `beyond` tells, along it from `lo` to `hi`.
+        // The side as a line: across it as `beyond` tells, along it from `lo` to `hi`.
         let (side, p, z) = b.side(i);
         let (lo, hi) = (b.along(side, p).min(b.along(side, z)), b.along(side, p).max(b.along(side, z)));
         // Only the parts reaching the side can cross it (a round block has many short sides).
@@ -699,8 +699,9 @@ fn draw_patterns(
 }
 
 /// Draws the walls of block `b` over the ground already draped in `pm`: the sides facing the eye
-/// (a box and a circle are convex, so no ground stands in front of them), each stretch of `edges` from the
-/// ground down to the base in the colours `runs` gives along it ([`runs`]) with their patterns
+/// (a box and a circle are convex, so no ground stands in front of them), each stretch of
+/// `edges` from the ground down to the base in the colours `runs` gives along it ([`runs`]) with
+/// their patterns
 /// over them ([`draw_patterns`]), lit by the way its side faces the light as extruded walls are
 /// and darker toward its foot, fogged with distance as the ground is (into `fog` toward the view's
 /// reach `far`), and outlined along the ground, the base, the box's corners (a round block's
@@ -712,7 +713,8 @@ pub(crate) fn draw_walls(pm: &mut Pixmap, view: &View, ground: &Ground, b: &Bloc
     let (w, h) = (view.width, view.height);
     let (eu, ev, _) = cam.eye(h);
     let centre = cam.ground_px(Coord::new((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0));
-    // Each side's outward normal on the ground (away from the outline's centre) where it faces the eye.
+    // Each side's outward normal on the ground (away from the outline's centre), where it faces
+    // the eye.
     let faces: Vec<Option<(f64, f64)>> = (0..b.sides())
         .map(|i| {
             let (_, a, z) = b.side(i);
@@ -745,6 +747,8 @@ pub(crate) fn draw_walls(pm: &mut Pixmap, view: &View, ground: &Ground, b: &Bloc
     let res = cam.res.max(1e-9);
     // Where a run's patterns are cut to (one for every run, cleared each time).
     let mut mask: Option<Mask> = None;
+    // The part of it the last run filled, cleared before the next: a round block has hundreds of sides.
+    let mut dirty: Option<tiny_skia::Rect> = None;
     for (s, n) in faces.iter().enumerate() {
         let Some(n) = *n else { continue };
         let (side, a, z) = b.side(s);
@@ -829,7 +833,11 @@ pub(crate) fn draw_walls(pm: &mut Pixmap, view: &View, ground: &Ground, b: &Bloc
         };
         let shade = (top_shade + foot_shade) / 2.0;
         let tone = |c: Rgba| c.shade(shade).lerp(fog.with_alpha(c.a()), f);
+        // A round block's contact at the corner it shares with the side before, when the colours
+        // either side of it differ.
+        let before = runs[(s + faces.len() - 1) % faces.len()].last();
         let runs = &runs[s];
+        let corner = runs.first().filter(|r| round && before.is_some_and(|p| p.color != r.color || p.patterns != r.patterns));
         for run in runs {
             // The side in one path a colour, every stretch (cut to the colour's) a quad a hair
             // longer each way along the edge: filled at once, the overlaps leave no seam, where
@@ -877,17 +885,22 @@ pub(crate) fn draw_walls(pm: &mut Pixmap, view: &View, ground: &Ground, b: &Bloc
                 mask = Mask::new(pm.width(), pm.height());
             }
             if let Some(cut) = mask.as_mut() {
-                cut.data_mut().fill(0);
+                if let Some(r) = dirty.take() {
+                    clear_mask(cut, r);
+                }
                 cut.fill_path(&path, FillRule::Winding, true, Transform::identity());
+                dirty = Some(path.bounds());
                 let (x0, x1) = (run.lo / res * dir, run.hi / res * dir);
                 draw_patterns(pm, cut, &run.patterns, ((x0.min(x1), x0.max(x1)), up_range), scale, tone, at);
             }
         }
         // The contacts between colours, straight down.
-        for c in runs.windows(2).map(|w| w[0].hi) {
+        for c in runs.windows(2).map(|w| w[0].hi).chain(corner.map(|r| r.lo)) {
             let at = quads.iter().find_map(|(ends, [fa, fz], [ta, tz])| {
                 let (ca, cz) = (b.along(side, ends[0]), b.along(side, ends[1]));
-                let inside = (cz - ca).abs() >= 1e-12 && (ca - c) * (cz - c) <= 0.0;
+                // (A round block's corner contact is where its first stretch begins, near enough.)
+                let start = round && (ca - c).abs() <= 1e-9 * (b.x1 - b.x0);
+                let inside = (cz - ca).abs() >= 1e-12 && ((ca - c) * (cz - c) <= 0.0 || start);
                 inside.then(|| ((c - ca) / (cz - ca), *ta, *tz, *fa, *fz))
             });
             if let Some((t, ta, tz, fa, fz)) = at {
@@ -904,6 +917,19 @@ pub(crate) fn draw_walls(pm: &mut Pixmap, view: &View, ground: &Ground, b: &Bloc
         }
     }
     stroke_outlines(pm, &mut outlines, k);
+}
+
+/// Clears `mask` over the box `r` (physical px), a pixel round it for the anti-aliased edge.
+fn clear_mask(mask: &mut Mask, r: tiny_skia::Rect) {
+    let (w, h) = (mask.width() as usize, mask.height() as usize);
+    let span = |lo: f32, hi: f32, n: usize| ((lo.floor() - 1.0).max(0.0) as usize, ((hi.ceil() + 1.0).max(0.0) as usize).min(n));
+    let ((x0, x1), (y0, y1)) = (span(r.left(), r.right(), w), span(r.top(), r.bottom(), h));
+    let data = mask.data_mut();
+    for y in y0..y1 {
+        if let Some(row) = data.get_mut(y * w + x0..y * w + x1.max(x0)) {
+            row.fill(0);
+        }
+    }
 }
 
 /// Strokes the walls' `outlines` (each in its colour) at the scale `k` (physical px a logical

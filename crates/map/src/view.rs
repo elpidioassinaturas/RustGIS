@@ -265,8 +265,9 @@ pub const BLOCK_MAX_DEPTH: f64 = 20_000.0;
 impl TerrainBlock {
     /// Why this block can't be drawn, when it can't: its box (ordered, within the Web Mercator
     /// world, at least [`BLOCK_MIN_SIDE`] a side and not in degrees), its depth (0 to
-    /// [`BLOCK_MAX_DEPTH`]), a circle's radius (at least half that side) and opaque walls. Checked where a block is set and where a project is
-    /// read, so a saved block that fails it is never drawn.
+    /// [`BLOCK_MAX_DEPTH`]), a circle's radius (at least half that side) and opaque walls.
+    /// Checked where a block is set and where a project is read, so a saved block that fails it
+    /// is never drawn.
     pub fn check(&self) -> Result<(), String> {
         if let Some([x0, y0, x1, y1]) = self.extent {
             if !([x0, y0, x1, y1].iter().all(|v| v.is_finite()) && x0 < x1 && y0 < y1) {

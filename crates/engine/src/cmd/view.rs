@@ -592,11 +592,15 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
             Some(l) => json!({"color": b.walls.hex(), "layer": l}),
             None => json!(b.walls.hex()),
         };
-        let (shape, radius) = match b.shape {
-            rustgis_map::view::BlockShape::Box => ("box", None),
-            rustgis_map::view::BlockShape::Circle { radius } => ("circle", radius),
+        // A circle's radius as drawn: the largest in the box when none is given or a larger one is
+        // (`radius_capped`), when the box is known.
+        let largest = b.extent.or(dem_box.as_ref().and_then(|d| d.1)).map(|[x0, y0, x1, y1]| (x1 - x0).min(y1 - y0) / 2.0);
+        let (shape, radius, capped) = match (b.shape, largest) {
+            (rustgis_map::view::BlockShape::Box, _) => ("box", None, None),
+            (rustgis_map::view::BlockShape::Circle { radius: Some(r) }, Some(l)) => ("circle", Some(r.min(l)), Some(r > l)),
+            (rustgis_map::view::BlockShape::Circle { radius }, l) => ("circle", radius.or(l), Some(false)),
         };
-        json!({"extent": extent, "extent_from": from, "depth": b.depth, "walls": walls, "shape": shape, "radius": radius})
+        json!({"extent": extent, "extent_from": from, "depth": b.depth, "walls": walls, "shape": shape, "radius": radius, "radius_capped": capped})
     });
     if matches!(t.source, TerrainSource::Layer(_)) && t.block.is_some() && dem_box.is_none() {
         out["block"]["pendingDem"] = json!(true);

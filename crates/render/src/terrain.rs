@@ -337,8 +337,9 @@ impl Ground {
     }
 
     /// The block diagram `map`'s terrain is cut to, when it has one: its box (the DEM's extent
-    /// when none is given; none over elevation tiles then) or the circle in it, and its base `depth` metres below the
-    /// lowest ground read in it (on a grid of [`BLOCK_SAMPLES`] cells a side; where a DEM has no
+    /// when none is given; none over elevation tiles then) or the circle in it, and its base
+    /// `depth` metres below the lowest ground read in it (on a grid of [`BLOCK_SAMPLES`] cells a
+    /// side, inside the circle for a round block; where a DEM has no
     /// height, 0, as the ground is drawn there; while elevation tiles are on their way, not
     /// [`Block::settled`]), or
     /// half its relief, at least `BLOCK_MIN_DEPTH`, both exaggerated as the heights are.
