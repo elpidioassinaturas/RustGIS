@@ -48,7 +48,7 @@ fn redirect() -> Result<String, String> {
 }
 
 /// Waits `ms`; an error when no timer can be set (the caller gives up rather than spin).
-async fn sleep(ms: i32) -> Result<(), String> {
+pub(crate) async fn sleep(ms: i32) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
     let mut timed = Ok(());
     let promise = js_sys::Promise::new(&mut |resolve, _| {

@@ -11,13 +11,15 @@ use std::cell::Cell;
 use rustgis_ui_egui::Slot;
 use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::{cache, copernicus};
 
-/// The sign-in server, as the messages name it.
-const WHO: &str = "Copernicus Data Space's sign-in";
+/// The service, as the messages name it.
+const WHO: &str = "Copernicus Data Space";
+/// How often a fetch waiting for another one's renewal looks again (milliseconds).
+const WAIT_MS: i32 = 50;
 
 thread_local! {
     /// A sign-in is under way (one at a time).
     static SIGNING_IN: Cell<bool> = const { Cell::new(false) };
-    /// A renewal is under way: the fetches meanwhile use the token still valid.
+    /// A renewal is under way: the fetches meanwhile use the token still valid, or wait for it.
     static RENEWING: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -54,12 +56,21 @@ pub fn sign_in(username: String, password: String, totp: String, slot: Slot<Resu
 }
 
 /// Renews the sign-in's access token when `url` is on a CDSE data host and the token is about to
-/// expire (one renewal at a time; the fetches meanwhile use the token, still valid for a minute).
-/// A refused renewal ends the sign-in; an unreachable host keeps it and is tried again later. An
+/// expire (one renewal at a time; the fetches meanwhile use the token while it is still valid, and
+/// once it has expired, the page left idle, wait for the renewal, as on the desktop, rather than
+/// go without it and be refused). A refused renewal ends the sign-in; an unreachable host keeps it and is tried again later. An
 /// answer that lands after the fetch was cancelled is still kept: the server may have spent the
 /// refresh token, and `renewal_done` changes nothing for a sign-in replaced or ended since.
 pub async fn renew_if_due(url: &str, still: Option<cache::Still>) {
-    if !copernicus::is_data_host(url) || RENEWING.get() || cache::check_still(&still).is_err() {
+    if !copernicus::is_data_host(url) || cache::check_still(&still).is_err() {
+        return;
+    }
+    if RENEWING.get() {
+        while RENEWING.get() && copernicus::authorization(url).is_none() {
+            if cache::check_still(&still).is_err() || crate::arcgis::sleep(WAIT_MS).await.is_err() {
+                return;
+            }
+        }
         return;
     }
     let Some(r) = copernicus::renewal_due() else { return };
