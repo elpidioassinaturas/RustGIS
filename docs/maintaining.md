@@ -98,7 +98,8 @@ Each release adds a small project and preferences file written by that release a
 release has no such file format. Current-writer examples do not replace these historical files.
 
 New project saves and map/layer exports write format 2. Their `requires` header names only
-features present in the saved payload: `terrain-block`, `terrain-water`,
+features present in the saved payload: `terrain-block`, `terrain-block-shape` (a block
+diagram cut to a circle), `terrain-water`,
 `terrain-water-shore` (a terrain water's shore band other than the default),
 `shaded-relief-effects` (cast shadows, sky visibility, fill light or rock colour),
 `shaded-relief-light` (a Shaded Relief's ambient or balanced light) and
