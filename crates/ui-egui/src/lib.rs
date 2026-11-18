@@ -4250,6 +4250,11 @@ impl RustGisApp {
                             "tif",
                             "tiff",
                             "asc",
+                            // GRIB weather and climate model output.
+                            "grb",
+                            "grib",
+                            "grb2",
+                            "grib2",
                         ][..],
                         // Rasters GDAL reads (every one it is asked to read).
                         #[cfg(not(target_arch = "wasm32"))]

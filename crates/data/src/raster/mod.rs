@@ -14,6 +14,7 @@ mod decoded;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gdal;
 pub mod geotiff;
+pub mod grib;
 mod image_grid;
 mod lerc;
 mod lzw;
@@ -94,7 +95,7 @@ pub fn max_samples() -> usize {
 /// Largest ASCII grid file read (1 GiB).
 pub const MAX_ASCII_BYTES: u64 = 1 << 30;
 /// File extensions read as rasters.
-pub const READ_EXTENSIONS: &[&str] = &["tif", "tiff", "asc", "png", "jpg", "jpeg"];
+pub const READ_EXTENSIONS: &[&str] = &["tif", "tiff", "asc", "png", "jpg", "jpeg", "grb", "grib", "grb2", "grib2"];
 
 /// Whether a file name is a raster this module reads: a PDF's page too (refused with
 /// [`PDF_ELSEWHERE`] where [`PDF_PAGES`] is false).
@@ -1234,6 +1235,8 @@ fn read_path_placing(path: &Path, world: bool) -> Result<Raster> {
             let text = crate::provenance::read_to_string(path)?;
             read_ascii(path, &text, &name, sidecar_nodata)?
         }
+        // Read message by message, never whole.
+        "grb" | "grib" | "grb2" | "grib2" => grib::read(std::io::BufReader::new(crate::provenance::open(path)?), &name)?,
         #[cfg(not(target_arch = "wasm32"))]
         _ if gdal::is_gdal_raster_name(&path.to_string_lossy()) => {
             // Converted once to a GeoTIFF in the cache; the layer still names this file.
@@ -1687,6 +1690,7 @@ pub fn read_bytes(file_name: &str, bytes: &[u8]) -> Result<Raster> {
             let text = std::str::from_utf8(bytes).map_err(|_| DataError::Format("not a text file".into()))?;
             ascii::read(text, &name, None)
         }
+        "grb" | "grib" | "grb2" | "grib2" => grib::read_bytes(bytes, &name),
         other => Err(DataError::Unsupported(format!(".{other}"))),
     }
 }
