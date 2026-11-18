@@ -464,14 +464,15 @@ mod tests {
     #[test]
     fn a_hole_dense_along_one_side_keeps_its_shape() {
         // 100 000 points round a 600 × 100 rectangle (one point in six read), and a hole across
-        // its upper half, too long to be kept whole, with 61 points along its top side.
+        // its upper half, too long to be kept whole, with 61 points along its top side (its bottom
+        // bent up to y = 40 in the middle, so one point in three keeps clearly over half its area).
         let n = 25_000;
         let mut outer: Vec<(f32, f32)> = (0..n).map(|i| (i as f32 * 600.0 / n as f32, 0.0)).collect();
         outer.extend((0..n).map(|i| (600.0, i as f32 * 100.0 / n as f32)));
         outer.extend((0..n).map(|i| (600.0 - i as f32 * 600.0 / n as f32, 100.0)));
         outer.extend((0..n).map(|i| (0.0, 100.0 - i as f32 * 100.0 / n as f32)));
         let mut hole: Vec<(f32, f32)> = (0..=60).map(|i| (50.0 + i as f32 * 500.0 / 60.0, 10.0)).collect();
-        hole.extend([(550.0, 50.0), (300.0, 50.0), (50.0, 50.0), (50.0, 10.0)]);
+        hole.extend([(550.0, 50.0), (300.0, 40.0), (50.0, 50.0), (50.0, 10.0)]);
         assert!(hole.len() >= KEEP_WHOLE);
         // Thinned, but not to its top side alone.
         let how = Thinning::new([outer.len(), hole.len()].into_iter());
