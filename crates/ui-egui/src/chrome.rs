@@ -532,10 +532,10 @@ fn sources_opening(app: &RustGisApp) -> bool {
     app.session.project.maps.iter().flat_map(|m| &m.layers).filter_map(|l| l.source.as_ref()).any(|s| s.opening_progress().is_some())
 }
 
-/// Whether windows are being read off the frame (none in the browser).
+/// Whether windows or PDF pages are being read off the frame (none in the browser).
 fn window_reads_under_way(app: &RustGisApp) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
-    return !app.ui.window_reads.is_empty();
+    return !app.ui.window_reads.is_empty() || !app.ui.page_reads.is_empty() || !app.ui.page_queue.is_empty();
     #[cfg(target_arch = "wasm32")]
     {
         let _ = app;
@@ -892,6 +892,7 @@ pub(crate) const UI_COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.themeLoad", "Load a Theme from File…", "Settings › Theme"),
     ("ui.themeReload", "Reload Themes", "Settings › Theme"),
     ("ui.scale", "Reset Interface Scale", "Settings › Theme"),
+    ("ui.datumGrids", "Toggle Downloading Datum Grids", "Settings › Datum Grids"),
     ("ui.map.gpu", "Toggle GPU Rendering", "View"),
     ("ui.importShapefile", "Import Shapefile with Projection…", "Home › Add"),
     ("ui.measurementUnits", "Toggle Imperial Measurements", "Home › Inspect › Measure"),

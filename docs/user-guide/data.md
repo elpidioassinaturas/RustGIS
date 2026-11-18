@@ -27,6 +27,7 @@ Formats](data-formats.md).
 | GeoTIFF and cloud-optimised GeoTIFF (`.tif`, `.tiff`) | Yes | Yes |
 | ASCII grid (`.asc`, with an optional `.prj`) | Yes | No |
 | Unreferenced TIFF and PNG scans; JPEG with `"as": "scan"` | Yes | GeoTIFF after georeferencing |
+| PDF pages: GeoPDFs placed by their coordinates, other pages as scans | Yes (desktop, command line and Python) | GeoTIFF after georeferencing |
 | Through GDAL: JPEG 2000, ERDAS Imagine, SRTM HGT, DTED, NetCDF, HDF, ENVI, SAGA… | Yes (desktop, when GDAL is installed) | No |
 | Web tiles: XYZ/TMS/WMS rasters, Mapbox Vector Tiles, MapLibre styles, PMTiles and MBTiles archives | Yes | Yes (Imagery › Create Hosted Imagery) |
 | RustGIS project (`.rgis`; older `.rgisx` files open too) | Yes | Yes |
@@ -1032,6 +1033,10 @@ of `id`. With `probe: true`, it returns the secret-free address to fetch (`fetch
 databases). For non-database kinds, pass that response text as `answer` with the same definition
 to parse it without a network request. Database kinds ignore `answer` and test through their
 driver. An anonymous S3 test needs at least one named bucket.
+
+**Test** does not send service requests to XYZ URL templates with tile coordinates
+(`{z}/{x}/{y}`, also `{zoom}` or `{-y}`). To add one to the map, use
+**Home › Add › Basemap › Add Tile Layer…** (`map.addTiles`) instead.
 
 `connection.browse` lists what a connection offers, a level at a time: database roots list the
 schemas returned by their provider; opening a schema lists its spatial tables. Services list their

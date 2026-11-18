@@ -156,18 +156,24 @@ struct Cut {
     parts: Vec<Part>,
 }
 
-/// The rows, layer, definition query and box a [`Cut`] was read for, and whether for the water.
+/// The rows, layer, query, query context and box a [`Cut`] was read for, and whether for the water.
 struct Key {
     rows: Weak<Vec<Feature>>,
     layer: String,
     query: Option<String>,
+    page: Option<Arc<rustgis_data::query::SeriesPage>>,
     sides: [f64; 4],
     water: bool,
 }
 
 impl Key {
     fn same(&self, o: &Key) -> bool {
-        self.rows.ptr_eq(&o.rows) && self.layer == o.layer && self.query == o.query && self.sides == o.sides && self.water == o.water
+        self.rows.ptr_eq(&o.rows)
+            && self.layer == o.layer
+            && self.query == o.query
+            && self.page == o.page
+            && self.sides == o.sides
+            && self.water == o.water
     }
 }
 
@@ -178,17 +184,18 @@ static LAST: Mutex<Vec<(Key, Arc<Cut>)>> = Mutex::new(Vec::new());
 const KEPT: usize = 4;
 
 /// `layer`'s [`Cut`] along block `b`'s box, from [`LAST`] when it was read already.
-fn cut(layer: &rustgis_map::Layer, b: &Block, water: bool) -> Arc<Cut> {
+fn cut(layer: &rustgis_map::Layer, b: &Block, water: bool, env: &rustgis_data::query::Env) -> Arc<Cut> {
     let key = Key {
         rows: layer.dataset.features.allocation_key(),
         layer: layer.name.clone(),
         query: layer.definition_query.clone(),
+        page: env.page.as_ref().filter(|_| layer.definition_query.as_deref().is_some_and(rustgis_data::query::reads_series_page)).cloned(),
         sides: [b.x0, b.y0, b.x1, b.y1],
         water,
     };
     let kept = LAST.lock().ok().and_then(|last| last.iter().find(|(k, _)| k.same(&key)).map(|(_, u)| u.clone()));
     kept.unwrap_or_else(|| {
-        let u = Arc::new(units(layer, b, water));
+        let u = Arc::new(units(layer, b, water, env));
         if let Ok(mut last) = LAST.lock() {
             last.retain(|(k, _)| k.rows.strong_count() > 0 && !k.same(&key));
             if last.len() >= KEPT {
@@ -214,7 +221,7 @@ fn cut(layer: &rustgis_map::Layer, b: &Block, water: bool) -> Arc<Cut> {
 /// longitude and latitude, then the rings reaching the box only, put in Web Mercator) and
 /// tests each piece's middle against the parts whose box holds it. The colours are read each
 /// frame, a few pieces a side.
-pub(crate) fn runs(map: &Map, b: &Block, scale: f64) -> Runs {
+pub(crate) fn runs(map: &Map, b: &Block, scale: f64, env: &rustgis_data::query::Env) -> Runs {
     let whole = |i: usize| {
         let (lo, hi) = if SIDES[i] & (SOUTH | NORTH) != 0 { (b.x0, b.x1) } else { (b.y0, b.y1) };
         vec![Run { lo, hi, color: b.walls, patterns: Vec::new() }]
@@ -227,8 +234,8 @@ pub(crate) fn runs(map: &Map, b: &Block, scale: f64) -> Runs {
         .and_then(|t| t.walls_layer.as_deref())
         .and_then(|n| crate::terrain::walls_layer(map, n));
     let Some(layer) = layer else { return [0, 1, 2, 3].map(whole) };
-    let cut = cut(layer, b, false);
-    let styler = layer.styler(None);
+    let cut = cut(layer, b, false, env);
+    let styler = layer.styler_with(env.clone());
     let grow = layer.size_factor(scale);
     let look = |row: Option<usize>| match row {
         None => (b.walls, Vec::new()),
@@ -319,8 +326,8 @@ fn side_point(b: &Block, side: u8, t: f64) -> Coord {
 /// water (`water`), the first polygon in row order instead, as the ground's level takes it, given
 /// as its place in the polygons reaching the box (each part of a multipolygon on its own), which
 /// are kept.
-fn units(layer: &rustgis_map::Layer, b: &Block, water: bool) -> Cut {
-    let keep = layer.query_rows(&layer.dataset);
+fn units(layer: &rustgis_map::Layer, b: &Block, water: bool, env: &rustgis_data::query::Env) -> Cut {
+    let keep = layer.query_rows_with(&layer.dataset, env);
     // The box in longitude and latitude (Web Mercator keeps north-up boxes north-up), so a part
     // off it is left before its rings are put in Web Mercator.
     let (lo, hi) = (merc_to_lonlat(Coord::new(b.x0, b.y0)), merc_to_lonlat(Coord::new(b.x1, b.y1)));
@@ -427,7 +434,7 @@ const SECTION_WATER: Rgba = Rgba::rgb(0x8F, 0xB8, 0xDE);
 /// kept as the walls' units are ([`cut`]). Each frame looks at every edge of the rings of each
 /// water body a stretch lies in once, a few comparisons an edge, to keep those within the ramp
 /// (the ramp follows the view's scale, so they can't be kept with the stretches).
-pub(crate) fn water_runs(map: &Map, b: &Block, ground: &Ground, res: f64) -> WaterRuns {
+pub(crate) fn water_runs(map: &Map, b: &Block, ground: &Ground, res: f64, env: &rustgis_data::query::Env) -> WaterRuns {
     let mut out: WaterRuns = Default::default();
     let Some(t) = map.view.terrain.as_ref() else { return out };
     let (Some(bw), Some(tw), Some(water)) = (t.block.as_ref().and_then(|b| b.water.as_ref()), t.water.as_ref(), ground.water()) else {
@@ -435,8 +442,8 @@ pub(crate) fn water_runs(map: &Map, b: &Block, ground: &Ground, res: f64) -> Wat
     };
     let Some(layer) = crate::terrain::walls_layer(map, &tw.layer) else { return out };
     let field = bw.field.as_deref().and_then(|f| layer.dataset.field_index(f));
-    let cut = cut(layer, b, true);
-    let styler = layer.styler(None);
+    let cut = cut(layer, b, true, env);
+    let styler = layer.styler_with(env.clone());
     let x = ground.exaggeration();
     let ramp = f64::from(crate::terrain::SHORE_PX) * res;
     for (i, side) in SIDES.into_iter().enumerate() {
@@ -1051,7 +1058,7 @@ mod tests {
     fn walls_take_the_unit_under_the_boxs_edge_with_contacts_straight_down() {
         let (mut m, b) = walls_by_units();
         let cuts = |m: &Map| {
-            let u = units(m.layer_by_name("geo").unwrap(), &b, false).units;
+            let u = units(m.layer_by_name("geo").unwrap(), &b, false, &Default::default()).units;
             u.map(|side| side.iter().map(|&(lo, hi, row)| (lo.round(), hi.round(), row)).collect::<Vec<_>>())
         };
         let [south, east, north, west] = cuts(&m);
@@ -1072,7 +1079,7 @@ mod tests {
         assert_eq!(west, vec![(-1000.0, 1000.0, Some(0))]);
         // In one symbol, the polygons merge into one colour; off them, the walls' colour.
         let fill = unit_paint(m.layer_by_name("geo").unwrap().symbol(0).fill, &[], b.walls).0;
-        let r = runs(&m, &b, 10_000.0);
+        let r = runs(&m, &b, 10_000.0, &Default::default());
         assert_eq!(r[0].iter().map(|r| r.color).collect::<Vec<_>>(), vec![fill, b.walls]);
         assert_eq!(r[2].len(), 3, "{:?}", r[2]);
         // A definition query leaves its rows out: without A, the west wall is the walls' colour.
@@ -1083,24 +1090,24 @@ mod tests {
         let mut copy = m.layers[0].clone();
         copy.id = 99;
         m.layers.push(copy);
-        assert!(runs(&m, &b, 10_000.0).iter().all(|side| side.len() == 1 && side[0].color == b.walls));
+        assert!(runs(&m, &b, 10_000.0, &Default::default()).iter().all(|side| side.len() == 1 && side[0].color == b.walls));
         m.layers.pop();
-        assert_eq!(runs(&m, &b, 10_000.0)[0].len(), 2);
+        assert_eq!(runs(&m, &b, 10_000.0, &Default::default())[0].len(), 2);
         // A hatch over the layer's fill is in every run under a polygon; with a reference scale
         // twice the map's, at twice its size, as on the ground.
         let hatch = FillPattern::Hatch { angle: 0.0, spacing: 4.0, width: 1.0, offset: 0.5 };
         m.layers[0].fill_layers = vec![FillLayer { color: None, pattern: FillPattern::Solid }, FillLayer { color: None, pattern: hatch }];
         let ink = m.layer_by_name("geo").unwrap().symbol(0).fill;
-        assert_eq!(runs(&m, &b, 10_000.0)[0][0].patterns, vec![(hatch, ink)]);
-        assert!(runs(&m, &b, 10_000.0)[0][1].patterns.is_empty(), "off every polygon, none");
+        assert_eq!(runs(&m, &b, 10_000.0, &Default::default())[0][0].patterns, vec![(hatch, ink)]);
+        assert!(runs(&m, &b, 10_000.0, &Default::default())[0][1].patterns.is_empty(), "off every polygon, none");
         m.layers[0].reference_scale = Some(20_000.0);
         let big = FillPattern::Hatch { angle: 0.0, spacing: 8.0, width: 2.0, offset: 1.0 };
-        assert_eq!(runs(&m, &b, 10_000.0)[0][0].patterns, vec![(big, ink)]);
+        assert_eq!(runs(&m, &b, 10_000.0, &Default::default())[0][0].patterns, vec![(big, ink)]);
         m.layers[0].reference_scale = None;
         m.layers[0].fill_layers.clear();
         // No such layer: the walls' colour all along.
         m.view.terrain.as_mut().unwrap().block.as_mut().unwrap().walls_layer = Some("none".into());
-        assert!(runs(&m, &b, 10_000.0).iter().all(|side| side.len() == 1 && side[0].color == b.walls));
+        assert!(runs(&m, &b, 10_000.0, &Default::default()).iter().all(|side| side.len() == 1 && side[0].color == b.walls));
     }
 
     #[test]
@@ -1236,7 +1243,7 @@ mod tests {
         // #2317: the east side crosses a lake from y −300 to 300; another lake lies inside the box.
         let lakes: [(&[[f64; 4]], _); 2] = [(&[[500.0, -300.0, 1500.0, 300.0]], None), (&[[-500.0, -500.0, -200.0, -200.0]], None)];
         let (m, b, g, res) = block_over_lakes(&lakes, Some(BlockWater { depth: Some(10.0), field: None }));
-        let w = water_runs(&m, &b, &g, res);
+        let w = water_runs(&m, &b, &g, res, &Default::default());
         assert!(w[0].is_empty() && w[2].is_empty() && w[3].is_empty(), "only the east side crosses water");
         let [r] = &w[1][..] else { panic!("one stretch of water on the east side") };
         assert!((r.lo + 300.0).abs() < 1e-6 && (r.hi - 300.0).abs() < 1e-6, "{} {}", r.lo, r.hi);
@@ -1251,15 +1258,15 @@ mod tests {
         let lakes: [(&[[f64; 4]], _); 2] = [(&[[500.0, -300.0, 1500.0, 300.0]], Some(4.0)), (&[[-300.0, 600.0, 300.0, 1500.0]], None)];
         let field = |depth| Some(BlockWater { depth, field: Some("prof".into()) });
         let (m, b, g, res) = block_over_lakes(&lakes, field(None));
-        let w = water_runs(&m, &b, &g, res);
+        let w = water_runs(&m, &b, &g, res, &Default::default());
         assert_eq!((w[1].len(), w[2].len()), (1, 0));
         assert!((w[1][0].depth - 8.0).abs() < 1e-6);
         let (m, b, g, res) = block_over_lakes(&lakes, field(Some(10.0)));
-        let w = water_runs(&m, &b, &g, res);
+        let w = water_runs(&m, &b, &g, res, &Default::default());
         assert!((w[1][0].depth - 8.0).abs() < 1e-6 && (w[2][0].depth - 20.0).abs() < 1e-6);
         // No water in the block: none in the walls.
         let (m, b, g, res) = block_over_lakes(&lakes, None);
-        assert!(water_runs(&m, &b, &g, res).iter().all(Vec::is_empty));
+        assert!(water_runs(&m, &b, &g, res, &Default::default()).iter().all(Vec::is_empty));
     }
 
     #[test]
@@ -1270,7 +1277,7 @@ mod tests {
         // shaped by its own part's shore.
         let halves: [[f64; 4]; 2] = [[500.0, -300.0, 1500.0, 0.0], [500.0, 0.0, 1500.0, 300.0]];
         let (mut m, b, g, res) = block_over_lakes(&[(&halves, None)], Some(BlockWater { depth: Some(10.0), field: None }));
-        let w = water_runs(&m, &b, &g, res);
+        let w = water_runs(&m, &b, &g, res, &Default::default());
         let [south, north] = &w[1][..] else { panic!("a stretch a part: {}", w[1].len()) };
         assert!((south.hi - 0.0).abs() < 1e-6 && (north.lo - 0.0).abs() < 1e-6);
         for (run, y, floor) in [(south, -290.0, 995.0), (south, -150.0, 980.0), (north, 290.0, 995.0), (north, 150.0, 980.0)] {
@@ -1282,6 +1289,6 @@ mod tests {
             l.fill_layers =
                 vec![FillLayer { color: None, pattern: FillPattern::Solid }, FillLayer { color: Some(blue), pattern: FillPattern::Solid }];
         }
-        assert!(water_runs(&m, &b, &g, res)[1].iter().all(|r| r.color == blue));
+        assert!(water_runs(&m, &b, &g, res, &Default::default())[1].iter().all(|r| r.color == blue));
     }
 }
