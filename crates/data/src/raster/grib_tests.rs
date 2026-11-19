@@ -461,8 +461,16 @@ fn another_edition_is_said_and_the_next_message_read() {
     let r = read_bytes(&file, "t").unwrap();
     assert_eq!(r.bands.len(), 1);
     assert_eq!(r.bands[0].data, vec![3.0, 4.0]);
-    assert!(r.lost.contains(&"1 field left out: GRIB edition 3, not read yet".to_string()), "{:?}", r.lost);
-    assert!(!r.lost.iter().any(|l| l.contains("ends inside")), "{:?}", r.lost);
+    // Its body isn't said to be bytes outside the messages.
+    assert_eq!(
+        r.lost.iter().filter(|l| !l.starts_with("its earth")).collect::<Vec<_>>(),
+        vec!["1 message left out: not GRIB 1 or 2 (edition 3)"]
+    );
+    // Nothing readable: the error names why.
+    let mut only = G1::new(2, 1, vec![1, 2]).bytes();
+    only[7] = 3;
+    let e = read_bytes(&only, "t").unwrap_err().to_string();
+    assert!(e.contains("1 message left out: not GRIB 1 or 2 (edition 3)"), "{e}");
 }
 
 #[test]

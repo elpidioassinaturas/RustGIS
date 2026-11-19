@@ -59,26 +59,31 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
     let mut messages = 0usize;
     let mut held = 0usize;
     let mut chunk = vec![0u8; CHUNK];
-    // Progress in KiB of the file; one message is decoded without a check (at most
-    // `max_samples` values).
+    // Progress in KiB of the file, counted as the search for each message reads it and as each
+    // message is read; one message is decoded without a check (at most `max_samples` values).
     crate::progress::begin(usize::try_from(file_len / 1024).unwrap_or(usize::MAX));
+    // Whether the bytes before the next "GRIB" are the rest of a message left out (whose length
+    // isn't known), rather than something outside the messages.
+    let mut in_skipped = false;
     loop {
         let (found, junk) = find_message(&mut source, at, file_len, &mut chunk)?;
-        skipped.junk += junk;
+        if !in_skipped {
+            skipped.junk += junk;
+        }
         let Some(start) = found else { break };
-        crate::progress::step(usize::try_from(start.saturating_sub(at) / 1024).unwrap_or(0))?;
         let (len, edition) = message_header(&mut source, start)?;
+        in_skipped = false;
         match (edition, len) {
             // Not a message GRIB 1 or 2 describes: its four letters are passed, and the search
             // goes on.
             (Some(e), _) if e != 1 && e != 2 => {
-                skipped.add(format!("GRIB edition {e}"));
-                at = start + 4;
+                skipped.message(format!("not GRIB 1 or 2 (edition {e})"));
+                (at, in_skipped) = (start + 4, true);
                 continue;
             }
             (Some(_), len) if len < MIN_MESSAGE => {
-                skipped.add("a damaged message".to_string());
-                at = start + 4;
+                skipped.message("damaged".to_string());
+                (at, in_skipped) = (start + 4, true);
                 continue;
             }
             // A message cut short (a byte range that ends early, a truncated download): what was
@@ -96,8 +101,10 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
         messages += 1;
         at = start + len;
         crate::progress::step(usize::try_from(len / 1024).unwrap_or(0))?;
-        // Past the memory limit: the rest is only counted.
-        if held >= limit {
+        // Past the memory limit, or a message larger than the values left room for can take (at
+        // most 32 bits each, a bitmap and a megabyte of sections): only counted, never read.
+        let room = limit.saturating_sub(held);
+        if held >= limit || len > (room as u64).saturating_mul(5).saturating_add(1 << 20) {
             skipped.over_limit += count_fields(&mut source, start, len, edition == Some(2))?;
             continue;
         }
@@ -105,8 +112,7 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
         bytes.try_reserve_exact(len as usize).map_err(|_| bad("not enough memory for a message"))?;
         source.seek(SeekFrom::Start(start))?;
         source.by_ref().take(len).read_to_end(&mut bytes)?;
-        let decoded =
-            if edition == Some(1) { vec![grib1(&bytes, limit.saturating_sub(held))] } else { grib2(&bytes, limit.saturating_sub(held)) };
+        let decoded = if edition == Some(1) { vec![grib1(&bytes, room)] } else { grib2(&bytes, room) };
         for d in decoded {
             match d {
                 Ok(f) => {
@@ -125,7 +131,7 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
             }
         }
     }
-    if messages == 0 && skipped.reasons.is_empty() {
+    if messages == 0 && skipped.messages.is_empty() {
         return Err(bad(if skipped.cut > 0 { "the first message is cut short" } else { "no GRIB message in the file" }));
     }
     let Some(first) = fields.first() else {
@@ -148,12 +154,16 @@ fn find_message<R: Read + Seek>(source: &mut R, at: u64, file_len: u64, chunk: &
         let n = usize::try_from(file_len - from).unwrap_or(usize::MAX).min(chunk.len());
         let window = chunk.get_mut(..n).unwrap_or_default();
         source.read_exact(window)?;
+        // Each window looks at Cancel, and counts the bytes it passes (a message's own are counted
+        // as it is read): a long run of other bytes can be stopped.
         if let Some(p) = window.windows(4).position(|w| w == b"GRIB") {
+            crate::progress::step(p / 1024)?;
             junk += window.iter().take(p).filter(|b| **b != 0).count() as u64;
             return Ok((Some(from + p as u64), junk));
         }
         // The last three bytes may start a "GRIB" that the next chunk ends.
         let keep = if from + n as u64 >= file_len { 0 } else { 3.min(n) };
+        crate::progress::step((n - keep) / 1024)?;
         junk += window.iter().take(n - keep).filter(|b| **b != 0).count() as u64;
         from += (n - keep).max(1) as u64;
     }
@@ -220,6 +230,8 @@ enum Skip {
 struct Skipped {
     /// Each reason, with how many fields it left out, in the order first met.
     reasons: Vec<(String, usize)>,
+    /// Each reason a whole message was left out (another edition, damaged), with a count.
+    messages: Vec<(String, usize)>,
     other_grid: usize,
     over_limit: usize,
     cut: usize,
@@ -229,14 +241,19 @@ struct Skipped {
 
 impl Skipped {
     fn add(&mut self, why: String) {
-        match self.reasons.iter_mut().find(|(r, _)| *r == why) {
-            Some((_, n)) => *n += 1,
-            None => self.reasons.push((why, 1)),
-        }
+        tally(&mut self.reasons, why);
+    }
+
+    fn message(&mut self, why: String) {
+        tally(&mut self.messages, why);
     }
 
     fn notes(&self, limit: usize) -> Vec<String> {
         let mut out: Vec<String> = self.reasons.iter().map(|(r, n)| format!("{} left out: {r}, not read yet", count(*n))).collect();
+        out.extend(self.messages.iter().map(|(r, n)| {
+            let what = if *n == 1 { "1 message".to_string() } else { format!("{n} messages") };
+            format!("{what} left out: {r}")
+        }));
         if self.other_grid > 0 {
             out.push(format!("{} left out: on another grid than the first field's", count(self.other_grid)));
         }
@@ -253,6 +270,14 @@ impl Skipped {
             out.push(format!("{} bytes outside its messages aren't GRIB, and are passed over", self.junk));
         }
         out
+    }
+}
+
+/// One more of `why` in `list`.
+fn tally(list: &mut Vec<(String, usize)>, why: String) {
+    match list.iter_mut().find(|(r, _)| *r == why) {
+        Some((_, n)) => *n += 1,
+        None => list.push((why, 1)),
     }
 }
 
