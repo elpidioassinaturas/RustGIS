@@ -597,6 +597,39 @@ fn a_grib1_quasi_regular_grid_is_said_as_such() {
 }
 
 #[test]
+fn a_length_past_the_file_hides_nothing() {
+    let mut first = G1::new(2, 1, vec![1, 2]).bytes();
+    let second = G1::new(2, 1, vec![3, 4]).bytes();
+    // The first says it runs far past the end of the file.
+    first[4..7].copy_from_slice(&u(0x00ff_ffff, 3));
+    let mut file = first;
+    file.extend(&second);
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert_eq!(r.bands[0].data, vec![3.0, 4.0]);
+    assert!(r.lost.contains(&"1 message left out: damaged".to_string()), "{:?}", r.lost);
+    assert!(!r.lost.iter().any(|l| l.contains("ends inside")), "{:?}", r.lost);
+}
+
+#[test]
+fn a_repeated_first_column_is_left_out_and_the_globe_laid_out_from_180() {
+    // 7 columns of 60° from 0° to 360°: the last is the first again. No increments given in
+    // the file would give the same 60° (360° / 6 intervals).
+    let mut g = G1::new(7, 1, vec![1, 2, 3, 4, 5, 6, 1]);
+    (g.lat1, g.lat2, g.lon1, g.lon2, g.di, g.dj) = (0, 0, 0, 0, 60_000, 60_000);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert_eq!(r.width, 6);
+    // From −180°: the 180° column first.
+    assert_eq!(r.bands[0].data, vec![4.0, 5.0, 6.0, 1.0, 2.0, 3.0]);
+    assert_eq!(r.transform.origin_x, -210.0);
+    assert!(
+        r.lost.contains(&"its last column repeats the first, 360° on, and is left out: 6 columns are read".to_string()),
+        "{:?}",
+        r.lost
+    );
+}
+
+#[test]
 fn points_in_counts_a_last_constant_field() {
     // A constant field's data section is 5 octets, just before "7777".
     let mut c = F2::new(3, 2, vec![]);

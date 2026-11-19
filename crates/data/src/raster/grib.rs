@@ -66,12 +66,24 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
     // Whether the bytes before the next "GRIB" are the rest of a message left out (whose length
     // isn't known), rather than something outside the messages.
     let mut in_skipped = false;
+    // Whether the last message found said it runs past the end of the file: cut short, unless
+    // another message follows it (its length is then damaged).
+    let mut overrun = false;
     loop {
         let (found, junk) = find_message(&mut source, at, file_len, &mut chunk, &mut counted)?;
         if !in_skipped {
             skipped.junk += junk;
         }
-        let Some(start) = found else { break };
+        let Some(start) = found else {
+            if overrun {
+                skipped.cut += 1;
+            }
+            break;
+        };
+        if overrun {
+            skipped.message("damaged".to_string());
+            overrun = false;
+        }
         let (len, edition) = message_header(&mut source, start)?;
         in_skipped = false;
         match (edition, len) {
@@ -93,9 +105,12 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
                 skipped.cut += 1;
                 break;
             }
+            // A length past the end of the file: the search goes on from inside the message, so a
+            // message after it is still found (and this one said as damaged); without one, the
+            // file ends inside it.
             (Some(_), len) if start.saturating_add(len) > file_len => {
-                skipped.cut += 1;
-                break;
+                (at, in_skipped, overrun) = (start + 4, true, true);
+                continue;
             }
             // A length that doesn't end on "7777" says the message wrongly: the search goes on
             // from inside it, so a message it would hide is still found.
@@ -449,7 +464,18 @@ impl Grid {
 
     /// Whether the columns go round the whole globe.
     fn whole_turn(&self) -> bool {
-        (self.ni as f64 * self.dx - 360.0).abs() < self.dx * 0.5
+        (self.columns() as f64 * self.dx - 360.0).abs() < self.dx * 0.5
+    }
+
+    /// Whether the last column is the first again, 360° on (a grid given from 0° to 360°
+    /// inclusive): it is left out, and the grid is a whole turn.
+    fn repeats_first_column(&self) -> bool {
+        self.ni > 1 && ((self.ni - 1) as f64 * self.dx - 360.0).abs() < self.dx * 0.5
+    }
+
+    /// The columns laid out: all of them, less a last one that repeats the first.
+    fn columns(&self) -> usize {
+        if self.repeats_first_column() { self.ni - 1 } else { self.ni }
     }
 
     /// The column and row (north up) of the `k`th value in scanning order.
@@ -483,6 +509,9 @@ impl Grid {
                 round6(north - (self.nj.saturating_sub(1)) as f64 * self.dy),
             ));
         }
+        if self.repeats_first_column() {
+            out.push(format!("its last column repeats the first, 360° on, and is left out: {} columns are read", self.ni - 1));
+        }
         if let Some(earth) = self.earth {
             out.push(format!("its earth is {earth}; latitudes and longitudes are read as WGS 84's"));
         }
@@ -510,7 +539,7 @@ struct Field {
 /// bands.
 fn to_raster(fields: Vec<Field>, name: &str) -> Result<Raster> {
     let Some(grid) = fields.first().map(|f| f.grid) else { return Err(bad("no field")) };
-    let (w, h) = (grid.ni, grid.nj);
+    let (w, h) = (grid.columns(), grid.nj);
     let west = grid.west();
     // A whole turn starting east of −180°: the column at 180° moves to the first, so the columns
     // run from −180°.
@@ -530,6 +559,10 @@ fn to_raster(fields: Vec<Field>, name: &str) -> Result<Raster> {
         let mut band = super::filled(w, h, f32::NAN)?;
         for (k, v) in f.values.iter().enumerate() {
             let (col, row) = grid.place(k);
+            // A repeated first column, 360° on, is the last (west to east); it isn't laid out.
+            if col >= w {
+                continue;
+            }
             let col = (col + roll) % w.max(1);
             if let Some(cell) = band.get_mut(row * w + col) {
                 *cell = *v;
