@@ -516,3 +516,28 @@ fn ensemble_members_are_named_apart() {
     let r = read_bytes(&msg, "t").unwrap();
     assert!(r.bands[0].name.ends_with(":template=4.1:surface=103:value=2:TimeU=1:forecast=6:ensemble=3:member=7"), "{}", r.bands[0].name);
 }
+
+#[test]
+fn a_damaged_field_is_said_as_damaged() {
+    let a = F2::new(2, 1, vec![1, 2]);
+    let mut msg = grib2_message(&[F2::new(2, 1, vec![1, 2]), F2::new(2, 1, vec![3, 4])]);
+    // The second field's data section claims more values than it holds: its 12-bit values need
+    // 3 octets; cut its length by giving section 5 a larger count.
+    let first = a.sections().len();
+    let s5 = 16 + 21 + first + 72 + 34;
+    msg[s5 + 5..s5 + 9].copy_from_slice(&u(2000, 4));
+    let r = read_bytes(&msg, "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert!(r.lost.contains(&"1 field left out: damaged (a field whose values don't fill its grid)".to_string()), "{:?}", r.lost);
+    assert!(!r.lost.iter().any(|l| l.contains("not read yet")), "{:?}", r.lost);
+}
+
+#[test]
+fn grib2_increments_given_are_used() {
+    // Code table 3.3: 0x20 and 0x10 say the increments are given; the last point then doesn't
+    // decide the cell size.
+    let mut f = F2::new(3, 2, vec![1, 2, 3, 4, 5, 6]);
+    (f.lon2, f.lat2) = (f.lon1 + 5_000_000, f.lat1 + 3_000_000);
+    let r = read_bytes(&grib2_message(&[f]), "t").unwrap();
+    assert_eq!((r.transform.pixel_width, r.transform.pixel_height), (0.5, -0.5));
+}

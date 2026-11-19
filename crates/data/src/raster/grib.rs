@@ -59,6 +59,7 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
     let mut messages = 0usize;
     let mut held = 0usize;
     let mut chunk = vec![0u8; CHUNK];
+    let mut counted = Counted::default();
     // Progress in KiB of the file, counted as the search for each message reads it and as each
     // message is read; one message is decoded without a check (at most `max_samples` values).
     crate::progress::begin(usize::try_from(file_len / 1024).unwrap_or(usize::MAX));
@@ -66,7 +67,7 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
     // isn't known), rather than something outside the messages.
     let mut in_skipped = false;
     loop {
-        let (found, junk) = find_message(&mut source, at, file_len, &mut chunk)?;
+        let (found, junk) = find_message(&mut source, at, file_len, &mut chunk, &mut counted)?;
         if !in_skipped {
             skipped.junk += junk;
         }
@@ -100,11 +101,13 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
         }
         messages += 1;
         at = start + len;
-        crate::progress::step(usize::try_from(len / 1024).unwrap_or(0))?;
-        // Past the memory limit, or a message larger than the values left room for can take (at
-        // most 32 bits each, a bitmap and a megabyte of sections): only counted, never read.
+        counted.add(len)?;
+        // Past the memory limit, a message whose grids hold more points than are left room for,
+        // or one larger than those points can take (at most 32 bits each, a bitmap and a megabyte
+        // of sections): only counted, never read.
         let room = limit.saturating_sub(held);
-        if held >= limit || len > (room as u64).saturating_mul(5).saturating_add(1 << 20) {
+        let too_long = len > (room as u64).saturating_mul(5).saturating_add(1 << 20);
+        if held >= limit || too_long || points_in(&mut source, start, len, edition == Some(2))?.is_some_and(|n| n > room) {
             skipped.over_limit += count_fields(&mut source, start, len, edition == Some(2))?;
             continue;
         }
@@ -128,6 +131,7 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
                 }
                 Err(Skip::TooLarge) => skipped.over_limit += 1,
                 Err(Skip::Other(why)) => skipped.add(why),
+                Err(Skip::Damaged(why)) => skipped.damaged(why),
             }
         }
     }
@@ -146,7 +150,13 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
 
 /// The offset of the next "GRIB" at or after `at` (`None` at the end of the file), and how many
 /// of the bytes passed on the way aren't zeros (padding): a bulletin header, other data.
-fn find_message<R: Read + Seek>(source: &mut R, at: u64, file_len: u64, chunk: &mut [u8]) -> Result<(Option<u64>, u64)> {
+fn find_message<R: Read + Seek>(
+    source: &mut R,
+    at: u64,
+    file_len: u64,
+    chunk: &mut [u8],
+    counted: &mut Counted,
+) -> Result<(Option<u64>, u64)> {
     let mut from = at;
     let mut junk = 0u64;
     while from < file_len {
@@ -157,13 +167,13 @@ fn find_message<R: Read + Seek>(source: &mut R, at: u64, file_len: u64, chunk: &
         // Each window looks at Cancel, and counts the bytes it passes (a message's own are counted
         // as it is read): a long run of other bytes can be stopped.
         if let Some(p) = window.windows(4).position(|w| w == b"GRIB") {
-            crate::progress::step(p / 1024)?;
+            counted.add(p as u64)?;
             junk += window.iter().take(p).filter(|b| **b != 0).count() as u64;
             return Ok((Some(from + p as u64), junk));
         }
         // The last three bytes may start a "GRIB" that the next chunk ends.
         let keep = if from + n as u64 >= file_len { 0 } else { 3.min(n) };
-        crate::progress::step((n - keep) / 1024)?;
+        counted.add((n - keep) as u64)?;
         junk += window.iter().take(n - keep).filter(|b| **b != 0).count() as u64;
         from += (n - keep).max(1) as u64;
     }
@@ -195,6 +205,61 @@ fn message_header<R: Read + Seek>(source: &mut R, start: u64) -> Result<(u64, Op
     Ok((len, Some(edition)))
 }
 
+/// The bytes counted for the progress, in KiB, with what is left of a KiB carried over.
+#[derive(Default)]
+struct Counted(u64);
+
+impl Counted {
+    /// Counts `n` more bytes, and looks at Cancel.
+    fn add(&mut self, n: u64) -> Result<()> {
+        self.0 = self.0.saturating_add(n);
+        let kib = self.0 / 1024;
+        self.0 %= 1024;
+        crate::progress::step(usize::try_from(kib).unwrap_or(usize::MAX))
+    }
+}
+
+/// How many points a message's fields cover, from its headers alone (GRIB1's grid description,
+/// GRIB2's number of data points of the grid each data section follows); `None` when they don't
+/// say (a predefined grid), which the decoder then refuses or reads.
+fn points_in<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) -> Result<Option<usize>> {
+    let end = start + len;
+    let mut head = [0u8; 16];
+    let read = |source: &mut R, at: u64, out: &mut [u8]| -> Result<bool> {
+        if at + out.len() as u64 > end {
+            return Ok(false);
+        }
+        source.seek(SeekFrom::Start(at))?;
+        source.read_exact(out)?;
+        Ok(true)
+    };
+    if !grib2 {
+        // The product definition's length and flags, then the grid description's sizes.
+        if !read(source, start + 8, &mut head[..8])? || head[7] & 0x80 == 0 {
+            return Ok(None);
+        }
+        let gds = start + 8 + u64::from(be(&head, 0, 3));
+        if !read(source, gds, &mut head[..10])? || head[5] != 0 {
+            return Ok(None);
+        }
+        return Ok(Some((be(&head, 6, 2) as usize).saturating_mul(be(&head, 8, 2) as usize)));
+    }
+    let (mut at, mut points, mut total) = (start + 16, 0usize, 0usize);
+    while read(source, at, &mut head[..10])? && &head[..4] != b"7777" {
+        let size = u64::from(be(&head, 0, 4));
+        if size < 5 {
+            break;
+        }
+        match head[4] {
+            3 => points = be(&head, 6, 4) as usize,
+            7 => total = total.saturating_add(points),
+            _ => {}
+        }
+        at += size;
+    }
+    Ok(Some(total))
+}
+
 /// How many fields a message holds: one in GRIB1, one a data section (7) in GRIB2, counted from
 /// the sections' headers alone.
 fn count_fields<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) -> Result<usize> {
@@ -219,10 +284,13 @@ fn count_fields<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: boo
     Ok(n.max(1))
 }
 
-/// Why a field isn't read: past the memory limit, or another reason said once with a count.
+/// Why a field isn't read: past the memory limit, something this reader doesn't read yet (a
+/// packing, a grid), or damage; each reason is said once with a count.
+#[derive(Clone)]
 enum Skip {
     TooLarge,
     Other(String),
+    Damaged(String),
 }
 
 /// What was left out of a file, for its notices.
@@ -232,6 +300,8 @@ struct Skipped {
     reasons: Vec<(String, usize)>,
     /// Each reason a whole message was left out (another edition, damaged), with a count.
     messages: Vec<(String, usize)>,
+    /// Each kind of damage that left a field out, with a count.
+    damage: Vec<(String, usize)>,
     other_grid: usize,
     over_limit: usize,
     cut: usize,
@@ -248,8 +318,13 @@ impl Skipped {
         tally(&mut self.messages, why);
     }
 
+    fn damaged(&mut self, why: String) {
+        tally(&mut self.damage, why);
+    }
+
     fn notes(&self, limit: usize) -> Vec<String> {
         let mut out: Vec<String> = self.reasons.iter().map(|(r, n)| format!("{} left out: {r}, not read yet", count(*n))).collect();
+        out.extend(self.damage.iter().map(|(r, n)| format!("{} left out: damaged ({r})", count(*n))));
         out.extend(self.messages.iter().map(|(r, n)| {
             let what = if *n == 1 { "1 message".to_string() } else { format!("{n} messages") };
             format!("{what} left out: {r}")
@@ -477,7 +552,7 @@ fn unpack(data: &[u8], count: usize, bits: u32, r: f64, e: i64, d: i64) -> std::
     }
     let need = (count as u64).saturating_mul(u64::from(bits)).div_ceil(8);
     if (data.len() as u64) < need {
-        return Err(Skip::Other("a data section shorter than its values".to_string()));
+        return Err(Skip::Damaged("a data section shorter than its values".to_string()));
     }
     let scale = 2f64.powi(e.clamp(-1000, 1000) as i32);
     let ten = 10f64.powi(d.clamp(-1000, 1000) as i32);
@@ -517,13 +592,13 @@ fn spread(values: Vec<f64>, bitmap: Option<&[u8]>, points: usize) -> std::result
     match bitmap {
         None => {
             if values.len() != points {
-                return Err(Skip::Other("a field whose values don't fill its grid".to_string()));
+                return Err(Skip::Damaged("a field whose values don't fill its grid".to_string()));
             }
             out.extend(values.into_iter().map(|v| v as f32));
         }
         Some(bits) => {
             if (bits.len() as u64) * 8 < points as u64 {
-                return Err(Skip::Other("a bitmap shorter than its grid".to_string()));
+                return Err(Skip::Damaged("a bitmap shorter than its grid".to_string()));
             }
             let mut values = values.into_iter();
             for k in 0..points {
@@ -549,16 +624,16 @@ fn date(year: i64, month: u32, day: u32, hour: u32) -> String {
 fn section1(b: &[u8], at: usize) -> std::result::Result<&[u8], Skip> {
     let len = be(b, at, 3) as usize;
     if len < 3 {
-        return Err(Skip::Other("a damaged section".to_string()));
+        return Err(Skip::Damaged("a damaged section".to_string()));
     }
-    b.get(at..at + len).ok_or_else(|| Skip::Other("a section past the end of its message".to_string()))
+    b.get(at..at + len).ok_or_else(|| Skip::Damaged("a section past the end of its message".to_string()))
 }
 
 /// A GRIB1 message (WMO FM 92 GRIB edition 1): its one field.
 fn grib1(b: &[u8], room: usize) -> std::result::Result<Field, Skip> {
     let pds = section1(b, 8)?;
     if pds.len() < 28 {
-        return Err(Skip::Other("a damaged product definition section".to_string()));
+        return Err(Skip::Damaged("a damaged product definition section".to_string()));
     }
     let flags = pds[7];
     if flags & 0x80 == 0 {
@@ -614,7 +689,7 @@ fn grib1(b: &[u8], room: usize) -> std::result::Result<Field, Skip> {
 /// A GRIB1 grid description section: a regular latitude/longitude grid only.
 fn grib1_grid(g: &[u8]) -> std::result::Result<Grid, Skip> {
     if g.len() < 28 {
-        return Err(Skip::Other("a damaged grid description section".to_string()));
+        return Err(Skip::Damaged("a damaged grid description section".to_string()));
     }
     let kind = g[5];
     if kind != 0 {
@@ -662,7 +737,7 @@ fn checked(g: Grid) -> std::result::Result<Grid, Skip> {
     if ok && north <= 90.0 + 1e-6 && south >= -90.0 - 1e-6 {
         Ok(g)
     } else {
-        Err(Skip::Other("a latitude/longitude grid that isn't on the globe".to_string()))
+        Err(Skip::Damaged("a latitude/longitude grid that isn't on the globe".to_string()))
     }
 }
 
@@ -679,15 +754,15 @@ fn grib2(b: &[u8], room: usize) -> Vec<std::result::Result<Field, Skip>> {
     let discipline = b.get(6).copied().unwrap_or(255);
     let mut at = 16usize;
     let mut reference = String::from("d=?");
-    let mut grid: Option<std::result::Result<Grid, String>> = None;
+    let mut grid: Option<std::result::Result<Grid, Skip>> = None;
     let mut product = String::new();
-    let mut packing: Option<std::result::Result<(usize, f64, i64, i64, u32), String>> = None;
-    let mut bitmap: Option<std::result::Result<Option<&[u8]>, String>> = None;
+    let mut packing: Option<std::result::Result<(usize, f64, i64, i64, u32), Skip>> = None;
+    let mut bitmap: Option<std::result::Result<Option<&[u8]>, Skip>> = None;
     let mut previous_bitmap: Option<&[u8]> = None;
     let mut held = 0usize;
     while b.get(at..at + 4).is_some_and(|m| m != b"7777") {
         let Some((number, s)) = section2(b, at) else {
-            out.push(Err(Skip::Other("a damaged GRIB2 section".to_string())));
+            out.push(Err(Skip::Damaged("a damaged GRIB2 section".to_string())));
             break;
         };
         at += s.len();
@@ -711,19 +786,19 @@ fn grib2(b: &[u8], room: usize) -> Vec<std::result::Result<Field, Skip>> {
                         previous_bitmap = Some(bits);
                         Ok(Some(bits))
                     }
-                    254 => previous_bitmap.map(Some).ok_or_else(|| "a bitmap that refers to none before it".to_string()),
-                    _ => Err("predefined bitmaps".to_string()),
+                    254 => previous_bitmap.map(Some).ok_or_else(|| Skip::Damaged("a bitmap that refers to none before it".to_string())),
+                    _ => Err(Skip::Other("predefined bitmaps".to_string())),
                 });
             }
             7 => {
                 let field = (|| {
-                    let grid = grid.clone().ok_or_else(|| Skip::Other("a field without a grid".to_string()))?.map_err(Skip::Other)?;
+                    let grid = grid.clone().ok_or_else(|| Skip::Damaged("a field without a grid".to_string()))??;
                     let (count, r, e, d, bits) =
-                        packing.clone().ok_or_else(|| Skip::Other("a field without its packing".to_string()))?.map_err(Skip::Other)?;
-                    let mask = bitmap.clone().unwrap_or(Ok(None)).map_err(Skip::Other)?;
+                        packing.clone().ok_or_else(|| Skip::Damaged("a field without its packing".to_string()))??;
+                    let mask = bitmap.clone().unwrap_or(Ok(None))?;
                     let points = grid.ni.checked_mul(grid.nj).filter(|n| held.saturating_add(*n) <= room).ok_or(Skip::TooLarge)?;
                     if mask.is_some_and(|m| kept(m, points) != count) || (mask.is_none() && count != points) {
-                        return Err(Skip::Other("a field whose values don't fill its grid".to_string()));
+                        return Err(Skip::Damaged("a field whose values don't fill its grid".to_string()));
                     }
                     let (values, rounded) = if bits == 0 {
                         constant(r / 10f64.powi(d.clamp(-1000, 1000) as i32), count)?
@@ -744,25 +819,25 @@ fn grib2(b: &[u8], room: usize) -> Vec<std::result::Result<Field, Skip>> {
         }
     }
     if out.is_empty() {
-        out.push(Err(Skip::Other("a GRIB2 message without a data section".to_string())));
+        out.push(Err(Skip::Damaged("a GRIB2 message without a data section".to_string())));
     }
     out
 }
 
 /// A GRIB2 grid definition section: template 3.0 (regular latitude/longitude) only.
-fn grib2_grid(s: &[u8]) -> std::result::Result<Grid, String> {
+fn grib2_grid(s: &[u8]) -> std::result::Result<Grid, Skip> {
     if s.get(5).copied().unwrap_or(1) != 0 {
-        return Err("predefined grids".to_string());
+        return Err(Skip::Other("predefined grids".to_string()));
     }
     if s.get(10).copied().unwrap_or(0) != 0 {
-        return Err("quasi-regular grids".to_string());
+        return Err(Skip::Other("quasi-regular grids".to_string()));
     }
     let template = be(s, 12, 2);
     if template != 0 {
-        return Err(format!("GRIB2 grid template 3.{template} (not regular latitude/longitude)"));
+        return Err(Skip::Other(format!("GRIB2 grid template 3.{template} (not regular latitude/longitude)")));
     }
     if s.len() < 72 {
-        return Err("a damaged grid definition section".to_string());
+        return Err(Skip::Damaged("a damaged grid definition section".to_string()));
     }
     let earth = match s[14] {
         // GRS 80, WGS 84: near enough.
@@ -776,18 +851,20 @@ fn grib2_grid(s: &[u8]) -> std::result::Result<Grid, String> {
     };
     let (ni, nj) = (be(s, 30, 4) as usize, be(s, 34, 4) as usize);
     if ni == 0 || nj == 0 || ni == u32::MAX as usize || nj == u32::MAX as usize {
-        return Err("quasi-regular grids".to_string());
+        return Err(Skip::Other("quasi-regular grids".to_string()));
     }
     let (basic, sub) = (be(s, 38, 4), be(s, 42, 4));
     let unit = if basic == 0 || basic == u32::MAX {
         1e-6
     } else if sub == 0 || sub == u32::MAX {
-        return Err("a grid with no angle subdivisions".to_string());
+        return Err(Skip::Damaged("a grid with no angle subdivisions".to_string()));
     } else {
         f64::from(basic) / f64::from(sub)
     };
     let deg = |o: usize| signed(s, o, 4) as f64 * unit;
     let (lat1, lon1, lat2, lon2) = (deg(46), deg(50), deg(55), deg(59));
+    // Code table 3.3: bit 3 (0x20) says the i direction's increments are given, bit 4 (0x10)
+    // the j direction's.
     let res = s[54];
     let (di, dj) = (be(s, 63, 4), be(s, 67, 4));
     let dx = if res & 0x20 != 0 && di != u32::MAX {
@@ -800,10 +877,7 @@ fn grib2_grid(s: &[u8]) -> std::result::Result<Grid, String> {
     } else {
         span(lat1, lat2, false) / (nj.saturating_sub(1)).max(1) as f64
     };
-    checked(Grid { ni, nj, lat1, lon1, lat2, lon2, dx, dy, scan: s[71], earth }).map_err(|e| match e {
-        Skip::Other(m) => m,
-        Skip::TooLarge => "a grid too large".to_string(),
-    })
+    checked(Grid { ni, nj, lat1, lon1, lat2, lon2, dx, dy, scan: s[71], earth })
 }
 
 /// A GRIB2 product definition section, as part of a band name: the parameter's category and
@@ -828,7 +902,7 @@ fn grib2_product(s: &[u8]) -> String {
 
 /// A GRIB2 data representation section: template 5.0 (simple packing) only, as the number of
 /// values, R, E, D and the bits a value.
-fn grib2_packing(s: &[u8]) -> std::result::Result<(usize, f64, i64, i64, u32), String> {
+fn grib2_packing(s: &[u8]) -> std::result::Result<(usize, f64, i64, i64, u32), Skip> {
     let template = be(s, 9, 2);
     if template != 0 {
         let kind = match template {
@@ -839,10 +913,10 @@ fn grib2_packing(s: &[u8]) -> std::result::Result<(usize, f64, i64, i64, u32), S
             42 => "CCSDS",
             _ => "a packing",
         };
-        return Err(format!("GRIB2 {kind} (template 5.{template})"));
+        return Err(Skip::Other(format!("GRIB2 {kind} (template 5.{template})")));
     }
     if s.len() < 21 {
-        return Err("a damaged data representation section".to_string());
+        return Err(Skip::Damaged("a damaged data representation section".to_string()));
     }
     let r = f64::from(f32::from_bits(be(s, 11, 4)));
     Ok((be(s, 5, 4) as usize, r, signed(s, 15, 2), signed(s, 17, 2), u32::from(s[19])))
