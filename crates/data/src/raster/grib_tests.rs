@@ -541,3 +541,15 @@ fn grib2_increments_given_are_used() {
     let r = read_bytes(&grib2_message(&[f]), "t").unwrap();
     assert_eq!((r.transform.pixel_width, r.transform.pixel_height), (0.5, -0.5));
 }
+
+#[test]
+fn points_in_counts_a_last_constant_field() {
+    // A constant field's data section is 5 octets, just before "7777".
+    let mut c = F2::new(3, 2, vec![]);
+    c.bits = 0;
+    let msg = grib2_message(&[F2::new(2, 1, vec![1, 2]), c]);
+    let n = points_in(&mut std::io::Cursor::new(&msg), 0, msg.len() as u64, true).unwrap();
+    assert_eq!(n, Some(2 + 6));
+    let one = G1::new(4, 3, vec![0; 12]).bytes();
+    assert_eq!(points_in(&mut std::io::Cursor::new(&one), 0, one.len() as u64, false).unwrap(), Some(12));
+}

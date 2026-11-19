@@ -245,13 +245,16 @@ fn points_in<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) 
         return Ok(Some((be(&head, 6, 2) as usize).saturating_mul(be(&head, 8, 2) as usize)));
     }
     let (mut at, mut points, mut total) = (start + 16, 0usize, 0usize);
-    while read(source, at, &mut head[..10])? && &head[..4] != b"7777" {
+    // Each section's 5-octet header (a constant field's data section is no longer, just before
+    // "7777"), and the grid's number of data points (octets 7 to 10) when it is section 3.
+    while read(source, at, &mut head[..5])? && &head[..4] != b"7777" {
         let size = u64::from(be(&head, 0, 4));
         if size < 5 {
             break;
         }
+        let mut count = [0u8; 4];
         match head[4] {
-            3 => points = be(&head, 6, 4) as usize,
+            3 if read(source, at + 6, &mut count)? => points = be(&count, 0, 4) as usize,
             7 => total = total.saturating_add(points),
             _ => {}
         }
@@ -481,7 +484,9 @@ struct Field {
     rounded: u64,
 }
 
-/// The raster of fields on one grid: north up, a whole turn of longitude from −180°.
+/// The raster of fields on one grid: north up, a whole turn of longitude from −180°. Cancel is
+/// looked at before each band is placed; one band's placement (at most `max_samples` values, one
+/// pass) runs without a check.
 fn to_raster(fields: Vec<Field>, name: &str) -> Result<Raster> {
     let Some(grid) = fields.first().map(|f| f.grid) else { return Err(bad("no field")) };
     let (w, h) = (grid.ni, grid.nj);
@@ -500,6 +505,7 @@ fn to_raster(fields: Vec<Field>, name: &str) -> Result<Raster> {
     let mut rounded = Vec::with_capacity(fields.len());
     let mut bands = Vec::with_capacity(fields.len());
     for f in fields {
+        crate::progress::check()?;
         let mut band = super::filled(w, h, f32::NAN)?;
         for (k, v) in f.values.iter().enumerate() {
             let (col, row) = grid.place(k);
@@ -546,7 +552,7 @@ fn ibm(v: u32) -> f64 {
 
 /// `count` values of `bits` bits each from `data`, big-endian, unpacked as `(R + X × 2^E) / 10^D`;
 /// with fewer bits there than that, an error.
-fn unpack(data: &[u8], count: usize, bits: u32, r: f64, e: i64, d: i64) -> std::result::Result<(Vec<f64>, u64), Skip> {
+fn unpack(data: &[u8], count: usize, bits: u32, r: f64, e: i64, d: i64) -> std::result::Result<(Vec<f32>, u64), Skip> {
     if bits > MAX_BITS {
         return Err(Skip::Other(format!("values of {bits} bits")));
     }
@@ -570,42 +576,40 @@ fn unpack(data: &[u8], count: usize, bits: u32, r: f64, e: i64, d: i64) -> std::
         if f64::from(v as f32) != v {
             rounded += 1;
         }
-        out.push(v);
+        // Unpacked in `f64` and held as `f32`, never both for the whole field.
+        out.push(v as f32);
     }
     Ok((out, rounded))
 }
 
 /// `count` copies of `v`, and how many of them `f32` changes: a field packed in no bits holds its
 /// reference value everywhere.
-fn constant(v: f64, count: usize) -> std::result::Result<(Vec<f64>, u64), Skip> {
+fn constant(v: f64, count: usize) -> std::result::Result<(Vec<f32>, u64), Skip> {
     let mut out = Vec::new();
     out.try_reserve_exact(count).map_err(|_| Skip::TooLarge)?;
-    out.resize(count, v);
+    out.resize(count, v as f32);
     Ok((out, if f64::from(v as f32) != v { count as u64 } else { 0 }))
 }
 
 /// Values in scanning order: those unpacked, spread over the points a bitmap keeps (NaN at the
 /// others), or all of them without one.
-fn spread(values: Vec<f64>, bitmap: Option<&[u8]>, points: usize) -> std::result::Result<Vec<f32>, Skip> {
+fn spread(values: Vec<f32>, bitmap: Option<&[u8]>, points: usize) -> std::result::Result<Vec<f32>, Skip> {
+    let Some(bits) = bitmap else {
+        // Without a bitmap, the values are the field as they are.
+        if values.len() != points {
+            return Err(Skip::Damaged("a field whose values don't fill its grid".to_string()));
+        }
+        return Ok(values);
+    };
+    if (bits.len() as u64) * 8 < points as u64 {
+        return Err(Skip::Damaged("a bitmap shorter than its grid".to_string()));
+    }
     let mut out = Vec::new();
     out.try_reserve_exact(points).map_err(|_| Skip::TooLarge)?;
-    match bitmap {
-        None => {
-            if values.len() != points {
-                return Err(Skip::Damaged("a field whose values don't fill its grid".to_string()));
-            }
-            out.extend(values.into_iter().map(|v| v as f32));
-        }
-        Some(bits) => {
-            if (bits.len() as u64) * 8 < points as u64 {
-                return Err(Skip::Damaged("a bitmap shorter than its grid".to_string()));
-            }
-            let mut values = values.into_iter();
-            for k in 0..points {
-                let set = bits.get(k / 8).is_some_and(|b| b & (0x80 >> (k % 8)) != 0);
-                out.push(if set { values.next().map_or(f32::NAN, |v| v as f32) } else { f32::NAN });
-            }
-        }
+    let mut values = values.into_iter();
+    for k in 0..points {
+        let set = bits.get(k / 8).is_some_and(|b| b & (0x80 >> (k % 8)) != 0);
+        out.push(if set { values.next().unwrap_or(f32::NAN) } else { f32::NAN });
     }
     Ok(out)
 }
