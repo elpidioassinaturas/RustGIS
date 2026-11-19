@@ -3693,12 +3693,12 @@ fn login_text(login: rustgis_engine::plugins::Login, kept: bool) -> String {
 }
 
 /// The key over the lower-right corner of a command's icon `ic`: green when its sign-in is kept,
-/// red when it is missing, on a disc of `behind`, the colour behind the button.
+/// red and struck through when it is missing, on a disc of `behind`, the colour behind the button.
 fn login_key(ui: &Ui, ic: Rect, kept: bool, behind: egui::Color32) {
     let fill = if kept { egui::Color32::from_rgb(0x1E, 0x9E, 0x4A) } else { egui::Color32::from_rgb(0xD6, 0x33, 0x33) };
     let side = (ic.width() * 0.5).max(10.0);
     let r = Rect::from_min_size(ic.max - vec2(side * 0.8, side * 0.8), vec2(side, side));
-    icons::key_badge(ui.painter(), r, fill, egui::Color32::from_gray(40), behind);
+    icons::key_badge(ui.painter(), r, fill, egui::Color32::from_gray(40), behind, !kept);
 }
 
 /// Popup entries always use menu rows; nested menus cascade rather than opening another ribbon.

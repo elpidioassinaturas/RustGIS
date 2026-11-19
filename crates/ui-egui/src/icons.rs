@@ -225,8 +225,9 @@ fn maneuver(p: &P, kind: &str) {
 }
 
 /// A key filled with `fill` and outlined with `ink`, on a disc of `backdrop` that keeps it clear of
-/// the icon it sits on: a command's sign-in, kept (green) or missing (red).
-pub fn key_badge(painter: &Painter, r: Rect, fill: Color32, ink: Color32, backdrop: Color32) {
+/// the icon it sits on: a command's sign-in, kept (green) or missing (red, and struck through, so
+/// the state doesn't rest on colour alone).
+pub fn key_badge(painter: &Painter, r: Rect, fill: Color32, ink: Color32, backdrop: Color32, missing: bool) {
     let p = P { p: painter, r, ink, acc: fill };
     p.circle(12.0, 12.0, 12.0, Some(backdrop), None);
     // The bow, then the shaft and its two teeth: the outline first, the fill over it.
@@ -240,6 +241,12 @@ pub fn key_badge(painter: &Painter, r: Rect, fill: Color32, ink: Color32, backdr
     }
     p.circle(8.0, 8.0, 5.0, Some(fill), Some((1.4, ink)));
     p.circle(7.0, 7.0, 1.6, Some(backdrop), None);
+    if missing {
+        // Across the key, on a gap of the backdrop that keeps it readable over the fill.
+        let slash = [(4.0, 20.0), (20.0, 4.0)];
+        p.line(&slash, 5.0, backdrop);
+        p.line(&slash, 2.2, ink);
+    }
 }
 
 /// Paints icon `name` into `r`. `ink` draws outlines, `accent` the colour parts.

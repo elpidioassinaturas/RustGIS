@@ -341,10 +341,10 @@ struct Session {
 }
 
 impl Session {
-    /// Whether it still gives a token at `now`: it renews itself, or it hasn't expired (a token
-    /// given with an address never does).
-    fn usable(&self, now: i64) -> bool {
-        self.refresh_token.is_some() || self.expires_at > now
+    /// Whether it is a sign-in that still gives a token at `now`: it renews itself, or it hasn't
+    /// expired. A token given with an address isn't a sign-in.
+    fn signed_in_at(&self, now: i64) -> bool {
+        !self.client_id.is_empty() && (self.refresh_token.is_some() || self.expires_at > now)
     }
 }
 
@@ -751,11 +751,12 @@ pub fn signed_in(portal: &str) -> Option<Info> {
     list().into_iter().find(|s| s.portal == portal && !s.token)
 }
 
-/// Whether a session kept still gives a token: one that renews itself or hasn't expired. A sign-in
-/// past its expiry with nothing to renew it is kept, but no request uses it.
+/// Whether a sign-in kept still gives a token: one that renews itself or hasn't expired. A sign-in
+/// past its expiry with nothing to renew it is kept, but no request uses it; a token given with an
+/// address covers its server only and isn't counted.
 pub fn kept() -> bool {
     let now = now_secs();
-    sessions().iter().any(|s| s.usable(now))
+    sessions().iter().any(|s| s.signed_in_at(now))
 }
 
 /// A revocation to send after a sign-out: the endpoint and its form.

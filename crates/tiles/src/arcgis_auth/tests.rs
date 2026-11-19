@@ -6,12 +6,13 @@ fn grant(token: &str, expires_at: i64) -> Grant {
     Grant { access_token: token.into(), refresh_token: Some("refresh".into()), expires_at, username: "ana".into() }
 }
 
-/// A session counts as kept while it renews itself or hasn't expired, as requests see it (#2378).
+/// A sign-in counts as kept while it renews itself or hasn't expired, as requests see it; a token
+/// given with an address doesn't count (#2378).
 #[test]
 fn a_session_past_its_expiry_with_no_renewal_is_not_kept() {
-    let session = |expires_at: i64, refresh: Option<&str>| Session {
+    let session = |client: &str, expires_at: i64, refresh: Option<&str>| Session {
         portal: "https://kept.example.org/portal".into(),
-        client_id: "client".into(),
+        client_id: client.into(),
         username: "ana".into(),
         access_token: "synthetic".into(),
         expires_at,
@@ -20,11 +21,11 @@ fn a_session_past_its_expiry_with_no_renewal_is_not_kept() {
         retry_at: 0,
     };
     let now = 1_000;
-    assert!(session(now + 60, None).usable(now));
-    assert!(!session(now, None).usable(now));
-    assert!(session(now - 60, Some("refresh")).usable(now));
-    // A token given with an address has no known expiry.
-    assert!(session(i64::MAX, None).usable(now));
+    assert!(session("client", now + 60, None).signed_in_at(now));
+    assert!(!session("client", now, None).signed_in_at(now));
+    assert!(session("client", now - 60, Some("refresh")).signed_in_at(now));
+    // A token given with an address (no client, no known expiry) isn't a sign-in.
+    assert!(!session("", i64::MAX, None).signed_in_at(now));
 }
 
 /// Raw account identity stays in memory and follows the effective selection, including absence.
