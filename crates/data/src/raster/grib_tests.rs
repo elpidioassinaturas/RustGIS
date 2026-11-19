@@ -543,6 +543,39 @@ fn grib2_increments_given_are_used() {
 }
 
 #[test]
+fn a_length_past_its_message_hides_nothing() {
+    let mut first = G1::new(2, 1, vec![1, 2]).bytes();
+    let second = G1::new(2, 1, vec![3, 4]).bytes();
+    // The first says it is 8 octets longer: its end falls inside the second.
+    let len = first.len() as u64 + 8;
+    first[4..7].copy_from_slice(&u(len, 3));
+    let mut file = first;
+    file.extend(&second);
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert_eq!(r.bands[0].data, vec![3.0, 4.0]);
+    assert!(r.lost.contains(&"1 message left out: damaged".to_string()), "{:?}", r.lost);
+}
+
+#[test]
+fn scale_factors_past_f64_are_damage() {
+    for (d, bits) in [(400, 16), (-400, 16), (400, 0)] {
+        let mut g = G1::new(2, 1, vec![1, 2]);
+        (g.d, g.bits) = (d, bits);
+        if bits == 0 {
+            g.x.clear();
+        }
+        let e = read_bytes(&g.bytes(), "t").unwrap_err().to_string();
+        assert!(e.contains("damaged (a decimal scale factor its values can't take)"), "{d}: {e}");
+    }
+    let mut g = G1::new(2, 1, vec![1, 2]);
+    (g.e, g.bits) = (1000, 32);
+    g.x = vec![u32::MAX, 1];
+    let e = read_bytes(&g.bytes(), "t").unwrap_err().to_string();
+    assert!(e.contains("damaged (a binary scale factor its values can't take)"), "{e}");
+}
+
+#[test]
 fn points_in_counts_a_last_constant_field() {
     // A constant field's data section is 5 octets, just before "7777".
     let mut c = F2::new(3, 2, vec![]);

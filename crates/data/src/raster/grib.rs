@@ -97,6 +97,13 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
                 skipped.cut += 1;
                 break;
             }
+            // A length that doesn't end on "7777" says the message wrongly: the search goes on
+            // from inside it, so a message it would hide is still found.
+            (Some(_), len) if !ends_message(&mut source, start + len)? => {
+                skipped.message("damaged".to_string());
+                (at, in_skipped) = (start + 4, true);
+                continue;
+            }
             _ => {}
         }
         messages += 1;
@@ -203,6 +210,14 @@ fn message_header<R: Read + Seek>(source: &mut R, start: u64) -> Result<(u64, Op
         _ => 0,
     };
     Ok((len, Some(edition)))
+}
+
+/// Whether the four octets before `end` are "7777", the end of a message.
+fn ends_message<R: Read + Seek>(source: &mut R, end: u64) -> Result<bool> {
+    let mut tail = [0u8; 4];
+    source.seek(SeekFrom::Start(end.saturating_sub(4)))?;
+    source.read_exact(&mut tail)?;
+    Ok(&tail == b"7777")
 }
 
 /// The bytes counted for the progress, in KiB, with what is left of a KiB carried over.
@@ -561,7 +576,13 @@ fn unpack(data: &[u8], count: usize, bits: u32, r: f64, e: i64, d: i64) -> std::
         return Err(Skip::Damaged("a data section shorter than its values".to_string()));
     }
     let scale = 2f64.powi(e.clamp(-1000, 1000) as i32);
-    let ten = 10f64.powi(d.clamp(-1000, 1000) as i32);
+    let ten = decimal(d)?;
+    // The largest value the field can hold must be a number: past `f64`, every value would be
+    // infinite.
+    let top = (r.abs() + ((1u64 << bits) - 1) as f64 * scale) / ten;
+    if !top.is_finite() {
+        return Err(Skip::Damaged("a binary scale factor its values can't take".to_string()));
+    }
     let mut out = Vec::new();
     out.try_reserve_exact(count).map_err(|_| Skip::TooLarge)?;
     let mut rounded = 0u64;
@@ -580,6 +601,13 @@ fn unpack(data: &[u8], count: usize, bits: u32, r: f64, e: i64, d: i64) -> std::
         out.push(v as f32);
     }
     Ok((out, rounded))
+}
+
+/// 10^`d`, the decimal scale factor's divisor; damage when `f64` can't hold it (every value
+/// would be 0 or infinite).
+fn decimal(d: i64) -> std::result::Result<f64, Skip> {
+    let ten = 10f64.powi(d.clamp(-1000, 1000) as i32);
+    if ten.is_finite() && ten > 0.0 { Ok(ten) } else { Err(Skip::Damaged("a decimal scale factor its values can't take".to_string())) }
 }
 
 /// `count` copies of `v`, and how many of them `f32` changes: a field packed in no bits holds its
@@ -685,8 +713,7 @@ fn grib1(b: &[u8], room: usize) -> std::result::Result<Field, Skip> {
     let bits = u32::from(bds.get(10).copied().unwrap_or(0));
     let count = bitmap.map_or(points, |m| kept(m, points));
     let data = bds.get(11..).unwrap_or_default();
-    let (values, rounded) =
-        if bits == 0 { constant(r / 10f64.powi(d.clamp(-1000, 1000) as i32), count)? } else { unpack(data, count, bits, r, e, d)? };
+    let (values, rounded) = if bits == 0 { constant(r / decimal(d)?, count)? } else { unpack(data, count, bits, r, e, d)? };
     Ok(Field { name, grid, values: spread(values, bitmap, points)?, rounded })
 }
 
@@ -805,7 +832,7 @@ fn grib2(b: &[u8], room: usize) -> Vec<std::result::Result<Field, Skip>> {
                         return Err(Skip::Damaged("a field whose values don't fill its grid".to_string()));
                     }
                     let (values, rounded) = if bits == 0 {
-                        constant(r / 10f64.powi(d.clamp(-1000, 1000) as i32), count)?
+                        constant(r / decimal(d)?, count)?
                     } else {
                         unpack(s.get(5..).unwrap_or_default(), count, bits, r, e, d)?
                     };
