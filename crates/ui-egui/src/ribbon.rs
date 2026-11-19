@@ -3683,7 +3683,7 @@ fn login_text(login: rustgis_engine::plugins::Login, kept: bool) -> String {
     let (what, place) = match login {
         Login::Earthdata => (tl_raw!("the Earthdata Login token"), tl_raw!("Home › Add › Web Data › NASA Earthaccess")),
         Login::Copernicus => (tl_raw!("a Copernicus Data Space sign-in"), tl_raw!("Home › Add › Web Data › Copernicus Data Space")),
-        Login::Arcgis => (tl_raw!("an ArcGIS sign-in"), tl_raw!("Home › Add › From Service")),
+        Login::Arcgis => (tl_raw!("an ArcGIS sign-in"), tl_raw!("Home › Add › Add Data › Add From Service")),
     };
     if kept {
         crate::i18n::fmt("Needs {what}: kept.", &[("what", what)])
@@ -5606,7 +5606,7 @@ mod tests {
             "Needs the Earthdata Login token, which isn't given: Home › Add › Web Data › NASA Earthaccess."
         );
         assert!(login_text(Login::Copernicus, false).ends_with("Home › Add › Web Data › Copernicus Data Space."));
-        assert!(login_text(Login::Arcgis, false).ends_with("Home › Add › From Service."));
+        assert!(login_text(Login::Arcgis, false).ends_with("Home › Add › Add Data › Add From Service."));
     }
 
     /// The sample with Cities selected, recording the steps run from here on.
