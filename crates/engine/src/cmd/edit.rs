@@ -151,6 +151,8 @@ pub(crate) fn add_geometry(s: &mut Session, id: u32, p: &Json, g: Geometry) -> C
         return Err(format!("{} can't go in a {} layer", g.kind().label(), want.label()));
     }
     validate(&g)?;
+    // Given in longitude/latitude, written in the layer's own coordinates.
+    let g = l.dataset.geometry_from_lonlat(g)?;
     // A feature template's defaults, then the given attributes.
     let template = match ps(p, "template") {
         Some(t) => {
@@ -668,6 +670,8 @@ fn set_value(s: &mut Session, p: &Json) -> CmdResult {
             let (ty, field) = ds.fields.get(fi).map(|f| (f.ty, f.name.clone())).ok_or("no field")?;
             let v = typed(raw, ty)?;
             let loss = numeric_loss(&input, &v, ty);
+            // Looked at before writing: a write copies rows shared with the Undo snapshot (#2431).
+            ds.features.get(row).and_then(|f| f.attrs.get(fi)).ok_or("no such row")?;
             let cell = ds.features.get_mut(row).and_then(|f| f.attrs.get_mut(fi)).ok_or("no such row")?;
             *cell = v;
             let table = ds.name.clone();
@@ -684,6 +688,8 @@ fn set_value(s: &mut Session, p: &Json) -> CmdResult {
     let v = typed(raw, ty)?;
     // Keep the existing finite coercion, but say when it discards information.
     let loss = numeric_loss(&input, &v, ty);
+    // Looked at before writing: a write copies rows shared with the Undo snapshot (#2431).
+    l.dataset.features.get(row).and_then(|f| f.attrs.get(fi)).ok_or("no such row")?;
     let f = l.dataset.features.get_mut(row).ok_or("no such row")?;
     let before = f.clone();
     let cell = f.attrs.get_mut(fi).ok_or("no such row")?;

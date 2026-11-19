@@ -44,6 +44,7 @@ pub mod service_tokens;
 pub mod sources;
 #[cfg(test)]
 mod tests;
+mod undo_memory;
 
 pub use project::Project;
 pub use rustgis_analysis as analysis;
@@ -618,9 +619,29 @@ struct ProjectFiles {
     opened_package: Option<PathBuf>,
 }
 
+/// Room made in memory for an edit ([`Session::room_for_edit`]): the history steps set aside for
+/// it, and what to say or give back once it has run ([`Session::put_back`]).
+pub(crate) struct RoomMade {
+    slot: undo_memory::AsideSlot,
+    count: usize,
+    name: String,
+    /// The copy, counted as held while a background edit runs ([`undo_memory::Budget::reserve`]).
+    pub(crate) copy: u64,
+    /// The history when the steps were set aside ([`Session::history_stamp`]).
+    pub(crate) stamp: (u64, usize),
+}
+
+impl RoomMade {
+    /// The hook that frees the steps just before the edit copies, on the thread it runs on.
+    pub(crate) fn free_on_copy(&self) -> Box<dyn FnOnce()> {
+        undo_memory::free_on_copy(&self.slot)
+    }
+}
+
 /// An undo or redo step: the project before it, the layout open then, its label, who made it,
-/// and which state of the project it is ([`Session::dirty`]). File origins accompany changes
-/// made by the command only: undoing an ordinary edit must not undo a subsequent Save As.
+/// which state of the project it is ([`Session::dirty`]), and the identities of its feature
+/// allocations for memory accounting. File origins accompany changes made by the command only:
+/// undoing an ordinary edit must not undo a subsequent Save As.
 type Step = (
     Project,
     Option<usize>,
@@ -630,6 +651,7 @@ type Step = (
     Option<ProjectFiles>,
     (policy::Trust, policy::Trust, policy::Trust),
     construction::Cache,
+    undo_memory::Allocations,
 );
 
 /// What a project holds in the session beside itself: what [`Session::clear_history`] forgets
@@ -898,6 +920,10 @@ pub struct Session {
     /// session's, so a step that added or moved layouts opens the right one when undone).
     undo: Vec<Step>,
     redo: Vec<Step>,
+    undo_memory: undo_memory::Budget,
+    /// History set aside for edits running in the background, and the project's state then
+    /// ([`Session::remember_room`]).
+    rooms: Vec<(undo_memory::AsideSlot, (u64, usize), usize, String)>,
     /// The key the next command's undo step merges by ([`Session::merge_undo`]), and the key the
     /// last step was made under.
     merge: Option<String>,
@@ -1212,9 +1238,19 @@ fn streamed_refusal(label: &str, layer: &str) -> String {
 
 /// Commands that change a layer's features or fields, refused on streamed layers (whose features
 /// are a window read again from the file as the view moves, so edits would be lost).
-fn edits_features(id: &str) -> bool {
-    const SETTINGS: &[&str] =
-        &["edit.enable", "edit.settings", "edit.status", "edit.template", "edit.snapping", "edit.snap", "edit.tools", "edit.copy"];
+pub(crate) fn edits_features(id: &str) -> bool {
+    const SETTINGS: &[&str] = &[
+        "edit.enable",
+        "edit.settings",
+        "edit.status",
+        "edit.template",
+        "edit.snapping",
+        "edit.snap",
+        "edit.tools",
+        "edit.copy",
+        "edit.elevation",
+        "edit.groundToGrid",
+    ];
     id.starts_with("edit.") && !SETTINGS.contains(&id)
 }
 
@@ -1326,6 +1362,8 @@ impl Session {
             saved_over: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
+            undo_memory: undo_memory::Budget::default(),
+            rooms: Vec::new(),
             merge: None,
             merged: None,
             put_aside: None,
@@ -1657,6 +1695,7 @@ impl Session {
     }
 
     /// Shared command bookkeeping for ordinary dispatch and execution of an already pinned retry.
+    /// Trims history once after both the command and its maintenance have recorded their steps.
     pub(crate) fn command_epilogue(&mut self, id: &str, params: &Value, run: impl FnOnce(&mut Self) -> CmdResult) -> CmdResult {
         let outermost = self.depth == 0;
         let _inputs = (outermost && self.log.on()).then(rustgis_data::provenance::Capture::start);
@@ -1668,6 +1707,7 @@ impl Session {
         // Restored on every path, including panics outside `guarded`, so a later notice is not
         // attributed to an aborted command. Mirrors the capture scope's restore-on-drop.
         let previous = std::mem::replace(&mut self.diagnostic_source, source);
+        let history_deferred = std::mem::replace(&mut self.undo_memory.deferred, true);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let notice_mark = self.notice_mark();
             if self.depth > 0 {
@@ -1686,6 +1726,7 @@ impl Session {
             let (at, start) = (project_log::now_ms(), web_time::Instant::now());
             #[cfg(not(target_arch = "wasm32"))]
             let files_before: Vec<String> = self.mbtiles_files().map(str::to_string).collect();
+            let history_before = self.history_position();
             let res = self.with_unread_bools(source, run);
             self.beyond_said = None;
             // Whichever command took its last layer away (removed, undone, the project closed):
@@ -1703,6 +1744,9 @@ impl Session {
                 cmd::terrain_blocks::after_command(self, id);
             }
             self.notice_landed_pixels();
+            if res.is_ok() && !history_deferred && self.history_position() != history_before {
+                self.trim_undo_memory();
+            }
             // And the coordinate systems that needed a missing datum grid, after every command.
             self.say_grid_notes();
             // A plugin's command waiting for its fetches answers `pending` and runs again when they
@@ -1745,6 +1789,7 @@ impl Session {
             res
         }));
         self.diagnostic_source = previous;
+        self.undo_memory.deferred = history_deferred;
         // Every top-level invocation consumes its key, even a refusal or panic before guarded.
         if outermost {
             self.merge = None;
@@ -1794,6 +1839,8 @@ impl Session {
             }
         }
         let active = self.active_layer;
+        // History a cancelled background edit set aside comes back before Undo is judged.
+        self.reclaim_rooms();
         let (blocked, named, table) = self.conditions(&spec, params);
         if let Some(why) = blocked {
             return Err(format!("{}: {why}", spec.label));
@@ -1806,8 +1853,23 @@ impl Session {
             return Err(e);
         }
         let op = self.authorize(id, params)?;
+        // After authorizing: an edit refused there (an Assistant call not approved) costs no history.
+        let room = match self.room_for_edit(id, mutates, label, named.or(active), table) {
+            Ok(room) => room,
+            Err(e) => {
+                self.notify(e.clone(), true);
+                return Err(e);
+            }
+        };
         self.merge = merge;
-        let res = self.invoke(op, policy::Txn::Own);
+        let res = match room.as_ref().filter(|room| room.count > 0) {
+            None => self.invoke(op, policy::Txn::Own),
+            Some(room) => {
+                let (res, _) = rustgis_data::before_rows_copy(undo_memory::free_on_copy(&room.slot), || self.invoke(op, policy::Txn::Own));
+                self.put_back(room, res.is_err(), true);
+                res
+            }
+        };
         if id == "layer.addDownload"
             && res.is_ok()
             && let Some(token) = params.get("geolibreLayer").and_then(|v| v.get("token")).and_then(serde_json::Value::as_str)
@@ -1828,8 +1890,9 @@ impl Session {
         if token.is_empty() {
             return;
         }
-        for (project, ..) in self.undo.iter_mut().chain(self.redo.iter_mut()) {
-            project.discard_import_reservation(token);
+        for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            step.0.discard_import_reservation(token);
+            step.8 = undo_memory::allocations(&step.0);
         }
     }
 
@@ -1903,6 +1966,146 @@ impl Session {
         Some(streamed_refusal(label, &l.name))
     }
 
+    /// Makes room in memory for an edit of a layer's or table's features or fields (#2431 fix 3):
+    /// its first write copies the rows the Undo snapshot shares, so the copy has to fit beside what
+    /// the session holds. Older history is set aside ([`undo_memory::Budget::make_room`]): freed
+    /// just before the edit copies, given back by [`Session::put_back`] if it never does. An edit
+    /// that wouldn't fit even without history is refused before anything changes (`Err`).
+    ///
+    /// A command run by another (a script's, a task's step) isn't checked: its history belongs to
+    /// the command running it, which may still roll back. A table edit the desktop runs in the
+    /// background is checked when its work starts ([`cmd::reads::ReadAhead::refresh_table_input`]).
+    /// An edit of several layers is measured by the one it names, and memory outside the project
+    /// (results, caches, the clipboard) is left to the quarter [`rustgis_data::memory::usable`]
+    /// keeps free.
+    pub(crate) fn room_for_edit(
+        &mut self,
+        id: &str,
+        mutates: bool,
+        label: &str,
+        layer: Option<u32>,
+        table: Option<u32>,
+    ) -> Result<Option<RoomMade>, String> {
+        // Paste Special makes a layer of its own: it copies none of the active one's rows.
+        if !(mutates && edits_features(id)) || id == "edit.pasteSpecial" || self.depth > 0 || self.undo_memory.memory.is_none() {
+            return Ok(None);
+        }
+        let target = match table {
+            Some(t) => self.project.table(t).map(|t| (t.dataset.name.clone(), t.dataset.features.clone())),
+            None => {
+                layer.and_then(|l| self.map().layer(l)).filter(|l| !l.is_streamed()).map(|l| (l.name.clone(), l.dataset.features.clone()))
+            }
+        };
+        let Some((name, features)) = target else { return Ok(None) };
+        let copy = self.undo_memory.rows_bytes(&features);
+        drop(features);
+        match self.undo_memory.make_room(&self.project, &mut self.undo, &mut self.redo, copy) {
+            Ok(aside) => Ok(Some(RoomMade {
+                count: aside.as_ref().map_or(0, undo_memory::Aside::len),
+                slot: std::sync::Arc::new(std::sync::Mutex::new(aside)),
+                name,
+                copy,
+                stamp: self.history_stamp(),
+            })),
+            Err((held, usable)) => Err(format!(
+                "{label}: not enough memory to edit {name}: the edit copies its rows (about {}), and the open layers and tables already hold about {} of the {} RustGIS plans to use on this computer. Remove layers or tables you no longer need, then try again.",
+                undo_memory::size_said(copy),
+                undo_memory::size_said(held),
+                undo_memory::size_said(usable),
+            )),
+        }
+    }
+
+    /// After an edit that had room made for it: steps it never needed freed (it failed, or wrote
+    /// nothing shared) go back where they were, Redo only when it failed, as success clears it.
+    /// `in_place` says the history still follows on from them: nothing else changed the project
+    /// since they were set aside (a background edit's may have); otherwise they are freed. Freed
+    /// steps are said, once a project.
+    pub(crate) fn put_back(&mut self, room: &RoomMade, failed: bool, in_place: bool) {
+        if room.count == 0 {
+            return;
+        }
+        let aside = room.slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        // Redo goes back unless the edit made a step of its own, which cleared it.
+        let redo = in_place && (failed || room.stamp == self.history_stamp());
+        self.return_steps(aside, in_place, redo, room.count, &room.name);
+    }
+
+    /// What tells whether the history moved on since steps were set aside: the count of states
+    /// given (each edit makes one; Undo and Redo don't) and the number of steps, which trimming
+    /// lowers.
+    pub(crate) fn history_stamp(&self) -> (u64, usize) {
+        (self.states, self.undo.len() + self.redo.len())
+    }
+
+    fn return_steps(&mut self, aside: Option<undo_memory::Aside>, undo: bool, redo: bool, count: usize, name: &str) {
+        match aside {
+            // Redo not put back was cleared by the edit's own step, as it would have been anyway.
+            Some(aside) if undo => {
+                self.undo.splice(0..0, aside.undo);
+                if redo {
+                    self.redo.splice(0..0, aside.redo);
+                }
+                // The edit's own step went in while they were out.
+                let over = self.undo.len().saturating_sub(UNDO_LIMIT);
+                self.undo.drain(..over);
+            }
+            // Not taken by a copy, but the history changed while a background edit ran (another
+            // edit, Undo, trimming): the steps can't follow on from it. Rare, and not about making
+            // room, so said each time.
+            Some(_) => {
+                let template = "Undo history set aside for a background edit of {layer} is dropped ({count} Undo or Redo steps), as the Undo history changed while the edit ran.";
+                let args = [("count", count.to_string().into()), ("layer", name.to_string().into())];
+                self.notify_text(notice_text::NoticeText::format(template, args), false);
+            }
+            // Freed by the edit's copy (the hook took them).
+            None => {
+                if self.undo_memory.say_room() {
+                    let template = "Memory is nearly full: Redo steps, then the oldest Undo steps, are dropped to make room for edits ({count} before editing {layer}). An edit that still doesn't fit is refused.";
+                    let args = [("count", count.to_string().into()), ("layer", name.to_string().into())];
+                    self.notify_text(notice_text::NoticeText::format(template, args), false);
+                }
+            }
+        }
+    }
+
+    /// Keeps track of history set aside for an edit running in the background, so it can be given
+    /// back if the edit ends without landing ([`Session::reclaim_rooms`]).
+    pub(crate) fn remember_room(&mut self, room: &RoomMade) {
+        if room.count > 0 {
+            self.rooms.push((std::sync::Arc::clone(&room.slot), room.stamp, room.count, room.name.clone()));
+        }
+    }
+
+    /// Whether history is set aside for an edit running in the background.
+    pub(crate) fn room_pending(&self) -> bool {
+        !self.rooms.is_empty()
+    }
+
+    /// Forgets a background edit's set-aside history once it has landed.
+    pub(crate) fn forget_room(&mut self, room: &RoomMade) {
+        self.rooms.retain(|(slot, ..)| !std::sync::Arc::ptr_eq(slot, &room.slot));
+    }
+
+    /// Gives back the history set aside for background edits that ended without landing (cancelled,
+    /// failed to start, or their worker failed): only the session still holds it. It goes back
+    /// while nothing else changed the project since, newest set aside first so the oldest ends
+    /// in front, and is freed and said otherwise. Run before each command run by itself, and by
+    /// the desktop as its background jobs end, so Undo sees it.
+    pub fn reclaim_rooms(&mut self) {
+        if self.depth > 0 || self.rooms.is_empty() {
+            return;
+        }
+        let (ended, running): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.rooms).into_iter().partition(|(slot, ..)| std::sync::Arc::strong_count(slot) == 1);
+        self.rooms = running;
+        for (slot, stamp, count, name) in ended.into_iter().rev() {
+            let aside = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            let in_place = stamp == self.history_stamp();
+            self.return_steps(aside, in_place, in_place, count, &name);
+        }
+    }
+
     /// Runs `f` as the command `label`: when it `mutates`, the project is snapshotted for undo
     /// and restored if `f` fails or panics.
     pub(crate) fn guarded(&mut self, label: &'static str, mutates: bool, f: impl FnOnce(&mut Session) -> CmdResult) -> CmdResult {
@@ -1915,6 +2118,8 @@ impl Session {
         self.guarded_inner(label, true, false, f)
     }
 
+    /// Commits the snapshot to history only for commands that own an Undo step. Nested guards
+    /// leave memory eviction to the enclosing transaction, which can still fail or replace them.
     fn guarded_inner(
         &mut self,
         label: &'static str,
@@ -2003,7 +2208,18 @@ impl Session {
                     files.identity != self.file_identity || files.path != self.path || files.opened_package != self.opened_package
                 });
                 if key.is_none() || key != self.merged || self.undo.is_empty() {
-                    self.undo.push((snap, open_layout, label, self.actor.clone(), state, files, trust.clone(), construction_snapshot));
+                    let allocations = undo_memory::allocations(&snap);
+                    self.undo.push((
+                        snap,
+                        open_layout,
+                        label,
+                        self.actor.clone(),
+                        state,
+                        files,
+                        trust.clone(),
+                        construction_snapshot,
+                        allocations,
+                    ));
                     if self.undo.len() > UNDO_LIMIT {
                         self.undo.remove(0);
                     }
@@ -2096,6 +2312,11 @@ impl Session {
         if self.depth == 0 {
             self.put_aside = None;
             self.published_syncs.clear();
+            // Frame maintenance and some policy adapters run a guard without command dispatch.
+            // Otherwise the command epilogue trims once, after any maintenance steps.
+            if res.is_ok() && !self.undo_memory.deferred && self.state != state {
+                self.trim_undo_memory();
+            }
         }
         self.fix_active_layer();
         self.revision = self.revision.wrapping_add(1);
@@ -2996,6 +3217,7 @@ impl Session {
     /// front end setting up how the project starts): what [`PutAside`] holds, dropped.
     pub fn clear_history(&mut self) {
         drop(self.take_project_state());
+        self.undo_memory.clear();
         self.project_starts = self.project_starts.wrapping_add(1);
         // A state of its own: undo back past a replacement made within a command (a task's step)
         // reaches a state of the project before, which isn't this one's saved state.
@@ -3033,9 +3255,18 @@ impl Session {
         self.states
     }
 
+    /// Applies the shared budget after a committed edit or a history move changes what the
+    /// stacks hold. Nested edits and savepoints can still roll back or discard temporary steps.
+    fn trim_undo_memory(&mut self) {
+        if let Some(notice) = self.undo_memory.trim(&self.project, &mut self.undo, &mut self.redo) {
+            self.notify_text(notice, false);
+        }
+    }
+
+    /// Restores the newest Undo snapshot, keeping the outgoing project's allocations for Redo.
     pub(crate) fn undo(&mut self) -> bool {
         self.merged = None;
-        let Some((p, saved, label, actor, state, mut files, trust, constructions)) = self.undo.pop() else { return false };
+        let Some((p, saved, label, actor, state, mut files, trust, constructions, _)) = self.undo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
         let old_constructions = std::mem::replace(&mut self.constructions, constructions);
@@ -3055,14 +3286,26 @@ impl Session {
         self.keep_tile_pick(&cur);
         self.keep_headers_said(&cur);
         self.keep_synced(&cur);
-        self.redo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state), files, old_trust, old_constructions));
+        let allocations = undo_memory::allocations(&cur);
+        self.redo.push((
+            cur,
+            was,
+            label,
+            actor,
+            std::mem::replace(&mut self.state, state),
+            files,
+            old_trust,
+            old_constructions,
+            allocations,
+        ));
         self.touch_all_geometry();
         true
     }
 
+    /// Restores the nearest Redo snapshot, keeping the outgoing project's allocations for Undo.
     pub(crate) fn redo(&mut self) -> bool {
         self.merged = None;
-        let Some((p, saved, label, actor, state, mut files, trust, constructions)) = self.redo.pop() else { return false };
+        let Some((p, saved, label, actor, state, mut files, trust, constructions, _)) = self.redo.pop() else { return false };
         let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
         let old_constructions = std::mem::replace(&mut self.constructions, constructions);
@@ -3082,7 +3325,18 @@ impl Session {
         self.keep_tile_pick(&cur);
         self.keep_headers_said(&cur);
         self.keep_synced(&cur);
-        self.undo.push((cur, was, label, actor, std::mem::replace(&mut self.state, state), files, old_trust, old_constructions));
+        let allocations = undo_memory::allocations(&cur);
+        self.undo.push((
+            cur,
+            was,
+            label,
+            actor,
+            std::mem::replace(&mut self.state, state),
+            files,
+            old_trust,
+            old_constructions,
+            allocations,
+        ));
         self.touch_all_geometry();
         true
     }

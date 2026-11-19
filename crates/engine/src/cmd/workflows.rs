@@ -475,7 +475,11 @@ fn environments(s: &mut Session, p: &Value) -> CmdResult {
         "densityCells": rustgis_analysis::max_density_cells(),
         "bufferBytes": rustgis_analysis::max_buffer_bytes(),
         "threadScratchBytes": rustgis_analysis::scratch_budget(),
+        "undoBytes": s.undo_memory.limit,
+        // What the limits follow: the computer, a container's limit, or RUSTGIS_MEMORY_BYTES.
+        "memorySource": rustgis_data::memory::source(),
         "projectBytes": crate::project::max_bytes(),
+        "fileBytes": rustgis_data::io::max_bytes(),
         // The threads one piece of work uses now, and the cores they come from (#1562).
         "threads": rustgis_data::threads::max(),
         "cores": rustgis_data::threads::cores(),
@@ -1670,7 +1674,8 @@ fn interpolate_work(s: &Session, p: &Value) -> Result<Work, String> {
     }))
 }
 
-/// Creates a route layer and reports invalid source segments omitted from its network.
+/// Routes over the query-visible resident network, independently of selection. Invalid
+/// source segments and unreadable-query fallback are reported after a successful route.
 fn route(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
     let l = s.map().layer(id).ok_or("no such layer")?;
@@ -1679,7 +1684,17 @@ fn route(s: &mut Session, p: &Value) -> CmdResult {
     }
     let name = out_name(p, format!("Route on {}", l.name))?;
     let cost = ps(p, "costField").map(|n| l.dataset.field_index(n).ok_or_else(|| format!("no field named '{n}'"))).transpose()?;
-    let rows: Vec<usize> = l.visible_rows().iter().enumerate().filter(|(_, v)| **v).map(|(i, _)| i).collect();
+    let resolved = l.resolve_rows(&l.dataset, rustgis_map::rows::Policy::Query, None)?;
+    let query_notice = resolved.query_error.map(|error| {
+        crate::notice_text::NoticeText::format(
+            "1 layer with an unreadable definition query; reading without that query: {layer}: {error}",
+            [("layer", l.name.clone().into()), ("error", error.into())],
+        )
+    });
+    let rows: Vec<usize> = match resolved.rows {
+        rustgis_map::rows::Rows::All => (0..l.dataset.features.len()).collect(),
+        rustgis_map::rows::Rows::Subset(rows) => rows,
+    };
     let r = network::shortest_route(
         &l.dataset,
         &rows,
@@ -1693,6 +1708,9 @@ fn route(s: &mut Session, p: &Value) -> CmdResult {
         Dataset::new(name, GeometryType::Polyline, vec![Field::new("length_km", FieldType::Double), Field::new("cost", FieldType::Double)]);
     ds.push(Some(Geometry::Line(vec![r.path.clone()])), vec![Attr::Float(r.length_m / 1000.0), Attr::Float(r.cost)]);
     let nid = super::layer::add_dataset(s, ds);
+    if let Some(notice) = query_notice {
+        s.notify_text(notice, false);
+    }
     if r.skipped_segments > 0 {
         s.notify(
             format!("{source_name}: {} segments with invalid coordinates were omitted from the route network", r.skipped_segments),
@@ -1702,6 +1720,8 @@ fn route(s: &mut Session, p: &Value) -> CmdResult {
     Ok(json!({"layer": nid, "lengthKm": r.length_m / 1000.0, "cost": r.cost, "segments": r.rows.len()}))
 }
 
+/// Searches query-visible resident rows independently of selection, replacing selection only
+/// when requested. Unreadable-query fallbacks are counted after a successful search.
 fn neighborhood(s: &mut Session, p: &Value) -> CmdResult {
     let at = Coord::new(f(p, "lon").ok_or("lon is required")?, f(p, "lat").ok_or("lat is required")?);
     if !(at.x.is_finite() && at.y.abs() <= 90.0) {
@@ -1714,11 +1734,27 @@ fn neighborhood(s: &mut Session, p: &Value) -> CmdResult {
     let mut found: Vec<(u32, Vec<usize>)> = Vec::new();
     let mut bounded = Vec::new();
     let mut invalid = Vec::new();
+    let mut query_errors = Vec::new();
+    let mut query_error_count = 0;
     for l in s.map().layers.iter().filter(|l| s.map().shows(l) && !l.is_raster() && !l.graphics) {
         if only.as_ref().is_some_and(|o| !o.contains(&l.name.to_ascii_lowercase())) {
             continue;
         }
-        let rows: Vec<usize> = l.visible_rows().iter().enumerate().filter(|(_, v)| **v).map(|(i, _)| i).collect();
+        let resolved = l.resolve_rows(&l.dataset, rustgis_map::rows::Policy::Query, None)?;
+        if let Some(error) = resolved.query_error {
+            query_error_count += 1;
+            // NoticeText::list nests entries; keep its depth independent of the layer count.
+            if query_errors.len() < 5 {
+                query_errors.push(crate::notice_text::NoticeText::format(
+                    "{layer}: {error}",
+                    [("layer", l.name.clone().into()), ("error", error.into())],
+                ));
+            }
+        }
+        let rows: Vec<usize> = match resolved.rows {
+            rustgis_map::rows::Rows::All => (0..l.dataset.features.len()).collect(),
+            rustgis_map::rows::Rows::Subset(rows) => rows,
+        };
         let report = network::within_report(&l.dataset, &rows, at, radius);
         let (near, n) = (report.rows, report.bounded);
         invalid.push((l.name.clone(), report.invalid_latitudes, report.missing_coordinates));
@@ -1748,9 +1784,25 @@ fn neighborhood(s: &mut Session, p: &Value) -> CmdResult {
             super::select::set(s, id, rows, super::select::Mode::Add);
         }
     }
+    if query_error_count > 0 {
+        use crate::notice_text::NoticeText;
+        let key = if query_error_count == 1 {
+            "{count} layer with an unreadable definition query; reading without that query: {layers}"
+        } else {
+            "{count} layers with unreadable definition queries; reading without those queries: {layers}"
+        };
+        let more = query_error_count - query_errors.len();
+        let mut layers = NoticeText::list(query_errors);
+        if more > 0 {
+            layers = NoticeText::format("{layers}; {count} more layers", [("layers", layers), ("count", more.to_string().into())]);
+        }
+        s.notify_text(NoticeText::format(key, [("count", query_error_count.to_string().into()), ("layers", layers)]), false);
+    }
     Ok(json!({"radiusKm": radius / 1000.0, "layers": out}))
 }
 
+/// Generate points in resident polygons kept by the selection and definition query. An
+/// unreadable saved query leaves those polygons unfiltered and is reported once.
 fn simulate(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
     let l = s.map().layer(id).ok_or("no such layer")?;
@@ -1758,11 +1810,16 @@ fn simulate(s: &mut Session, p: &Value) -> CmdResult {
         return Err("points are simulated inside polygons".into());
     }
     let name = out_name(p, format!("{}_simulated", l.name))?;
-    // The selected polygons, or every visible one.
-    let rows: Vec<usize> = if l.selection.is_empty() {
-        l.visible_rows().iter().enumerate().filter(|(_, v)| **v).map(|(i, _)| i).collect()
-    } else {
-        l.selection.clone()
+    let resolved = l.resolve_rows(&l.dataset, rustgis_map::rows::Policy::SelectionAndQuery, None)?;
+    let query_notice = resolved.query_error.map(|error| {
+        crate::notice_text::NoticeText::format(
+            "1 layer with an unreadable definition query; reading without that query: {layer}: {error}",
+            [("layer", l.name.clone().into()), ("error", error.into())],
+        )
+    });
+    let rows: Vec<usize> = match resolved.rows {
+        rustgis_map::rows::Rows::All => (0..l.dataset.features.len()).collect(),
+        rustgis_map::rows::Rows::Subset(rows) => rows,
     };
     let seed = f(p, "seed").map_or(42, |v| v.max(0.0) as u64);
     let pts: Vec<(usize, Coord)> = match ps(p, "field") {
@@ -1793,6 +1850,9 @@ fn simulate(s: &mut Session, p: &Value) -> CmdResult {
         ds.push(Some(Geometry::Point(*c)), vec![Attr::Int(*r as i64)]);
     }
     let n = ds.features.len();
+    if let Some(notice) = query_notice {
+        s.notify_text(notice, false);
+    }
     let nid = super::layer::add_dataset(s, ds);
     Ok(json!({"layer": nid, "points": n}))
 }
@@ -2029,7 +2089,7 @@ fn converted(ds: &Dataset, p: &Value) -> Result<(String, Vec<String>), String> {
     };
     // Every format here is longitude/latitude.
     let target = ps(p, "path").unwrap_or(&ds.name);
-    let mut notes = rustgis_data::export_notes([(ds, ds.extent())], target, rustgis_data::raster::Crs::LonLat);
+    let mut notes = rustgis_data::export_notes([(ds, ds.lonlat_extent())], target, rustgis_data::raster::Crs::LonLat);
     notes.extend(rustgis_data::io::export_losses_notes(ds, format, name_field, target).map_err(|e| e.to_string())?);
     // KML and GPX hold features with geometry only.
     if let ext @ ("kml" | "gpx") = format {
