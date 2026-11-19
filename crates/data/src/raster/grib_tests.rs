@@ -298,7 +298,8 @@ fn grib1_simple_packing_north_to_south() {
     assert_eq!(r.bands[0].name, "d=2026111806:kpds5=11:kpds6=105:kpds7=2:TR=0:P1=0:P2=0:TimeU=1");
     // GRIB1's earth is a sphere: said once.
     assert_eq!(r.lost, vec!["its earth is a sphere of radius 6,367,470 m (GRIB1's); latitudes and longitudes are read as WGS 84's"]);
-    assert!(r.rounded.is_empty());
+    // 10.1 and 10.2 change in `f32`; 10, 13, 14 and 15 don't.
+    assert_eq!(r.rounded, vec![2]);
 }
 
 #[test]
@@ -449,4 +450,61 @@ fn grib_names_are_rasters() {
     assert!(!is_grib_name("a.grd"));
     let r = crate::raster::read_bytes("run.grb2", &grib2_message(&[F2::new(2, 1, vec![1, 2])])).unwrap();
     assert_eq!(r.name, "run");
+}
+
+#[test]
+fn another_edition_is_said_and_the_next_message_read() {
+    let mut other = G1::new(2, 1, vec![1, 2]).bytes();
+    other[7] = 3;
+    let mut file = other;
+    file.extend(G1::new(2, 1, vec![3, 4]).bytes());
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert_eq!(r.bands[0].data, vec![3.0, 4.0]);
+    assert!(r.lost.contains(&"1 field left out: GRIB edition 3, not read yet".to_string()), "{:?}", r.lost);
+    assert!(!r.lost.iter().any(|l| l.contains("ends inside")), "{:?}", r.lost);
+}
+
+#[test]
+fn a_long_gap_between_messages_is_passed_and_said() {
+    let mut file = G1::new(2, 1, vec![1, 2]).bytes();
+    // About 70 KiB of something else, with "GRI" split over a chunk's end on the way.
+    file.extend(std::iter::repeat_n(b'x', 70 * 1024));
+    file.extend(b"GRI");
+    file.extend(G1::new(2, 1, vec![3, 4]).bytes());
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 2);
+    assert_eq!(r.bands[1].data, vec![3.0, 4.0]);
+    assert!(r.lost.contains(&format!("{} bytes outside its messages aren't GRIB, and are passed over", 70 * 1024 + 3)), "{:?}", r.lost);
+    // A "GRIB" split over two chunks is found.
+    for pad in 4090..4100 {
+        let mut file = vec![0u8; pad];
+        file.extend(G1::new(2, 1, vec![1, 2]).bytes());
+        assert_eq!(read_bytes(&file, "t").unwrap().bands.len(), 1, "{pad}");
+    }
+}
+
+#[test]
+fn ensemble_members_are_named_apart() {
+    let mut s = F2::new(2, 1, vec![1, 2]).sections();
+    // Section 4 is at 72 (after section 3): template 4.1, with its ensemble octets.
+    let at = 72;
+    s[at + 8] = 1;
+    let mut s4_tail = vec![3u8, 7, 20];
+    // Grow section 4 from 34 to 37 octets.
+    s.splice(at + 34..at + 34, s4_tail.drain(..));
+    s[at + 3] = 37;
+    let mut s1 = u(21, 4);
+    s1.extend([1, 0, 7, 0, 0, 2, 1, 1]);
+    s1.extend(u(2026, 2));
+    s1.extend([11, 18, 0, 0, 0, 0, 1]);
+    let mut body = s1;
+    body.extend(s);
+    let mut msg = b"GRIB".to_vec();
+    msg.extend([0, 0, 0, 2]);
+    msg.extend(u(16 + body.len() as u64 + 4, 8));
+    msg.extend(body);
+    msg.extend(b"7777");
+    let r = read_bytes(&msg, "t").unwrap();
+    assert!(r.bands[0].name.ends_with(":template=4.1:surface=103:value=2:TimeU=1:forecast=6:ensemble=3:member=7"), "{}", r.bands[0].name);
 }

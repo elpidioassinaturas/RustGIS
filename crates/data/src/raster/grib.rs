@@ -12,7 +12,8 @@
 //!
 //! The fields on the grid of the first one read are the raster's bands, in file order; fields on
 //! another grid are left out with a notice. Values are `(R + X × 2^E) / 10^D`, in the units the
-//! file stores (kelvin stays kelvin). Points a bitmap masks are NaN. Rows are laid out north up,
+//! file stores (kelvin stays kelvin), unpacked in `f64`; those `f32` changes are counted in
+//! [`Raster::rounded`]. Points a bitmap masks are NaN. Rows are laid out north up,
 //! and a grid round the whole globe runs from −180° (as GDAL lays it out).
 
 use super::{Crs, GeoTransform, Raster, max_samples};
@@ -28,9 +29,9 @@ pub fn is_grib_name(name: &str) -> bool {
     EXTENSIONS.contains(&ext.as_str())
 }
 
-/// Most bytes looked through for the start of the next message ("GRIB"): files may put a
-/// bulletin header or padding between messages, never this much.
-const MAX_GAP: u64 = 64 * 1024;
+/// The bytes read at a time while looking for the next message ("GRIB"): files may put a
+/// bulletin header or padding between messages.
+const CHUNK: usize = 4 * 1024;
 
 /// The most bits a packed value may have: GRIB allows more, no producer writes them.
 const MAX_BITS: u32 = 32;
@@ -57,31 +58,55 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
     let mut at = 0u64;
     let mut messages = 0usize;
     let mut held = 0usize;
-    while let Some(start) = find_message(&mut source, at, file_len)? {
-        crate::progress::check()?;
+    let mut chunk = vec![0u8; CHUNK];
+    // Progress in KiB of the file; one message is decoded without a check (at most
+    // `max_samples` values).
+    crate::progress::begin(usize::try_from(file_len / 1024).unwrap_or(usize::MAX));
+    loop {
+        let (found, junk) = find_message(&mut source, at, file_len, &mut chunk)?;
+        skipped.junk += junk;
+        let Some(start) = found else { break };
+        crate::progress::step(usize::try_from(start.saturating_sub(at) / 1024).unwrap_or(0))?;
         let (len, edition) = message_header(&mut source, start)?;
-        if len < MIN_MESSAGE || start.saturating_add(len) > file_len {
+        match (edition, len) {
+            // Not a message GRIB 1 or 2 describes: its four letters are passed, and the search
+            // goes on.
+            (Some(e), _) if e != 1 && e != 2 => {
+                skipped.add(format!("GRIB edition {e}"));
+                at = start + 4;
+                continue;
+            }
+            (Some(_), len) if len < MIN_MESSAGE => {
+                skipped.add("a damaged message".to_string());
+                at = start + 4;
+                continue;
+            }
             // A message cut short (a byte range that ends early, a truncated download): what was
             // read before it stands, and the cut is said.
-            skipped.cut += 1;
-            break;
+            (None, _) => {
+                skipped.cut += 1;
+                break;
+            }
+            (Some(_), len) if start.saturating_add(len) > file_len => {
+                skipped.cut += 1;
+                break;
+            }
+            _ => {}
         }
         messages += 1;
         at = start + len;
+        crate::progress::step(usize::try_from(len / 1024).unwrap_or(0))?;
         // Past the memory limit: the rest is only counted.
         if held >= limit {
-            skipped.over_limit += count_fields(&mut source, start, len, edition)?;
+            skipped.over_limit += count_fields(&mut source, start, len, edition == Some(2))?;
             continue;
         }
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(len as usize).map_err(|_| bad("not enough memory for a message"))?;
         source.seek(SeekFrom::Start(start))?;
         source.by_ref().take(len).read_to_end(&mut bytes)?;
-        let decoded = match edition {
-            1 => vec![grib1(&bytes, limit.saturating_sub(held))],
-            2 => grib2(&bytes, limit.saturating_sub(held)),
-            e => vec![Err(Skip::Other(format!("edition {e}")))],
-        };
+        let decoded =
+            if edition == Some(1) { vec![grib1(&bytes, limit.saturating_sub(held))] } else { grib2(&bytes, limit.saturating_sub(held)) };
         for d in decoded {
             match d {
                 Ok(f) => {
@@ -100,7 +125,7 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
             }
         }
     }
-    if messages == 0 {
+    if messages == 0 && skipped.reasons.is_empty() {
         return Err(bad(if skipped.cut > 0 { "the first message is cut short" } else { "no GRIB message in the file" }));
     }
     let Some(first) = fields.first() else {
@@ -113,20 +138,31 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
     Ok(r)
 }
 
-/// The offset of the next "GRIB" at or after `at`, within [`MAX_GAP`] bytes; `None` at the end.
-fn find_message<R: Read + Seek>(source: &mut R, at: u64, file_len: u64) -> Result<Option<u64>> {
-    if at >= file_len {
-        return Ok(None);
+/// The offset of the next "GRIB" at or after `at` (`None` at the end of the file), and how many
+/// of the bytes passed on the way aren't zeros (padding): a bulletin header, other data.
+fn find_message<R: Read + Seek>(source: &mut R, at: u64, file_len: u64, chunk: &mut [u8]) -> Result<(Option<u64>, u64)> {
+    let mut from = at;
+    let mut junk = 0u64;
+    while from < file_len {
+        source.seek(SeekFrom::Start(from))?;
+        let n = usize::try_from(file_len - from).unwrap_or(usize::MAX).min(chunk.len());
+        let window = chunk.get_mut(..n).unwrap_or_default();
+        source.read_exact(window)?;
+        if let Some(p) = window.windows(4).position(|w| w == b"GRIB") {
+            junk += window.iter().take(p).filter(|b| **b != 0).count() as u64;
+            return Ok((Some(from + p as u64), junk));
+        }
+        // The last three bytes may start a "GRIB" that the next chunk ends.
+        let keep = if from + n as u64 >= file_len { 0 } else { 3.min(n) };
+        junk += window.iter().take(n - keep).filter(|b| **b != 0).count() as u64;
+        from += (n - keep).max(1) as u64;
     }
-    source.seek(SeekFrom::Start(at))?;
-    let n = (file_len - at).min(MAX_GAP + 4);
-    let mut window = Vec::new();
-    source.by_ref().take(n).read_to_end(&mut window)?;
-    Ok(window.windows(4).position(|w| w == b"GRIB").map(|p| at + p as u64))
+    Ok((None, junk))
 }
 
-/// A message's length and edition, from its indicator section.
-fn message_header<R: Read + Seek>(source: &mut R, start: u64) -> Result<(u64, u8)> {
+/// A message's length and edition, from its indicator section: no edition when the file ends
+/// inside the section, a length of 0 for an edition other than 1 and 2.
+fn message_header<R: Read + Seek>(source: &mut R, start: u64) -> Result<(u64, Option<u8>)> {
     source.seek(SeekFrom::Start(start))?;
     let mut head = [0u8; 16];
     let mut got = 0;
@@ -137,21 +173,22 @@ fn message_header<R: Read + Seek>(source: &mut R, start: u64) -> Result<(u64, u8
         }
     }
     if got < 8 {
-        return Ok((0, 0));
+        return Ok((0, None));
     }
     let edition = head[7];
     let len = match edition {
         1 => u64::from(be(&head, 4, 3)),
         2 if got == 16 => head[8..16].iter().fold(0u64, |v, &b| (v << 8) | u64::from(b)),
+        2 => return Ok((0, None)),
         _ => 0,
     };
-    Ok((len, edition))
+    Ok((len, Some(edition)))
 }
 
 /// How many fields a message holds: one in GRIB1, one a data section (7) in GRIB2, counted from
 /// the sections' headers alone.
-fn count_fields<R: Read + Seek>(source: &mut R, start: u64, len: u64, edition: u8) -> Result<usize> {
-    if edition != 2 {
+fn count_fields<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) -> Result<usize> {
+    if !grib2 {
         return Ok(1);
     }
     let (mut at, end, mut n) = (start + 16, start + len, 0usize);
@@ -186,6 +223,8 @@ struct Skipped {
     other_grid: usize,
     over_limit: usize,
     cut: usize,
+    /// Bytes outside every message that aren't zeros.
+    junk: u64,
 }
 
 impl Skipped {
@@ -209,6 +248,9 @@ impl Skipped {
         }
         if self.cut > 0 {
             out.push("the file ends inside a message, which is left out".to_string());
+        }
+        if self.junk > 0 {
+            out.push(format!("{} bytes outside its messages aren't GRIB, and are passed over", self.junk));
         }
         out
     }
@@ -335,7 +377,7 @@ struct Field {
     name: String,
     grid: Grid,
     values: Vec<f32>,
-    /// Values `f32` changed (only packings of more than 24 bits can lose any).
+    /// Values `f32` changed: decimals (`D` > 0) and sums with more digits than it holds.
     rounded: u64,
 }
 
@@ -425,7 +467,7 @@ fn unpack(data: &[u8], count: usize, bits: u32, r: f64, e: i64, d: i64) -> std::
         let x = (word << (bit % 8)) >> (64 - bits);
         bit += u64::from(bits);
         let v = (r + x as f64 * scale) / ten;
-        if bits > 24 && f64::from(v as f32) != v {
+        if f64::from(v as f32) != v {
             rounded += 1;
         }
         out.push(v);
@@ -433,12 +475,13 @@ fn unpack(data: &[u8], count: usize, bits: u32, r: f64, e: i64, d: i64) -> std::
     Ok((out, rounded))
 }
 
-/// `count` copies of `v`: a field packed in no bits holds its reference value everywhere.
-fn constant(v: f64, count: usize) -> std::result::Result<Vec<f64>, Skip> {
+/// `count` copies of `v`, and how many of them `f32` changes: a field packed in no bits holds its
+/// reference value everywhere.
+fn constant(v: f64, count: usize) -> std::result::Result<(Vec<f64>, u64), Skip> {
     let mut out = Vec::new();
     out.try_reserve_exact(count).map_err(|_| Skip::TooLarge)?;
     out.resize(count, v);
-    Ok(out)
+    Ok((out, if f64::from(v as f32) != v { count as u64 } else { 0 }))
 }
 
 /// Values in scanning order: those unpacked, spread over the points a bitmap keeps (NaN at the
@@ -539,7 +582,7 @@ fn grib1(b: &[u8], room: usize) -> std::result::Result<Field, Skip> {
     let count = bitmap.map_or(points, |m| kept(m, points));
     let data = bds.get(11..).unwrap_or_default();
     let (values, rounded) =
-        if bits == 0 { (constant(r / 10f64.powi(d.clamp(-1000, 1000) as i32), count)?, 0) } else { unpack(data, count, bits, r, e, d)? };
+        if bits == 0 { constant(r / 10f64.powi(d.clamp(-1000, 1000) as i32), count)? } else { unpack(data, count, bits, r, e, d)? };
     Ok(Field { name, grid, values: spread(values, bitmap, points)?, rounded })
 }
 
@@ -658,7 +701,7 @@ fn grib2(b: &[u8], room: usize) -> Vec<std::result::Result<Field, Skip>> {
                         return Err(Skip::Other("a field whose values don't fill its grid".to_string()));
                     }
                     let (values, rounded) = if bits == 0 {
-                        (constant(r / 10f64.powi(d.clamp(-1000, 1000) as i32), count)?, 0)
+                        constant(r / 10f64.powi(d.clamp(-1000, 1000) as i32), count)?
                     } else {
                         unpack(s.get(5..).unwrap_or_default(), count, bits, r, e, d)?
                     };
@@ -750,6 +793,10 @@ fn grib2_product(s: &[u8]) -> String {
     if template <= 15 && s.len() >= 28 {
         let value = signed(s, 24, 4) as f64 / 10f64.powi(signed(s, 23, 1) as i32);
         name.push_str(&format!(":surface={}:value={}:TimeU={}:forecast={}", s[22], round6(value), s[17], be(s, 18, 4)));
+    }
+    // An ensemble's member (templates 4.1 and 4.11): its type and perturbation number.
+    if matches!(template, 1 | 11) && s.len() >= 37 {
+        name.push_str(&format!(":ensemble={}:member={}", s[34], s[35]));
     }
     name
 }
