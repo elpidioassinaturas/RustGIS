@@ -257,7 +257,12 @@ fn points_in<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) 
         if !read(source, gds, &mut head[..10])? || head[5] != 0 {
             return Ok(None);
         }
-        return Ok(Some((be(&head, 6, 2) as usize).saturating_mul(be(&head, 8, 2) as usize)));
+        let (ni, nj) = (be(&head, 6, 2) as usize, be(&head, 8, 2) as usize);
+        // A quasi-regular grid's missing length: the decoder says why it isn't read.
+        if ni == 0xffff || nj == 0xffff {
+            return Ok(None);
+        }
+        return Ok(Some(ni.saturating_mul(nj)));
     }
     let (mut at, mut points, mut total) = (start + 16, 0usize, 0usize);
     // Each section's 5-octet header (a constant field's data section is no longer, just before
@@ -501,7 +506,8 @@ struct Field {
 
 /// The raster of fields on one grid: north up, a whole turn of longitude from −180°. Cancel is
 /// looked at before each band is placed; one band's placement (at most `max_samples` values, one
-/// pass) runs without a check.
+/// pass) runs without a check, and so does the statistics pass `Raster::new` makes over the
+/// bands.
 fn to_raster(fields: Vec<Field>, name: &str) -> Result<Raster> {
     let Some(grid) = fields.first().map(|f| f.grid) else { return Err(bad("no field")) };
     let (w, h) = (grid.ni, grid.nj);

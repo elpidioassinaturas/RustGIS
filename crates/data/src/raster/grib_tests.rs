@@ -576,6 +576,27 @@ fn scale_factors_past_f64_are_damage() {
 }
 
 #[test]
+fn clean_input_says_nothing() {
+    // A GRIB2 field on WGS 84 (shape 5), whole numbers in 12 bits, no bitmap: no notice.
+    let msg = grib2_message(&[F2::new(2, 2, vec![1, 2, 3, 4])]);
+    let mut msg = msg;
+    // Section 3 starts after section 0 (16) and section 1 (21); its shape of the earth is octet 15.
+    msg[16 + 21 + 14] = 5;
+    let r = read_bytes(&msg, "t").unwrap();
+    assert!(r.lost.is_empty(), "{:?}", r.lost);
+    assert!(r.rounded.is_empty());
+}
+
+#[test]
+fn a_grib1_quasi_regular_grid_is_said_as_such() {
+    let mut g = G1::new(2, 1, vec![1, 2]).bytes();
+    // Ni (GDS octets 7 and 8, after the 8-octet indicator and the 28-octet product section).
+    g[8 + 28 + 6..8 + 28 + 8].copy_from_slice(&[0xff, 0xff]);
+    let e = read_bytes(&g, "t").unwrap_err().to_string();
+    assert!(e.contains("quasi-regular grids"), "{e}");
+}
+
+#[test]
 fn points_in_counts_a_last_constant_field() {
     // A constant field's data section is 5 octets, just before "7777".
     let mut c = F2::new(3, 2, vec![]);
