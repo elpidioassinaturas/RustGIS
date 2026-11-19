@@ -357,7 +357,9 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         let (missing, bad) = held(&c.form, &d.values, &d.texts);
         let ready = missing.is_empty() && bad.is_empty();
         if tab_clicked && d.asked.is_some() {
-            d.again = true;
+            // Only a click that could run now is left to run after: one with a field to fill
+            // in only selects its tab, even if the field is filled in before the run answers.
+            d.again = ready;
         } else if tab_clicked || again || d.opening {
             run = ready;
             d.again = false;
@@ -869,6 +871,28 @@ mod tests {
         assert!(!dialog(&h).again && dialog(&h).asked.is_none());
         assert_eq!(echoed(&h), json!({"part": "Authors"}));
         plugins::unload("ui-dialog-tabs-again");
+    }
+
+    /// A tab clicked during a run while a required field is empty only selects it: filling the
+    /// field in before that run answers doesn't run it then.
+    #[test]
+    fn a_tab_clicked_while_running_and_not_ready_is_not_run_after() {
+        let mut h = launch("ui-dialog-tabs-not-ready");
+        h.state_mut().run_by_user("plugin:ui-dialog-tabs-not-ready/qr", Value::Null).unwrap();
+        h.run();
+        h.state_mut().ui.plugin_dialog.open.as_mut().unwrap().values.insert("note".into(), json!("hi"));
+        h.get_by_label("Sources").click();
+        h.step();
+        assert!(dialog(&h).asked.is_some(), "waits to start");
+        h.state_mut().ui.plugin_dialog.open.as_mut().unwrap().values.remove("note");
+        h.get_by_label("Authors").click();
+        h.step();
+        assert!(!dialog(&h).again, "not ready, so nothing is left to run");
+        h.state_mut().ui.plugin_dialog.open.as_mut().unwrap().values.insert("note".into(), json!("hi"));
+        h.run();
+        assert!(!dialog(&h).again && dialog(&h).asked.is_none());
+        assert_eq!(echoed(&h), json!({"note": "hi", "part": "Sources"}), "only the ready click ran");
+        plugins::unload("ui-dialog-tabs-not-ready");
     }
 
     /// A `report` text is shown as it is; any other answer as JSON, without its panel state; a
