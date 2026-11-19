@@ -542,6 +542,26 @@ fn inside(rings: &[Vec<Coord>], p: Coord) -> bool {
 /// polygon under a pixel does on the map (`pattern_fill::tint`).
 const MAX_MARKS: f64 = 20_000.0;
 
+/// How much to stretch `pattern` across a wall `around` (logical px) long that closes on itself,
+/// so it holds a whole number of the pattern's periods across and meets itself where it closes:
+/// under 1% on a wall a hundred periods round.
+fn closing(pattern: FillPattern, around: f64) -> f64 {
+    let period = match pattern {
+        // Lines repeat across every spacing / sin(angle); level ones don't change across.
+        FillPattern::Hatch { angle, spacing, .. } => {
+            let s = f64::from(angle).to_radians().sin().abs();
+            if s < 1e-6 { 0.0 } else { f64::from(spacing) / s }
+        }
+        // Odd columns are shifted down, so the grid repeats every two columns.
+        FillPattern::Dots { spacing, displacement, .. } => f64::from(spacing[0]) * if displacement[1] == 0.0 { 1.0 } else { 2.0 },
+        _ => 0.0,
+    };
+    if !(period > 0.0 && period.is_finite() && around > 0.0 && around.is_finite()) {
+        return 1.0;
+    }
+    (around / period).round().max(1.0) * period / around
+}
+
 /// Draws `patterns` (hatch lines, markers on a grid; `tone` gives each colour its light and fog)
 /// on a stretch of wall, cut to `mask`. A pattern is laid out in the wall's own plane, across it
 /// (left to right as seen from outside the box) and up, both in logical px at the view centre's
@@ -898,7 +918,14 @@ pub(crate) fn draw_walls(pm: &mut Pixmap, view: &View, ground: &Ground, b: &Bloc
                 cut.fill_path(&path, FillRule::Winding, true, Transform::identity());
                 dirty = Some(path.bounds());
                 let (x0, x1) = (run.lo / res * dir, run.hi / res * dir);
-                draw_patterns(pm, cut, &run.patterns, ((x0.min(x1), x0.max(x1)), up_range), scale, tone, at);
+                // A round block's wall closes on itself at the east point, where `along` goes
+                // back to 0: each pattern is stretched across so it runs on over that seam.
+                let around = b.circle.map(|(_, r)| r * std::f64::consts::TAU / res);
+                for p in &run.patterns {
+                    let f = around.map_or(1.0, |c| closing(p.0, c));
+                    let span = ((x0.min(x1) * f, x0.max(x1) * f), up_range);
+                    draw_patterns(pm, cut, std::slice::from_ref(p), span, scale, tone, |x, up| at(x / f, up));
+                }
             }
         }
         // The contacts between colours, straight down.
@@ -1253,5 +1280,29 @@ mod tests {
         // A pattern that draws nothing (no width) is left off too.
         let bare = FillLayer { color: Some(blue), pattern: FillPattern::Hatch { angle: 0.0, spacing: 4.0, width: 0.0, offset: 0.0 } };
         assert_eq!(unit_paint(red, &[bare], walls), (walls, Vec::new()));
+    }
+
+    #[test]
+    fn a_pattern_round_a_round_blocks_wall_holds_whole_periods_so_it_meets_itself_at_the_east_point() {
+        let hatch = |angle| FillPattern::Hatch { angle, spacing: 6.0, width: 1.0, offset: 0.0 };
+        // At 30° the lines repeat every 12 px across: 1000 px round holds 83 of them, stretched by 0.4%.
+        let f = closing(hatch(30.0), 1000.0);
+        assert!(((1000.0 * f / 12.0) - 83.0).abs() < 1e-9 && (f - 1.0).abs() < 0.01, "{f}");
+        assert!(((1000.0 * closing(hatch(-75.0), 1000.0) / (6.0 / 75f64.to_radians().sin())).fract()).abs() < 1e-9);
+        // Level lines don't change across, and a solid fill has nothing to meet.
+        assert_eq!(closing(hatch(0.0), 1000.0), 1.0);
+        assert_eq!(closing(FillPattern::Solid, 1000.0), 1.0);
+        // Odd columns shifted down: the grid repeats every two columns.
+        let dots = |dy| FillPattern::Dots {
+            marker: Default::default(),
+            size: 1.0,
+            outline: None,
+            outline_width: 0.0,
+            spacing: [7.0, 7.0],
+            displacement: [0.0, dy],
+            offset: [0.0, 0.0],
+        };
+        assert!((1000.0 * closing(dots(0.0), 1000.0) / 7.0 - 143.0).abs() < 1e-9);
+        assert!((1000.0 * closing(dots(3.0), 1000.0) / 14.0 - 71.0).abs() < 1e-9);
     }
 }
