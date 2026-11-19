@@ -603,6 +603,13 @@ pub fn picture_marker_draws(p: rustgis_map::Picture) -> bool {
     picture::marker_aspect(p).is_some()
 }
 
+/// Picture marker `p`'s image at most `side` pixels per side (a preview's), and its height for its
+/// width from before it was scaled down; `None` where the map draws a circle. Decoded on every
+/// call: the caller keeps it.
+pub fn picture_marker_image(p: rustgis_map::Picture, side: u32) -> Option<(Pixmap, f32)> {
+    picture::marker_image(p, side)
+}
+
 /// The colour unplaced labels are drawn in.
 pub const UNPLACED: Rgba = Rgba::rgb(0xD0, 0x1C, 0x1C);
 
@@ -2740,7 +2747,7 @@ fn drape_terrain(
     // at 160 cells).
     type Vertex = ((f64, f64), (f64, f64), f64);
     let (pw, ph) = (f64::from(pm.width()), f64::from(pm.height()));
-    let mut grids: Vec<(usize, Vec<Option<Vertex>>, Vec<Option<u8>>)> = Vec::with_capacity(bands.len());
+    let mut grids: Vec<(usize, Vec<Option<Vertex>>, Vec<Option<u16>>)> = Vec::with_capacity(bands.len());
     let mut tris: Vec<(f64, u32, u32)> = Vec::new();
     // A block diagram (#1914): each vertex's sides of the box it lies beyond, and the stretches of
     // the box's edge the ground cut to it ends at, for the walls.
@@ -2756,7 +2763,7 @@ fn drape_terrain(
         // same map point.
         let points = (nx + 1) * (ny + 1);
         let mut grid: Vec<Option<Vertex>> = Vec::with_capacity(points);
-        let mut codes: Vec<Option<u8>> = Vec::with_capacity(if block.is_some() { points } else { 0 });
+        let mut codes: Vec<Option<u16>> = Vec::with_capacity(if block.is_some() { points } else { 0 });
         for (i, j) in (0..=ny).flat_map(|j| (0..=nx).map(move |i| (i, j))) {
             let (lx, ly) = (v.width * i as f64 / nx as f64, v.height * j as f64 / ny as f64);
             let m = v.camera.to_map(lx, ly, v.width, v.height);
@@ -2779,9 +2786,9 @@ fn drape_terrain(
                 if depth < d0 - margin || depth > d1 + margin || p.2.min(q.2).min(r.2) > far {
                     continue;
                 }
-                // Wholly beyond one side of the block's box: not drawn.
+                // Wholly beyond one side of the block's box (or a tangent of its circle): not drawn.
                 let code = codes.and_then(|c| c.get(half).copied()).unwrap_or([0; 3]);
-                if code[0] & code[1] & code[2] != 0 {
+                if code[0] & code[1] & code[2] & !block::ROUND_OFF != 0 {
                     continue;
                 }
                 // Wholly off one side of the picture: nothing to draw. Across the block's edge it
@@ -2835,7 +2842,7 @@ fn drape_terrain(
                             (w[0] * dst[0].0 + w[1] * dst[1].0 + w[2] * dst[2].0, w[0] * dst[0].1 + w[1] * dst[1].1 + w[2] * dst[2].1)
                         })
                         .collect();
-                    block::edges(&poly, &screen, depth, &mut edges);
+                    block::edges(b, &poly, &screen, depth, &mut edges);
                     (c != [0; 3]).then_some(screen)
                 }
             }
@@ -3680,6 +3687,9 @@ fn upright_markers_with(map: &mut Map, view: &View, margin: f64, env: &Env) -> V
         let layer: &rustgis_map::Layer = layer;
         let styler = layer.styler_with(env.at_scale(Some(scale)));
         let mut here: Vec<(f64, UprightMarker)> = Vec::new();
+        // Boxes in longitude/latitude for the view distance, from the dataset's own coordinates:
+        // none is drawn when they can't be converted, as `within_view_distance` draws none.
+        let to_lonlat = clip.and_then(|_| layer.dataset.lonlat_conversion().ok());
         for (row, g) in layer.projected_cache().iter().enumerate() {
             if rows.get(row) != Some(&true) {
                 continue;
@@ -3689,7 +3699,10 @@ fn upright_markers_with(map: &mut Map, view: &View, margin: f64, env: &Env) -> V
                 Some(Geometry::MultiPoint(v)) => v,
                 _ => continue,
             };
-            let lonlat = clip.and_then(|_| layer.dataset.features.get(row).and_then(|f| f.geometry.as_ref()).map(|g| g.extent()));
+            let lonlat = clip.and_then(|_| {
+                let own = layer.dataset.features.get(row).and_then(|f| f.geometry.as_ref())?.extent();
+                Some(to_lonlat.as_ref().map_or(rustgis_geom::Extent::EMPTY, |t| t.extent(&own)))
+            });
             if let (Some((centre, d)), Some(e)) = (clip, lonlat) {
                 let near = Coord::new(centre.x.clamp(e.min_x, e.max_x), centre.y.clamp(e.min_y, e.max_y));
                 if e.is_empty() || rustgis_geom::haversine_m(centre, near) > d {
@@ -4054,9 +4067,17 @@ impl Drop for TiltGlint {
 /// map's view distance, lon/lat): one reaching into it (its box's nearest point within the
 /// distance) is kept, one with no geometry isn't.
 pub(crate) fn within_view_distance(rows: &mut [bool], dataset: &rustgis_data::Dataset, centre: Coord, d: f64) {
+    // Each box in longitude/latitude, from the dataset's own coordinates: none is drawn when they
+    // can't be converted, as `Layer::projected_in` draws none.
+    let to = dataset.lonlat_conversion().ok();
     for (r, keep) in rows.iter_mut().enumerate() {
         if *keep {
-            let e = dataset.features.get(r).and_then(|f| f.geometry.as_ref()).map(|g| g.extent()).filter(|e| !e.is_empty());
+            let e = dataset
+                .features
+                .get(r)
+                .and_then(|f| f.geometry.as_ref())
+                .and_then(|g| to.as_ref().map(|t| t.extent(&g.extent())))
+                .filter(|e| !e.is_empty());
             *keep = e.is_some_and(|e| {
                 let near = Coord::new(centre.x.clamp(e.min_x, e.max_x), centre.y.clamp(e.min_y, e.max_y));
                 rustgis_geom::haversine_m(centre, near) <= d
@@ -9583,6 +9604,7 @@ mod tests {
         let m = export.join().unwrap();
         assert!(waited, "the export waited for the far band's cast shadows");
         let rl = m.layer(id).and_then(|l| l.raster.as_ref()).unwrap();
+        assert!(rl.cast_shadow_jobs() > 0, "completed light work remains observable");
         assert!(matches!(rl.cast_shadows(false, (0, 0), || {}), rustgis_map::raster::CastShadows::Ready(_)), "and drew them");
     }
 
@@ -9621,10 +9643,7 @@ mod tests {
             }
             render_complete(&mut m, &view).unwrap();
             let rl = m.layer(id).and_then(|l| l.raster.as_ref()).unwrap();
-            assert!(
-                matches!(rl.cast_shadows(false, (0, 0), || {}), rustgis_map::raster::CastShadows::Pending),
-                "grouped {grouped}: nothing was worked out for it"
-            );
+            assert_eq!(rl.cast_shadow_jobs(), 0, "grouped {grouped}: no light work was started");
         }
     }
 
@@ -9963,6 +9982,7 @@ mod tests {
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
             water: None,
+            shape: rustgis_map::view::BlockShape::Box,
         };
         let terrain = |block: Option<rustgis_map::view::TerrainBlock>| {
             Some(rustgis_map::view::Terrain {
@@ -10006,6 +10026,64 @@ mod tests {
     }
 
     #[test]
+    fn a_round_block_cuts_the_ground_to_its_circle_and_stands_its_wall_round_it() {
+        // #2318: the circle in a 2 km box over flat ground 500 m high, seen from the south. Below
+        // its south-west point stands a wall where the box had ground; past it, by the box's far
+        // corner, the fog shows where the box had ground.
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 20.0, bearing: 0.0, pitch: 60.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let gt = GeoTransform { origin_x: -5000.0, origin_y: 5000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let dem =
+            Raster::new("dem", 500, 500, vec![vec![500.0; 500 * 500]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
+        let mut frame = |shape| {
+            m.view.terrain = Some(rustgis_map::view::Terrain {
+                source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+                exaggeration: 1.0,
+                block: Some(rustgis_map::view::TerrainBlock {
+                    extent: Some([-1000.0, -1000.0, 1000.0, 1000.0]),
+                    depth: Some(1000.0),
+                    walls: rustgis_map::view::BLOCK_WALLS,
+                    walls_layer: None,
+                    shape,
+                    water: None,
+                }),
+                water: None,
+            });
+            let g = terrain::Ground::of(&m, &camera).expect("terrain");
+            (render(&mut m, &view).expect("a frame"), g.block(&m).expect("a block"), g.per_unit(Coord::new(0.0, 0.0)))
+        };
+        let (boxed, _, _) = frame(rustgis_map::view::BlockShape::Box);
+        let (round, b, per_unit) = frame(rustgis_map::view::BlockShape::Circle { radius: None });
+        assert_eq!(b.circle, Some((Coord::new(0.0, 0.0), 1000.0)));
+        let screen = |x: f64, y: f64, metres: f64| {
+            let (u, v) = camera.ground_px(Coord::new(x, y));
+            camera.project_raised(u, v, metres / per_unit / camera.res, view.width, view.height).expect("in view")
+        };
+        let px = |r: &Rendered, p: (f64, f64)| r.pixmap.pixel(p.0 as u32, p.1 as u32).expect("in the frame").demultiply();
+        // 150 m down the wall under the circle's south-west point, where the box's ground lies.
+        let d = 1000.0 * std::f64::consts::FRAC_1_SQRT_2;
+        let mid = screen(-d, -d, 350.0);
+        let wall = px(&round, mid);
+        assert!(wall.red() > wall.green() && wall.green() > wall.blue() + 8, "{wall:?}");
+        assert_ne!(wall, px(&boxed, mid));
+        // A smaller radius makes a smaller circle; one larger than the box's takes the box's.
+        assert_eq!(frame(rustgis_map::view::BlockShape::Circle { radius: Some(400.0) }).1.circle.map(|c| c.1), Some(400.0));
+        assert_eq!(frame(rustgis_map::view::BlockShape::Circle { radius: Some(4000.0) }).1.circle.map(|c| c.1), Some(1000.0));
+        // The ground by the far corner: the box's, gone from the circle's.
+        let (_, fog) = tilt_sky(&m);
+        let corner = px(&round, screen(950.0, 950.0, 500.0));
+        assert!(
+            [(corner.red(), fog.r()), (corner.green(), fog.g()), (corner.blue(), fog.b())].iter().all(|(a, b)| a.abs_diff(*b) <= 2),
+            "{corner:?} vs {fog:?}"
+        );
+        assert_ne!(corner, px(&boxed, screen(950.0, 950.0, 500.0)));
+    }
+
+    #[test]
     fn a_block_diagrams_wall_shows_the_unit_under_its_edge() {
         // #1914: the near wall of a 2 km box, seen from the south, with a red unit over the box's
         // west half: red below the edge's west half, the walls' sandy brown below its east half.
@@ -10041,6 +10119,7 @@ mod tests {
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: Some("geo".into()),
                 water: None,
+                shape: rustgis_map::view::BlockShape::Box,
             }),
             water: None,
         });
@@ -10123,6 +10202,7 @@ mod tests {
             depth: Some(1000.0),
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            shape: rustgis_map::view::BlockShape::Box,
             water,
         };
         m.view.terrain = Some(rustgis_map::view::Terrain {
