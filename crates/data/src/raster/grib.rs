@@ -39,6 +39,10 @@ const MAX_BITS: u32 = 32;
 /// The smallest a message can be: GRIB1's indicator, its shortest sections and "7777".
 const MIN_MESSAGE: u64 = 8 + 28 + 11 + 4;
 
+/// The most sections a GRIB2 message is walked through: a real one has about eight a field, and
+/// a message of more (sections of five octets, from a damaged or hostile file) is left out.
+const MAX_SECTIONS: usize = 1024;
+
 fn bad(m: impl std::fmt::Display) -> DataError {
     DataError::Format(format!("GRIB: {m}"))
 }
@@ -127,9 +131,23 @@ pub fn read<R: Read + Seek>(mut source: R, name: &str) -> Result<Raster> {
         // Past the memory limit, a message whose grids hold more points than are left room for,
         // or one larger than those points can take (at most 32 bits each, a bitmap and a megabyte
         // of sections): only counted, never read.
+        // What the headers say, before the body is read: a grid this reader refuses, or too many
+        // sections, leaves the message out unread.
+        let header = header(&mut source, start, len, edition == Some(2))?;
+        match header {
+            Header::Refused(why) => {
+                skipped.add(why);
+                continue;
+            }
+            Header::TooManySections => {
+                skipped.message(format!("damaged (more than {MAX_SECTIONS} sections)"));
+                continue;
+            }
+            Header::Points(_) | Header::Unknown => {}
+        }
         let room = limit.saturating_sub(held);
         let too_long = len > (room as u64).saturating_mul(5).saturating_add(1 << 20);
-        if held >= limit || too_long || points_in(&mut source, start, len, edition == Some(2))?.is_some_and(|n| n > room) {
+        if held >= limit || too_long || matches!(header, Header::Points(n) if n > room) {
             skipped.over_limit += count_fields(&mut source, start, len, edition == Some(2))?;
             continue;
         }
@@ -249,10 +267,22 @@ impl Counted {
     }
 }
 
-/// How many points a message's fields cover, from its headers alone (GRIB1's grid description,
-/// GRIB2's number of data points of the grid each data section follows); `None` when they don't
-/// say (a predefined grid), which the decoder then refuses or reads.
-fn points_in<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) -> Result<Option<usize>> {
+/// What a message's headers say before its body is read.
+#[derive(Debug, PartialEq)]
+enum Header {
+    /// How many points its fields cover (GRIB1's grid description, GRIB2's number of data points
+    /// of the grid each data section follows).
+    Points(usize),
+    /// Headers the decoder will find damaged: it says why.
+    Unknown,
+    /// A GRIB1 grid this reader doesn't read, with the reason the decoder gives.
+    Refused(String),
+    /// A GRIB2 message of more than [`MAX_SECTIONS`] sections.
+    TooManySections,
+}
+
+/// A message's [`Header`], from its headers alone.
+fn header<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) -> Result<Header> {
     let end = start + len;
     let mut head = [0u8; 16];
     let read = |source: &mut R, at: u64, out: &mut [u8]| -> Result<bool> {
@@ -264,28 +294,39 @@ fn points_in<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) 
         Ok(true)
     };
     if !grib2 {
-        // The product definition's length and flags, then the grid description's sizes.
-        if !read(source, start + 8, &mut head[..8])? || head[7] & 0x80 == 0 {
-            return Ok(None);
+        // The product definition's length, grid number and flags, then the grid description's
+        // type and sizes: the same refusals as `grib1` and `grib1_grid`, in the same words.
+        if !read(source, start + 8, &mut head[..8])? {
+            return Ok(Header::Unknown);
+        }
+        if head[7] & 0x80 == 0 {
+            return Ok(Header::Refused(format!("predefined grids (grid {})", head[6])));
         }
         let gds = start + 8 + u64::from(be(&head, 0, 3));
-        if !read(source, gds, &mut head[..10])? || head[5] != 0 {
-            return Ok(None);
+        if !read(source, gds, &mut head[..10])? {
+            return Ok(Header::Unknown);
+        }
+        let kind = head[5];
+        if kind != 0 {
+            return Ok(Header::Refused(format!("GRIB1 grids of data representation type {kind} (not latitude/longitude)")));
         }
         let (ni, nj) = (be(&head, 6, 2) as usize, be(&head, 8, 2) as usize);
-        // A quasi-regular grid's missing length: the decoder says why it isn't read.
-        if ni == 0xffff || nj == 0xffff {
-            return Ok(None);
+        if ni == 0xffff || nj == 0xffff || ni == 0 || nj == 0 {
+            return Ok(Header::Refused("quasi-regular grids".to_string()));
         }
-        return Ok(Some(ni.saturating_mul(nj)));
+        return Ok(Header::Points(ni.saturating_mul(nj)));
     }
-    let (mut at, mut points, mut total) = (start + 16, 0usize, 0usize);
+    let (mut at, mut points, mut total, mut sections) = (start + 16, 0usize, 0usize, 0usize);
     // Each section's 5-octet header (a constant field's data section is no longer, just before
     // "7777"), and the grid's number of data points (octets 7 to 10) when it is section 3.
     while read(source, at, &mut head[..5])? && &head[..4] != b"7777" {
         let size = u64::from(be(&head, 0, 4));
         if size < 5 {
             break;
+        }
+        sections += 1;
+        if sections > MAX_SECTIONS {
+            return Ok(Header::TooManySections);
         }
         let mut count = [0u8; 4];
         match head[4] {
@@ -295,7 +336,7 @@ fn points_in<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) 
         }
         at += size;
     }
-    Ok(Some(total))
+    Ok(Header::Points(total))
 }
 
 /// How many fields a message holds: one in GRIB1, one a data section (7) in GRIB2, counted from
@@ -305,7 +346,10 @@ fn count_fields<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: boo
         return Ok(1);
     }
     let (mut at, end, mut n) = (start + 16, start + len, 0usize);
-    while at + 5 <= end {
+    for _ in 0..MAX_SECTIONS {
+        if at + 5 > end {
+            break;
+        }
         source.seek(SeekFrom::Start(at))?;
         let mut head = [0u8; 5];
         source.read_exact(&mut head)?;
@@ -830,7 +874,13 @@ fn grib2(b: &[u8], room: usize) -> Vec<std::result::Result<Field, Skip>> {
     let mut bitmap: Option<std::result::Result<Option<&[u8]>, Skip>> = None;
     let mut previous_bitmap: Option<&[u8]> = None;
     let mut held = 0usize;
+    let mut sections = 0usize;
     while b.get(at..at + 4).is_some_and(|m| m != b"7777") {
+        sections += 1;
+        if sections > MAX_SECTIONS {
+            out.push(Err(Skip::Damaged(format!("a message of more than {MAX_SECTIONS} sections"))));
+            break;
+        }
         let Some((number, s)) = section2(b, at) else {
             out.push(Err(Skip::Damaged("a damaged GRIB2 section".to_string())));
             break;

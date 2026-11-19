@@ -630,13 +630,60 @@ fn a_repeated_first_column_is_left_out_and_the_globe_laid_out_from_180() {
 }
 
 #[test]
-fn points_in_counts_a_last_constant_field() {
+fn header_counts_a_last_constant_field() {
     // A constant field's data section is 5 octets, just before "7777".
     let mut c = F2::new(3, 2, vec![]);
     c.bits = 0;
     let msg = grib2_message(&[F2::new(2, 1, vec![1, 2]), c]);
-    let n = points_in(&mut std::io::Cursor::new(&msg), 0, msg.len() as u64, true).unwrap();
-    assert_eq!(n, Some(2 + 6));
+    let n = header(&mut std::io::Cursor::new(&msg), 0, msg.len() as u64, true).unwrap();
+    assert_eq!(n, Header::Points(2 + 6));
     let one = G1::new(4, 3, vec![0; 12]).bytes();
-    assert_eq!(points_in(&mut std::io::Cursor::new(&one), 0, one.len() as u64, false).unwrap(), Some(12));
+    assert_eq!(header(&mut std::io::Cursor::new(&one), 0, one.len() as u64, false).unwrap(), Header::Points(12));
+}
+
+#[test]
+fn grib1_grids_refused_from_the_headers() {
+    let at = |g: &[u8]| header(&mut std::io::Cursor::new(g), 0, g.len() as u64, false).unwrap();
+    // A Gaussian grid (data representation type 4), in the decoder's words.
+    let mut g = G1::new(2, 1, vec![1, 2]).bytes();
+    g[8 + 28 + 5] = 4;
+    assert_eq!(at(&g), Header::Refused("GRIB1 grids of data representation type 4 (not latitude/longitude)".to_string()));
+    let e = read_bytes(&g, "t").unwrap_err().to_string();
+    assert!(e.contains("1 field left out: GRIB1 grids of data representation type 4 (not latitude/longitude), not read yet"), "{e}");
+    // No grid description: a predefined grid, by its number (octet 7 of the product section).
+    let mut g = G1::new(2, 1, vec![1, 2]).bytes();
+    g[8 + 7] &= 0x7f;
+    g[8 + 6] = 3;
+    assert_eq!(at(&g), Header::Refused("predefined grids (grid 3)".to_string()));
+    // A row length missing: quasi-regular.
+    let mut g = G1::new(2, 1, vec![1, 2]).bytes();
+    g[8 + 28 + 8..8 + 28 + 10].copy_from_slice(&[0xff, 0xff]);
+    assert_eq!(at(&g), Header::Refused("quasi-regular grids".to_string()));
+}
+
+#[test]
+fn a_message_of_too_many_sections_is_left_out() {
+    // 1100 empty local-use sections (section 2, five octets each) before a field.
+    let mut s1 = u(21, 4);
+    s1.extend([1, 0, 7, 0, 0, 2, 1, 1]);
+    s1.extend(u(2026, 2));
+    s1.extend([11, 18, 0, 0, 0, 0, 1]);
+    let mut body = s1;
+    for _ in 0..1100 {
+        body.extend([0, 0, 0, 5, 2]);
+    }
+    body.extend(F2::new(2, 1, vec![1, 2]).sections());
+    let mut msg = b"GRIB".to_vec();
+    msg.extend([0, 0, 0, 2]);
+    msg.extend(u(16 + body.len() as u64 + 4, 8));
+    msg.extend(body);
+    msg.extend(b"7777");
+    assert_eq!(header(&mut std::io::Cursor::new(&msg), 0, msg.len() as u64, true).unwrap(), Header::TooManySections);
+    let mut file = msg;
+    file.extend(grib2_message(&[F2::new(2, 1, vec![3, 4])]));
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert!(r.lost.contains(&"1 message left out: damaged (more than 1024 sections)".to_string()), "{:?}", r.lost);
+    // The decoder refuses one too, should it get one.
+    assert!(matches!(grib2(&file, usize::MAX).first(), Some(Err(Skip::Damaged(m))) if m.contains("more than 1024 sections")));
 }
