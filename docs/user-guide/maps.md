@@ -147,9 +147,10 @@ the shore band's width in (a few pixels at the view's centre), so the section sh
 cliff. A water body with no depth, or no level, shows none, and setting the block or the water says
 how many of those its definition query keeps have no value in the field. These depths are schematic
 unless they come from a field: say so in the figure's caption. `"water": false` in the block takes
-the water out of the walls; while it is there, taking the terrain's water off, or giving it a layer
-without the depth field, is refused. Deleting the depth field keeps the block's `depth` for all the
-water, or takes the water out of the walls when there is none, and says so.
+the water out of the walls (give the block whole again: a `"block"` object sets all of it, its
+extent, depth and walls too); while it is there, taking the terrain's water off, or giving it a
+layer without the depth field, is refused. Deleting the depth field keeps the water's own `depth`
+for all the water, or takes the water out of the walls when there is none, and says so.
 
 **Water** on the terrain lies flat: `map.terrain` with `{"water": {"layer": "Lakes"}}` names a
 polygon layer of water bodies, and inside each polygon the ground is level, at the lowest height

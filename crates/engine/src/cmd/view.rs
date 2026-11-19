@@ -655,7 +655,7 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     if let Some(bw) = block_water {
         let checked = (|| {
             let w = t.water.as_ref().ok_or(
-                "block's water shows the terrain's water in the walls: give the terrain a water layer, or take the block's water off (\"block\": {\"water\": false})",
+                "block's water shows the terrain's water in the walls: give the terrain a water layer, or take the block's water off by giving the block again without it (a \"block\" object sets the whole block: its extent, depth and walls too)",
             )?;
             let l = m.layer_by_name(&w.layer).ok_or_else(|| format!("no layer '{}'", w.layer))?;
             let Some(f) = &bw.field else { return Ok(None) };
