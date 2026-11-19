@@ -230,8 +230,9 @@ cargo build --release --target wasm32-unknown-unknown
   shows its answer, so such a dialog has no **Run**; while required fields are empty, a click only
   selects the tab and the dialog says what to fill in, and a tab clicked while a run is going runs
   once that run has answered. On opening, a dialog with tabs runs once when its required fields
-  have values (a dialog without tabs runs only from **Run**). A form has at most one field with
-  tabs, and only a `choice` may have them; tool parameters can't, or the plugin is refused.
+  have values (a dialog without tabs runs only from **Run**), so give tabs only to a command that
+  shows something, not one that changes the project or writes files. A form has at most one field
+  with tabs, and only a `choice` may have them; tool parameters can't, or the plugin is refused.
   RustGIS versions before tabs ignore the key and show the drop-down and **Run**.
 
   ```json

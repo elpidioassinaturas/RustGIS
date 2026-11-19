@@ -238,6 +238,11 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     if again {
         d.result = None;
     }
+    // The tab selected before anything reads the values, so the fields to fill in below don't
+    // list a tabs field this frame then selects.
+    if let Some(f) = tabbed {
+        select_tab(f, &mut d.values);
+    }
     // Fields to fill in before it can run.
     let (missing, bad) = held(&c.form, &d.values, &d.texts);
     let missing: Vec<&str> = missing.iter().map(|f| m.translate(&lang, &f.label)).collect();
@@ -259,7 +264,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         .default_pos(ctx.content_rect().center())
         .show(ctx, |ui| {
             if let Some(f) = tabbed {
-                tab_clicked = tabs(ui, f, &mut d.values, m, &lang);
+                tab_clicked = tab_row(ui, f, &mut d.values, m, &lang);
                 ui.separator();
             }
             if !c.help.is_empty() {
@@ -380,9 +385,9 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     }
 }
 
-/// A `choice` field's row of tabs, drawn as the app's other tabs are: one always selected (the
-/// field's default, or its first choice), and whether one was clicked, the selected one too.
-fn tabs(ui: &mut Ui, f: &ParamDecl, values: &mut Map<String, Value>, m: &rustgis_engine::plugins::Manifest, lang: &str) -> bool {
+/// Keeps one of a tabs field's choices selected: the one held, else the field's default, else its
+/// first choice.
+fn select_tab(f: &ParamDecl, values: &mut Map<String, Value>) {
     let known = |v: &str| f.choices.iter().any(|c| c == v);
     if !values.get(&f.name).and_then(Value::as_str).is_some_and(known) {
         let start = f.default.as_ref().and_then(Value::as_str).filter(|d| known(d)).or(f.choices.first().map(String::as_str));
@@ -390,6 +395,12 @@ fn tabs(ui: &mut Ui, f: &ParamDecl, values: &mut Map<String, Value>, m: &rustgis
             values.insert(f.name.clone(), json!(s));
         }
     }
+}
+
+/// A `choice` field's row of tabs, drawn as the app's other tabs are, with the tab
+/// [`select_tab`] keeps selected; whether one was clicked, the selected one too.
+fn tab_row(ui: &mut Ui, f: &ParamDecl, values: &mut Map<String, Value>, m: &rustgis_engine::plugins::Manifest, lang: &str) -> bool {
+    select_tab(f, values);
     let cur = values.get(&f.name).and_then(Value::as_str).map(str::to_string);
     let mut clicked = false;
     ui.horizontal_wrapped(|ui| {
