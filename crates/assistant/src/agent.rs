@@ -119,6 +119,9 @@ pub struct Agent {
     /// The Chat Completions provider, address and model the request waiting was sent to: a refusal
     /// is theirs even if the settings changed since.
     sent_to: Option<(String, String, String)>,
+    /// The provider, address and model the request waiting carried images to: a refusal of them
+    /// is theirs even if the settings changed since.
+    sent_images_to: Option<(String, String, String)>,
     /// A summary request waiting to be retried ([`State::Compacting`]'s `upto` and `resume`).
     retrying_summary: Option<(usize, bool)>,
     /// The skills the model may load ([`skills`]), listed in the system prompt.
@@ -196,6 +199,7 @@ impl Agent {
             no_reasoning: Vec::new(),
             no_images: Vec::new(),
             sent_to: None,
+            sent_images_to: None,
             retrying_summary: None,
             summary_limit: compact::BUDGET,
             agents_auto: false,
@@ -310,6 +314,7 @@ impl Agent {
         child.always = self.always.clone();
         child.conversation = self.conversation;
         child.no_reasoning = self.no_reasoning.clone();
+        child.no_images = self.no_images.clone();
         // The budget is the main assistant's: what's left of it for this message.
         child.max_steps = self.max_steps.saturating_sub(self.steps).max(1);
         child.base_system = system_prompt(s) + SUBAGENT_PROMPT;
@@ -492,6 +497,7 @@ impl Agent {
         self.state = State::Waiting;
         self.preview = Some(provider::StreamPreview::new(self.config.api()));
         self.sent_to = (self.config.api() == provider::Api::OpenAi).then(|| identity(&self.config));
+        self.sent_images_to = compact::has_images(&self.turns).then(|| identity(&self.config));
         let off = self.refused_reasoning().then(|| Config { reasoning: Some(false), ..self.config.clone() });
         Step::Send(provider::chat_request(off.as_ref().unwrap_or(&self.config), &self.system, &self.turns, &self.tool_defs()))
     }
@@ -574,6 +580,8 @@ impl Agent {
     fn summarise_quietly(&mut self, upto: usize, resume: bool) -> Step {
         self.state = State::Compacting { upto, resume };
         self.preview = None;
+        // A summary is asked for in text only.
+        self.sent_images_to = None;
         let text = compact::as_text_with_limit(&self.turns, upto, self.summary_limit);
         self.summary_input_len = text.len();
         let text = Turn::User(text);
@@ -687,8 +695,8 @@ impl Agent {
         let parsed = resp.as_ref().map_err(Clone::clone).and_then(|r| provider::parse_reply(self.config.api(), r));
         // A model that doesn't read images refuses them every time (some servers with a 500):
         // asked again at once without them, not retried as an outage.
-        let images_refused =
-            matches!(&parsed, Err(e) if !self.refused_images() && compact::has_images(&self.turns) && provider::refuses_images(e));
+        let images_refused = matches!(&parsed, Err(e) if self.sent_images_to.as_ref().is_some_and(|to| !self.no_images.contains(to))
+            && provider::refuses_images(e));
         if self.retries < MAX_RETRIES
             && !images_refused
             && let Some(after) = provider::retry_delay_for(&resp, &parsed, self.retries)
@@ -742,7 +750,10 @@ impl Agent {
             }
             // The model doesn't read images: ask again with their captions, once, and keep it so.
             Err(_) if images_refused => {
-                self.no_images.push(identity(&self.config));
+                self.no_images.extend(self.sent_images_to.take());
+                self.transcript.push(Entry::Note(Note::new(
+                    "The model doesn't read images: the map's pictures go to it as their captions, and view_map is off for it.",
+                )));
                 return self.send();
             }
             Err(e) => {

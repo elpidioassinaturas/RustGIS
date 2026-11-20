@@ -673,6 +673,7 @@ pub const NOTE_TEMPLATES: &[&str] = &[
     "The provider returned HTTP {status}; trying again in {seconds} s.",
     "The connection failed; trying again in {seconds} s.",
     "The model sent an empty reply; ask again, or try another model.",
+    "The model doesn't read images: the map's pictures go to it as their captions, and view_map is off for it.",
     "Stopped after {steps} steps; say \"continue\" to go on.",
     "Stopped.",
 ];
@@ -1120,11 +1121,16 @@ pub fn refuses_reasoning_with_tools(e: &Error) -> bool {
 }
 
 /// Whether the provider refused a request for the images in it (a model or server that doesn't
-/// read them). Asked only of a request that carried images.
+/// read them). Asked only of a request that carried images. The error names images as a word
+/// (not "vision" in "revision") and says they aren't taken: unsupported, or no image input
+/// (Ollama's "missing data required for image input", vLLM's "not a multimodal model"). An error
+/// about one image ("Error processing image; please retry") is not a refusal.
 pub fn refuses_images(e: &Error) -> bool {
     let detail = e.detail.to_lowercase();
-    matches!(e.status, Some(400 | 404 | 415 | 422 | 500))
-        && ["image", "vision", "multimodal", "multi-modal"].iter().any(|w| detail.contains(w))
+    let words: Vec<&str> = detail.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')).collect();
+    let names_images = words.iter().any(|w| matches!(*w, "image" | "images" | "image_url" | "vision" | "multimodal" | "multi-modal"));
+    let refused = ["support", "image input", "image_url", "not a multimodal", "not multimodal"].iter().any(|p| detail.contains(p));
+    matches!(e.status, Some(400 | 404 | 415 | 422 | 500)) && names_images && refused
 }
 
 fn openai_reply(v: &Value) -> Result<Reply, String> {

@@ -244,6 +244,14 @@ pub(crate) const MAX_VIEW: f64 = 2048.0;
 
 /// `view_map`: the current view drawn offscreen at the size asked (default 1024 × 640), and a
 /// caption naming it. It goes through its adapter, so the policy sees what the picture draws.
+///
+/// It draws on the thread that runs the assistant's calls, which on the desktop is the window's:
+/// the agent runs every call there (`run_command` and `run_tool` too, through
+/// `Session::run_scoped`), and a call's result must be in the conversation before the next
+/// request goes out. The drawing is one pass over the features in view, capped at 2048 pixels a
+/// side, with no Cancel; a layer of about 476,000 polygons read in place takes some 12 s at the
+/// default size, one of 120,000 some 2 s. Moving the assistant's calls off the window is a change
+/// to the agent's loop of its own.
 pub fn view_map(s: &mut Session, call: &ToolCall, scope: Scope, permit: Option<Permit>) -> Result<(String, ToolImage), String> {
     let engine = policy_call(call)?.ok_or("missing view adapter")?;
     let owned = s.defer(scope, &engine, permit)?;

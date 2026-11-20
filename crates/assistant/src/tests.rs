@@ -4922,6 +4922,7 @@ fn a_model_that_refuses_images_is_asked_again_with_captions() {
     let b = body(&req);
     let m = b["messages"].as_array().unwrap();
     assert!(m.last().unwrap()["content"].as_str().unwrap().contains("no longer attached"), "{}", m.last().unwrap());
+    assert!(a.transcript.iter().any(|e| matches!(e, Entry::Note(n) if n.to_string().contains("doesn't read images"))));
     // From then on, view_map says why it can't help.
     let reply = call("v2", "view_map", json!({}));
     let Step::Send(req) = a.receive(a.generation(), ok(reply), &mut s) else { panic!("expected a request") };
@@ -4937,4 +4938,34 @@ fn a_model_that_refuses_images_is_asked_again_with_captions() {
     assert!(refuses_images(&other(400, "Invalid content type. image_url is only supported by certain models.")));
     assert!(!refuses_images(&other(400, "max_tokens is too large")));
     assert!(!refuses_images(&other(429, "too many images today")));
+    assert!(!refuses_images(&other(500, "failed to pull image registry.local/runner:3")));
+    assert!(!refuses_images(&other(500, "Error processing image; please retry.")));
+    assert!(!refuses_images(&other(404, "model revision not found; check the supported models")));
+    assert!(refuses_images(&other(500, "model does not support vision")));
+    assert!(refuses_images(&other(400, "Qwen/Qwen3-8B is not a multimodal model")));
+}
+
+#[test]
+fn a_refusal_of_images_is_the_model_s_it_was_sent_to() {
+    let mut s = sample();
+    let mut a = Agent::new(cfg("ollama"), &s);
+    assert!(matches!(a.ask("look", &s), Step::Send(_)));
+    let reply = call("v1", "view_map", json!({"width": 64, "height": 64}));
+    assert!(matches!(a.receive(a.generation(), ok(reply), &mut s), Step::Send(_)));
+    // The user picks another model while the request with the picture is out.
+    let sent = a.config.model.clone();
+    a.config.model = "llava".into();
+    let refused = json!({"error": {"message": "this model is missing data required for image input"}});
+    let resp = Ok(HttpResponse { status: 500, body: refused.to_string().into_bytes(), headers: vec![] });
+    // The new model never refused: it gets the picture.
+    let Step::Send(req) = a.receive(a.generation(), resp, &mut s) else { panic!("asked again") };
+    assert!(body(&req).to_string().contains("data:image/png;base64,"));
+    // Back on the model that refused, the picture goes as its caption.
+    a.config.model = sent;
+    let reply = call("v2", "view_map", json!({}));
+    let Step::Send(req) = a.receive(a.generation(), ok(reply), &mut s) else { panic!("expected a request") };
+    let b = body(&req);
+    assert!(!b.to_string().contains("data:image/png;base64,"), "{b}");
+    let last = b["messages"].as_array().unwrap().last().cloned().unwrap();
+    assert!(last["content"].as_str().unwrap().contains("doesn't read images"), "{last}");
 }
