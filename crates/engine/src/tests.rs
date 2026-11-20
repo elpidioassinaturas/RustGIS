@@ -4466,7 +4466,7 @@ fn removing_a_perpendicular_label_line_says_so() {
     s.run("layer.remove", &json!({"layer": "Rivers"})).unwrap();
     let notes = said(&s, mark);
     assert_eq!(notes.len(), 1, "{notes:?}");
-    assert!(notes[0].contains("'Rivers' was removed"), "{notes:?}");
+    assert!(notes[0].contains("1 perpendicular labels' line layer(s) 'Rivers' removed"), "{notes:?}");
     let c = s.map().layer_by_name("Cities").unwrap().labels.default.clone();
     assert_eq!((c.placement, c.square_to.unwrap().layer.as_str()), (crate::map::LabelPlacement::Perpendicular, "Rivers"));
 }
@@ -4519,7 +4519,7 @@ fn labels_are_guided_along_a_line_layer() {
     let mark = s.notices_given();
     s.run("layer.remove", &json!({"layer": "Waters"})).unwrap();
     let said: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.contains("guide layer")).map(|n| n.text.clone()).collect();
-    assert!(said.len() == 1 && said[0].contains("'Waters' was removed"), "{said:?}");
+    assert!(said.len() == 1 && said[0].contains("1 guide layer(s) 'Waters' removed"), "{said:?}");
     place(&mut s, "Lakes", Value::Null).unwrap();
     assert_eq!(guide(&s), None);
     let said = |v: &Value| {
@@ -4528,8 +4528,11 @@ fn labels_are_guided_along_a_line_layer() {
     };
     let clean: Value = serde_json::to_value(&world().project).unwrap();
     let mut fine = clean.clone();
-    fine["maps"][0]["layers"][0]["labels"]["guide"] = json!({"layer": "Rivers", "field": "name"});
+    // (Spaces round its layer's name trimmed, as the command keeps it.)
+    fine["maps"][0]["layers"][0]["labels"]["guide"] = json!({"layer": " Rivers ", "field": "name"});
     assert!(said(&clean).is_empty() && said(&fine).is_empty());
+    let read = Project::from_json(&fine.to_string()).unwrap();
+    assert_eq!(read.maps[0].layers[0].labels.default.guide.as_ref().map(|g| g.layer.as_str()), Some("Rivers"));
     let mut damaged = clean.clone();
     damaged["maps"][0]["layers"][0]["labels"]["guide"] = json!({"layer": ""});
     damaged["maps"][0]["layers"][1]["labels"]["guide"] = json!({"layer": "Rivers", "field": 3});

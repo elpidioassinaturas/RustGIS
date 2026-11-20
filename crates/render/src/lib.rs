@@ -4427,7 +4427,7 @@ fn render_frame(
     // The lines point labels are turned square to (#2263), on the screen.
     let square_lines = square_lines(map, &ctx, &flat);
     // And the lines labels are curved along (#2262).
-    let guide_lines = guide_lines(map, &ctx, &flat);
+    let guide_lines = guide_lines(map, &ctx, &flat, scale, distance);
     // Bottom first; a higher depth priority draws later (on top) whatever the order.
     let mut order: Vec<usize> = (0..n_layers).rev().collect();
     order.sort_by_key(|i| map.layers.get(*i).map_or(0, |l| l.priority));
@@ -6455,42 +6455,61 @@ fn screen_pieces(ctx: &Ctx<'_>, flat: &rustgis_map::projection::Flat, part: &[Co
     }
 }
 
-/// The lines labels are curved along ([`rustgis_map::LabelClass::guide`], #2262), keyed by layer
-/// name in ASCII lower case (as [`Map::layer_by_name`] matches names) and field: each line's
-/// stretches in view on the screen ([`screen_pieces`]), with its value in the field. Worked out
-/// once a frame for the guide layers of the labels shown, shown or not themselves, each vertex
-/// projected once, as [`square_lines`]; a layer read in chunks from its source has none to hand.
+/// The lines of the guide layers ([`rustgis_map::LabelClass::guide`], #2262) of the label classes
+/// shown at `scale` and `distance`, keyed by layer name in ASCII lower case (as
+/// [`Map::layer_by_name`] matches names) and field, on the screen ([`guides_of`]). Worked out once
+/// a frame, before the layers are drawn (each layer is then borrowed to draw it).
 fn guide_lines(
     map: &Map,
     ctx: &Ctx<'_>,
     flat: &rustgis_map::projection::Flat,
+    scale: f64,
+    distance: f64,
 ) -> std::collections::HashMap<(String, Option<String>), guide_labels::Guides> {
     let mut out = std::collections::HashMap::new();
-    let wanted = map.layers.iter().filter(|l| l.visible && l.labels.enabled).flat_map(|l| l.labels.in_order());
-    let wanted: Vec<_> = wanted.filter_map(|c| c.guide.as_ref()).map(|g| (g.layer.to_ascii_lowercase(), g.field.clone())).collect();
-    let (w, h) = (ctx.view.width as f32, ctx.view.height as f32);
-    for key in wanted {
-        if out.contains_key(&key) {
-            continue;
-        }
-        let Some(layer) = map.layer_by_name(&key.0) else { continue };
-        // Read in longitude/latitude, as the lines labels are square to.
-        let Ok(to) = layer.dataset.lonlat_conversion() else { continue };
-        let field = key.1.as_deref().and_then(|f| layer.dataset.field_index(f));
-        let mut guides = guide_labels::Guides::default();
-        for row in layer.dataset.features.rows() {
-            let Some(g) = row.geometry().and_then(|g| rustgis_data::Dataset::converted_to_lonlat(&to, g)) else { continue };
-            let Geometry::Line(parts) = &*g else { continue };
-            let value = field.map(|fi| row.value(fi)).filter(|v| !v.is_null()).map(|v| v.to_string());
-            for piece in parts.iter().flat_map(|part| screen_pieces(ctx, flat, part)) {
-                for stretch in line_labels::in_view(piece.into_iter().map(Some), w, h) {
-                    guides.push(&stretch, value.as_deref());
-                }
+    let shown = map.layers.iter().filter(|l| l.visible && l.labels.enabled).flat_map(|l| l.labels.in_order());
+    for c in shown.filter(|c| c.visible && c.in_range(scale, distance)) {
+        if let Some(g) = &c.guide {
+            let key = (g.layer.to_ascii_lowercase(), g.field.clone());
+            if let std::collections::hash_map::Entry::Vacant(e) = out.entry(key) {
+                let guides = guides_of(map, ctx, flat, e.key());
+                e.insert(guides);
             }
         }
-        out.insert(key, guides);
     }
     out
+}
+
+/// The lines of the guide layer `name` (shown or not) on the screen, their stretches in view
+/// ([`screen_pieces`], thinned as [`guide_labels::Guides`] keeps them), each with its value in
+/// `field`, read only for a line with a stretch in view. Each vertex is projected once, as for
+/// [`square_lines`]; what is kept is at most about 24 bytes a point of the stretches in view,
+/// which thinning bounds by their length on the screen, and dropped with the frame. A layer read
+/// in chunks from its source has none to hand.
+fn guides_of(
+    map: &Map,
+    ctx: &Ctx<'_>,
+    flat: &rustgis_map::projection::Flat,
+    (name, field): &(String, Option<String>),
+) -> guide_labels::Guides {
+    let mut guides = guide_labels::Guides::default();
+    let Some(layer) = map.layer_by_name(name) else { return guides };
+    // Read in longitude/latitude, as the lines labels are square to.
+    let Ok(to) = layer.dataset.lonlat_conversion() else { return guides };
+    let field = field.as_deref().and_then(|f| layer.dataset.field_index(f));
+    let (w, h) = (ctx.view.width as f32, ctx.view.height as f32);
+    for row in layer.dataset.features.rows() {
+        let Some(g) = row.geometry().and_then(|g| rustgis_data::Dataset::converted_to_lonlat(&to, g)) else { continue };
+        let Geometry::Line(parts) = &*g else { continue };
+        let mut value: Option<Option<String>> = None;
+        for piece in parts.iter().flat_map(|part| screen_pieces(ctx, flat, part)) {
+            for stretch in line_labels::in_view(piece.into_iter().map(Some), w, h) {
+                let v = value.get_or_insert_with(|| field.map(|fi| row.value(fi)).filter(|v| !v.is_null()).map(|v| v.to_string()));
+                guides.push(&stretch, v.as_deref());
+            }
+        }
+    }
+    guides
 }
 
 /// The lines of the layers point labels are turned square to ([`LabelPlacement::Perpendicular`],

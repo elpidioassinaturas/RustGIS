@@ -6432,31 +6432,36 @@ pub(crate) fn drop_layers(s: &mut Session, ids: &[u32]) {
 
 /// After layers called `names` are removed: point labels turned square to one of them (#2263),
 /// and labels curved along one (#2262), keep its name, so a layer of that name brings their line
-/// back, and are placed as auto, or as without a guide, meanwhile: said once a layer and kind, as
-/// for the terrain's water.
+/// back, and are placed as auto, or as without a guide, meanwhile: said once a kind, naming the
+/// layers, as for the terrain's water.
 fn square_labels_follow_removal(s: &mut Session, names: &[String]) {
-    for n in names {
-        if named_layers(s, n) > 0 {
-            continue;
-        }
+    let (mut squared, mut guided) = (Vec::new(), Vec::new());
+    for n in names.iter().filter(|n| named_layers(s, n) == 0) {
         let classes = || s.map().layers.iter().flat_map(|l| l.labels.in_order());
-        let squared = classes().any(|c| {
+        let squares = |c: &rustgis_map::LabelClass| {
             c.placement == rustgis_map::LabelPlacement::Perpendicular
                 && c.square_to.as_ref().is_some_and(|t| t.layer.eq_ignore_ascii_case(n))
-        });
-        let guided = classes().any(|c| c.guide.as_ref().is_some_and(|g| g.layer.eq_ignore_ascii_case(n)));
-        if squared {
-            s.notify(
-                format!("Labels: the perpendicular labels' line layer '{n}' was removed, so they are placed as auto until a layer of that name comes back"),
-                false,
-            );
+        };
+        if classes().any(squares) {
+            squared.push(format!("'{n}'"));
         }
-        if guided {
-            s.notify(
-                format!("Labels: the guide layer '{n}' was removed, so the labels it guided are placed as without it until a layer of that name comes back"),
-                false,
-            );
+        if classes().any(|c| c.guide.as_ref().is_some_and(|g| g.layer.eq_ignore_ascii_case(n))) {
+            guided.push(format!("'{n}'"));
         }
+    }
+    if !squared.is_empty() {
+        let (count, names) = (squared.len(), squared.join(", "));
+        s.notify(
+            format!("Labels: {count} perpendicular labels' line layer(s) {names} removed, so their labels are placed as auto until a layer of that name comes back"),
+            false,
+        );
+    }
+    if !guided.is_empty() {
+        let (count, names) = (guided.len(), guided.join(", "));
+        s.notify(
+            format!("Labels: {count} guide layer(s) {names} removed, so the labels they guided are placed as without them until a layer of that name comes back"),
+            false,
+        );
     }
 }
 

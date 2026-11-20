@@ -3141,13 +3141,14 @@ pub struct LabelGuide {
     pub field: Option<String>,
 }
 
-/// A project file's `guide`: one that doesn't read, or names no layer, is none; a blank field none.
+/// A project file's `guide`: one that doesn't read, or names no layer, is none; its layer's name
+/// trimmed, as the command keeps it; a blank field none.
 fn de_guide<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<LabelGuide>, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value::<LabelGuide>(v)
         .ok()
-        .filter(|g| !g.layer.trim().is_empty())
-        .map(|g| LabelGuide { field: g.field.filter(|f| !f.trim().is_empty()), ..g }))
+        .map(|g| LabelGuide { layer: g.layer.trim().to_owned(), field: g.field.filter(|f| !f.trim().is_empty()) })
+        .filter(|g| !g.layer.is_empty()))
 }
 
 /// How a label along a line fits the room the line gives ([`LabelClass::fit`], #2265).

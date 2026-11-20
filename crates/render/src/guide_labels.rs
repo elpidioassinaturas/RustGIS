@@ -10,6 +10,14 @@ use crate::line_labels::{self, Line};
 /// The most guide lines a label is tried along: the longest, or nearest, first.
 const MOST_TRIED: usize = 8;
 
+/// The side of a cell of the grid the guide stretches are found by (points).
+const CELL: f32 = 64.0;
+
+/// How near a guide stretch's points are kept to the last one kept (points): finer detail than
+/// this doesn't turn a letter, and the stretches in view then hold about as many points as the
+/// screen length they run, however dense the layer.
+const MIN_STEP: f32 = 0.5;
+
 /// A guide line's stretch in view, and its box ([min x, min y, max x, max y]).
 struct Guide {
     line: Line,
@@ -17,24 +25,54 @@ struct Guide {
 }
 
 /// A guide layer's lines in view (each stretch on its own), and those of each value of its field,
-/// by the value's text trimmed and in lower case.
+/// by the value's text trimmed and in lower case. A stretch holds about 24 bytes a point it keeps
+/// (its path both ways, [`Line`]) and its box, and is listed in each [`CELL`] its box covers.
 #[derive(Default)]
 pub(crate) struct Guides {
     lines: Vec<Guide>,
     by_value: HashMap<String, Vec<usize>>,
+    cells: HashMap<(i32, i32), Vec<usize>>,
+}
+
+/// The grid cells a box covers, clamped to the view's (a label's box may run far out of it).
+fn cells_of(b: [f32; 4]) -> impl Iterator<Item = (i32, i32)> {
+    let at = |v: f32| (v / CELL).floor().clamp(-2.0, 1024.0) as i32;
+    (at(b[0])..=at(b[2])).flat_map(move |x| (at(b[1])..=at(b[3])).map(move |y| (x, y)))
 }
 
 impl Guides {
-    /// Adds a stretch of a guide line with `value` in its field (none: no field, or no value).
+    /// Adds a stretch of a guide line with `value` in its field (none: no field, or no value),
+    /// its points thinned to [`MIN_STEP`] apart.
     pub(crate) fn push(&mut self, stretch: &[(f32, f32)], value: Option<&str>) {
-        let Some(line) = Line::new(stretch) else { return };
-        let bbox = stretch
-            .iter()
-            .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| [b[0].min(p.0), b[1].min(p.1), b[2].max(p.0), b[3].max(p.1)]);
+        let mut kept: Vec<(f32, f32)> = Vec::with_capacity(stretch.len());
+        for (k, p) in stretch.iter().enumerate() {
+            let far = kept.last().is_none_or(|q| (p.0 - q.0).hypot(p.1 - q.1) >= MIN_STEP);
+            if far || k + 1 == stretch.len() {
+                kept.push(*p);
+            }
+        }
+        let Some(line) = Line::new(&kept) else { return };
+        let bbox =
+            kept.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| [b[0].min(p.0), b[1].min(p.1), b[2].max(p.0), b[3].max(p.1)]);
+        let id = self.lines.len();
         if let Some(v) = value {
-            self.by_value.entry(v.trim().to_lowercase()).or_default().push(self.lines.len());
+            self.by_value.entry(v.trim().to_lowercase()).or_default().push(id);
+        }
+        for cell in cells_of(bbox) {
+            self.cells.entry(cell).or_default().push(id);
         }
         self.lines.push(Guide { line, bbox });
+    }
+
+    /// The stretches whose boxes meet box `b`, each once.
+    fn meeting(&self, b: [f32; 4]) -> Vec<usize> {
+        let mut ids: Vec<usize> = cells_of(b).filter_map(|c| self.cells.get(&c)).flatten().copied().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.retain(|i| {
+            self.lines.get(*i).is_some_and(|g| g.bbox[0] <= b[2] && b[0] <= g.bbox[2] && g.bbox[1] <= b[3] && b[1] <= g.bbox[3])
+        });
+        ids
     }
 }
 
@@ -54,8 +92,9 @@ pub(crate) enum Near<'a> {
 /// `None` when the text follows none of them: the label is placed as without a guide.
 ///
 /// Per frame, for each label with a guide and its label point in view; it looks at no Cancel: it
-/// reads the boxes of the guide stretches in view once, and tries at most [`MOST_TRIED`] lines, a
-/// polygon's inside tested against its outline thinned as for its centre line (#2295).
+/// reads the stretches listed in the grid cells round its point or polygon, and tries at most
+/// [`MOST_TRIED`] lines, a polygon's inside tested against its outline thinned as for its centre
+/// line (#2295).
 pub(super) fn glyphs(
     guides: &Guides,
     value: Option<&str>,
@@ -97,13 +136,9 @@ fn curved(guides: &Guides, value: Option<&str>, near: Near<'_>, advances: &[f32]
             // Nearest first, each within the text's width: centred at its nearest place, or as
             // near it as the text fits on the line.
             let mut nearest: Vec<(f32, usize, f32)> = guides
-                .lines
-                .iter()
-                .enumerate()
-                .filter(|(_, g)| {
-                    (g.bbox[0] - p.0).max(p.0 - g.bbox[2]).max(0.0).hypot((g.bbox[1] - p.1).max(p.1 - g.bbox[3]).max(0.0)) <= len
-                })
-                .filter_map(|(i, g)| g.line.nearest(p, 0.0).filter(|(d2, _)| *d2 <= len * len).map(|(d2, at)| (d2, i, at)))
+                .meeting([p.0 - len, p.1 - len, p.0 + len, p.1 + len])
+                .into_iter()
+                .filter_map(|i| line(&i)?.nearest(p, 0.0).filter(|(d2, _)| *d2 <= len * len).map(|(d2, at)| (d2, i, at)))
                 .collect();
             nearest.sort_by(|a, b| a.0.total_cmp(&b.0));
             nearest.into_iter().take(MOST_TRIED).find_map(|(_, i, at)| {
@@ -117,16 +152,11 @@ fn curved(guides: &Guides, value: Option<&str>, near: Near<'_>, advances: &[f32]
                 .iter()
                 .flatten()
                 .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| [b[0].min(p.0), b[1].min(p.1), b[2].max(p.0), b[3].max(p.1)]);
-            let ids = guides
-                .lines
-                .iter()
-                .enumerate()
-                .filter(|(_, g)| g.bbox[0] <= b[2] && b[0] <= g.bbox[2] && g.bbox[1] <= b[3] && b[1] <= g.bbox[3]);
             // Its middle and both ends inside the polygon.
             let inside = |(c, turns): &Curved| {
                 [turns.first(), turns.last()].into_iter().flatten().map(|t| (c.0 + t.0, c.1 + t.1)).chain([*c]).all(|p| inside(&rings, p))
             };
-            longest_first(ids.map(|(i, _)| i).collect()).iter().filter_map(line).find_map(|l| along(l, &inside))
+            longest_first(guides.meeting(b)).iter().filter_map(line).find_map(|l| along(l, &inside))
         }
     }
 }
@@ -177,6 +207,20 @@ mod tests {
         assert!(curved(&guides, None, Near::Polygon(Box::new(|| Some(away))), &advances(), 1.0, 10.0).is_none());
     }
 
+    /// A dense stretch keeps a point every half a point at least, and its ends; the grid finds a
+    /// stretch by any cell its box covers, not those away from it.
+    #[test]
+    fn stretches_are_thinned_and_found_by_their_cells() {
+        let mut guides = Guides::default();
+        let dense: Vec<(f32, f32)> = (0..=10_000).map(|i| (i as f32 * 0.03, 10.0)).collect();
+        guides.push(&dense, None);
+        let line = &guides.lines[0].line;
+        assert!((line.length() - 300.0).abs() < 0.01, "{}", line.length());
+        assert_eq!(guides.meeting([290.0, 0.0, 400.0, 20.0]), vec![0]);
+        assert!(guides.meeting([0.0, 100.0, 300.0, 200.0]).is_empty());
+        assert!(guides.cells.values().map(Vec::len).sum::<usize>() <= 6);
+    }
+
     #[test]
     fn a_point_takes_the_nearest_line_within_its_texts_width() {
         let mut guides = Guides::default();
@@ -220,13 +264,16 @@ mod tests {
         d.push(Some(Geometry::Polygon(square(-2.5, -2.5, 0.6))), vec![Value::Text("Serra Baixa".into())]);
         let serras = m.add_dataset(d);
         let mut d = Dataset::new("Picos", GeometryType::Point, vec![Field::new("nome", FieldType::Text)]);
-        d.push(Some(Geometry::Point(Coord::new(1.0, 0.45))), vec![Value::Text("Pico".into())]);
+        // Near the ridge's east end, far from the range's name at its middle.
+        d.push(Some(Geometry::Point(Coord::new(2.0, -0.05))), vec![Value::Text("Pico".into())]);
         let picos = m.add_dataset(d);
         for (id, field) in [(serras, Some("nome")), (picos, None)] {
             let l = m.layer_mut(id).unwrap();
             l.labels.enabled = true;
             l.labels.default.field = "nome".into();
             l.labels.default.size = 12.0;
+            // Every label drawn, whatever the platform's font makes them crowd.
+            l.labels.default.show_all = true;
             l.labels.default.guide = Some(LabelGuide { layer: "cumeadas".into(), field: field.map(String::from) });
         }
         let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, -0.5)), res: 1500.0, bearing: 0.0, pitch: 0.0 };
@@ -236,7 +283,7 @@ mod tests {
         let per_degree =
             (view.to_screen(lonlat_to_merc(Coord::new(1.0, 0.0))).0 - view.to_screen(lonlat_to_merc(Coord::new(0.0, 0.0))).0) as f32;
         for name in ["Serra Grande", "Pico"] {
-            let l = labels.iter().find(|l| l.text == name).expect("placed");
+            let l = labels.iter().find(|l| l.text == name).unwrap_or_else(|| panic!("{name} not placed"));
             assert_eq!(l.glyphs.iter().map(|g| g.text.as_str()).collect::<String>(), name);
             for g in &l.glyphs {
                 let off = ((l.x + g.dx) - cx as f32).hypot((l.y + g.dy) - cy as f32) / per_degree - r as f32;
