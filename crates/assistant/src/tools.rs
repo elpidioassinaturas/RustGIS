@@ -10,7 +10,7 @@ use rustgis_engine::policy::{Call, Outcome, Permit, Scope};
 use rustgis_engine::{Session, analysis, project};
 use serde_json::{Value, json};
 
-use crate::provider::{ToolCall, ToolDef};
+use crate::provider::{ToolCall, ToolDef, ToolImage};
 
 /// Default per-tool token estimate, matching Codex's default output budget.
 pub const DEFAULT_OUTPUT_TOKENS: usize = 10_000;
@@ -35,6 +35,17 @@ pub fn defs() -> Vec<ToolDef> {
                 "properties": {
                     "name_filter": {"type": "string", "description": "Only the layers and tables whose name holds this (ignoring case)"},
                     "include_fields": {"type": "boolean", "description": "List each layer's fields (default true); false keeps a large project short"}
+                }
+            }),
+        },
+        ToolDef {
+            name: "view_map",
+            description: "The map as it looks now, as a PNG image: look after changing it. The current view, at a size of your choosing (default 1024 x 640).",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "width": {"type": "integer", "description": "Pixels (64 to 2048)"},
+                    "height": {"type": "integer", "description": "Pixels (64 to 2048)"}
                 }
             }),
         },
@@ -226,6 +237,35 @@ pub fn summary(call: &ToolCall) -> String {
         "delegate" => format!("Delegated: {}", str_arg(&call.args, "task").unwrap_or_default().chars().take(300).collect::<String>()),
         other => format!("{other} {}", short(call.args.clone())),
     }
+}
+
+/// The largest map image `view_map` draws (pixels a side).
+pub(crate) const MAX_VIEW: f64 = 2048.0;
+
+/// `view_map`: the current view drawn offscreen at the size asked (default 1024 × 640), and a
+/// caption naming it. It goes through its adapter, so the policy sees what the picture draws.
+pub fn view_map(s: &mut Session, call: &ToolCall, scope: Scope, permit: Option<Permit>) -> Result<(String, ToolImage), String> {
+    let engine = policy_call(call)?.ok_or("missing view adapter")?;
+    let owned = s.defer(scope, &engine, permit)?;
+    s.finish_deferred(owned, |s| draw_view(s, &call.args))?
+}
+
+fn draw_view(s: &mut Session, a: &Value) -> Result<(String, ToolImage), String> {
+    let size =
+        |k: &str, default: f64| a.get(k).and_then(Value::as_f64).filter(|v| v.is_finite()).unwrap_or(default).clamp(64.0, MAX_VIEW).round();
+    let (w, h) = (size("width", 1024.0), size("height", 640.0));
+    let png = rustgis_engine::cmd::share::map_png(s, Some(w), Some(h), None)?;
+    let m = s.map();
+    let c = m.center_lonlat();
+    let caption = format!(
+        "Map \"{}\", {} layers, centre {:.4}, {:.4} (lon, lat), scale 1:{:.0}, {w:.0} x {h:.0} px.",
+        m.name,
+        m.layers.len(),
+        c.x,
+        c.y,
+        m.scale()
+    );
+    Ok((caption, ToolImage { png, width: w as u32, height: h as u32 }))
 }
 
 /// Runs a call; `Err` is a result the model is told failed.
