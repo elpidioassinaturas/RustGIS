@@ -6120,9 +6120,31 @@ fn raster_layers_open_style_identify_and_round_trip() {
     s.active_layer = s.map().layer_by_name("Countries").map(|l| l.id);
     s.run("raster.info", &json!({"layer": "scene"})).unwrap();
     s.active_layer = s.map().layer_by_name("scene").map(|l| l.id);
-    // Identify reports features first (Lake Erie is here), then pixel values.
-    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0})).unwrap();
+    // Identify ranks a raster's pixel with the features by the drawing order (#2488): the scene,
+    // added last, is drawn over Lake Erie, so topmost reports its pixel, alone, as before.
+    let erie = json!({"lon": -81.0, "lat": 42.0});
+    let v = s.run("identify", &erie).unwrap();
+    assert_eq!(v["raster"], true, "{v}");
+    assert_eq!(v["layer"], "scene", "{v}");
+    assert!(v.get("results").is_none(), "a pixel alone answers without a list: {v}");
+    // Visible lists the pixel first, then the features drawn under it.
+    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": "visible"})).unwrap();
+    let found: Vec<&str> = v["results"].as_array().unwrap().iter().map(|r| r["layer"].as_str().unwrap()).collect();
+    assert_eq!(found.first(), Some(&"scene"), "{v}");
+    assert!(found.contains(&"Lakes"), "{v}");
+    assert_eq!(v["raster"], true, "the first result's fields stay at the top: {v}");
+    // Selectable picks layers by another rule: the lake, the raster's pixel only with no feature.
+    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": "selectable"})).unwrap();
     assert_eq!(v["layer"], "Lakes", "{v}");
+    // Moved to the bottom, the scene gives way: Lake Erie is drawn over it.
+    s.run("layer.move", &json!({"layer": "scene", "to": 99})).unwrap();
+    let v = s.run("identify", &erie).unwrap();
+    assert_eq!(v["layer"], "Lakes", "{v}");
+    assert!(v["results"].as_array().unwrap().iter().all(|r| r["raster"] != true), "{v}");
+    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": "visible"})).unwrap();
+    let found: Vec<&str> = v["results"].as_array().unwrap().iter().map(|r| r["layer"].as_str().unwrap()).collect();
+    assert_eq!(found.last(), Some(&"scene"), "the pixel comes after the features drawn over it: {v}");
+    s.run("layer.move", &json!({"layer": "scene", "to": 0})).unwrap();
     for l in ["Cities", "Rivers", "Lakes", "Countries"] {
         s.run("layer.visibility", &json!({"layer": l, "visible": false})).unwrap();
     }
