@@ -416,7 +416,7 @@ impl Skipped {
         }
         if self.over_limit > 0 {
             out.push(format!(
-                "{} left out: the bands read hold the most this computer keeps in memory ({limit} values); open a smaller part of the file",
+                "{} left out: the bands read hold the most this computer keeps in memory ({limit} values); split the file with a GRIB tool (wgrib2 or CDO) and add its parts",
                 count(self.over_limit)
             ));
         }
@@ -648,9 +648,50 @@ fn ibm(v: u32) -> f64 {
     sign * mantissa * 16f64.powi(exponent)
 }
 
-/// `count` values of `bits` bits each from `data`, big-endian, unpacked as `(R + X × 2^E) / 10^D`;
-/// with fewer bits there than that, an error.
-fn unpack(data: &[u8], count: usize, bits: u32, r: f64, e: i64, d: i64) -> std::result::Result<(Vec<f32>, u64), Skip> {
+/// The `points` values of a field in scanning order, written straight into one vector: the
+/// `count` values `next` gives, over the points a bitmap keeps (NaN at the others), or all of
+/// them without one; and how many of them `f32` changed (`next`'s second value). The values are
+/// never held apart from the field, so it costs 4 bytes a point.
+fn field_values(
+    points: usize,
+    mask: Option<&[u8]>,
+    count: usize,
+    mut next: impl FnMut() -> (f32, bool),
+) -> std::result::Result<(Vec<f32>, u64), Skip> {
+    match mask {
+        None if count != points => return Err(Skip::Damaged("a field whose values don't fill its grid".to_string())),
+        Some(bits) if (bits.len() as u64) * 8 < points as u64 => {
+            return Err(Skip::Damaged("a bitmap shorter than its grid".to_string()));
+        }
+        _ => {}
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(points).map_err(|_| Skip::TooLarge)?;
+    let (mut rounded, mut left) = (0u64, count);
+    for k in 0..points {
+        let kept = mask.is_none_or(|bits| bits.get(k / 8).is_some_and(|b| b & (0x80 >> (k % 8)) != 0));
+        if kept && left > 0 {
+            left -= 1;
+            let (v, changed) = next();
+            rounded += u64::from(changed);
+            out.push(v);
+        } else {
+            out.push(f32::NAN);
+        }
+    }
+    Ok((out, rounded))
+}
+
+/// A field's `count` values of `bits` bits each from `data`, big-endian, unpacked as
+/// `(R + X × 2^E) / 10^D` in `f64` and held as `f32`, over the `points` of its grid
+/// ([`field_values`]); with fewer bits there than that, an error.
+fn unpack(
+    data: &[u8],
+    (count, bits): (usize, u32),
+    (r, e, d): (f64, i64, i64),
+    mask: Option<&[u8]>,
+    points: usize,
+) -> std::result::Result<(Vec<f32>, u64), Skip> {
     if bits > MAX_BITS {
         return Err(Skip::Other(format!("values of {bits} bits")));
     }
@@ -666,24 +707,16 @@ fn unpack(data: &[u8], count: usize, bits: u32, r: f64, e: i64, d: i64) -> std::
     if !top.is_finite() {
         return Err(Skip::Damaged("a binary scale factor its values can't take".to_string()));
     }
-    let mut out = Vec::new();
-    out.try_reserve_exact(count).map_err(|_| Skip::TooLarge)?;
-    let mut rounded = 0u64;
     let mut bit = 0u64;
-    for _ in 0..count {
+    field_values(points, mask, count, || {
         // The 8 octets from the value's first: at most 7 bits before it, and its 32 at most.
         let byte = (bit / 8) as usize;
         let word = (0..8).fold(0u64, |w, i| (w << 8) | u64::from(data.get(byte + i).copied().unwrap_or(0)));
         let x = (word << (bit % 8)) >> (64 - bits);
         bit += u64::from(bits);
         let v = (r + x as f64 * scale) / ten;
-        if f64::from(v as f32) != v {
-            rounded += 1;
-        }
-        // Unpacked in `f64` and held as `f32`, never both for the whole field.
-        out.push(v as f32);
-    }
-    Ok((out, rounded))
+        (v as f32, f64::from(v as f32) != v)
+    })
 }
 
 /// 10^`d`, the decimal scale factor's divisor; damage when `f64` can't hold it (every value
@@ -693,36 +726,10 @@ fn decimal(d: i64) -> std::result::Result<f64, Skip> {
     if ten.is_finite() && ten > 0.0 { Ok(ten) } else { Err(Skip::Damaged("a decimal scale factor its values can't take".to_string())) }
 }
 
-/// `count` copies of `v`, and how many of them `f32` changes: a field packed in no bits holds its
-/// reference value everywhere.
-fn constant(v: f64, count: usize) -> std::result::Result<(Vec<f32>, u64), Skip> {
-    let mut out = Vec::new();
-    out.try_reserve_exact(count).map_err(|_| Skip::TooLarge)?;
-    out.resize(count, v as f32);
-    Ok((out, if f64::from(v as f32) != v { count as u64 } else { 0 }))
-}
-
-/// Values in scanning order: those unpacked, spread over the points a bitmap keeps (NaN at the
-/// others), or all of them without one.
-fn spread(values: Vec<f32>, bitmap: Option<&[u8]>, points: usize) -> std::result::Result<Vec<f32>, Skip> {
-    let Some(bits) = bitmap else {
-        // Without a bitmap, the values are the field as they are.
-        if values.len() != points {
-            return Err(Skip::Damaged("a field whose values don't fill its grid".to_string()));
-        }
-        return Ok(values);
-    };
-    if (bits.len() as u64) * 8 < points as u64 {
-        return Err(Skip::Damaged("a bitmap shorter than its grid".to_string()));
-    }
-    let mut out = Vec::new();
-    out.try_reserve_exact(points).map_err(|_| Skip::TooLarge)?;
-    let mut values = values.into_iter();
-    for k in 0..points {
-        let set = bits.get(k / 8).is_some_and(|b| b & (0x80 >> (k % 8)) != 0);
-        out.push(if set { values.next().unwrap_or(f32::NAN) } else { f32::NAN });
-    }
-    Ok(out)
+/// A field packed in no bits: its reference value `v` at every point a bitmap keeps
+/// ([`field_values`]).
+fn constant(v: f64, count: usize, mask: Option<&[u8]>, points: usize) -> std::result::Result<(Vec<f32>, u64), Skip> {
+    field_values(points, mask, count, || (v as f32, f64::from(v as f32) != v))
 }
 
 /// `n` bitmap bits set among the first `points`.
@@ -796,8 +803,9 @@ fn grib1(b: &[u8], room: usize) -> std::result::Result<Field, Skip> {
     let bits = u32::from(bds.get(10).copied().unwrap_or(0));
     let count = bitmap.map_or(points, |m| kept(m, points));
     let data = bds.get(11..).unwrap_or_default();
-    let (values, rounded) = if bits == 0 { constant(r / decimal(d)?, count)? } else { unpack(data, count, bits, r, e, d)? };
-    Ok(Field { name, grid, values: spread(values, bitmap, points)?, rounded })
+    let (values, rounded) =
+        if bits == 0 { constant(r / decimal(d)?, count, bitmap, points)? } else { unpack(data, (count, bits), (r, e, d), bitmap, points)? };
+    Ok(Field { name, grid, values, rounded })
 }
 
 /// A GRIB1 grid description section: a regular latitude/longitude grid only.
@@ -921,17 +929,12 @@ fn grib2(b: &[u8], room: usize) -> Vec<std::result::Result<Field, Skip>> {
                         return Err(Skip::Damaged("a field whose values don't fill its grid".to_string()));
                     }
                     let (values, rounded) = if bits == 0 {
-                        constant(r / decimal(d)?, count)?
+                        constant(r / decimal(d)?, count, mask, points)?
                     } else {
-                        unpack(s.get(5..).unwrap_or_default(), count, bits, r, e, d)?
+                        unpack(s.get(5..).unwrap_or_default(), (count, bits), (r, e, d), mask, points)?
                     };
                     held += points;
-                    Ok(Field {
-                        name: format!("{reference}:discipline={discipline}:{product}"),
-                        grid,
-                        values: spread(values, mask, points)?,
-                        rounded,
-                    })
+                    Ok(Field { name: format!("{reference}:discipline={discipline}:{product}"), grid, values, rounded })
                 })();
                 out.push(field);
             }
