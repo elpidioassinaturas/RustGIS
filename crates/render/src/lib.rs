@@ -17,6 +17,7 @@ pub mod fonts;
 mod glyphs;
 pub mod gpu_scene;
 mod gradient_fill;
+mod guide_labels;
 mod label_places;
 pub mod layout;
 mod line_labels;
@@ -4425,6 +4426,8 @@ fn render_frame(
     let masks = layer_masks(map, &ctx, w, h, &flat, &key, scale, failed_source)?;
     // The lines point labels are turned square to (#2263), on the screen.
     let square_lines = square_lines(map, &ctx, &flat);
+    // And the lines labels are curved along (#2262).
+    let guide_lines = guide_lines(map, &ctx, &flat);
     // Bottom first; a higher depth priority draws later (on top) whatever the order.
     let mut order: Vec<usize> = (0..n_layers).rev().collect();
     order.sort_by_key(|i| map.layers.get(*i).map_or(0, |l| l.priority));
@@ -5261,11 +5264,12 @@ fn render_frame(
                             && raw.graphemes(true).nth(line_labels::MAX_CURVED_CHARS).is_none();
                         // A polygon's label curved along its centre line (#2262): its text unwrapped,
                         // kept for that; where it doesn't fit, placed and wrapped as `Auto`.
-                        let mut unwrapped = (class.placement == LabelPlacement::Curved
-                            && matches!(g, Geometry::Polygon(_))
-                            && point.is_some()
-                            && moved.is_none()
-                            && raw.graphemes(true).nth(line_labels::MAX_CURVED_CHARS).is_none())
+                        // So is a point's or a polygon's curved along its guide line (#2262).
+                        let curvable =
+                            point.is_some() && moved.is_none() && raw.graphemes(true).nth(line_labels::MAX_CURVED_CHARS).is_none();
+                        let guided = class.guide.as_ref().filter(|_| curvable && (is_point || matches!(g, Geometry::Polygon(_))));
+                        let mut unwrapped = (curvable
+                            && (guided.is_some() || (class.placement == LabelPlacement::Curved && matches!(g, Geometry::Polygon(_)))))
                         .then(|| raw.clone());
                         let mut text =
                             if curving || (class.wrap_char.is_none() && class.wrap_length == 0) { raw } else { class.wrap(&raw) };
@@ -5537,7 +5541,35 @@ fn render_frame(
                         {
                             squared = true;
                             places.push((0, lx, ly, Some(angle), Vec::new()));
+                        } else if let (Some(line_text), Some(guide)) = (unwrapped.as_deref(), guided)
+                            && let Some(lines) = guide_lines.get(&(guide.layer.to_ascii_lowercase(), guide.field.clone()))
+                            && let Some(((cx, cy), glyphs)) = {
+                                // Its feature's value in the guide's field, matching its line.
+                                let value = guide.field.as_deref().and_then(|f| ds_ptr.field_index(f)).map(|fi| ds_ptr.value(row, fi));
+                                let value = value.filter(|v| !v.is_null()).map(|v| v.to_string());
+                                let near = match g {
+                                    Geometry::Polygon(polys) => {
+                                        guide_labels::Near::Polygon(Box::new(|| area_labels::screen_rings(ctx, polys)))
+                                    }
+                                    _ => guide_labels::Near::Point((x as f32, y as f32)),
+                                };
+                                guide_labels::glyphs(
+                                    lines,
+                                    value.as_deref(),
+                                    near,
+                                    line_text,
+                                    |c| text::measure_in(c, size, face),
+                                    spacing * 1.33,
+                                    size,
+                                )
+                            }
+                        {
+                            // On its line: no other places round its point.
+                            squared = true;
+                            places.push((0, cx, cy, None, glyphs));
+                            text = unwrapped.take().unwrap_or_default();
                         } else if let (Some(line_text), Geometry::Polygon(polys)) = (unwrapped.as_deref(), g)
+                            && class.placement == LabelPlacement::Curved
                             && let Some(((cx, cy), glyphs)) =
                                 area_labels::glyphs(ctx, polys, line_text, |c| text::measure_in(c, size, face), spacing * 1.33, size)
                         {
@@ -6410,6 +6442,57 @@ fn longest_on_screen(ctx: &Ctx<'_>, parts: &[Vec<Coord>]) -> Option<Vec<(f32, f3
         .max_by(|a, b| length(a).total_cmp(&length(b)))
 }
 
+/// A line in longitude and latitude on the screen: its runs, broken where a place doesn't project
+/// (on the globe, cut at the horizon as its stroke is).
+fn screen_pieces(ctx: &Ctx<'_>, flat: &rustgis_map::projection::Flat, part: &[Coord]) -> Vec<Vec<(f32, f32)>> {
+    match &ctx.globe {
+        Some(g) => globe_runs(g, part),
+        None => {
+            let points: Vec<Option<(f32, f32)>> =
+                part.iter().map(|c| flat.forward_checked(*c).map(|m| ctx.view.to_screen(m)).map(|(x, y)| (x as f32, y as f32))).collect();
+            points.split(Option::is_none).map(|r| r.iter().flatten().copied().collect()).collect()
+        }
+    }
+}
+
+/// The lines labels are curved along ([`rustgis_map::LabelClass::guide`], #2262), keyed by layer
+/// name in ASCII lower case (as [`Map::layer_by_name`] matches names) and field: each line's
+/// stretches in view on the screen ([`screen_pieces`]), with its value in the field. Worked out
+/// once a frame for the guide layers of the labels shown, shown or not themselves, each vertex
+/// projected once, as [`square_lines`]; a layer read in chunks from its source has none to hand.
+fn guide_lines(
+    map: &Map,
+    ctx: &Ctx<'_>,
+    flat: &rustgis_map::projection::Flat,
+) -> std::collections::HashMap<(String, Option<String>), guide_labels::Guides> {
+    let mut out = std::collections::HashMap::new();
+    let wanted = map.layers.iter().filter(|l| l.visible && l.labels.enabled).flat_map(|l| l.labels.in_order());
+    let wanted: Vec<_> = wanted.filter_map(|c| c.guide.as_ref()).map(|g| (g.layer.to_ascii_lowercase(), g.field.clone())).collect();
+    let (w, h) = (ctx.view.width as f32, ctx.view.height as f32);
+    for key in wanted {
+        if out.contains_key(&key) {
+            continue;
+        }
+        let Some(layer) = map.layer_by_name(&key.0) else { continue };
+        // Read in longitude/latitude, as the lines labels are square to.
+        let Ok(to) = layer.dataset.lonlat_conversion() else { continue };
+        let field = key.1.as_deref().and_then(|f| layer.dataset.field_index(f));
+        let mut guides = guide_labels::Guides::default();
+        for row in layer.dataset.features.rows() {
+            let Some(g) = row.geometry().and_then(|g| rustgis_data::Dataset::converted_to_lonlat(&to, g)) else { continue };
+            let Geometry::Line(parts) = &*g else { continue };
+            let value = field.map(|fi| row.value(fi)).filter(|v| !v.is_null()).map(|v| v.to_string());
+            for piece in parts.iter().flat_map(|part| screen_pieces(ctx, flat, part)) {
+                for stretch in line_labels::in_view(piece.into_iter().map(Some), w, h) {
+                    guides.push(&stretch, value.as_deref());
+                }
+            }
+        }
+        out.insert(key, guides);
+    }
+    out
+}
+
 /// The lines of the layers point labels are turned square to ([`LabelPlacement::Perpendicular`],
 /// #2263), keyed by layer name in ASCII lower case (as [`Map::layer_by_name`] matches names):
 /// each line's and polygon outline's runs on the screen, a ring closed as it is drawn, broken
@@ -6450,17 +6533,7 @@ fn square_lines(
                     }
                     _ => part,
                 };
-                let pieces = match &ctx.globe {
-                    Some(g) => globe_runs(g, part),
-                    None => {
-                        let points: Vec<Option<(f32, f32)>> = part
-                            .iter()
-                            .map(|c| flat.forward_checked(*c).map(|m| ctx.view.to_screen(m)).map(|(x, y)| (x as f32, y as f32)))
-                            .collect();
-                        points.split(Option::is_none).map(|r| r.iter().flatten().copied().collect()).collect()
-                    }
-                };
-                runs.extend(pieces.into_iter().filter_map(square_labels::Run::new));
+                runs.extend(screen_pieces(ctx, flat, part).into_iter().filter_map(square_labels::Run::new));
             }
         }
         out.insert(name, runs);

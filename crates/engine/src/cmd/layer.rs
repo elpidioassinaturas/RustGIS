@@ -6273,11 +6273,14 @@ fn references_follow_layer(s: &mut Session, old: &str, new: &str) {
     if let Some(walls) = s.map_mut().view.terrain.as_mut().and_then(|t| t.block.as_mut()).and_then(|b| b.walls_layer.as_mut()) {
         replace(walls);
     }
-    // And the lines point labels are turned square to (#2263).
+    // And the lines point labels are turned square to (#2263), and labels curved along (#2262).
     for layer in &mut s.map_mut().layers {
         for class in std::iter::once(&mut layer.labels.default).chain(layer.labels.classes.iter_mut()) {
             if let Some(to) = &mut class.square_to {
                 replace(&mut to.layer);
+            }
+            if let Some(guide) = &mut class.guide {
+                replace(&mut guide.layer);
             }
         }
     }
@@ -6427,18 +6430,30 @@ pub(crate) fn drop_layers(s: &mut Session, ids: &[u32]) {
     }
 }
 
-/// After layers called `names` are removed: point labels turned square to one of them (#2263)
-/// keep its name, so a layer of that name brings their line back, and are placed as auto
-/// meanwhile: said once a layer, as for the terrain's water.
+/// After layers called `names` are removed: point labels turned square to one of them (#2263),
+/// and labels curved along one (#2262), keep its name, so a layer of that name brings their line
+/// back, and are placed as auto, or as without a guide, meanwhile: said once a layer and kind, as
+/// for the terrain's water.
 fn square_labels_follow_removal(s: &mut Session, names: &[String]) {
     for n in names {
-        let used = s.map().layers.iter().flat_map(|l| l.labels.in_order()).any(|c| {
+        if named_layers(s, n) > 0 {
+            continue;
+        }
+        let classes = || s.map().layers.iter().flat_map(|l| l.labels.in_order());
+        let squared = classes().any(|c| {
             c.placement == rustgis_map::LabelPlacement::Perpendicular
                 && c.square_to.as_ref().is_some_and(|t| t.layer.eq_ignore_ascii_case(n))
         });
-        if used && named_layers(s, n) == 0 {
+        let guided = classes().any(|c| c.guide.as_ref().is_some_and(|g| g.layer.eq_ignore_ascii_case(n)));
+        if squared {
             s.notify(
                 format!("Labels: the perpendicular labels' line layer '{n}' was removed, so they are placed as auto until a layer of that name comes back"),
+                false,
+            );
+        }
+        if guided {
+            s.notify(
+                format!("Labels: the guide layer '{n}' was removed, so the labels it guided are placed as without it until a layer of that name comes back"),
                 false,
             );
         }

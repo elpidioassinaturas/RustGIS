@@ -70,6 +70,8 @@ struct Class {
     #[serde(default)]
     square_to: Option<serde_json::Value>,
     #[serde(default)]
+    guide: Option<serde_json::Value>,
+    #[serde(default)]
     line_offset: Option<serde_json::Value>,
     #[serde(default)]
     show_all: Option<serde_json::Value>,
@@ -89,6 +91,8 @@ struct Labels {
     show_all: Option<serde_json::Value>,
     #[serde(default)]
     square_to: Option<serde_json::Value>,
+    #[serde(default)]
+    guide: Option<serde_json::Value>,
     #[serde(default)]
     stretch: Option<serde_json::Value>,
     #[serde(default)]
@@ -161,6 +165,16 @@ fn adjusted_square_to(value: Option<&serde_json::Value>) -> bool {
     })
 }
 
+/// A label guide (#2262) that doesn't read, names no layer or gives a field that isn't a name:
+/// dropped, its labels placed as without one; null is none.
+fn dropped_guide(value: Option<&serde_json::Value>) -> bool {
+    value.is_some_and(|v| {
+        !v.is_null()
+            && (v.get("layer").and_then(serde_json::Value::as_str).is_none_or(|n| n.trim().is_empty())
+                || v.get("field").is_some_and(|f| !f.is_null() && !f.is_string()))
+    })
+}
+
 /// Whether a "Show all labels" setting is something other than true or false (null is none).
 fn damaged_flag(value: Option<&serde_json::Value>) -> bool {
     value.is_some_and(|v| !v.is_boolean() && !v.is_null())
@@ -175,6 +189,7 @@ fn count<'a>(
     what: &str,
 ) -> Vec<(ReadPart, String)> {
     let (mut moves, mut callouts, mut offsets, mut flags, mut squares, mut stretches) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut guides = 0usize;
     let mut diagrams = rustgis_map::diagram::DiagramAudit::default();
     for layer in raw {
         diagrams = diagrams.plus(layer.diagram);
@@ -184,6 +199,7 @@ fn count<'a>(
         offsets = offsets.saturating_add(usize::from(adjusted_line_offset(labels.line_offset.as_ref())));
         flags = flags.saturating_add(usize::from(damaged_flag(labels.show_all.as_ref())));
         squares = squares.saturating_add(usize::from(adjusted_square_to(labels.square_to.as_ref())));
+        guides = guides.saturating_add(usize::from(dropped_guide(labels.guide.as_ref())));
         stretches = stretches.saturating_add(usize::from(adjusted_stretch(labels.stretch.as_ref())));
         for class in &labels.classes {
             moves = moves.saturating_add(class.moved.0);
@@ -191,6 +207,7 @@ fn count<'a>(
             offsets = offsets.saturating_add(usize::from(adjusted_line_offset(class.line_offset.as_ref())));
             flags = flags.saturating_add(usize::from(damaged_flag(class.show_all.as_ref())));
             squares = squares.saturating_add(usize::from(adjusted_square_to(class.square_to.as_ref())));
+            guides = guides.saturating_add(usize::from(dropped_guide(class.guide.as_ref())));
             stretches = stretches.saturating_add(usize::from(adjusted_stretch(class.stretch.as_ref())));
         }
     }
@@ -215,6 +232,9 @@ fn count<'a>(
         messages.push(format!(
             "{name}: {squares} perpendicular label line setting(s) dropped (labelled as auto) or adjusted while opening {what}"
         ));
+    }
+    if guides > 0 {
+        messages.push(format!("{name}: {guides} label guide setting(s) that didn't read dropped while opening {what}"));
     }
     if stretches > 0 {
         messages.push(format!("{name}: {stretches} label stretch setting(s) out of range or not a number adjusted while opening {what}"));
