@@ -577,7 +577,8 @@ panel: username, password, the one-time code for an account with two-factor auth
 **Remember on this computer** (`remember`, below). It shows whether a sign-in is kept, as whom and
 until when its token is renewed, and **Sign out** runs `copernicus.logout`. In the web app the
 panel sends the sign-in from the browser itself: there is no **Remember** there, and the sign-in
-lasts as long as the page (its token is renewed meanwhile). `copernicus.login` signs in with the
+lasts at most as long as the page. Its token is renewed meanwhile; if CDSE refuses a renewal, the
+sign-in ends sooner and the panel says it expired. `copernicus.login` signs in with the
 account's username and password (and `"totp"`, the one-time code, for an account with two-factor
 authentication). The password is sent only to CDSE's sign-in server
 (`identity.dataspace.copernicus.eu`), and kept only if remembered (below). The token it

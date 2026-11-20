@@ -5,7 +5,7 @@
 //! `copernicus.logout`. Like the Earthdata Login section of NASA Earthaccess, the password is
 //! never kept in the pane: it is handed to the command and emptied. In the web app, where a
 //! command can't wait for the browser's fetch, Sign in hands it to `Services::copernicus_sign_in`
-//! instead, and the sign-in lasts as long as the page.
+//! instead, and the sign-in lasts at most as long as the page (a refused renewal ends it sooner).
 
 use rustgis_engine::render::rustgis_tiles::{copernicus, earthdata};
 use serde_json::{Value, json};
