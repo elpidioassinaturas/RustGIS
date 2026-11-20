@@ -575,6 +575,8 @@ struct Field {
     values: Vec<f32>,
     /// Values `f32` changed: decimals (`D` > 0) and sums with more digits than it holds.
     rounded: u64,
+    /// Values past `f32`'s range, which have no value.
+    past: u64,
 }
 
 /// The raster of fields on one grid: north up, a whole turn of longitude from −180°. Cancel is
@@ -597,6 +599,7 @@ fn to_raster(fields: Vec<Field>, name: &str) -> Result<Raster> {
     let origin_y = grid.north() + grid.dy / 2.0;
     let mut names = Vec::with_capacity(fields.len());
     let mut rounded = Vec::with_capacity(fields.len());
+    let mut past = 0u64;
     let mut bands = Vec::with_capacity(fields.len());
     for f in fields {
         crate::progress::check()?;
@@ -614,6 +617,7 @@ fn to_raster(fields: Vec<Field>, name: &str) -> Result<Raster> {
         }
         names.push(f.name);
         rounded.push(f.rounded);
+        past += f.past;
         bands.push(band);
     }
     let size = |n: usize| u32::try_from(n).map_err(|_| bad("the grid is too large"));
@@ -624,6 +628,10 @@ fn to_raster(fields: Vec<Field>, name: &str) -> Result<Raster> {
     }
     if rounded.iter().any(|n| *n > 0) {
         r.rounded = rounded;
+    }
+    if past > 0 {
+        let (what, has) = if past == 1 { ("1 value".to_string(), "has") } else { (format!("{past} values"), "have") };
+        r.lost.push(format!("{what} past the range of 32-bit floats (±3.4 × 10^38) {has} no value"));
     }
     Ok(r)
 }
@@ -649,15 +657,16 @@ fn ibm(v: u32) -> f64 {
 }
 
 /// The `points` values of a field in scanning order, written straight into one vector: the
-/// `count` values `next` gives, over the points a bitmap keeps (NaN at the others), or all of
-/// them without one; and how many of them `f32` changed (`next`'s second value). The values are
-/// never held apart from the field, so it costs 4 bytes a point.
+/// `count` values `next` gives (in `f64`), held as `f32`, over the points a bitmap keeps (NaN at
+/// the others), or all of them without one. Also how many of them `f32` rounded, and how many
+/// are past its range (about ±3.4 × 10^38): those have no value (NaN) rather than an infinity.
+/// The values are never held apart from the field, so it costs 4 bytes a point.
 fn field_values(
     points: usize,
     mask: Option<&[u8]>,
     count: usize,
-    mut next: impl FnMut() -> (f32, bool),
-) -> std::result::Result<(Vec<f32>, u64), Skip> {
+    mut next: impl FnMut() -> f64,
+) -> std::result::Result<(Vec<f32>, u64, u64), Skip> {
     match mask {
         None if count != points => return Err(Skip::Damaged("a field whose values don't fill its grid".to_string())),
         Some(bits) if (bits.len() as u64) * 8 < points as u64 => {
@@ -667,19 +676,25 @@ fn field_values(
     }
     let mut out = Vec::new();
     out.try_reserve_exact(points).map_err(|_| Skip::TooLarge)?;
-    let (mut rounded, mut left) = (0u64, count);
+    let (mut rounded, mut past, mut left) = (0u64, 0u64, count);
     for k in 0..points {
         let kept = mask.is_none_or(|bits| bits.get(k / 8).is_some_and(|b| b & (0x80 >> (k % 8)) != 0));
         if kept && left > 0 {
             left -= 1;
-            let (v, changed) = next();
-            rounded += u64::from(changed);
-            out.push(v);
+            let wide = next();
+            let v = wide as f32;
+            if v.is_infinite() && wide.is_finite() {
+                past += 1;
+                out.push(f32::NAN);
+            } else {
+                rounded += u64::from(f64::from(v) != wide);
+                out.push(v);
+            }
         } else {
             out.push(f32::NAN);
         }
     }
-    Ok((out, rounded))
+    Ok((out, rounded, past))
 }
 
 /// A field's `count` values of `bits` bits each from `data`, big-endian, unpacked as
@@ -691,7 +706,7 @@ fn unpack(
     (r, e, d): (f64, i64, i64),
     mask: Option<&[u8]>,
     points: usize,
-) -> std::result::Result<(Vec<f32>, u64), Skip> {
+) -> std::result::Result<(Vec<f32>, u64, u64), Skip> {
     if bits > MAX_BITS {
         return Err(Skip::Other(format!("values of {bits} bits")));
     }
@@ -714,8 +729,7 @@ fn unpack(
         let word = (0..8).fold(0u64, |w, i| (w << 8) | u64::from(data.get(byte + i).copied().unwrap_or(0)));
         let x = (word << (bit % 8)) >> (64 - bits);
         bit += u64::from(bits);
-        let v = (r + x as f64 * scale) / ten;
-        (v as f32, f64::from(v as f32) != v)
+        (r + x as f64 * scale) / ten
     })
 }
 
@@ -728,8 +742,8 @@ fn decimal(d: i64) -> std::result::Result<f64, Skip> {
 
 /// A field packed in no bits: its reference value `v` at every point a bitmap keeps
 /// ([`field_values`]).
-fn constant(v: f64, count: usize, mask: Option<&[u8]>, points: usize) -> std::result::Result<(Vec<f32>, u64), Skip> {
-    field_values(points, mask, count, || (v as f32, f64::from(v as f32) != v))
+fn constant(v: f64, count: usize, mask: Option<&[u8]>, points: usize) -> std::result::Result<(Vec<f32>, u64, u64), Skip> {
+    field_values(points, mask, count, || v)
 }
 
 /// `n` bitmap bits set among the first `points`.
@@ -803,9 +817,9 @@ fn grib1(b: &[u8], room: usize) -> std::result::Result<Field, Skip> {
     let bits = u32::from(bds.get(10).copied().unwrap_or(0));
     let count = bitmap.map_or(points, |m| kept(m, points));
     let data = bds.get(11..).unwrap_or_default();
-    let (values, rounded) =
+    let (values, rounded, past) =
         if bits == 0 { constant(r / decimal(d)?, count, bitmap, points)? } else { unpack(data, (count, bits), (r, e, d), bitmap, points)? };
-    Ok(Field { name, grid, values, rounded })
+    Ok(Field { name, grid, values, rounded, past })
 }
 
 /// A GRIB1 grid description section: a regular latitude/longitude grid only.
@@ -928,13 +942,13 @@ fn grib2(b: &[u8], room: usize) -> Vec<std::result::Result<Field, Skip>> {
                     if mask.is_some_and(|m| kept(m, points) != count) || (mask.is_none() && count != points) {
                         return Err(Skip::Damaged("a field whose values don't fill its grid".to_string()));
                     }
-                    let (values, rounded) = if bits == 0 {
+                    let (values, rounded, past) = if bits == 0 {
                         constant(r / decimal(d)?, count, mask, points)?
                     } else {
                         unpack(s.get(5..).unwrap_or_default(), (count, bits), (r, e, d), mask, points)?
                     };
                     held += points;
-                    Ok(Field { name: format!("{reference}:discipline={discipline}:{product}"), grid, values, rounded })
+                    Ok(Field { name: format!("{reference}:discipline={discipline}:{product}"), grid, values, rounded, past })
                 })();
                 out.push(field);
             }

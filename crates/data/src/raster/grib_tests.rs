@@ -687,3 +687,22 @@ fn a_message_of_too_many_sections_is_left_out() {
     // The decoder refuses one too, should it get one.
     assert!(matches!(grib2(&file, usize::MAX).first(), Some(Err(Skip::Damaged(m))) if m.contains("more than 1024 sections")));
 }
+
+#[test]
+fn values_past_f32_are_said_not_rounded() {
+    // E = 130: 1 × 2^130 is past f32's range; 0 isn't.
+    let mut g = G1::new(2, 1, vec![0, 1]);
+    g.e = 130;
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    let v = &r.bands[0].data;
+    assert_eq!(v[0], 0.0);
+    assert!(v[1].is_nan(), "{v:?}");
+    assert!(r.rounded.is_empty(), "{:?}", r.rounded);
+    assert!(r.lost.contains(&"1 value past the range of 32-bit floats (±3.4 × 10^38) has no value".to_string()), "{:?}", r.lost);
+    // A constant field whose reference value is past it (IBM 16^60).
+    let mut c = G1::new(2, 1, vec![]);
+    (c.bits, c.r) = (0, 0x7c10_0000);
+    let r = read_bytes(&c.bytes(), "t").unwrap();
+    assert!(r.bands[0].data.iter().all(|v| v.is_nan()));
+    assert!(r.lost.contains(&"2 values past the range of 32-bit floats (±3.4 × 10^38) have no value".to_string()), "{:?}", r.lost);
+}
