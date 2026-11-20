@@ -47,7 +47,10 @@ Select a layer in Layers and open **Style › Symbology** (or the Symbology pane
   while those stay under 40% of the values they were taken from: for a few very large values among
   many small ones (city sizes, incomes). It sets its own number of classes, at most the number
   asked. Manual keeps the bounds you type: each class's upper bound is a number to edit or take out, **Split the widest
-  class** adds one, and the field's largest value closes the last class. If no field is
+  class** adds one, and the field's largest value closes the last class. On a layer read in
+  place, whose values aren't all at hand, the field's range is unknown: the first class takes
+  every value up to its bound, and one more class takes every value past the last bound, shown
+  as "up to 4" and "more than 25" in the legend. If no field is
   chosen, the current renderer's field is kept when it is numeric; otherwise the first numeric
   field is used. If the layer has no numeric field, or the
   switch fails for another reason, the pane shows why and keeps the current renderer. When numeric
@@ -97,8 +100,10 @@ marker; the symbol's fill and outline don't show. It turns with **Rotation**, is
 selected, and is kept in the project file. A project that has one opens only in a RustGIS that
 draws them. An image that doesn't decode draws a circle, so the point still shows; opening a
 project, map file or layer file, or adding styles, says which layers and styles have such an image,
-or one too large to keep. The **Layers** pane, its legend and the editors' previews (the symbol's,
-the strokes' and the fills') show the image too, whole within their patch and not turned:
+or one too large to keep. A PDF or SVG export keeps the image once, however many points and lines
+draw it (in an SVG each place is a `<use>` of it, a clone in a vector editor). The **Layers**
+pane, its legend and the editors' previews (the symbol's, the strokes' and the fills') show the
+image too, whole within their patch and not turned:
 
 ```text
 layer.marker={"layer":"Schools","image":"iVBORw0KGgo…","size":16}

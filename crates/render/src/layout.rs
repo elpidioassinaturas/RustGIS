@@ -582,10 +582,10 @@ fn draw_page(
                     None => placeholder(&mut pm, r, "Table", ppp),
                 }
             }
-            ElementKind::Chart { frame: f, layer, field, label, color } => {
+            ElementKind::Chart { frame: f, layer, color, .. } => {
                 let ds = frame(*f).and_then(|fr| maps.get(fr.1)).and_then(|m| m.layer_by_name(layer)).map(|l| &l.dataset);
-                match ds {
-                    Some(ds) => chart(&mut pm, r, ds, field, label.as_deref(), color.unwrap_or(INK), ppp),
+                match ds.and_then(|ds| e.kind.chart_data(ds)) {
+                    Some(data) => chart(&mut pm, r, &data, color.unwrap_or(INK), ppp),
                     None => placeholder(&mut pm, r, "Chart", ppp),
                 }
             }
@@ -3259,7 +3259,8 @@ pub(crate) fn wrapped(s: &str, width: f64, size: f64, style: TextStyle) -> Strin
         let (lo, hi) = text::styled_extent(t, px, style.face, spacing);
         f64::from(if style.align == TextAlign::Left { hi } else { hi - lo })
     };
-    // Lines past the 200 a text draws aren't broken: one more tells the cut-off check it goes on.
+    // Lines past the 200 a text draws aren't broken: one more, with text, tells the cut-off check
+    // it goes on.
     crate::report::wrap_lines(s, width * WRAP_PX_PER_MM, measure, 200).join("\n")
 }
 
@@ -3429,45 +3430,45 @@ fn table(pm: &mut Canvas, r: Rect, ds: &rustgis_data::Dataset, rows: usize, ink:
     }
 }
 
-/// A bar chart of a field's values, largest first (up to 20 bars): its title and labels in `dark`.
-fn chart(pm: &mut Canvas, r: Rect, ds: &rustgis_data::Dataset, field: &str, label: Option<&str>, dark: Rgba, ppp: f64) {
+/// A bar chart of `data`'s bars ([`ElementKind::chart_data`]): its title and labels in `dark`.
+/// With a negative value, bars run either way from a zero line (#2487).
+fn chart(pm: &mut Canvas, r: Rect, data: &rustgis_map::layout::ChartData, dark: Rgba, ppp: f64) {
     let ppp = ppp as f32;
-    let Some(fi) = ds.field_index(field) else {
-        placeholder(pm, r, "Chart", ppp as f64);
-        return;
-    };
-    let li = label.and_then(|l| ds.field_index(l));
-    let mut vals: Vec<(f64, String)> = (0..ds.features.len())
-        .filter_map(|row| {
-            ds.value(row, fi).as_f64().filter(|v| v.is_finite()).map(|v| (v, li.map(|i| ds.value(row, i).to_string()).unwrap_or_default()))
-        })
-        .collect();
-    vals.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    vals.truncate(20);
+    let vals = &data.bars;
     let max = vals.iter().map(|v| v.0).fold(0.0_f64, f64::max);
-    if vals.is_empty() || max <= 0.0 {
+    let min = vals.iter().map(|v| v.0).fold(0.0_f64, f64::min);
+    if vals.is_empty() || (max <= 0.0 && min >= 0.0) {
         placeholder(pm, r, "Chart", ppp as f64);
         return;
     }
+    let span = max - min;
     let px = 7.5 * 1.33 * ppp;
     let title_h = px * 1.6;
-    text::text_at(pm, field, r.x(), r.y() + title_h / 2.0, px * 1.15, dark, true, text::Align::Left, false);
-    let label_w = if li.is_some() { r.width() * 0.32 } else { 0.0 };
+    text::text_at(pm, &data.title, r.x(), r.y() + title_h / 2.0, px * 1.15, dark, true, text::Align::Left, false);
+    let label_w = if data.labelled { r.width() * 0.32 } else { 0.0 };
     let bar_area = r.width() - label_w - 4.0;
     let bh = ((r.height() - title_h) / vals.len() as f32).min(18.0 * ppp);
+    // Where the bars start: the left of the bar area when none is negative.
+    let zero = r.x() + label_w + bar_area * (-min / span) as f32;
     for (i, (v, name)) in vals.iter().enumerate() {
         let y = r.y() + title_h + bh * i as f32;
-        let w = (bar_area * (*v / max) as f32).max(1.0);
-        if let Some(b) = Rect::from_xywh(r.x() + label_w, y + bh * 0.15, w, bh * 0.7) {
+        let w = (bar_area * (v.abs() / span) as f32).max(1.0);
+        let x = if *v < 0.0 { zero - w } else { zero };
+        if let Some(b) = Rect::from_xywh(x, y + bh * 0.15, w, bh * 0.7) {
             pm.fill_rect(b, &paint(Rgba::rgb(0x3B, 0x82, 0xC4), 1.0), Transform::identity(), None);
         }
-        if li.is_some() {
+        if data.labelled {
             let mut t: String = name.chars().take(30).collect();
             while !t.is_empty() && text::measure(&t, 7.5, false) * ppp > label_w - 4.0 * ppp {
                 t.pop();
             }
             text::text_at(pm, &t, r.x(), y + bh / 2.0, px.min(bh * 0.9), dark, false, text::Align::Left, false);
         }
+    }
+    if min < 0.0
+        && let Some(line) = Rect::from_xywh(zero - 0.375 * ppp, r.y() + title_h, 0.75 * ppp, bh * vals.len() as f32)
+    {
+        pm.fill_rect(line, &paint(dark, 1.0), Transform::identity(), None);
     }
 }
 
@@ -3479,6 +3480,116 @@ pub fn map_index(maps: &[rustgis_map::Map], name: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chart element of layer "t" on frame 1, with `extra` keys (its field among them).
+    fn chart_kind(extra: serde_json::Value) -> ElementKind {
+        let mut chart = serde_json::json!({"frame": 1, "layer": "t"});
+        if let (Some(c), Some(e)) = (chart.as_object_mut(), extra.as_object()) {
+            c.extend(e.clone());
+        }
+        serde_json::from_value(serde_json::json!({ "Chart": chart })).unwrap()
+    }
+
+    /// The chart as it was drawn before charts were grouped, ordered or cut by choice, kept to
+    /// show a chart saved then still draws to the same pixels.
+    fn chart_before(pm: &mut Canvas, r: Rect, ds: &rustgis_data::Dataset, field: &str, label: Option<&str>, dark: Rgba, ppp: f64) {
+        let ppp = ppp as f32;
+        let Some(fi) = ds.field_index(field) else {
+            placeholder(pm, r, "Chart", ppp as f64);
+            return;
+        };
+        let li = label.and_then(|l| ds.field_index(l));
+        let mut vals: Vec<(f64, String)> = (0..ds.features.len())
+            .filter_map(|row| {
+                ds.value(row, fi)
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .map(|v| (v, li.map(|i| ds.value(row, i).to_string()).unwrap_or_default()))
+            })
+            .collect();
+        vals.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        vals.truncate(20);
+        let max = vals.iter().map(|v| v.0).fold(0.0_f64, f64::max);
+        if vals.is_empty() || max <= 0.0 {
+            placeholder(pm, r, "Chart", ppp as f64);
+            return;
+        }
+        let px = 7.5 * 1.33 * ppp;
+        let title_h = px * 1.6;
+        text::text_at(pm, field, r.x(), r.y() + title_h / 2.0, px * 1.15, dark, true, text::Align::Left, false);
+        let label_w = if li.is_some() { r.width() * 0.32 } else { 0.0 };
+        let bar_area = r.width() - label_w - 4.0;
+        let bh = ((r.height() - title_h) / vals.len() as f32).min(18.0 * ppp);
+        for (i, (v, name)) in vals.iter().enumerate() {
+            let y = r.y() + title_h + bh * i as f32;
+            let w = (bar_area * (*v / max) as f32).max(1.0);
+            if let Some(b) = Rect::from_xywh(r.x() + label_w, y + bh * 0.15, w, bh * 0.7) {
+                pm.fill_rect(b, &paint(Rgba::rgb(0x3B, 0x82, 0xC4), 1.0), Transform::identity(), None);
+            }
+            if li.is_some() {
+                let mut t: String = name.chars().take(30).collect();
+                while !t.is_empty() && text::measure(&t, 7.5, false) * ppp > label_w - 4.0 * ppp {
+                    t.pop();
+                }
+                text::text_at(pm, &t, r.x(), y + bh / 2.0, px.min(bh * 0.9), dark, false, text::Align::Left, false);
+            }
+        }
+    }
+
+    /// A chart saved before grouping, order and limits draws to the same pixels: with labels or
+    /// without, past 20 features, with rows with no number, a missing label field, all zero.
+    #[test]
+    fn a_chart_saved_before_draws_to_the_same_pixels() {
+        use rustgis_data::{Dataset, Field, FieldType, Geometry, Value};
+        let mut ds = Dataset::new("t", GeometryType::Point, vec![Field::new("name", FieldType::Text), Field::new("n", FieldType::Double)]);
+        for i in 0..27 {
+            let n = match i {
+                3 => Value::Null,
+                5 => Value::Float(f64::NAN),
+                _ => Value::Float(((i * 37) % 23) as f64 + 0.5),
+            };
+            ds.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Text(format!("Place {i}")), n]);
+        }
+        let mut zeros = Dataset::new("t", GeometryType::Point, vec![Field::new("n", FieldType::Double)]);
+        zeros.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Float(0.0)]);
+        let r = Rect::from_xywh(7.0, 5.0, 230.0, 170.0).unwrap();
+        for (ds, label, ppp) in [(&ds, Some("name"), 1.0), (&ds, None, 2.0), (&ds, Some("gone"), 1.5), (&zeros, None, 1.0)] {
+            let draw = |f: &dyn Fn(&mut Canvas)| {
+                let mut c = Canvas::new(480, 360).unwrap();
+                f(&mut c);
+                c
+            };
+            let before = draw(&|c| chart_before(c, r, ds, "n", label, INK, ppp));
+            let kind = chart_kind(serde_json::json!({"field": "n", "label": label}));
+            let now = draw(&|c| match kind.chart_data(ds) {
+                Some(data) => chart(c, r, &data, INK, ppp),
+                None => placeholder(c, r, "Chart", ppp),
+            });
+            assert!(before.pixmap().data() == now.pixmap().data(), "{label:?} at {ppp}");
+        }
+    }
+
+    /// A negative value runs left of a zero line in the ink; a positive one right of it.
+    #[test]
+    fn a_chart_with_a_negative_value_draws_from_a_zero_line() {
+        use rustgis_data::{Dataset, Field, FieldType, Geometry, Value};
+        let mut ds = Dataset::new("t", GeometryType::Point, vec![Field::new("n", FieldType::Double)]);
+        for n in [3.0, -1.0] {
+            ds.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Float(n)]);
+        }
+        let data = chart_kind(serde_json::json!({"field": "n"})).chart_data(&ds).unwrap();
+        let mut c = Canvas::new(200, 120).unwrap();
+        let r = Rect::from_xywh(0.0, 0.0, 200.0, 120.0).unwrap();
+        chart(&mut c, r, &data, INK, 1.0);
+        // Bar area 196 px over a span of 4: zero at 49 px. Rows of 18 px under a 16 px title,
+        // their bars from 18.7 to 30.6 px and from 36.7 to 48.6 px down.
+        let blue = |x: u32, y: u32| c.pixmap().pixel(x, y).is_some_and(|p| p.blue() > 150 && p.red() < 100);
+        assert!(blue(150, 25) && !blue(30, 25), "3 runs right of zero");
+        assert!(blue(30, 43) && !blue(70, 43), "-1 runs left of zero");
+        // Between the bars, the zero line (0.75 px wide, so partly covering its pixel).
+        let line = c.pixmap().pixel(49, 34).unwrap();
+        assert!(line.alpha() > 60 && line.blue() < 60, "the zero line: {line:?}");
+    }
 
     /// Both map frames share the index feature, even though the locator draws a different map.
     /// A page using expressions draws exactly like the same page with its values written inline.
@@ -3603,7 +3714,8 @@ mod tests {
             assert_eq!(reddish(&legend), expected, "legend {ink:?}");
             assert_eq!(reddish(&draw(&|c| colorbar(c, r, &grey, &bar(ink), 1.0))), expected, "colorbar {ink:?}");
             // Its bars keep their blue.
-            assert_eq!(reddish(&draw(&|c| chart(c, r, &ds, "n", Some("name"), ink, 1.0))), expected, "chart {ink:?}");
+            let data = chart_kind(serde_json::json!({"field": "n", "label": "name"})).chart_data(&ds).unwrap();
+            assert_eq!(reddish(&draw(&|c| chart(c, r, &data, ink, 1.0))), expected, "chart {ink:?}");
         }
         // Two columns 90 px wide, a header and two rows 17 px high: (175, 25) is in the first
         // row's empty right end, (175, 8) in the header's.
@@ -5362,6 +5474,27 @@ mod tests {
         let id = l.elements[0].id;
         l.element_mut(id).unwrap().h = 4.0;
         assert_eq!(clipped_text(&l, &[], 96.0, &info), vec![(id, "Note".into())]);
+    }
+
+    /// A wrapped text past the 200 lines a text draws is reported cut, even when its 201st line is
+    /// blank and the text goes on after it (#2346); one followed only by blank lines loses nothing
+    /// and isn't.
+    #[test]
+    fn a_wrapped_text_past_its_last_drawn_line_is_reported_cut() {
+        let info = PageInfo::default();
+        let page = |tail: &str| {
+            let mut l = Layout::new("L", 100.0, 1500.0);
+            let mut kind = ElementKind::text(format!("{}{tail}", vec!["a"; 200].join("\n")), 12.0, Rgba::rgb(0, 0, 0), false);
+            if let ElementKind::Text { wrap, .. } = &mut kind {
+                *wrap = true;
+            }
+            let id = l.add("Note", (10.0, 10.0, 40.0, 1400.0), kind);
+            (l, id)
+        };
+        let (l, id) = page("\n\u{a0}\nZ");
+        assert_eq!(clipped_text(&l, &[], 96.0, &info), vec![(id, "Note".into())]);
+        let (l, _) = page("\n\n\n");
+        assert!(clipped_text(&l, &[], 96.0, &info).is_empty(), "only blank lines past it");
     }
 
     /// The same lines at every resolution: they are measured at one (#2346), so the layout view,

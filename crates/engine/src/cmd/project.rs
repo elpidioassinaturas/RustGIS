@@ -536,7 +536,8 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
         }
     };
     reset(s, proj);
-    unlink_partial_copies(s, is_field);
+    let legacy_field = is_package && legacy_field_package(&s.project);
+    unlink_partial_copies(s, is_field || legacy_field);
     // A package opens as a new, unsaved project (saving writes a plain project file).
     if !is_package {
         name_from_file(s, &path);
@@ -553,10 +554,19 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
     Ok(Value::Null)
 }
 
+/// Before `field_origin`, the field writer named the project after the area and put only
+/// its `<area> (offline)` map in it, without any saved offline areas. Use that signature
+/// for packages even when the extension or the archive's README is unavailable.
+fn legacy_field_package(project: &Project) -> bool {
+    project.field_origin.is_none()
+        && project.offline_areas.is_empty()
+        && matches!(project.maps.as_slice(), [map] if map.name.strip_suffix(super::field::OFFLINE) == Some(project.name.as_str()))
+}
+
 /// Unlinks the maps of the project just opened that hold only some of a table's rows from the
 /// GeoPackage or PostGIS tables they were loaded from, as offline copies made now are, and says so:
 /// every map of a field project (`field`, opened from a field package, or one with a field
-/// origin), else a home project's offline maps (`<area> (offline)`). Saved before offline copies
+/// origin), else a home project's offline maps. Saved before offline copies
 /// were unlinked, they would delete from the table every row they lack.
 fn unlink_partial_copies(s: &mut Session, field: bool) {
     if field || s.project.field_origin.is_some() {
@@ -568,10 +578,13 @@ fn unlink_partial_copies(s: &mut Session, field: bool) {
     }
 }
 
+/// Opens project JSON, including a browser package's extracted project. Package imports skip
+/// saved secret restoration and protect legacy field copies without needing their archive.
 fn open_text(s: &mut Session, p: &Value) -> CmdResult {
     let text = super::ps(p, "text").ok_or("text is required")?;
+    let package = super::b(p, "package").unwrap_or(false);
     super::connections::clear_active();
-    let proj = if super::b(p, "package").unwrap_or(false) { Project::from_import_json(text, None) } else { Project::from_json(text) };
+    let proj = if package { Project::from_import_json(text, None) } else { Project::from_json(text) };
     let proj = match proj {
         Ok(proj) => proj,
         Err(error) => {
@@ -580,7 +593,8 @@ fn open_text(s: &mut Session, p: &Value) -> CmdResult {
         }
     };
     reset(s, proj);
-    unlink_partial_copies(s, false);
+    let legacy_field = package && legacy_field_package(&s.project);
+    unlink_partial_copies(s, legacy_field);
     // The browser opens files by name and contents: the name still names the project.
     if let Some(file) = super::ps(p, "fileName") {
         name_from_file(s, std::path::Path::new(file));

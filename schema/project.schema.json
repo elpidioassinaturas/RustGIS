@@ -1085,7 +1085,9 @@
           "picture-markers",
           "layout-element-ink",
           "layout-element-wrap",
+          "layout-chart-data",
           "field-generation",
+          "offline-map-area-id",
           "crs-wkt",
           "zarr-window"
         ],
@@ -1170,7 +1172,9 @@
     "picture-markers",
     "layout-element-ink",
     "layout-element-wrap",
+    "layout-chart-data",
     "field-generation",
+    "offline-map-area-id",
     "crs-wkt",
     "zarr-window"
   ],
