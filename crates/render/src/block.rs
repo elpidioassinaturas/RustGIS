@@ -624,7 +624,7 @@ pub(crate) fn water_runs(map: &Map, b: &Block, ground: &Ground, res: f64, env: &
         for &(lo, hi, part) in units {
             let Some(p) = part else { continue };
             let Some(&(row, k)) = cut.parts.get(p) else { continue };
-            let given = field.and_then(|f| layer.dataset.features.get(row)?.attrs.get(f)?.as_f64()).filter(|d| d.is_finite() && *d > 0.0);
+            let given = field.and_then(|f| layer.dataset.features.value(row, f).as_f64()).filter(|d| d.is_finite() && *d > 0.0);
             let Some(depth) = given.or(bw.depth).filter(|d| *d > 0.0) else { continue };
             let mid = b.point(side, (lo + hi) / 2.0);
             let Some(level) = water.level(mid) else { continue };
@@ -636,7 +636,7 @@ pub(crate) fn water_runs(map: &Map, b: &Block, ground: &Ground, res: f64, env: &
                 // Tested in longitude and latitude (Web Mercator keeps each axis in order, so an
                 // edge's box meets the box's the same), only those near it put in Web Mercator.
                 let (lo, hi) = (merc_to_lonlat(Coord::new(b.x0 - ramp, b.y0 - ramp)), merc_to_lonlat(Coord::new(b.x1 + ramp, b.y1 + ramp)));
-                let Some(Some(Geometry::Polygon(polys))) = layer.dataset.features.get(row).map(|f| &f.geometry) else { return Vec::new() };
+                let Some(Geometry::Polygon(polys)) = layer.dataset.features.geometry(row) else { return Vec::new() };
                 polys
                     .get(k)
                     .into_iter()

@@ -686,11 +686,11 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
                 return Err(format!("block's water field '{f}' isn't numeric (depths in metres)"));
             }
             let keep = l.query_rows(&l.dataset);
-            let missing = |(row, ft): &(usize, &rustgis_data::Feature)| {
+            let missing = |(row, v): &(usize, &rustgis_data::Value)| {
                 keep.as_ref().is_none_or(|k| k.get(*row).copied().unwrap_or(false))
-                    && ft.attrs.get(i).and_then(rustgis_data::Value::as_f64).is_none_or(|d| !d.is_finite() || d <= 0.0)
+                    && v.as_f64().is_none_or(|d| !d.is_finite() || d <= 0.0)
             };
-            let n = if bw.depth.is_some() { 0 } else { l.dataset.features.iter().enumerate().filter(missing).count() };
+            let n = if bw.depth.is_some() { 0 } else { l.dataset.features.column(i).enumerate().filter(missing).count() };
             Ok((n > 0).then(|| (n, l.name.clone(), f.clone())))
         })();
         match checked {
