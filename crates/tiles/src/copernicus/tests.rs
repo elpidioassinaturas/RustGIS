@@ -175,9 +175,14 @@ fn a_sign_in_answer_sent_from_the_browser_is_kept_like_one_made_here() {
     assert!(!is_remembered(), "a sign-in from the browser is never remembered");
     logout();
     assert_eq!(authorization(DATA), None);
-    // Until the web app can sign in, its refusal sends the user where they can.
+    // The web app signs in from its panel: its refusal sends the user there.
     let web = refused_message_in(DATA, true);
-    assert!(web.contains("f.tif: Copernicus Data Space asks for a sign-in") && web.contains("the web app can't sign in yet"), "{web}");
+    assert!(
+        web.ends_with(
+            "f.tif: Copernicus Data Space asks for a sign-in for this file: sign in with a free account in Web Data › Copernicus Data Space"
+        ),
+        "{web}"
+    );
     assert!(refused_message(DATA).ends_with("sign in with a free account (copernicus.login)"), "{}", refused_message(DATA));
 }
 
