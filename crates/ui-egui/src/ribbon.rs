@@ -3648,7 +3648,7 @@ fn login_help<'a>(
 }
 
 /// Whether the sign-in `login` is kept: an Earthdata token that hasn't expired (one remembered on
-/// this computer is read at launch); a Copernicus Data Space sign-in, or one remembered; an ArcGIS
+/// this computer is read at launch); a Copernicus Data Space sign-in, or one remembered that a request can still use; an ArcGIS
 /// session that renews itself or hasn't expired. Read from what the app keeps in memory, never
 /// from the system's credential store, and once a frame however many buttons ask.
 fn login_kept(ctx: &egui::Context, login: rustgis_engine::plugins::Login) -> bool {
@@ -3669,7 +3669,7 @@ fn login_kept(ctx: &egui::Context, login: rustgis_engine::plugins::Login) -> boo
         // A remembered token is read into the session at launch; remembered with none in the
         // session means one that expired or was damaged and couldn't be deleted.
         Login::Earthdata => earthdata::has_token() && !earthdata::token_expired(),
-        Login::Copernicus => copernicus::signed_in().is_some() || copernicus::is_remembered_now() == Some(true),
+        Login::Copernicus => copernicus::signed_in().is_some() || copernicus::is_usable_remembered_now() == Some(true),
         Login::Arcgis => arcgis_auth::kept(),
     };
     known[slot] = Some(kept);
@@ -3683,7 +3683,7 @@ fn login_text(login: rustgis_engine::plugins::Login, kept: bool) -> String {
     let (what, place) = match login {
         Login::Earthdata => (tl_raw!("the Earthdata Login token"), tl_raw!("Home › Add › Web Data › NASA Earthaccess")),
         Login::Copernicus => (tl_raw!("a Copernicus Data Space sign-in"), tl_raw!("Home › Add › Web Data › Copernicus Data Space")),
-        Login::Arcgis => (tl_raw!("an ArcGIS sign-in"), tl_raw!("Home › Add › Add Data › Add From Service")),
+        Login::Arcgis => (tl_raw!("an ArcGIS sign-in"), tl_raw!("Home › Add › Add Data › From Service")),
     };
     if kept {
         crate::i18n::fmt("Needs {what}: kept.", &[("what", what)])
@@ -5606,7 +5606,7 @@ mod tests {
             "Needs the Earthdata Login token, which isn't given: Home › Add › Web Data › NASA Earthaccess."
         );
         assert!(login_text(Login::Copernicus, false).ends_with("Home › Add › Web Data › Copernicus Data Space."));
-        assert!(login_text(Login::Arcgis, false).ends_with("Home › Add › Add Data › Add From Service."));
+        assert!(login_text(Login::Arcgis, false).ends_with("Home › Add › Add Data › From Service."));
     }
 
     /// The sample with Cities selected, recording the steps run from here on.
