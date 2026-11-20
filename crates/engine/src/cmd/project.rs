@@ -450,6 +450,7 @@ fn reset(s: &mut Session, p: Project) {
             ),
             false,
         );
+        super::terrain_blocks::told_uncut(s);
     }
     match plain.as_slice() {
         [] => {}

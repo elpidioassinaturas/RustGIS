@@ -72,6 +72,22 @@ pub(super) fn check(name: &str, raster: &Raster, extent: Option<[f64; 4]>) -> Re
     Ok(Coverage { extent, missing, total })
 }
 
+/// Blocks cut to polygons that can't be read, said as the project opened: remembered as checked,
+/// so the landing check right after doesn't say them again (an edit, or new pixels, checks again).
+pub(crate) fn told_uncut(session: &mut Session) {
+    for map in &session.project.maps {
+        let Some(terrain) = &map.view.terrain else { continue };
+        let (TerrainSource::Layer(name), Some(block)) = (&terrain.source, &terrain.block) else { continue };
+        if !matches!(block.shape, rustgis_map::view::BlockShape::Polygon { .. }) || own_box(map, block).is_some() {
+            continue;
+        }
+        let Some(layer) = map.layer_by_name(name) else { continue };
+        let Some(raster) = layer.raster.as_ref().and_then(|raster| raster.data.as_ref()) else { continue };
+        let checked = Checked { layer: layer.instance_id(), pixels: Arc::downgrade(raster), extent: None };
+        session.terrain_blocks_checked.insert(map.instance_id(), checked);
+    }
+}
+
 /// Called after a command commits and when the frame reports newly landed raster pixels.
 /// A Weak retains allocation identity without retaining the DEM's pixel buffers.
 pub(crate) fn landed(session: &mut Session) {

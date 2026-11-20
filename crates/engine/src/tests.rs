@@ -13703,6 +13703,16 @@ fn terrain_block_cut_to_polygons() {
     assert!(opened.map().view.terrain.as_ref().is_some_and(|t| t.block.is_some()), "{:?}", opened.notices);
     assert!(opened.notices.iter().any(|n| n.text.contains("lie off their DEM")), "{:?}", opened.notices);
     assert!(!opened.notices.iter().any(|n| n.text.contains("was dropped")), "{:?}", opened.notices);
+    // One that picks no polygon is said once as the project opens, not again by the landing check.
+    let mut none = s.project.clone();
+    if let Some(b) = none.maps[0].view.terrain.as_mut().and_then(|t| t.block.as_mut()) {
+        b.shape = rustgis_map::view::BlockShape::Polygon { layer: "bacias".into(), filter: Some("nome = 'z'".into()) };
+    }
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, none);
+    crate::cmd::terrain_blocks::landed(&mut opened);
+    let uncut = opened.notices.iter().filter(|n| n.text.contains("no block is drawn")).count();
+    assert_eq!(uncut, 1, "{:?}", opened.notices);
     // A toothed ring of 70 000 corners is, to stay under 65 535 sides: said when it is set and when the
     // project opens again.
     let star: Vec<Value> = (0..=70_000)

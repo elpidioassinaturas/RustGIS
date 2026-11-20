@@ -110,9 +110,10 @@ impl Outline {
             (xs.clone().fold(f64::NEG_INFINITY, f64::max) - xs.fold(f64::INFINITY, f64::min))
                 .max(ys.clone().fold(f64::NEG_INFINITY, f64::max) - ys.fold(f64::INFINITY, f64::min))
         };
-        let count = |t: &[Vec<Coord>]| t.iter().map(Vec::len).sum::<usize>();
+        let count = |t: &[(usize, Vec<Coord>)]| t.iter().map(|r| r.1.len()).sum::<usize>();
         let mut thinned = loop {
-            let thinned: Vec<Vec<Coord>> = rings.iter().filter_map(|r| thin(r, gap.min(size(r) / 8.0))).collect();
+            let thinned: Vec<(usize, Vec<Coord>)> =
+                rings.iter().enumerate().filter_map(|(i, r)| Some((i, thin(r, gap.min(size(r) / 8.0))?))).collect();
             if count(&thinned) <= MAX_SIDES || gap > longer {
                 break thinned;
             }
@@ -121,11 +122,11 @@ impl Outline {
         // Still too many (thousands of small rings): the largest that fit are kept.
         let all = thinned.len();
         if count(&thinned) > MAX_SIDES {
-            thinned.sort_by(|a, b| area2(b).total_cmp(&area2(a)));
+            thinned.sort_by(|a, b| area2(&b.1).total_cmp(&area2(&a.1)));
             let mut used = 0;
             thinned.retain(|r| {
-                let fits = used + r.len() <= MAX_SIDES;
-                used += if fits { r.len() } else { 0 };
+                let fits = used + r.1.len() <= MAX_SIDES;
+                used += if fits { r.1.len() } else { 0 };
                 fits
             });
         }
@@ -133,8 +134,13 @@ impl Outline {
         // The widest gap a ring was thinned at: past an eighth of the largest ring, `gap` only
         // doubled on (the rings' own eighths kept their corners), so it isn't said as the spacing.
         let spacing = gap.min(rings.iter().map(|r| size(r)).fold(0.0, f64::max) / 8.0);
+        // The box is the kept rings' (a ring without an area, or left out, doesn't widen it).
+        (x0, y0, x1, y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for c in thinned.iter().flat_map(|(i, _)| &rings[*i]) {
+            (x0, y0, x1, y1) = (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y));
+        }
         let (mut sides, mut starts) = (Vec::new(), Vec::new());
-        for (i, r) in thinned.iter().enumerate() {
+        for (i, (_, r)) in thinned.iter().enumerate() {
             let first = sides.len();
             let mut along = 0.0;
             for (j, &a) in r.iter().enumerate() {

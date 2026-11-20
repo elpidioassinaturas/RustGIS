@@ -1377,6 +1377,14 @@ mod tests {
             (0..6553).map(|i| gon(i, 10, 5.0)).chain([gon(6553, 10, 4.0)]).chain((6554..6564).map(|i| gon(i, 3, 2.0))).collect();
         let fit = Outline::from_rings(rings).expect("an outline");
         assert_eq!((fit.side_count(), fit.dropped()), (65_533, 10));
+        // The box is the kept rings': a far ring without an area, or one left out, doesn't widen it.
+        let flat = vec![Coord::new(500_000.0, 0.0), Coord::new(500_010.0, 0.0), Coord::new(500_020.0, 0.0)];
+        let one = Outline::from_rings(vec![small(0.0), flat]).expect("an outline");
+        assert_eq!(one.extent(), [0.0, 0.0, 10.0, 10.0]);
+        let near = || (0..6553).map(|i| gon(i, 10, 5.0));
+        let kept = Outline::from_rings(near().chain([gon(500_000, 10, 4.0)]).collect()).expect("an outline");
+        let alone = Outline::from_rings(near().collect()).expect("an outline");
+        assert_eq!((kept.dropped(), kept.extent()), (1, alone.extent()));
     }
 
     #[test]
