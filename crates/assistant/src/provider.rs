@@ -1124,14 +1124,16 @@ pub fn refuses_reasoning_with_tools(e: &Error) -> bool {
 /// read them). Asked only of a request that carried images. The error names images as a word
 /// (not "vision" in "revision") and says they aren't taken: not supported, or no image input
 /// (Ollama's "missing data required for image input", vLLM's "not a multimodal model", OpenAI's
-/// "image_url is only supported by certain models", "unknown variant `image_url`"). An error
-/// about one image ("Error processing image_url; please retry", "not in a supported format") is
-/// not a refusal.
+/// "image_url is only supported by certain models", "Images are not supported by this model").
+/// An error about one image, its format, decoding, size or fetching, or one that asks to retry
+/// ("Error processing image_url; please retry", "image decoder does not support WebP") is not
+/// a refusal: the model reads images, and the picture is what failed.
 pub fn refuses_images(e: &Error) -> bool {
     let detail = e.detail.to_lowercase();
     let words: Vec<&str> = detail.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')).collect();
     let names_images = words.iter().any(|w| matches!(*w, "image" | "images" | "image_url" | "vision" | "multimodal" | "multi-modal"));
     let refused = [
+        "not supported",
         "does not support",
         "doesn't support",
         "is only supported by",
@@ -1142,7 +1144,10 @@ pub fn refuses_images(e: &Error) -> bool {
     ]
     .iter()
     .any(|p| detail.contains(p));
-    matches!(e.status, Some(400 | 404 | 415 | 422 | 500)) && names_images && refused
+    let about_one_image = ["format", "decod", "corrupt", "invalid image", "too large", "size", "dimension", "retry", "download", "fetch"]
+        .iter()
+        .any(|p| detail.contains(p));
+    matches!(e.status, Some(400 | 404 | 415 | 422 | 500)) && names_images && refused && !about_one_image
 }
 
 fn openai_reply(v: &Value) -> Result<Reply, String> {

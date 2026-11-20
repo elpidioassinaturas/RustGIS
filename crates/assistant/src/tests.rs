@@ -4943,6 +4943,11 @@ fn a_model_that_refuses_images_is_asked_again_with_captions() {
     assert!(!refuses_images(&other(404, "model revision not found; check the supported models")));
     assert!(!refuses_images(&other(400, "Invalid image: format is not in a supported format")));
     assert!(!refuses_images(&other(500, "Error processing image_url; please retry.")));
+    assert!(!refuses_images(&other(500, "image decoder does not support WebP")));
+    assert!(!refuses_images(&other(400, "image format is only supported by PNG and JPEG")));
+    assert!(!refuses_images(&other(400, "image is too large: 30 MB, the most is 20 MB; not supported")));
+    assert!(refuses_images(&other(400, "Images are not supported by this model.")));
+    assert!(refuses_images(&other(400, "image input is not supported - hint: you may need to provide the mmproj")));
     assert!(refuses_images(&other(422, "Failed to deserialize: unknown variant `image_url`, expected `text`")));
     assert!(refuses_images(&other(400, "Model does not support images. Please use a model that does.")));
     assert!(refuses_images(&other(500, "model does not support vision")));
