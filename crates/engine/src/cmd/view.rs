@@ -687,8 +687,7 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
             }
             let keep = l.query_rows(&l.dataset);
             let missing = |(row, v): &(usize, &rustgis_data::Value)| {
-                keep.as_ref().is_none_or(|k| k.get(*row).copied().unwrap_or(false))
-                    && v.as_f64().is_none_or(|d| !d.is_finite() || d <= 0.0)
+                keep.as_ref().is_none_or(|k| k.get(*row).copied().unwrap_or(false)) && v.as_f64().is_none_or(|d| !d.is_finite() || d <= 0.0)
             };
             let n = if bw.depth.is_some() { 0 } else { l.dataset.features.column(i).enumerate().filter(missing).count() };
             Ok((n > 0).then(|| (n, l.name.clone(), f.clone())))

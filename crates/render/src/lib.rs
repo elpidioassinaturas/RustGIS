@@ -2868,7 +2868,7 @@ fn drape_terrain(
     // each tile (the frame is drawn again when they arrive, `Ground::pending`).
     if let Some(b) = block.as_ref().filter(|b| b.walls_stand(ground)) {
         let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
-        let water = block::water_runs(map, b, ground, cam.res, env);
+        let water = block::water_runs(map, b, ground, cam.res, scale, env);
         block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale, env), &water, fog, far);
     }
     true
