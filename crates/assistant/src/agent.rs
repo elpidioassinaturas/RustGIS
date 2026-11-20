@@ -971,6 +971,12 @@ impl Agent {
             }
             self.always.push(key.clone());
         }
+        // A model it found doesn't read images doesn't get them here either.
+        for to in &child.no_images {
+            if !self.no_images.contains(to) {
+                self.no_images.push(to.clone());
+            }
+        }
         let (report, error) = child.report();
         self.record_front(report.clone(), report, error);
         self.drain(s)

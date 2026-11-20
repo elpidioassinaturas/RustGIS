@@ -4942,9 +4942,29 @@ fn a_model_that_refuses_images_is_asked_again_with_captions() {
     assert!(!refuses_images(&other(500, "Error processing image; please retry.")));
     assert!(!refuses_images(&other(404, "model revision not found; check the supported models")));
     assert!(!refuses_images(&other(400, "Invalid image: format is not in a supported format")));
+    assert!(!refuses_images(&other(500, "Error processing image_url; please retry.")));
+    assert!(refuses_images(&other(422, "Failed to deserialize: unknown variant `image_url`, expected `text`")));
     assert!(refuses_images(&other(400, "Model does not support images. Please use a model that does.")));
     assert!(refuses_images(&other(500, "model does not support vision")));
     assert!(refuses_images(&other(400, "Qwen/Qwen3-8B is not a multimodal model")));
+}
+
+#[test]
+fn a_subagent_s_refusal_of_images_reaches_the_main_assistant() {
+    let mut s = sample();
+    let mut a = Agent::new(cfg("ollama"), &s);
+    assert!(matches!(a.ask("look", &s), Step::Send(_)));
+    assert!(matches!(a.receive(a.generation(), ok(calls("delegate", json!({"task": "look at the map"}))), &mut s), Step::Send(_)));
+    let look = call("v1", "view_map", json!({"width": 64, "height": 64}));
+    assert!(matches!(a.receive(a.generation(), ok(look), &mut s), Step::Send(_)));
+    let refused = json!({"error": {"message": "this model is missing data required for image input"}});
+    let resp = Ok(HttpResponse { status: 500, body: refused.to_string().into_bytes(), headers: vec![] });
+    assert!(matches!(a.receive(a.generation(), resp, &mut s), Step::Send(_)));
+    // The subagent reports; the main assistant's own view_map knows the model doesn't read images.
+    assert!(matches!(a.receive(a.generation(), ok(say("It shows a map.")), &mut s), Step::Send(_)));
+    let Step::Send(req) = a.receive(a.generation(), ok(call("v2", "view_map", json!({}))), &mut s) else { panic!("expected a request") };
+    let last = body(&req)["messages"].as_array().unwrap().last().cloned().unwrap();
+    assert!(last["content"].as_str().unwrap().contains("doesn't read images"), "{last}");
 }
 
 #[test]
