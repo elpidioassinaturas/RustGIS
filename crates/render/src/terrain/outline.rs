@@ -47,8 +47,9 @@ pub struct Outline {
 }
 
 /// The rows, layer, queries and outline read last ([`Outline::of`]), kept while the layer's rows
-/// stay the same: the outline is read again only after an edit or a new query.
-type Kept = (Weak<Vec<Feature>>, String, Option<String>, Option<String>, Arc<Outline>);
+/// stay the same: the outline is read again only after an edit or a new query. One that can't be
+/// read is kept too, so a block whose `where` picks nothing isn't looked for again every frame.
+type Kept = (Weak<Vec<Feature>>, String, Option<String>, Option<String>, Option<Arc<Outline>>);
 static LAST: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
 /// How many outlines [`LAST`] keeps (maps drawn side by side, a layout's frames).
 const KEPT: usize = 4;
@@ -62,20 +63,20 @@ impl Outline {
         let rows = l.dataset.features.allocation_key();
         let same = |k: &Kept| k.0.ptr_eq(&rows) && k.1 == l.name && k.2 == l.definition_query && k.3.as_deref() == filter;
         if let Some(o) = LAST.lock().ok().and_then(|last| last.iter().find(|k| same(k)).map(|k| k.4.clone())) {
-            return Some(o);
+            return o;
         }
         let keep = l.query_rows(&l.dataset);
         let pick = rustgis_data::rows::Query::compile(filter, &l.dataset).ok()?;
         let env = rustgis_data::query::Env::default();
         let mut rings = Vec::new();
-        for (row, ft) in l.dataset.features.iter().enumerate() {
+        for (row, ft) in l.dataset.features.rows().enumerate() {
             if keep.as_ref().is_some_and(|k| !k.get(row).copied().unwrap_or(false)) || !pick.matches(&l.dataset, row, &env) {
                 continue;
             }
-            let Some(Geometry::Polygon(parts)) = &ft.geometry else { continue };
+            let Some(Geometry::Polygon(parts)) = ft.geometry() else { continue };
             rings.extend(parts.iter().filter_map(|p| p.first()).map(|r| r.iter().map(|c| lonlat_to_merc(*c)).collect()));
         }
-        let o = Arc::new(Outline::from_rings(rings)?);
+        let o = Outline::from_rings(rings).map(Arc::new);
         if let Ok(mut last) = LAST.lock() {
             last.retain(|k| k.0.strong_count() > 0 && !same(k));
             if last.len() >= KEPT {
@@ -83,7 +84,7 @@ impl Outline {
             }
             last.push((rows, l.name.clone(), l.definition_query.clone(), filter.map(str::to_string), o.clone()));
         }
-        Some(o)
+        o
     }
 
     /// The outline of `rings` (Web Mercator, either way round, closed or not), corners nearer than
@@ -123,8 +124,9 @@ impl Outline {
             thinned.sort_by(|a, b| area2(b).total_cmp(&area2(a)));
             let mut used = 0;
             thinned.retain(|r| {
-                used += r.len();
-                used <= MAX_SIDES
+                let fits = used + r.len() <= MAX_SIDES;
+                used += if fits { r.len() } else { 0 };
+                fits
             });
         }
         let dropped = all - thinned.len();
@@ -214,19 +216,22 @@ impl Outline {
         if !(m.x >= x0 && m.x <= x1 && m.y >= y0 && m.y <= y1) {
             return false;
         }
-        // Each ring is anticlockwise: a ring round `m` winds it once.
-        let mut winding: Vec<(u32, i32)> = Vec::new();
+        // Each ring is anticlockwise: a ring round `m` winds it once. A row lists its sides in
+        // order, and a ring's sides follow one another, so each ring's winding is summed in turn.
+        let (mut ring_of, mut winding) = (u32::MAX, 0);
         for &k in self.rows.get(*self.rows_of(m.y, m.y).start()).into_iter().flatten() {
             let Some(Side { a, z, ring, .. }) = self.sides.get(k as usize).copied() else { continue };
-            if counted(ring) && (a.y > m.y) != (z.y > m.y) && m.x < a.x + (m.y - a.y) / (z.y - a.y) * (z.x - a.x) {
-                let turn = if z.y > a.y { 1 } else { -1 };
-                match winding.iter_mut().find(|w| w.0 == ring) {
-                    Some(w) => w.1 += turn,
-                    None => winding.push((ring, turn)),
+            if ring != ring_of {
+                if winding != 0 {
+                    return true;
                 }
+                (ring_of, winding) = (ring, 0);
+            }
+            if counted(ring) && (a.y > m.y) != (z.y > m.y) && m.x < a.x + (m.y - a.y) / (z.y - a.y) * (z.x - a.x) {
+                winding += if z.y > a.y { 1 } else { -1 };
             }
         }
-        winding.iter().any(|w| w.1 != 0)
+        winding != 0
     }
 
     /// The sides whose box meets the box from `lo` to `hi`, each once, into `out` (emptied first).

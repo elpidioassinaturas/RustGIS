@@ -1364,6 +1364,19 @@ mod tests {
         let many = Outline::from_rings((0..7000).map(decagon).collect()).expect("an outline");
         assert!(many.dropped() > 0 && many.side_count() <= 65_535, "{} {}", many.dropped(), many.side_count());
         assert!(many.spacing().0 <= 10.0 / 8.0 + 1e-9, "{:?}", many.spacing());
+        // A ring that doesn't fit is left out, and smaller ones that still fit are kept: 6553
+        // decagons, one smaller that doesn't fit, then ten triangles, of which one fits.
+        let gon = |i: usize, n: usize, r: f64| -> Vec<Coord> {
+            let (cx, cy) = ((i % 100) as f64 * 100.0, (i / 100) as f64 * 100.0);
+            (0..n)
+                .map(|k| (k as f64 * std::f64::consts::TAU / n as f64).sin_cos())
+                .map(|(s, c)| Coord::new(cx + r * c, cy + r * s))
+                .collect()
+        };
+        let rings: Vec<Vec<Coord>> =
+            (0..6553).map(|i| gon(i, 10, 5.0)).chain([gon(6553, 10, 4.0)]).chain((6554..6564).map(|i| gon(i, 3, 2.0))).collect();
+        let fit = Outline::from_rings(rings).expect("an outline");
+        assert_eq!((fit.side_count(), fit.dropped()), (65_533, 10));
     }
 
     #[test]

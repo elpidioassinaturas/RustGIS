@@ -365,7 +365,12 @@ fn reset(s: &mut Session, p: Project) {
             b.check().err().or_else(|| {
                 (over_tiles && !b.own_box())
                     .then(|| "over elevation tiles a block needs an extent box [xmin, ymin, xmax, ymax]".to_string())
-                    .or_else(|| off_dem(super::terrain_blocks::own_box(m, b), dem.as_ref()))
+                    // A block cut to polygons off its DEM is kept, for when they change: the
+                    // landing check after the project opens says it (`terrain_blocks`).
+                    .or_else(|| {
+                        let polygons = matches!(b.shape, rustgis_map::view::BlockShape::Polygon { .. });
+                        (!polygons).then(|| off_dem(super::terrain_blocks::own_box(m, b), dem.as_ref())).flatten()
+                    })
             })
         }) else {
             continue;
@@ -429,8 +434,13 @@ fn reset(s: &mut Session, p: Project) {
             _ => None,
         })
         .collect();
-    for said in simplified {
-        s.notify(said, false);
+    match simplified.as_slice() {
+        [] => {}
+        [one] => s.notify(one.clone(), false),
+        _ => s.notify(
+            format!("{} block diagrams cut to polygons have simplified outlines: {}", simplified.len(), simplified.join("; ")),
+            false,
+        ),
     }
     if !uncut.is_empty() {
         s.notify(

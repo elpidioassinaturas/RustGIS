@@ -13653,6 +13653,7 @@ fn terrain_block_cut_to_polygons() {
     let areas = json!({"type": "FeatureCollection", "features": [
         {"type": "Feature", "properties": {"nome": "a"}, "geometry": {"type": "Polygon", "coordinates": square(10.005, 45.005)}},
         {"type": "Feature", "properties": {"nome": "b"}, "geometry": {"type": "Polygon", "coordinates": square(10.02, 45.02)}},
+        {"type": "Feature", "properties": {"nome": "c"}, "geometry": {"type": "Polygon", "coordinates": square(20.0, 45.0)}},
     ]});
     let data = base64::engine::general_purpose::STANDARD.encode(areas.to_string().as_bytes());
     s.run("layer.addDataBytes", &json!({"fileName": "areas.geojson", "data": data})).unwrap();
@@ -13691,6 +13692,17 @@ fn terrain_block_cut_to_polygons() {
     let mut opened = Session::new(Project::default());
     crate::cmd::project::reset_to(&mut opened, s.project.clone());
     assert!(!simplified(&s) && !simplified(&opened), "{:?}", opened.notices);
+    // A saved block cut to a polygon off the DEM is kept as the project opens, and said.
+    let mut far = s.project.clone();
+    if let Some(b) = far.maps[0].view.terrain.as_mut().and_then(|t| t.block.as_mut()) {
+        b.shape = rustgis_map::view::BlockShape::Polygon { layer: "bacias".into(), filter: Some("nome = 'c'".into()) };
+    }
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, far);
+    crate::cmd::terrain_blocks::landed(&mut opened);
+    assert!(opened.map().view.terrain.as_ref().is_some_and(|t| t.block.is_some()), "{:?}", opened.notices);
+    assert!(opened.notices.iter().any(|n| n.text.contains("lie off their DEM")), "{:?}", opened.notices);
+    assert!(!opened.notices.iter().any(|n| n.text.contains("was dropped")), "{:?}", opened.notices);
     // A toothed ring of 70 000 corners is, to stay under 65 535 sides: said when it is set and when the
     // project opens again.
     let star: Vec<Value> = (0..=70_000)
