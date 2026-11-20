@@ -425,12 +425,12 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   edited or its size changes, so there are no line breaks to put in by hand. It is off by default,
   so a text breaks lines only where it has a line break, as before. Dynamic text wraps once filled
   in, the text's own line breaks are kept, a word wider than the box (a long address) is broken
-  across lines, and a turned text wraps to the width of its unturned box. The layout view and
-  every export (PNG, PDF, SVG) break the same lines. Spaces running together in a wrapped text
-  are drawn as one, and none are kept at a line's start or end. Lines that don't fit the box's
-  height are left out, and the export notice above names the text. Scripts set `"wrap": true` on
-  `layout.addElement` and `layout.update`. A project with a wrapped text needs this release or a
-  later one to open.
+  across lines, a no-break space keeps its words on one line, and a turned text wraps to the
+  width of its unturned box. The layout view and every export (PNG, PDF, SVG) break the same
+  lines. Spaces running together in a wrapped text are drawn as one, and no ordinary space is
+  kept at a line's start or end. Lines that don't fit the box's height are left out, and the
+  export notice above names the text. Scripts set `"wrap": true` on `layout.addElement` and
+  `layout.update`. A project with a wrapped text needs this release or a later one to open.
   Scripts give the family's name: `"font": "Garamond"`, with `"fallback": "serif"` if wanted;
   `labels.fonts` lists the installed families. The project keeps the name, never a file. A PDF
   sets its text in the letters' own outlines, so it shows the family wherever it is opened, and
@@ -477,6 +477,20 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   so it reads on whatever is behind it: give it a **Background** for a box. From a command:
   `layout.update={"element":5,"color":"#FFFFFF"}`, and `"color":null` for the default;
   `layout.addElement` takes it too.
+- **Chart frame**: a bar chart of a layer of the frame's map. Its properties pick the **Layer**
+  and the numeric **Field**, and by default draw a bar per feature, the largest first, each
+  labelled by the **Label** field. **Group by** a field draws a bar per value of that field
+  instead (features with none together as "(blank)"), its **Statistic** of the field over that
+  value's features: sum, count (features, numbers or not, so a count can chart a text field),
+  mean, minimum or maximum. A text field charted that way gives way to the layer's first numeric
+  field when the chart stops grouping or counting, and the chart says so. **Order** puts the
+  largest first, the smallest first, the labels A to Z or the bars in the layer's order. **Bars** sets how many are drawn (1 to 100, 20 by default);
+  **Past the limit** leaves the rest out, which the chart says, or gathers them in a last
+  **Other bar**, its statistic over their features (their sum when not grouped), last whatever
+  the order. A negative value is drawn the other way from a line at zero. Features with no number
+  in the field are left out, and the chart says how many. From a command:
+  `layout.update={"element":6,"group":"region","statistic":"mean","order":"category","bars":8,"other":true}`,
+  and `"group":""` for a bar per feature again; `layout.addElement` takes them too.
 - **Rulers and guides**: rulers start on along the top and left and show millimetres from the page's corner.
   Drag out of a ruler to add a guide, drag a guide to move it, and drag it back onto a ruler to
   remove it. Guides are saved with the layout but never printed or exported. **Clear Guides**
@@ -533,7 +547,8 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   PDF (their labels as the letters' shapes, each run labelled with its text), so the page can be
   finished in a vector editor. What a PDF keeps as pictures is a picture in the SVG too, at the
   export's `dpi`, and a frame whose vectors would pass the budget is drawn as a picture, with a
-  notice. A text element uses the viewer's
+  notice. A picture marker's image is written once and placed with `<use>` wherever drawn, so a
+  vector editor shows each place as a clone of it. A text element uses the viewer's
   font (a named family where the viewer has it, else its serif or sans-serif), so its alignment
   and line widths can differ from PNG/PDF and can
   change when edited. A picture standing for a whole element is clipped to its box;

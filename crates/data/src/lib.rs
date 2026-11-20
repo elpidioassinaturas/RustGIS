@@ -44,6 +44,7 @@ pub mod provenance;
 pub mod publish;
 pub mod query;
 pub mod raster;
+mod row_access;
 pub mod rows;
 pub mod s3_address;
 pub mod secrets;
@@ -62,6 +63,7 @@ pub mod zip;
 
 pub use date::{Date, DateTime};
 pub use geometry::{Geometry, GeometryType, Measure, VertexId, ambiguous_area_message, pole_loop_count, pole_loop_message};
+pub use row_access::RowRef;
 pub use rustgis_geom::{Coord, Extent};
 pub use value::{Field, FieldType, Value};
 
@@ -202,8 +204,11 @@ mod secret_redaction_tests {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Feature {
+    #[cfg_attr(feature = "count-row-uses", deprecated(note = "read rows through `Features::row`/`rows` (`RowRef`); see cargo xtask rows"))]
     pub id: u64,
+    #[cfg_attr(feature = "count-row-uses", deprecated(note = "read rows through `Features::row`/`rows` (`RowRef`); see cargo xtask rows"))]
     pub geometry: Option<Geometry>,
+    #[cfg_attr(feature = "count-row-uses", deprecated(note = "read rows through `Features::row`/`rows` (`RowRef`); see cargo xtask rows"))]
     pub attrs: Vec<Value>,
 }
 
@@ -276,6 +281,7 @@ impl Features {
     }
 
     /// The rows, taking them out of the share (copying them only when another copy holds them).
+    #[cfg_attr(feature = "count-row-uses", deprecated(note = "use `Features::to_rows` or the row accessors; see cargo xtask rows"))]
     pub fn into_vec(self) -> Vec<Feature> {
         self.before_copy();
         std::sync::Arc::unwrap_or_clone(self.rows)
@@ -433,6 +439,10 @@ impl Dataset {
     /// a layer whose conversion fails (`Layer::projected_in`) and doesn't say so yet: before this
     /// returns another system, that needs a notice, as AGENTS.md's "Never silent" asks.
     pub fn coord_crs(&self) -> raster::Crs {
+        #[cfg(test)]
+        if let Some(held) = tests::held_in() {
+            return held;
+        }
         raster::Crs::LonLat
     }
 
@@ -504,7 +514,7 @@ impl Dataset {
         if self.windowed {
             return 0;
         }
-        self.features.iter().flat_map(|f| &f.attrs).filter(|v| v.is_non_finite()).count()
+        self.features.rows().flat_map(RowRef::values).filter(|v| v.is_non_finite()).count()
     }
 
     /// How many of its features have a coordinate that isn't a number (NaN, infinity), which a
@@ -514,7 +524,7 @@ impl Dataset {
         if self.windowed {
             return 0;
         }
-        self.features.iter().filter(|f| f.geometry.as_ref().is_some_and(|g| !g.is_finite())).count()
+        self.features.rows().filter(|r| r.geometry().is_some_and(|g| !g.is_finite())).count()
     }
 }
 
@@ -553,6 +563,8 @@ impl Serialize for Dataset {
 pub struct ReadReport {
     pub skipped: usize,
     pub messages: Vec<String>,
+    /// Classified losses to publish alongside the ordinary messages.
+    pub losses: Vec<loss::LossMessage>,
     /// The files read and the rows read from them, when the read recorded them
     /// ([`sync::FileSync::around`]): what a layer kept in the project compares with its source
     /// before writing edits back.
@@ -566,6 +578,13 @@ pub struct ReadReport {
     /// The extrusion the reader suggests for the layer (a city model's volumes): applied when the
     /// layer is added, and only then; a reload keeps the layer's own.
     pub extrusion: Option<SuggestedExtrusion>,
+}
+
+impl ReadReport {
+    /// All report messages in their text form for consumers that do not carry loss codes.
+    pub fn into_messages(self) -> impl Iterator<Item = String> {
+        self.messages.into_iter().chain(self.losses.into_iter().map(|loss| loss.text))
+    }
 }
 
 /// An extrusion a reader suggests for a layer of polygons: heights from one field, on a base from
@@ -733,7 +752,19 @@ fn web_mercator_note(layers: &[(&Dataset, rustgis_geom::Extent)], target: &str) 
         .filter_map(|(ds, e)| {
             let mut moved = 0usize;
             if !ds.windowed {
-                let mut count = |c: Coord| moved += usize::from(c.x.is_finite() && c.y.abs() > MAX_LAT);
+                // By latitude, from the system the layer holds its coordinates in: none counted
+                // when that can't be converted (its export can't be written either).
+                let to = match ds.lonlat_conversion() {
+                    Ok(t) => (!t.is_identity()).then_some(t),
+                    Err(_) => return None,
+                };
+                let mut count = |c: Coord| {
+                    let c = match &to {
+                        Some(t) => t.point(c).unwrap_or(Coord::new(f64::NAN, f64::NAN)),
+                        None => c,
+                    };
+                    moved += usize::from(c.x.is_finite() && c.y.abs() > MAX_LAT)
+                };
                 for g in ds.features.iter().filter_map(|f| f.geometry.as_ref()) {
                     if shapefile {
                         crate::io::shapefile_vertices(g, ds.geometry_type, &mut count);
@@ -827,14 +858,14 @@ impl Dataset {
 
     /// Value of `field` for feature `row` (Null when out of range).
     pub fn value(&self, row: usize, field: usize) -> &Value {
-        self.features.get(row).and_then(|f| f.attrs.get(field)).unwrap_or(&Value::Null)
+        self.features.value(row, field)
     }
 
     /// The box around its features' geometry, in its own coordinates ([`Dataset::coord_crs`]), as
     /// a file in that system would hold it. [`Dataset::lonlat_extent`] gives it in
     /// longitude/latitude, for zooming and for what the map and the notices take.
     pub fn extent(&self) -> Extent {
-        self.features.iter().filter_map(|f| f.geometry.as_ref()).fold(Extent::EMPTY, |e, g| e.union(&g.extent()))
+        self.features.rows().filter_map(RowRef::geometry).fold(Extent::EMPTY, |e, g| e.union(&g.extent()))
     }
 
     /// The box around its features' geometry in longitude/latitude: [`Dataset::extent`] through
@@ -862,6 +893,61 @@ impl Dataset {
         self.coord_crs().to(raster::Crs::LonLat)
     }
 
+    /// `m` of one of its geometries on the WGS 84 ellipsoid, measured in longitude/latitude
+    /// ([`Geometry::wgs84_measure`]) from its own coordinates; refused as
+    /// [`Dataset::geometry_to_lonlat`] refuses.
+    pub fn wgs84_measure(&self, g: &Geometry, m: Measure) -> std::result::Result<Option<f64>, String> {
+        Ok(self.geometry_to_lonlat(g)?.wgs84_measure(m))
+    }
+
+    /// [`ambiguous_area_message`] for these of its geometries, read in longitude/latitude, where a
+    /// ring through both poles is one; it also counts those that can't be given there, whose area
+    /// can't be measured either.
+    pub fn ambiguous_area_message<'a>(&self, geometries: impl Iterator<Item = &'a Geometry>) -> Option<String> {
+        let unplaced = std::cell::Cell::new(0usize);
+        let ambiguous = ambiguous_area_message(geometries.filter_map(|g| match self.geometry_to_lonlat(g) {
+            Ok(g) => Some(g),
+            Err(_) => {
+                unplaced.set(unplaced.get() + 1);
+                None
+            }
+        }));
+        let unplaced = (unplaced.get() > 0).then(|| {
+            format!("area can't be measured for {} feature(s) with a place that can't be given in longitude/latitude", unplaced.get())
+        });
+        match (ambiguous, unplaced) {
+            (Some(a), Some(u)) => Some(format!("{a}; {u}")),
+            (a, u) => a.or(u),
+        }
+    }
+
+    /// The dataset in longitude/latitude, the space analysis tools work in: borrowed while its
+    /// coordinates are longitude/latitude ([`Dataset::coord_crs`]), as every dataset's are today;
+    /// otherwise a copy with every geometry converted, missing coordinates kept. Refused, naming
+    /// the first feature that can't be, when one of its places can't be converted. Once a dataset
+    /// records its own system (C2 of #2032), the copy is to be recorded as longitude/latitude, so
+    /// that it isn't converted again.
+    pub fn in_lonlat(&self) -> std::result::Result<Cow<'_, Dataset>, String> {
+        let to = self.lonlat_conversion()?;
+        if to.is_identity() {
+            return Ok(Cow::Borrowed(self));
+        }
+        let mut out = self.clone();
+        for f in &mut out.features {
+            if let Some(g) = &mut f.geometry {
+                *g = convert_keeping_missing(&to, g, &HeldPlaces::default()).ok_or_else(|| {
+                    format!(
+                        "{}: feature {} has a place in {} that can't be given in longitude/latitude",
+                        self.name,
+                        f.id,
+                        to.source().label()
+                    )
+                })?;
+            }
+        }
+        Ok(Cow::Owned(out))
+    }
+
     /// A longitude/latitude box in its own coordinates ([`Dataset::coord_crs`]), as
     /// [`raster::Reprojection::extent`] converts it: for asking which features a box reaches, once
     /// for the box rather than once a feature. The box itself while they are longitude/latitude,
@@ -874,6 +960,27 @@ impl Dataset {
             Ok(to) => to.extent(e),
             Err(_) => Extent::EMPTY,
         }
+    }
+
+    /// `results`, a dataset in longitude/latitude made from this one (a tool's update of it), in
+    /// its own coordinates: as it is while they are longitude/latitude, as every dataset's are
+    /// today; otherwise each geometry written back as an edit is ([`Dataset::edit_from_lonlat`]),
+    /// its stored places kept as stored. Refused, naming the first feature, when one of its places
+    /// can't be held in its system.
+    pub fn results_from_lonlat(&self, mut results: Dataset) -> std::result::Result<Dataset, String> {
+        if self.edits_in_lonlat() {
+            return Ok(results);
+        }
+        let mut held = HeldPlaces::default();
+        for g in self.features.iter().filter_map(|f| f.geometry.as_ref()) {
+            self.hold_places(g, None, &mut held);
+        }
+        for f in &mut results.features {
+            if let Some(g) = f.geometry.take() {
+                f.geometry = Some(self.edit_from_lonlat(g, &held).map_err(|e| format!("{}: feature {}: {e}", self.name, f.id))?);
+            }
+        }
+        Ok(results)
     }
 
     /// Pushes a feature with the next id, padding/truncating attributes to the schema.
@@ -896,9 +1003,7 @@ impl Dataset {
             return i;
         }
         self.fields.push(Field::new(name, ty));
-        for f in &mut self.features {
-            f.attrs.push(Value::Null);
-        }
+        self.features.add_column(Value::Null);
         self.fields.len() - 1
     }
 
@@ -1043,6 +1148,66 @@ fn convert_keeping_missing(to: &raster::Reprojection, g: &Geometry, held: &HeldP
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// The system this thread's tests hold every dataset's coordinates in ([`HeldIn`]).
+        static HELD_IN: std::cell::Cell<Option<raster::Crs>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// What [`Dataset::coord_crs`] says on this thread while a [`HeldIn`] is alive: what a dataset
+    /// that keeps the coordinates it was read in (#2032 C2) will say, for the paths that convert
+    /// from it to be tried before it does.
+    pub(crate) fn held_in() -> Option<raster::Crs> {
+        HELD_IN.try_with(std::cell::Cell::get).ok().flatten()
+    }
+
+    /// Every dataset on this thread is taken to hold its coordinates in a system until dropped,
+    /// on the thread that made it (it can't be sent to another).
+    pub(crate) struct HeldIn(Option<raster::Crs>, std::marker::PhantomData<*const ()>);
+
+    impl HeldIn {
+        pub(crate) fn new(crs: raster::Crs) -> HeldIn {
+            HeldIn(HELD_IN.with(|h| h.replace(Some(crs))), std::marker::PhantomData)
+        }
+    }
+
+    impl Drop for HeldIn {
+        fn drop(&mut self) {
+            let _ = HELD_IN.try_with(|h| h.set(self.0));
+        }
+    }
+
+    /// An export in Web Mercator counts the places past where it ends by their latitude, from the
+    /// system the layer holds its coordinates in (UTM 32N here): one at 86° N, not every northing.
+    #[test]
+    fn web_mercators_end_is_counted_by_latitude() {
+        let utm = raster::Crs::Epsg(32632);
+        let t = utm.transformer().unwrap();
+        let mut ds = Dataset::new("held", GeometryType::Point, vec![]);
+        for lat in [48.7, 86.0] {
+            ds.push(Some(Geometry::Point(t.from_lonlat(Coord::new(9.0, lat)).unwrap())), vec![]);
+        }
+        let _held = HeldIn::new(utm);
+        let note = web_mercator_note(&[(&ds, ds.extent())], "out.gpkg").unwrap_or_default();
+        assert_eq!(note, web_mercator_said(&[("held", Some(1))], "out.gpkg").unwrap_or_default());
+        assert!(!note.is_empty());
+    }
+
+    /// Analysis and measurement read a longitude/latitude dataset as it is: no copy, and the
+    /// measure and the area check of the geometry itself.
+    #[test]
+    fn a_lonlat_dataset_is_read_as_it_is() {
+        let ring = vec![Coord::new(0.0, 0.0), Coord::new(1.0, 0.0), Coord::new(1.0, 1.0), Coord::new(0.0, 1.0), Coord::new(0.0, 0.0)];
+        let g = Geometry::Polygon(vec![vec![ring]]);
+        let mut d = Dataset::new("t", GeometryType::Polygon, Vec::new());
+        d.push(Some(g.clone()), Vec::new());
+        assert!(matches!(d.in_lonlat(), Ok(Cow::Borrowed(b)) if std::ptr::eq(b, &d)));
+        assert_eq!(d.wgs84_measure(&g, Measure::Area), Ok(g.wgs84_measure(Measure::Area)));
+        assert!(d.wgs84_measure(&g, Measure::Area).unwrap().is_some_and(|a| a > 1.2e10));
+        assert_eq!(d.ambiguous_area_message(std::iter::once(&g)), None);
+        let results = d.clone();
+        assert_eq!(d.results_from_lonlat(results.clone()).map(|r| r.features), Ok(results.features));
+    }
 
     /// An edit's conversion keeps a missing coordinate (NaN) as it is, as edits in
     /// longitude/latitude do, converts the rest, and refuses a place that can't be converted:
