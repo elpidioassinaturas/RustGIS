@@ -5676,7 +5676,8 @@ impl RustGisApp {
             match r {
                 Ok(bytes) => {
                     let landed = serviceui::Landed { id, url, params: p, origin };
-                    // A PDF's page is drawn on a thread first, so a large one doesn't hold the window.
+                    // A PDF's page is drawn, and a GRIB file read, on a thread first, so a large one
+                    // doesn't hold the window.
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(page) = rustgis_engine::cmd::raster::download_page(&landed.url, &landed.params, &bytes) {
                         self.draw_page(landed, bytes, page);
@@ -5687,7 +5688,7 @@ impl RustGisApp {
                 Err(e) => self.landed_failed(id, &url, &p, e),
             }
         }
-        // PDF pages drawn on threads, added with their downloads' bytes.
+        // PDF pages drawn (and GRIB files read) on threads, added with their downloads' bytes.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut drawn = Vec::new();
@@ -5716,7 +5717,7 @@ impl RustGisApp {
                 std::mem::take(&mut self.ui.page_queue).into_iter().partition(|(l, ..)| self.session.download_under_way(l.id));
             self.ui.page_queue = waiting;
             for (landed, ..) in gone {
-                let why = tl!("given up before its page was drawn: its project was closed, or more than 64 downloads started after it");
+                let why = tl!("given up before it was read: its project was closed, or more than 64 downloads started after it");
                 self.landed_failed(landed.id, &landed.url, &landed.params, why.to_string());
             }
             // Those waiting take the places freed, oldest first.
@@ -5921,7 +5922,8 @@ impl RustGisApp {
         Ok(Value::Null)
     }
 
-    /// Draws a downloaded PDF's page on a thread ([`rustgis_engine::cmd::raster::read_download_page`]),
+    /// Draws a downloaded PDF's page, or reads a downloaded GRIB file, on a thread
+    /// ([`rustgis_engine::cmd::raster::read_download_page`]),
     /// to be added with its bytes once drawn ([`UiState::page_reads`]). `page`: its file name, page
     /// and whether it is placed ([`download_page`]). Drawn one at a time with the windows' reads;
     /// past [`MAX_WINDOW_READS`] under way, or where the OS gives no thread, it waits in
@@ -5946,14 +5948,14 @@ impl RustGisApp {
         // Kept here too, so a thread the OS refuses doesn't take the download with it.
         let bytes = std::sync::Arc::new(bytes);
         let mine = bytes.clone();
-        let spawned = std::thread::Builder::new().name("pdf-page".into()).spawn(move || {
+        let spawned = std::thread::Builder::new().name("download-read".into()).spawn(move || {
             let read = match window_turn(&leaving) {
                 // On a thread no command's catch reaches: a bug must not leave it running forever.
                 Some(_turn) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     rustgis_engine::cmd::raster::read_download_page(&name, &bytes, page.as_deref(), place)
                 }))
-                .unwrap_or_else(|_| Err(tl!("Drawing the PDF's page failed unexpectedly").to_string())),
-                None => Err(tl!("given up before its page was drawn: it was cancelled, or its project was closed").to_string()),
+                .unwrap_or_else(|_| Err(tl!("Reading the download failed unexpectedly").to_string())),
+                None => Err(tl!("given up before it was read: it was cancelled, or its project was closed").to_string()),
             };
             let bytes = std::sync::Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone());
             *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(read.map(|r| (bytes, r)));

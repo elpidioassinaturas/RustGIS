@@ -598,26 +598,29 @@ pub(crate) fn pdf_page(path: &str, p: &Value) -> Result<Option<String>, String> 
     }
 }
 
-/// Whether a whole file downloaded from `url` is a PDF page to draw off the frame before it is
-/// added (`layer.addDownload` with `p`): its file name, page and whether it is placed by its
-/// coordinates (not `"as": "scan"`). `None` for anything else, or a page that can't be read here,
-/// which `layer.addDownload` reads (or refuses) as it adds it.
+/// Whether a whole file downloaded from `url` is read off the frame before it is added
+/// (`layer.addDownload` with `p`): a PDF's page to draw, or a GRIB file (whose fields can be
+/// many). Its file name, page and whether it is placed by its coordinates (not `"as": "scan"`).
+/// `None` for anything else, or a page that can't be read here, which `layer.addDownload` reads
+/// (or refuses) as it adds it.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn download_page(url: &str, p: &Value, bytes: &[u8]) -> Option<(String, Option<String>, bool)> {
     let plain = ["service", "coverage", "geolibreProject", "geolibreLayer"]
         .iter()
         .all(|k| p.get(k).is_none_or(|v| v.is_null() || v.as_bool() == Some(false)));
-    if !raster::PDF_PAGES || !plain {
+    if !plain {
         return None;
     }
-    let name = super::layer::url_file_name(url, bytes).ok().filter(|n| raster::is_pdf_name(n))?;
+    let name = super::layer::url_file_name(url, bytes)
+        .ok()
+        .filter(|n| (raster::PDF_PAGES && raster::is_pdf_name(n)) || raster::grib::is_grib_name(n))?;
     let page = pdf_page(&name, p).ok()?;
     let scan = wants_scan(p, &name).ok()?;
     Some((name, page, !scan))
 }
 
-/// Draws a downloaded PDF's page off the frame ([`download_page`]), for
-/// [`crate::Session::download_landed_page`].
+/// Draws a downloaded PDF's page, or reads a downloaded GRIB file, off the frame
+/// ([`download_page`]), for [`crate::Session::download_landed_page`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_download_page(name: &str, bytes: &[u8], page: Option<&str>, place: bool) -> Result<Raster, String> {
     raster::read_bytes_page(name, bytes, page, place).map_err(|e| format!("{name}: {e}"))

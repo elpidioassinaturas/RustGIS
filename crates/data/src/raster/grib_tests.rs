@@ -104,16 +104,24 @@ impl G1 {
         gds.extend([0, 0, 0, 0]);
         let mut body = pds;
         body.extend(gds);
+        // Sections of an even number of octets (GRIB1's rule), padded, with their unused bits said.
         if let Some(keep) = &self.keep {
-            let bits = bitmap(keep);
+            let mut bits = bitmap(keep);
+            if (6 + bits.len()) % 2 == 1 {
+                bits.push(0);
+            }
             let mut bms = u(6 + bits.len() as u64, 3);
-            bms.extend([0, 0, 0]);
+            bms.extend([(bits.len() * 8 - keep.len()) as u8, 0, 0]);
             bms.extend(bits);
             body.extend(bms);
         }
-        let data = pack(&self.x, self.bits);
+        let mut data = pack(&self.x, self.bits);
+        if (11 + data.len()) % 2 == 1 {
+            data.push(0);
+        }
+        let unused = data.len() * 8 - self.x.len() * self.bits as usize;
         let mut bds = u(11 + data.len() as u64, 3);
-        bds.push(self.bds_flags);
+        bds.push(self.bds_flags | (unused as u8 & 0x0f));
         bds.extend(sm(self.e, 2));
         bds.extend(u(u64::from(self.r), 4));
         bds.push(self.bits as u8);
@@ -215,7 +223,9 @@ impl F2 {
         s4.extend([255, 0]);
         s4.extend(u(0, 4));
         assert_eq!(s4.len(), 34);
-        let count = self.keep.as_ref().map_or(self.x.len(), |k| k.iter().filter(|b| **b).count());
+        // A constant field (0 bits) has no packed values, but still one a point.
+        let all = if self.bits == 0 { self.ni * self.nj } else { self.x.len() };
+        let count = self.keep.as_ref().map_or(all, |k| k.iter().filter(|b| **b).count());
         let mut s5 = u(21, 4);
         s5.push(5);
         s5.extend(u(count as u64, 4));
@@ -568,11 +578,34 @@ fn scale_factors_past_f64_are_damage() {
         let e = read_bytes(&g.bytes(), "t").unwrap_err().to_string();
         assert!(e.contains("damaged (a decimal scale factor its values can't take)"), "{d}: {e}");
     }
+    // Values past f64 with E = 1000: past f32's range, said (not the whole field refused).
     let mut g = G1::new(2, 1, vec![1, 2]);
     (g.e, g.bits) = (1000, 32);
     g.x = vec![u32::MAX, 1];
-    let e = read_bytes(&g.bytes(), "t").unwrap_err().to_string();
-    assert!(e.contains("damaged (a binary scale factor its values can't take)"), "{e}");
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert!(r.bands[0].data.iter().all(|v| v.is_nan()));
+    assert!(r.lost.contains(&"2 values past the range of 32-bit floats (±3.4 × 10^38) have no value".to_string()), "{:?}", r.lost);
+}
+
+#[test]
+fn the_values_present_are_made_whatever_their_scale_factors() {
+    // E = 1000 and D = 280 in 32 bits: the largest value the bits could hold is past f64, but
+    // 1 × 2^1000 / 10^280 and 2 × 2^1000 / 10^280 aren't.
+    let mut g = G1::new(2, 1, vec![1, 2]);
+    (g.e, g.d, g.bits) = (1000, 280, 32);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    let one = 2f64.powi(1000) / 1e280;
+    for (v, want) in r.bands[0].data.iter().zip([one, 2.0 * one]) {
+        assert!((f64::from(*v) / want - 1.0).abs() < 1e-6, "{v} {want}");
+    }
+    assert!(!r.lost.iter().any(|l| l.contains("past the range")), "{:?}", r.lost);
+    // E = -1100 (past f64's exponents) and D = -300: 2^-1100 × 10^300, about 7.4 × 10^-32, kept.
+    let mut g = G1::new(2, 1, vec![1, 0]);
+    (g.e, g.d) = (-1100, -300);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    let want = 1e300 * 2f64.powi(-1000) * 2f64.powi(-100);
+    assert!((f64::from(r.bands[0].data[0]) / want - 1.0).abs() < 1e-6, "{:?}", r.bands[0].data);
+    assert_eq!(r.bands[0].data[1], 0.0);
 }
 
 #[test]
@@ -636,7 +669,8 @@ fn header_counts_a_last_constant_field() {
     c.bits = 0;
     let msg = grib2_message(&[F2::new(2, 1, vec![1, 2]), c]);
     let n = header(&mut std::io::Cursor::new(&msg), 0, msg.len() as u64, true).unwrap();
-    assert_eq!(n, Header::Points(2 + 6));
+    // The smallest field: a message is left out unread only when not even it fits.
+    assert_eq!(n, Header::Points(2));
     let one = G1::new(4, 3, vec![0; 12]).bytes();
     assert_eq!(header(&mut std::io::Cursor::new(&one), 0, one.len() as u64, false).unwrap(), Header::Points(12));
 }
@@ -685,7 +719,8 @@ fn a_message_of_too_many_sections_is_left_out() {
     assert_eq!(r.bands.len(), 1);
     assert!(r.lost.contains(&"1 message left out: damaged (more than 1024 sections)".to_string()), "{:?}", r.lost);
     // The decoder refuses one too, should it get one.
-    assert!(matches!(grib2(&file, usize::MAX).first(), Some(Err(Skip::Damaged(m))) if m.contains("more than 1024 sections")));
+    let first = grib2(&file, usize::MAX, Uncounted::default());
+    assert!(matches!(first.first(), Some(Err(Skip::Damaged(m))) if m.contains("more than 1024 sections")));
 }
 
 #[test]
@@ -705,4 +740,216 @@ fn values_past_f32_are_said_not_rounded() {
     let r = read_bytes(&c.bytes(), "t").unwrap();
     assert!(r.bands[0].data.iter().all(|v| v.is_nan()));
     assert!(r.lost.contains(&"2 values past the range of 32-bit floats (±3.4 × 10^38) have no value".to_string()), "{:?}", r.lost);
+}
+
+#[test]
+fn a_constant_past_f64_is_said_and_a_reference_that_isnt_a_number_is_damage() {
+    // R about 10^10 (IBM 0x4925_40be) and D = −300: R / 10^D is past f64, so past f32.
+    let mut c = G1::new(2, 1, vec![]);
+    (c.bits, c.r, c.d) = (0, 0x4925_40be, -300);
+    let r = read_bytes(&c.bytes(), "t").unwrap();
+    assert!(r.bands[0].data.iter().all(|v| v.is_nan()), "{:?}", r.bands[0].data);
+    assert!(r.lost.contains(&"2 values past the range of 32-bit floats (±3.4 × 10^38) have no value".to_string()), "{:?}", r.lost);
+    assert!(r.rounded.is_empty());
+    // A GRIB2 constant field whose IEEE reference value is NaN.
+    let mut f = F2::new(2, 1, vec![]);
+    (f.bits, f.r) = (0, f32::NAN);
+    let e = read_bytes(&grib2_message(&[f]), "t").unwrap_err().to_string();
+    assert!(e.contains("damaged (a reference value that isn't a number)"), "{e}");
+    // A constant GRIB2 field that is a number reads as one.
+    let mut f = F2::new(2, 1, vec![]);
+    (f.bits, f.r) = (0, 7.0);
+    assert_eq!(read_bytes(&grib2_message(&[f]), "t").unwrap().bands[0].data, vec![7.0, 7.0]);
+}
+
+/// A field's sections with its section `number` (4, 5 or 6) cut out.
+fn without_section(field: &F2, number: u8) -> Vec<u8> {
+    let s = field.sections();
+    let mut at = 0;
+    while at + 5 <= s.len() {
+        let len = u32::from_be_bytes([s[at], s[at + 1], s[at + 2], s[at + 3]]) as usize;
+        if s[at + 4] == number {
+            let mut out = s[..at].to_vec();
+            out.extend(&s[at + len..]);
+            return out;
+        }
+        at += len;
+    }
+    panic!("no section {number}");
+}
+
+#[test]
+fn a_grib2_field_without_its_own_sections_is_damaged() {
+    for (number, why) in [(4, "its product definition"), (5, "its packing"), (6, "its bitmap section")] {
+        let first = F2::new(2, 1, vec![1, 2]);
+        let mut second = F2::new(2, 1, vec![3, 4]);
+        second.number = 1;
+        let mut s1 = u(21, 4);
+        s1.extend([1, 0, 7, 0, 0, 2, 1, 1]);
+        s1.extend(u(2026, 2));
+        s1.extend([11, 18, 0, 0, 0, 0, 1]);
+        let mut body = s1;
+        body.extend(first.sections());
+        body.extend(without_section(&second, number));
+        let mut msg = b"GRIB".to_vec();
+        msg.extend([0, 0, 0, 2]);
+        msg.extend(u(16 + body.len() as u64 + 4, 8));
+        msg.extend(body);
+        msg.extend(b"7777");
+        let r = read_bytes(&msg, "t").unwrap();
+        assert_eq!(r.bands.len(), 1, "{number}");
+        assert_eq!(r.bands[0].data, vec![1.0, 2.0]);
+        assert!(r.lost.contains(&format!("1 field left out: damaged (a field without {why})")), "{number}: {:?}", r.lost);
+    }
+}
+
+#[test]
+fn a_length_that_hides_the_next_message_is_damage() {
+    // GRIB1: the first message's length runs to the end of the second, whose "7777" it ends on.
+    let mut first = G1::new(2, 1, vec![1, 2]).bytes();
+    let second = G1::new(2, 1, vec![3, 4]).bytes();
+    let len = (first.len() + second.len()) as u64;
+    first[4..7].copy_from_slice(&u(len, 3));
+    let mut file = first;
+    file.extend(&second);
+    assert_eq!(header(&mut std::io::Cursor::new(&file), 0, len, false).unwrap(), Header::WrongLength);
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert_eq!(r.bands[0].data, vec![3.0, 4.0]);
+    assert!(r.lost.contains(&"1 message left out: damaged".to_string()), "{:?}", r.lost);
+    // GRIB2 alike.
+    let mut first = grib2_message(&[F2::new(2, 1, vec![1, 2])]);
+    let second = grib2_message(&[F2::new(2, 1, vec![3, 4])]);
+    let len = (first.len() + second.len()) as u64;
+    first[8..16].copy_from_slice(&u(len, 8));
+    let mut file = first;
+    file.extend(&second);
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert_eq!(r.bands[0].data, vec![3.0, 4.0]);
+    assert!(r.lost.contains(&"1 message left out: damaged".to_string()), "{:?}", r.lost);
+}
+
+#[test]
+fn grids_are_compared_where_their_points_are() {
+    // BAM's latitudes: two southward grids of two 60° rows from −30°, given last at 30° and at
+    // 50°, are laid out from 30° and from 40°: not the same grid.
+    let grid = |lat2: i64| {
+        let mut g = G1::new(2, 2, vec![1, 2, 3, 4]);
+        (g.lat1, g.lat2, g.dj) = (-30_000, lat2, 60_000);
+        g
+    };
+    let mut file = grid(30_000).bytes();
+    file.extend(grid(50_000).bytes());
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert!(r.lost.contains(&"1 field left out: on another grid than the first field's".to_string()), "{:?}", r.lost);
+    // The same points scanned from the other end (south to north) are the same grid: a second
+    // band, placed by its own scanning mode.
+    let mut south_up = G1::new(2, 2, vec![3, 4, 1, 2]);
+    (south_up.lat1, south_up.lat2, south_up.scan) = (59_000, 60_000, 0x40);
+    let mut file = G1::new(2, 2, vec![1, 2, 3, 4]).bytes();
+    file.extend(south_up.bytes());
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 2, "{:?}", r.lost);
+    assert_eq!(r.bands[0].data, vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(r.bands[1].data, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn only_a_whole_turn_is_rolled_and_only_a_repeated_column_dropped() {
+    // Seven columns of 50° from 0° cover 350°: not a whole turn, so not moved.
+    let mut g = G1::new(7, 1, vec![1, 2, 3, 4, 5, 6, 7]);
+    (g.lat1, g.lat2, g.lon1, g.lon2, g.di) = (0, 0, 0, 300_000, 50_000);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert_eq!(r.bands[0].data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    assert_eq!(r.transform.origin_x, -25.0);
+    // Eight columns of 50° from 0° to 350°: the last isn't the first again.
+    let mut g = G1::new(8, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    (g.lat1, g.lat2, g.lon1, g.lon2, g.di) = (0, 0, 0, 350_000, 50_000);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert_eq!(r.width, 8);
+    assert!(!r.lost.iter().any(|l| l.contains("repeats the first")), "{:?}", r.lost);
+}
+
+#[test]
+fn increments_left_out_follow_the_scanning_direction() {
+    // Three columns scanned west from 12° E to 10° E, without increments: 1° cells, not 179°.
+    let mut g = G1::new(3, 2, vec![1, 2, 3, 4, 5, 6]);
+    (g.lon1, g.lon2, g.scan) = (12_000, 10_000, 0x80);
+    let mut b = g.bytes();
+    // The resolution flags (GDS octet 17): no increments given.
+    b[8 + 28 + 16] = 0;
+    let r = read_bytes(&b, "t").unwrap();
+    assert_eq!(r.transform.pixel_width, 1.0);
+    assert_eq!(r.transform.origin_x, 9.5);
+    assert_eq!(r.transform.pixel_height, -1.0);
+    assert_eq!(r.bands[0].data, vec![3.0, 2.0, 1.0, 6.0, 5.0, 4.0]);
+}
+
+#[test]
+fn staggered_rows_are_refused_by_name() {
+    let mut f = F2::new(2, 2, vec![1, 2, 3, 4]);
+    f.scan = 0x44;
+    let e = read_bytes(&grib2_message(&[f]), "t").unwrap_err().to_string();
+    assert!(e.contains("grids whose rows are offset or shortened"), "{e}");
+}
+
+#[test]
+fn short_grib1_sections_are_damage() {
+    // A binary data section of 4 octets: no reference value or bits a value.
+    let mut c = G1::new(2, 1, vec![]);
+    c.bits = 0;
+    let full = c.bytes();
+    let bds = 8 + 28 + 32;
+    let mut b = full[..bds].to_vec();
+    b.extend([0, 0, 4, 0]);
+    b.extend(b"7777");
+    let len = b.len() as u64;
+    b[4..7].copy_from_slice(&u(len, 3));
+    let e = read_bytes(&b, "t").unwrap_err().to_string();
+    assert!(e.contains("damaged (a damaged binary data section)"), "{e}");
+}
+
+#[test]
+fn a_layer_between_two_surfaces_is_named_by_both() {
+    let mut msg = grib2_message(&[F2::new(2, 1, vec![1, 2])]);
+    // Section 4 starts after sections 0, 1 and 3; its second surface's type is octet 29, its
+    // value octets 31 to 34.
+    let s4 = 16 + 21 + 72;
+    msg[s4 + 28] = 105;
+    msg[s4 + 33] = 5;
+    let r = read_bytes(&msg, "t").unwrap();
+    let name = &r.bands[0].name;
+    assert!(name.contains(":surface=103:value=2:") && name.ends_with(":surface2=105:value2=5"), "{name}");
+}
+
+#[test]
+fn a_sidecars_nodata_isnt_counted_as_rounded() {
+    // D = 1: 0.1 and 0.2, which f32 both rounds; a sidecar's no-data of 0.1 leaves one counted.
+    let mut g = G1::new(2, 1, vec![1, 2]);
+    g.d = 1;
+    let bytes = g.bytes();
+    let plain = read_bytes(&bytes, "t").unwrap();
+    assert_eq!(plain.rounded, vec![2]);
+    let masked = read_with_nodata(std::io::Cursor::new(&bytes), "t", Some(0.1)).unwrap();
+    assert_eq!(masked.rounded, vec![1]);
+}
+
+#[test]
+fn reasons_past_the_most_said_apart_are_counted_together() {
+    let mut list = Vec::new();
+    for k in 0..20 {
+        tally(&mut list, format!("GRIB2 grid template 3.{k}"));
+    }
+    tally(&mut list, "GRIB2 grid template 3.0".to_string());
+    assert_eq!(list.len(), MAX_REASONS + 1);
+    assert_eq!(list[0], ("GRIB2 grid template 3.0".to_string(), 2));
+    assert_eq!(list[MAX_REASONS], (OTHER_REASONS.to_string(), 4));
+}
+
+#[test]
+fn grib_is_known_by_its_first_bytes() {
+    assert_eq!(crate::io::sniff_extension(&grib2_message(&[F2::new(2, 1, vec![1, 2])])), Some("grb"));
+    assert_eq!(crate::io::sniff_extension(&G1::new(2, 1, vec![1, 2]).bytes()), Some("grb"));
 }

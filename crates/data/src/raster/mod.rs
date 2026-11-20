@@ -1236,7 +1236,9 @@ fn read_path_placing(path: &Path, world: bool) -> Result<Raster> {
             read_ascii(path, &text, &name, sidecar_nodata)?
         }
         // Read message by message, never whole.
-        "grb" | "grib" | "grb2" | "grib2" => grib::read(std::io::BufReader::new(crate::provenance::open(path)?), &name)?,
+        "grb" | "grib" | "grb2" | "grib2" => {
+            grib::read_with_nodata(std::io::BufReader::new(crate::provenance::open(path)?), &name, sidecar_nodata)?
+        }
         #[cfg(not(target_arch = "wasm32"))]
         _ if gdal::is_gdal_raster_name(&path.to_string_lossy()) => {
             // Converted once to a GeoTIFF in the cache; the layer still names this file.
@@ -1248,12 +1250,13 @@ fn read_path_placing(path: &Path, world: bool) -> Result<Raster> {
     // left out of the rounded count: it left out the sidecar's no-data for all bands. When the two
     // differ (a record for a band the raster lacks, or one only some bands give), the file is read
     // again with the one applied (none, when the bands it has give none), so the rounded count
-    // leaves out just its pixels. Only an ASCII grid, or a GeoTIFF of a type `f32` can round, is read again.
+    // leaves out just its pixels. Only an ASCII grid, a GRIB file, or a GeoTIFF of a type `f32` can
+    // round, is read again.
     let applied = pam.as_ref().map(|p| p.nodata_within(r.bands.len()));
     if let Some(nd) = applied
         && nd != sidecar_nodata
         && r.nodata.is_none()
-        && (ext == "asc"
+        && (matches!(ext.as_str(), "asc" | "grb" | "grib" | "grb2" | "grib2")
             || (matches!(ext.as_str(), "tif" | "tiff")
                 && matches!(r.data_type.as_str(), "UInt32" | "Int32" | "UInt64" | "Int64" | "Float64")))
     {
@@ -1261,6 +1264,8 @@ fn read_path_placing(path: &Path, world: bool) -> Result<Raster> {
         drop(r);
         r = if ext == "asc" {
             read_ascii(path, &crate::provenance::read_to_string(path)?, &name, nd)?
+        } else if grib::EXTENSIONS.contains(&ext.as_str()) {
+            grib::read_with_nodata(std::io::BufReader::new(crate::provenance::open(path)?), &name, nd)?
         } else {
             #[cfg(not(target_arch = "wasm32"))]
             let again = geotiff::read_file_with_nodata(path, &name, nd)?;
