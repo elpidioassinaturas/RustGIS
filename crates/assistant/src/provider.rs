@@ -1122,14 +1122,17 @@ pub fn refuses_reasoning_with_tools(e: &Error) -> bool {
 
 /// Whether the provider refused a request for the images in it (a model or server that doesn't
 /// read them). Asked only of a request that carried images. The error names images as a word
-/// (not "vision" in "revision") and says they aren't taken: unsupported, or no image input
+/// (not "vision" in "revision") and says they aren't taken: not supported, or no image input
 /// (Ollama's "missing data required for image input", vLLM's "not a multimodal model"). An error
-/// about one image ("Error processing image; please retry") is not a refusal.
+/// about one image ("Error processing image; please retry", "not in a supported format") is not a
+/// refusal.
 pub fn refuses_images(e: &Error) -> bool {
     let detail = e.detail.to_lowercase();
     let words: Vec<&str> = detail.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')).collect();
     let names_images = words.iter().any(|w| matches!(*w, "image" | "images" | "image_url" | "vision" | "multimodal" | "multi-modal"));
-    let refused = ["support", "image input", "image_url", "not a multimodal", "not multimodal"].iter().any(|p| detail.contains(p));
+    let refused = ["does not support", "doesn't support", "image input", "image_url", "not a multimodal", "not multimodal"]
+        .iter()
+        .any(|p| detail.contains(p));
     matches!(e.status, Some(400 | 404 | 415 | 422 | 500)) && names_images && refused
 }
 

@@ -55,7 +55,9 @@ pub const KEPT_IMAGES: usize = 2;
 
 /// Keeps the newest `keep` images of tool results; each older one is dropped and its caption
 /// added to its result's text, so a long conversation doesn't send old pictures again. Says
-/// whether any was dropped.
+/// whether any was dropped. A dropped image is gone from the conversation for good: with `keep`
+/// 0 (a model that refused images), a model picked afterwards sees the captions, and calls
+/// `view_map` again for a picture.
 pub fn keep_images(turns: &mut [Turn], keep: usize) -> bool {
     let (mut seen, mut changed) = (0, false);
     for t in turns.iter_mut().rev() {

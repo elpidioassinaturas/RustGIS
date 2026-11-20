@@ -4941,6 +4941,8 @@ fn a_model_that_refuses_images_is_asked_again_with_captions() {
     assert!(!refuses_images(&other(500, "failed to pull image registry.local/runner:3")));
     assert!(!refuses_images(&other(500, "Error processing image; please retry.")));
     assert!(!refuses_images(&other(404, "model revision not found; check the supported models")));
+    assert!(!refuses_images(&other(400, "Invalid image: format is not in a supported format")));
+    assert!(refuses_images(&other(400, "Model does not support images. Please use a model that does.")));
     assert!(refuses_images(&other(500, "model does not support vision")));
     assert!(refuses_images(&other(400, "Qwen/Qwen3-8B is not a multimodal model")));
 }
