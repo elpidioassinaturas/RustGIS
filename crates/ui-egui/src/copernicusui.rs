@@ -113,27 +113,30 @@ fn sign_out(app: &mut RustGisApp, ui: &mut egui::Ui, enabled: bool) {
     }
 }
 
-/// Username, password, one-time code, Remember and Sign in.
+/// Username, password, one-time code, Remember and Sign in. The fields are off while a sign-in is
+/// under way, so nothing is typed into them that its answer would leave behind.
 fn form(app: &mut RustGisApp, ui: &mut egui::Ui, busy: bool) {
     let w = ui.available_width();
     let mut enter = false;
-    egui::Grid::new("cdse_sign_in").num_columns(2).spacing(egui::vec2(10.0, 6.0)).show(ui, |ui| {
-        let st = &mut app.ui.copernicus;
-        let field = (w - 130.0).max(120.0);
-        let label = ui.label(tl!("Username"));
-        ui.add(egui::TextEdit::singleline(&mut st.username).hint_text(tl!("Your account's email address")).desired_width(field))
-            .labelled_by(label.id);
-        ui.end_row();
-        let label = ui.label(tl!("Password"));
-        let r = ui.add(egui::TextEdit::singleline(&mut st.password).password(true).desired_width(field)).labelled_by(label.id);
-        enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        ui.end_row();
-        let label = ui.label(tl!("One-time code"));
-        let r = ui
-            .add(egui::TextEdit::singleline(&mut st.totp).hint_text(tl!("Only with two-factor authentication")).desired_width(field))
-            .labelled_by(label.id);
-        enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        ui.end_row();
+    ui.add_enabled_ui(!busy, |ui| {
+        egui::Grid::new("cdse_sign_in").num_columns(2).spacing(egui::vec2(10.0, 6.0)).show(ui, |ui| {
+            let st = &mut app.ui.copernicus;
+            let field = (w - 130.0).max(120.0);
+            let label = ui.label(tl!("Username"));
+            ui.add(egui::TextEdit::singleline(&mut st.username).hint_text(tl!("Your account's email address")).desired_width(field))
+                .labelled_by(label.id);
+            ui.end_row();
+            let label = ui.label(tl!("Password"));
+            let r = ui.add(egui::TextEdit::singleline(&mut st.password).password(true).desired_width(field)).labelled_by(label.id);
+            enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.end_row();
+            let label = ui.label(tl!("One-time code"));
+            let r = ui
+                .add(egui::TextEdit::singleline(&mut st.totp).hint_text(tl!("Only with two-factor authentication")).desired_width(field))
+                .labelled_by(label.id);
+            enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.end_row();
+        });
     });
     if can_remember(app) {
         ui.checkbox(&mut app.ui.copernicus.remember, tl!("Remember on this computer")).on_hover_text(tl!(
@@ -182,9 +185,12 @@ fn sign_in(app: &mut RustGisApp) {
     answered(app, r);
 }
 
-/// Shows what a sign-in or sign-out said: its error, or the warning it gave.
+/// Shows what a sign-in or sign-out said: its error, or the warning it gave. The password and the
+/// one-time code are emptied whatever it says.
 fn answered(app: &mut RustGisApp, r: Result<Value, String>) {
     let st = &mut app.ui.copernicus;
+    st.password.clear();
+    st.totp.clear();
     (st.error, st.warning) = match r {
         Ok(v) => (None, v.get("warning").and_then(Value::as_str).map(str::to_string)),
         Err(e) => (Some(e), None),
@@ -409,21 +415,35 @@ mod tests {
         assert!(st.password.is_empty() && st.totp.is_empty(), "nothing typed is kept in the pane");
         h.get_by_label("Signing in…");
         assert!(!sign_in_on(&h), "one sign-in at a time");
+        assert!(
+            h.get_by_role_and_label(egui::accesskit::Role::PasswordInput, "Password").accesskit_node().is_disabled(),
+            "no typing while it waits"
+        );
+        type_into(&mut h, "Password", "typed-while-waiting");
+        type_into(&mut h, "One-time code", "654321");
+        let st = &h.state().ui.copernicus;
+        assert!(st.password.is_empty() && st.totp.is_empty(), "the fields are off while it waits");
+        // Even if something got in meanwhile, the answer leaves nothing behind.
+        h.state_mut().ui.copernicus.password = "typed-while-waiting".into();
+        h.state_mut().ui.copernicus.totp = "654321".into();
 
         *slot.lock().unwrap() = Some(Err("Copernicus Data Space refused the sign-in: Invalid user credentials".into()));
         h.run();
         let st = &h.state().ui.copernicus;
         assert!(st.pending.is_none() && st.error.as_deref().is_some_and(|e| e.contains("Invalid user credentials")), "{:?}", st.error);
+        assert!(st.password.is_empty() && st.totp.is_empty(), "nothing typed while it waited is kept");
         h.get_by_label("Not signed in.");
         type_into(&mut h, "Password", "synthetic-password");
         assert!(sign_in_on(&h), "the form is back for another try");
         h.get_by_role_and_label(egui::accesskit::Role::Button, "Sign in").click();
         h.run();
         let slot = sent.lock().unwrap()[1].3.clone();
+        h.state_mut().ui.copernicus.password = "typed-while-waiting".into();
         *slot.lock().unwrap() = Some(Ok("synthetic.user@example.invalid".into()));
         h.run();
         let st = &h.state().ui.copernicus;
         assert!(st.pending.is_none() && st.error.is_none() && st.warning.is_none(), "{:?}", st.error);
+        assert!(st.password.is_empty(), "a signed-in pane keeps no password for after Sign out");
         assert_eq!(sent.lock().unwrap().len(), 2);
     }
 
