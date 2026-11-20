@@ -324,10 +324,12 @@ type Units = Vec<Vec<(f64, f64, Option<usize>)>>;
 type Part = (usize, Vec<Vec<Coord>>, Extent);
 
 /// A layer's [`Units`] along a block's outline, and for the water (#2317) the polygons reaching
-/// the box, whose shores shape the water's floor.
+/// the box, whose shores shape the water's floor: each by its row and its place among the row's
+/// parts, read again from the layer's rows (the key holds them), so a large lake or sea crossing
+/// the box is not kept twice.
 struct Cut {
     units: Units,
-    parts: Vec<Part>,
+    parts: Vec<(usize, usize)>,
 }
 
 /// The rows, layer, query, query context, box and circle a [`Cut`] was read for, and whether for
@@ -482,7 +484,7 @@ fn grown(pattern: FillPattern, k: f32) -> FillPattern {
 /// topmost polygon over each piece, found at its middle: the contacts go straight down. For the
 /// water (`water`), the first polygon in row order instead, as the ground's level takes it, given
 /// as its place in the polygons reaching the box (each part of a multipolygon on its own), which
-/// are kept.
+/// are kept by row and part.
 fn units(layer: &rustgis_map::Layer, b: &Block, water: bool, env: &rustgis_data::query::Env) -> Cut {
     let keep = layer.query_rows_with(&layer.dataset, env);
     // The box in longitude and latitude (Web Mercator keeps north-up boxes north-up), so a part
@@ -490,13 +492,13 @@ fn units(layer: &rustgis_map::Layer, b: &Block, water: bool, env: &rustgis_data:
     let (lo, hi) = (merc_to_lonlat(Coord::new(b.x0, b.y0)), merc_to_lonlat(Coord::new(b.x1, b.y1)));
     // The polygons reaching the box (Web Mercator rings, and their box), each part on its own, in
     // row order.
-    let mut parts: Vec<Part> = Vec::new();
+    let (mut parts, mut ids): (Vec<Part>, Vec<(usize, usize)>) = (Vec::new(), Vec::new());
     for (row, ft) in layer.dataset.features.iter().enumerate() {
         if keep.as_ref().is_some_and(|k| !k.get(row).copied().unwrap_or(false)) {
             continue;
         }
         let Some(Geometry::Polygon(polys)) = &ft.geometry else { continue };
-        for rings in polys {
+        for (k, rings) in polys.iter().enumerate() {
             let mut e = Extent::EMPTY;
             rings.iter().flatten().for_each(|c| e.expand(*c));
             if e.is_empty() || e.max_x < lo.x || e.min_x > hi.x || e.max_y < lo.y || e.min_y > hi.y {
@@ -506,6 +508,7 @@ fn units(layer: &rustgis_map::Layer, b: &Block, water: bool, env: &rustgis_data:
             let mut e = Extent::EMPTY;
             rings.iter().flatten().for_each(|c| e.expand(*c));
             parts.push((row, rings, e));
+            ids.push((row, k));
         }
     }
     let side_units = |i: usize| {
@@ -546,7 +549,7 @@ fn units(layer: &rustgis_map::Layer, b: &Block, water: bool, env: &rustgis_data:
         out
     };
     let units = (0..b.sides()).map(side_units).collect();
-    Cut { units, parts: if water { parts } else { Vec::new() } }
+    Cut { units, parts: if water { ids } else { Vec::new() } }
 }
 
 /// A stretch of one side of the outline inside a water body (#2317): from `lo` to `hi` along it
@@ -620,8 +623,7 @@ pub(crate) fn water_runs(map: &Map, b: &Block, ground: &Ground, res: f64, env: &
         let Some(units) = cut.units.get(i) else { continue };
         for &(lo, hi, part) in units {
             let Some(p) = part else { continue };
-            let Some((row, rings, _)) = cut.parts.get(p) else { continue };
-            let row = *row;
+            let Some(&(row, k)) = cut.parts.get(p) else { continue };
             let given = field.and_then(|f| layer.dataset.features.get(row)?.attrs.get(f)?.as_f64()).filter(|d| d.is_finite() && *d > 0.0);
             let Some(depth) = given.or(bw.depth).filter(|d| *d > 0.0) else { continue };
             let mid = b.point(side, (lo + hi) / 2.0);
@@ -631,11 +633,17 @@ pub(crate) fn water_runs(map: &Map, b: &Block, ground: &Ground, res: f64, env: &
             let (sym, _, fills) = styler.style_and_fills(row);
             let color = unit_paint(sym.fill, fills, SECTION_WATER).0;
             let edges = near_box.entry(p).or_insert_with(|| {
-                let (x0, y0, x1, y1) = (b.x0 - ramp, b.y0 - ramp, b.x1 + ramp, b.y1 + ramp);
-                rings
-                    .iter()
+                // Tested in longitude and latitude (Web Mercator keeps each axis in order, so an
+                // edge's box meets the box's the same), only those near it put in Web Mercator.
+                let (lo, hi) = (merc_to_lonlat(Coord::new(b.x0 - ramp, b.y0 - ramp)), merc_to_lonlat(Coord::new(b.x1 + ramp, b.y1 + ramp)));
+                let Some(Some(Geometry::Polygon(polys))) = layer.dataset.features.get(row).map(|f| &f.geometry) else { return Vec::new() };
+                polys
+                    .get(k)
+                    .into_iter()
+                    .flatten()
                     .flat_map(|r| r.iter().zip(r.iter().cycle().skip(1)).map(|(a, q)| (*a, *q)))
-                    .filter(|(a, q)| a.x.max(q.x) >= x0 && a.x.min(q.x) <= x1 && a.y.max(q.y) >= y0 && a.y.min(q.y) <= y1)
+                    .filter(|(a, q)| a.x.max(q.x) >= lo.x && a.x.min(q.x) <= hi.x && a.y.max(q.y) >= lo.y && a.y.min(q.y) <= hi.y)
+                    .map(|(a, q)| (lonlat_to_merc(a), lonlat_to_merc(q)))
                     .collect()
             });
             // The shore's edges that can lie within the ramp of the stretch.
@@ -1131,62 +1139,86 @@ pub(crate) fn draw_walls(
             }
             samples.sort_by(|p, q| p.0.total_cmp(&q.0));
             samples.dedup_by(|p, q| (p.0 - q.0).abs() < 1e-9);
-            if samples.len() < 2 {
-                continue;
-            }
-            // A round block's water runs on over hundreds of sides: each band a hair longer each
-            // way, as its walls are, so no light seam shows between them.
-            if round {
-                let n = samples.len();
-                let (first, second, last, before) = (samples[0], samples[1], samples[n - 1], samples[n - 2]);
-                let out = |p: (f64, f64), q: (f64, f64)| {
-                    let g = grow(p, q);
-                    (f64::from(g.0), f64::from(g.1))
-                };
-                samples[0] = (first.0, out(first.1, second.1), out(first.2, second.2), first.3);
-                samples[n - 1] = (last.0, out(last.1, before.1), out(last.2, before.2), last.3);
-            }
-            let (mut band, mut level, mut floor) = (PathBuilder::new(), PathBuilder::new(), PathBuilder::new());
-            for (i, (_, top, bed, _)) in samples.iter().enumerate() {
-                let (top, bed) = (pt(*top), pt(*bed));
-                if i == 0 {
-                    band.move_to(top.0, top.1);
-                    level.move_to(top.0, top.1);
-                    floor.move_to(bed.0, bed.1);
-                } else {
-                    band.line_to(top.0, top.1);
-                    level.line_to(top.0, top.1);
-                    floor.line_to(bed.0, bed.1);
+            // The wall's stretches within the run, joined where they meet or overlap: a band of
+            // ground that failed to draw (`render_tilted` goes on without it) leaves the wall in
+            // pieces, and the water keeps to each, crossing no gap where no wall stands.
+            let tol = 1e-6 * (b.x1 - b.x0).abs().max(1.0);
+            let (rlo, rhi) = (wr.lo.min(wr.hi), wr.lo.max(wr.hi));
+            let mut spans: Vec<(f64, f64)> = quads
+                .iter()
+                .filter_map(|(ends, _, _)| {
+                    let (ca, cz) = (b.along(side, ends[0]), b.along(side, ends[1]));
+                    let (lo, hi) = (ca.min(cz).max(rlo), ca.max(cz).min(rhi));
+                    (hi > lo).then_some((lo, hi))
+                })
+                .collect();
+            spans.sort_by(|p, q| p.0.total_cmp(&q.0));
+            let mut pieces: Vec<(f64, f64)> = Vec::new();
+            for (lo, hi) in spans {
+                match pieces.last_mut() {
+                    Some(last) if lo <= last.1 + tol => last.1 = last.1.max(hi),
+                    _ => pieces.push((lo, hi)),
                 }
             }
-            for (_, _, bed, _) in samples.iter().rev() {
-                band.line_to(pt(*bed).0, pt(*bed).1);
+            for (lo, hi) in pieces {
+                let mut samples: Vec<Sample> = samples.iter().filter(|p| p.0 >= lo - tol && p.0 <= hi + tol).copied().collect();
+                if samples.len() < 2 {
+                    continue;
+                }
+                // A round block's water runs on over hundreds of sides: each band a hair longer each
+                // way, as its walls are, so no light seam shows between them.
+                if round {
+                    let n = samples.len();
+                    let (first, second, last, before) = (samples[0], samples[1], samples[n - 1], samples[n - 2]);
+                    let out = |p: (f64, f64), q: (f64, f64)| {
+                        let g = grow(p, q);
+                        (f64::from(g.0), f64::from(g.1))
+                    };
+                    samples[0] = (first.0, out(first.1, second.1), out(first.2, second.2), first.3);
+                    samples[n - 1] = (last.0, out(last.1, before.1), out(last.2, before.2), last.3);
+                }
+                let (mut band, mut level, mut floor) = (PathBuilder::new(), PathBuilder::new(), PathBuilder::new());
+                for (i, (_, top, bed, _)) in samples.iter().enumerate() {
+                    let (top, bed) = (pt(*top), pt(*bed));
+                    if i == 0 {
+                        band.move_to(top.0, top.1);
+                        level.move_to(top.0, top.1);
+                        floor.move_to(bed.0, bed.1);
+                    } else {
+                        band.line_to(top.0, top.1);
+                        level.line_to(top.0, top.1);
+                        floor.line_to(bed.0, bed.1);
+                    }
+                }
+                for (_, _, bed, _) in samples.iter().rev() {
+                    band.line_to(pt(*bed).0, pt(*bed).1);
+                }
+                band.close();
+                let n = samples.len() as f64;
+                let mean = |pick: fn(&Sample) -> (f64, f64)| {
+                    let s = samples.iter().map(pick).fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
+                    Point::from_xy((s.0 / n) as f32, (s.1 / n) as f32)
+                };
+                let (top, deep) = (wr.color.shade(top_shade).lerp(fog, f), wr.color.shade(top_shade * 0.5).lerp(fog, f));
+                let shader = tiny_skia::LinearGradient::new(
+                    mean(|p| p.1),
+                    mean(|p| p.3),
+                    vec![GradientStop::new(0.0, color(top)), GradientStop::new(1.0, color(deep))],
+                    SpreadMode::Pad,
+                    Transform::identity(),
+                );
+                let paint_water = match shader {
+                    Some(shader) => Paint { shader, anti_alias: true, ..Paint::default() },
+                    None => paint(top, 1.0),
+                };
+                // A line at the level, and one along the floor as dark as the shore band at its outline.
+                let bed = Rgba::rgb(0, 0, 0).lerp(fog, f).with_alpha((wr.dark.clamp(0.0, 1.0) * 255.0).round() as u8);
+                let lines = [(floor, bed), (level, wr.color.shade(0.6).lerp(fog, f))]
+                    .into_iter()
+                    .filter_map(|(line, c)| line.finish().filter(|_| c.a() > 0).map(|p| (p, c)))
+                    .collect();
+                waters.push((band.finish(), paint_water, lines));
             }
-            band.close();
-            let n = samples.len() as f64;
-            let mean = |pick: fn(&Sample) -> (f64, f64)| {
-                let s = samples.iter().map(pick).fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
-                Point::from_xy((s.0 / n) as f32, (s.1 / n) as f32)
-            };
-            let (top, deep) = (wr.color.shade(top_shade).lerp(fog, f), wr.color.shade(top_shade * 0.5).lerp(fog, f));
-            let shader = tiny_skia::LinearGradient::new(
-                mean(|p| p.1),
-                mean(|p| p.3),
-                vec![GradientStop::new(0.0, color(top)), GradientStop::new(1.0, color(deep))],
-                SpreadMode::Pad,
-                Transform::identity(),
-            );
-            let paint_water = match shader {
-                Some(shader) => Paint { shader, anti_alias: true, ..Paint::default() },
-                None => paint(top, 1.0),
-            };
-            // A line at the level, and one along the floor as dark as the shore band at its outline.
-            let bed = Rgba::rgb(0, 0, 0).lerp(fog, f).with_alpha((wr.dark.clamp(0.0, 1.0) * 255.0).round() as u8);
-            let lines = [(floor, bed), (level, wr.color.shade(0.6).lerp(fog, f))]
-                .into_iter()
-                .filter_map(|(line, c)| line.finish().filter(|_| c.a() > 0).map(|p| (p, c)))
-                .collect();
-            waters.push((band.finish(), paint_water, lines));
         }
         // A box's water over its side's outline at once; a round block's once all are stroked.
         if !round {
@@ -1698,5 +1730,69 @@ mod tests {
         let shore = b.point(side as u16, last.hi);
         assert!((shore.y - 300.0).abs() < 1e-6, "{shore:?}");
         assert!((last.floor(shore) - 1000.0).abs() < 1e-6, "{}", last.floor(shore));
+    }
+
+    #[test]
+    fn a_wall_in_pieces_keeps_its_water_to_each_piece() {
+        use rustgis_map::view::BlockWater;
+        // #2317: the south side crosses a lake from x −800 to 800, but a band of ground that
+        // failed to draw left its wall only at x −1000 to −300 and 300 to 1000: water on each
+        // piece, none in the gap between them.
+        let lakes: [(&[[f64; 4]], _); 1] = [(&[[-800.0, -1500.0, 800.0, -500.0]], None)];
+        let (m, b, g, res) = block_over_lakes(&lakes, Some(BlockWater { depth: Some(50.0), field: None }));
+        let water = water_runs(&m, &b, &g, res, &Default::default());
+        let camera = rustgis_map::Camera { center: Coord::new(0.0, 0.0), res, bearing: 0.0, pitch: 60.0 };
+        let view = View { width: 600.0, height: 500.0, pixels_per_point: 1.0, camera, sky: false };
+        let (w, h) = (view.width, view.height);
+        // On the south side at `x`, `metres` high (exaggerated), on screen.
+        let at = |x: f64, metres: f64| {
+            let m = Coord::new(x, -1000.0);
+            let (u, v) = camera.ground_px(m);
+            camera.project_raised(u, v, metres / g.per_unit(m) / res, w, h).expect("in view")
+        };
+        let top = |x: f64| {
+            let m = Coord::new(x, -1000.0);
+            let (u, v) = camera.ground_px(m);
+            camera.project_raised(u, v, g.up_px(m, &camera), w, h).expect("in view")
+        };
+        let stretch = |x0: f64, x1: f64| Edge {
+            side: u16::from(SOUTH),
+            ends: [Coord::new(x0, -1000.0), Coord::new(x1, -1000.0)],
+            top: [top(x0), top(x1)],
+            depth: 1.0,
+        };
+        let edges: Vec<Edge> =
+            [(-1000.0, -650.0), (-650.0, -300.0), (300.0, 650.0), (650.0, 1000.0)].iter().map(|&(a, z)| stretch(a, z)).collect();
+        let runs = runs(&m, &b, 1.0, &Default::default());
+        let draw = |water: &WaterRuns| {
+            let mut pm = Pixmap::new(600, 500).unwrap();
+            draw_walls(&mut pm, &view, &g, &b, &edges, &runs, water, Rgba::rgb(255, 255, 255), rustgis_map::camera::FAR);
+            pm
+        };
+        let (wet, dry) = (draw(&water), draw(&(0..b.sides()).map(|_| Vec::new()).collect()));
+        let pixel = |pm: &Pixmap, x: f64, metres: f64| {
+            let (px, py) = at(x, metres);
+            pm.pixel(px as u32, py as u32).expect("in the picture").demultiply()
+        };
+        // Halfway down the water (level 1000, floor 900 away from the shore), on each piece: the
+        // water's colour over the wall's.
+        let [r] = &water[0][..] else { panic!("one stretch of water on the south side") };
+        // The water is its colour shaded, so its colour's shares of red, green and blue.
+        let shares = |p: [u8; 3]| {
+            let sum = p.iter().map(|v| f64::from(*v)).sum::<f64>().max(1.0);
+            p.map(|v| f64::from(v) / sum)
+        };
+        let apart = |p: [f64; 3], q: [f64; 3]| p.iter().zip(q).map(|(a, b)| (a - b).abs()).sum::<f64>();
+        let rgb = |c: tiny_skia::ColorU8| shares([c.red(), c.green(), c.blue()]);
+        let water_rgb = shares([r.color.r(), r.color.g(), r.color.b()]);
+        for x in [-500.0, 500.0] {
+            let (c, d) = (pixel(&wet, x, 950.0), pixel(&dry, x, 950.0));
+            assert!(c.alpha() == 255 && d.alpha() == 255, "{x}: {c:?} over {d:?}");
+            assert!(apart(rgb(c), water_rgb) < 0.05 && apart(rgb(d), water_rgb) > 0.1, "{x}: {c:?} over {d:?}, water {:?}", r.color);
+        }
+        // Nothing in the gap: no wall there, and no water across it.
+        for x in [-150.0, 0.0, 150.0] {
+            assert_eq!(pixel(&wet, x, 950.0).alpha(), 0, "{x}: {:?}", pixel(&wet, x, 950.0));
+        }
     }
 }
