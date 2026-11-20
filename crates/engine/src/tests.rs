@@ -13686,6 +13686,31 @@ fn terrain_block_cut_to_polygons() {
     s.run("layer.rename", &json!({"layer": id, "name": "bacias"})).unwrap();
     let shape = s.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).map(|b| b.shape.clone());
     assert_eq!(shape, Some(rustgis_map::view::BlockShape::Polygon { layer: "bacias".into(), filter: Some("nome = 'a'".into()) }));
+    // Its four sides aren't simplified: nothing said, set or opened.
+    let simplified = |s: &Session| s.notices.iter().any(|n| n.text.contains("too many corners"));
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, s.project.clone());
+    assert!(!simplified(&s) && !simplified(&opened), "{:?}", opened.notices);
+    // A toothed ring of 70 000 corners is, to stay under 65 535 sides: said when it is set and when the
+    // project opens again.
+    let star: Vec<Value> = (0..=70_000)
+        .map(|i| {
+            let (sin, cos) = (i as f64 * std::f64::consts::TAU / 70_000.0).sin_cos();
+            let r = if i % 2 == 0 { 0.004 } else { 0.0039 };
+            json!([10.01 + r * cos, 45.01 + r * sin])
+        })
+        .collect();
+    let star = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [star]}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(star.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "estrela.geojson", "data": data})).unwrap();
+    let v = s.run("map.terrain", &json!({"block": {"shape": {"layer": "estrela"}}})).unwrap();
+    assert_eq!(v["block"]["outline"]["coarsened"], json!(true), "{v}");
+    assert!(simplified(&s), "{:?}", s.notices);
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, s.project.clone());
+    assert!(simplified(&opened), "{:?}", opened.notices);
 }
 
 /// A block's walls coloured by a polygon layer (#1914): the layer checked before anything changes,

@@ -1352,6 +1352,18 @@ mod tests {
         // Two 10 m squares 100 km apart both stay, each with its four sides.
         let small = |x: f64| vec![Coord::new(x, 0.0), Coord::new(x + 10.0, 0.0), Coord::new(x + 10.0, 10.0), Coord::new(x, 10.0)];
         assert_eq!(Outline::from_rings(vec![small(0.0), small(100_000.0)]).map(|o| o.side_count()), Some(8));
+        // 7000 decagons 10 m across, too many sides even at their own eighth: the smallest are left
+        // out, and the spacing said is the one they were thinned at, not the gap doubled past it.
+        let decagon = |i: usize| -> Vec<Coord> {
+            let (cx, cy) = ((i % 84) as f64 * 100.0, (i / 84) as f64 * 100.0);
+            (0..10)
+                .map(|k| (k as f64 * std::f64::consts::TAU / 10.0).sin_cos())
+                .map(|(s, c)| Coord::new(cx + 5.0 * c, cy + 5.0 * s))
+                .collect()
+        };
+        let many = Outline::from_rings((0..7000).map(decagon).collect()).expect("an outline");
+        assert!(many.dropped() > 0 && many.side_count() <= 65_535, "{} {}", many.dropped(), many.side_count());
+        assert!(many.spacing().0 <= 10.0 / 8.0 + 1e-9, "{:?}", many.spacing());
     }
 
     #[test]

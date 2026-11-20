@@ -128,6 +128,9 @@ impl Outline {
             });
         }
         let dropped = all - thinned.len();
+        // The widest gap a ring was thinned at: past an eighth of the largest ring, `gap` only
+        // doubled on (the rings' own eighths kept their corners), so it isn't said as the spacing.
+        let spacing = gap.min(rings.iter().map(|r| size(r)).fold(0.0, f64::max) / 8.0);
         let (mut sides, mut starts) = (Vec::new(), Vec::new());
         for (i, r) in thinned.iter().enumerate() {
             let first = sides.len();
@@ -151,7 +154,7 @@ impl Outline {
             let (lo, hi) = (row(s.a.y.min(s.z.y)), row(s.a.y.max(s.z.y)));
             rows.iter_mut().take(hi + 1).skip(lo).for_each(|r| r.push(k as u32));
         }
-        Some(Outline { sides, rings: starts, extent: [x0, y0, x1, y1], rows, spacing: gap, coarsened: gap > first, dropped })
+        Some(Outline { sides, rings: starts, extent: [x0, y0, x1, y1], rows, spacing, coarsened: spacing > first, dropped })
     }
 
     /// How many sides the outline keeps.

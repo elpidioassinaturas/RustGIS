@@ -416,6 +416,22 @@ fn reset(s: &mut Session, p: Project) {
             _ => None,
         })
         .collect();
+    // A block whose outline was simplified to stay under 65 535 sides: said, as `map.terrain` says it.
+    let simplified: Vec<String> = s
+        .project
+        .maps
+        .iter()
+        .filter_map(|m| match &m.view.terrain.as_ref()?.block.as_ref()?.shape {
+            rustgis_map::view::BlockShape::Polygon { layer, filter } => {
+                let o = rustgis_render::terrain::Outline::of(m, layer, filter.as_deref())?;
+                super::view::outline_simplified(layer, &o).map(|said| format!("{}: {said}", m.name))
+            }
+            _ => None,
+        })
+        .collect();
+    for said in simplified {
+        s.notify(said, false);
+    }
     if !uncut.is_empty() {
         s.notify(
             format!(

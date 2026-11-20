@@ -400,6 +400,20 @@ fn block_polygons(s: &Session, o: &serde_json::Map<String, Value>) -> Result<rus
 
 /// The name of the polygon layer `name` for `what` (water, a block's walls), checked: a polygon
 /// layer (`holds` says of what) holding all its polygons, of a name of its own.
+/// What simplifying a polygon block's outline lost, past a third of the finest mesh cell or short
+/// of its smallest rings, to stay under 65 535 sides (said when it is set and when a project opens).
+pub(crate) fn outline_simplified(layer: &str, o: &rustgis_render::terrain::Outline) -> Option<String> {
+    let (spacing, coarsened) = o.spacing();
+    let left = match o.dropped() {
+        0 if !coarsened => return None,
+        0 => String::new(),
+        n => format!(", and its {n} smallest ring(s) were left out"),
+    };
+    Some(format!(
+        "the outline of '{layer}' the block is cut to has too many corners: corners up to {spacing:.0} m apart were merged (less in smaller rings){left}, to stay under 65535 sides"
+    ))
+}
+
 fn polygon_layer(s: &Session, name: &str, what: &str, holds: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -715,18 +729,8 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     m.view.terrain = Some(t);
     // A polygon block's outline simplified past a third of the finest mesh cell, or short of its
     // smallest rings, to stay under 65 535 sides: said, with how far.
-    if let Some((layer, o)) = outline.filter(|(_, o)| o.spacing().1 || o.dropped() > 0) {
-        let left = match o.dropped() {
-            0 => String::new(),
-            n => format!(", and its {n} smallest ring(s) were left out"),
-        };
-        s.notify(
-            format!(
-                "Terrain: the outline of '{layer}' the block is cut to has too many corners: they were kept {:.0} m apart or more{left}, to stay under 65535 sides",
-                o.spacing().0
-            ),
-            false,
-        );
+    if let Some(said) = outline.and_then(|(layer, o)| outline_simplified(&layer, &o)) {
+        s.notify(format!("Terrain: {said}"), false);
     }
     if block_cut {
         s.notify(
