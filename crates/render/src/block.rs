@@ -493,11 +493,20 @@ fn units(layer: &rustgis_map::Layer, b: &Block, water: bool, env: &rustgis_data:
     // The polygons reaching the box (Web Mercator rings, and their box), each part on its own, in
     // row order.
     let (mut parts, mut ids): (Vec<Part>, Vec<(usize, usize)>) = (Vec::new(), Vec::new());
+    // Its conversion to longitude/latitude, made once for its polygons (none: a system that can't
+    // be converted, of which the map draws nothing either).
+    let to = layer.dataset.lonlat_conversion().ok();
     for (row, ft) in layer.dataset.features.iter().enumerate() {
         if keep.as_ref().is_some_and(|k| !k.get(row).copied().unwrap_or(false)) {
             continue;
         }
-        let Some(Geometry::Polygon(polys)) = &ft.geometry else { continue };
+        // In longitude/latitude, whatever system the layer holds its coordinates in; a polygon
+        // that can't be given there makes no contact, as the map draws none of it.
+        let Some(lonlat) = ft.geometry.as_ref().zip(to.as_ref()).and_then(|(g, to)| rustgis_data::Dataset::converted_to_lonlat(to, g))
+        else {
+            continue;
+        };
+        let Geometry::Polygon(polys) = &*lonlat else { continue };
         for (k, rings) in polys.iter().enumerate() {
             let mut e = Extent::EMPTY;
             rings.iter().flatten().for_each(|c| e.expand(*c));
@@ -618,6 +627,8 @@ pub(crate) fn water_runs(map: &Map, b: &Block, ground: &Ground, res: f64, env: &
     // Each water body's edges within the ramp of the box (a round block has many short sides,
     // each crossing few of them).
     let mut near_box: std::collections::HashMap<usize, Vec<(Coord, Coord)>> = std::collections::HashMap::new();
+    // The layer's conversion to longitude/latitude, as the cut's parts were read (`units`).
+    let to = layer.dataset.lonlat_conversion().ok();
     for (i, runs) in out.iter_mut().enumerate() {
         let (side, _, _) = b.side(i);
         let Some(units) = cut.units.get(i) else { continue };
@@ -636,7 +647,8 @@ pub(crate) fn water_runs(map: &Map, b: &Block, ground: &Ground, res: f64, env: &
                 // Tested in longitude and latitude (Web Mercator keeps each axis in order, so an
                 // edge's box meets the box's the same), only those near it put in Web Mercator.
                 let (lo, hi) = (merc_to_lonlat(Coord::new(b.x0 - ramp, b.y0 - ramp)), merc_to_lonlat(Coord::new(b.x1 + ramp, b.y1 + ramp)));
-                let Some(Geometry::Polygon(polys)) = layer.dataset.features.geometry(row) else { return Vec::new() };
+                let lonlat = layer.dataset.features.geometry(row).zip(to.as_ref()).and_then(|(g, to)| rustgis_data::Dataset::converted_to_lonlat(to, g));
+                let Some(Geometry::Polygon(polys)) = lonlat.as_deref() else { return Vec::new() };
                 polys
                     .get(k)
                     .into_iter()
