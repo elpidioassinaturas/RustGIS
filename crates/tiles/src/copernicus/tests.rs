@@ -179,7 +179,7 @@ fn a_sign_in_answer_sent_from_the_browser_is_kept_like_one_made_here() {
     let web = refused_message_in(DATA, true);
     assert!(
         web.ends_with(
-            "f.tif: Copernicus Data Space asks for a sign-in for this file: sign in with a free account in Web Data › Copernicus Data Space"
+            "f.tif: Copernicus Data Space asks for a sign-in for this file: sign in with a free account in Home › Add › Web Data › Copernicus Data Space…"
         ),
         "{web}"
     );

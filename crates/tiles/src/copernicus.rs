@@ -572,7 +572,7 @@ pub fn refused_message(url: &str) -> String {
 /// [`refused_message`], for the web app (`web`) or not: the web app signs in from its panel, not
 /// with the command, so its message sends the user there.
 fn refused_message_in(url: &str, web: bool) -> String {
-    let how = if web { "in Web Data › Copernicus Data Space" } else { "(copernicus.login)" };
+    let how = if web { "in Home › Add › Web Data › Copernicus Data Space…" } else { "(copernicus.login)" };
     // An OData address names its file in its last node: `…/Nodes(f.tif)/$value`.
     let last = url.split(['?', '#']).next().unwrap_or(url).trim_end_matches("/$value").rsplit('/').next().unwrap_or("");
     let file = last.strip_prefix("Nodes(").and_then(|n| n.strip_suffix(')')).unwrap_or(last);

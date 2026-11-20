@@ -577,10 +577,10 @@ panel: username, password, the one-time code for an account with two-factor auth
 **Remember on this computer** (`remember`, below). It shows whether a sign-in is kept, as whom and
 until when its token is renewed, and **Sign out** runs `copernicus.logout`. In the web app the
 panel sends the sign-in from the browser itself: there is no **Remember** there, and the sign-in
-lasts as long as the page (its token is renewed meanwhile). `copernicus.login` signs in with the account's username and password (and
-`"totp"`, the one-time code, for an account with two-factor authentication). The password is sent
-only to CDSE's sign-in server (`identity.dataspace.copernicus.eu`), and kept only if remembered
-(below). The token it
+lasts as long as the page (its token is renewed meanwhile). `copernicus.login` signs in with the
+account's username and password (and `"totp"`, the one-time code, for an account with two-factor
+authentication). The password is sent only to CDSE's sign-in server
+(`identity.dataspace.copernicus.eu`), and kept only if remembered (below). The token it
 gives is kept until RustGIS closes, never in the project, and renewed before it expires; once it
 can't be renewed any more (after a long pause), the sign-in ends and `copernicus.status` says so.
 The token is sent only over HTTPS to CDSE's data servers (`download.dataspace.copernicus.eu` and
