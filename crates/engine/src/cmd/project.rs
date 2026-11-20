@@ -363,9 +363,9 @@ fn reset(s: &mut Session, p: Project) {
         };
         let Some(e) = t.block.as_ref().and_then(|b| {
             b.check().err().or_else(|| {
-                (over_tiles && b.extent.is_none())
+                (over_tiles && !b.own_box())
                     .then(|| "over elevation tiles a block needs an extent box [xmin, ymin, xmax, ymax]".to_string())
-                    .or_else(|| off_dem(b.extent, dem.as_ref()))
+                    .or_else(|| off_dem(super::terrain_blocks::own_box(m, b), dem.as_ref()))
             })
         }) else {
             continue;
@@ -403,6 +403,28 @@ fn reset(s: &mut Session, p: Project) {
             rustgis_render::terrain::walls_layer(m, l).is_none().then(|| format!("{} ('{l}')", m.name))
         })
         .collect();
+    // A block cut to polygons (#2318) whose layer is missing isn't drawn: said, and kept, so a
+    // polygon layer of that name brings it back.
+    let uncut: Vec<String> = s
+        .project
+        .maps
+        .iter()
+        .filter_map(|m| match &m.view.terrain.as_ref()?.block.as_ref()?.shape {
+            rustgis_map::view::BlockShape::Polygon { layer, .. } => {
+                rustgis_render::terrain::walls_layer(m, layer).is_none().then(|| format!("{} ('{layer}')", m.name))
+            }
+            _ => None,
+        })
+        .collect();
+    if !uncut.is_empty() {
+        s.notify(
+            format!(
+                "{}: the layer a block diagram is cut to is missing, not a polygon layer, read a view at a time or of a name another layer shares, so no block is drawn",
+                uncut.join(", ")
+            ),
+            false,
+        );
+    }
     match plain.as_slice() {
         [] => {}
         [one] => s.notify(

@@ -1069,6 +1069,7 @@
         "enum": [
           "terrain-block",
           "terrain-block-shape",
+          "terrain-block-polygon",
           "terrain-water",
           "terrain-water-shore",
           "shaded-relief-effects",
@@ -1153,6 +1154,7 @@
   "x-rustgis-capabilities": [
     "terrain-block",
     "terrain-block-shape",
+    "terrain-block-polygon",
     "terrain-water",
     "terrain-water-shore",
     "shaded-relief-effects",

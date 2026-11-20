@@ -13,6 +13,17 @@ use crate::notice_text::NoticeText;
 
 const CHECK_CELLS: usize = 64;
 
+/// The box `b` is cut to when it has one of its own: its extent, or the box round the polygons it
+/// is cut to (#2318) when they can be read. None: the DEM's.
+pub(crate) fn own_box(map: &rustgis_map::Map, b: &rustgis_map::view::TerrainBlock) -> Option<[f64; 4]> {
+    b.extent.or_else(|| match &b.shape {
+        rustgis_map::view::BlockShape::Polygon { layer, filter } => {
+            rustgis_render::terrain::Outline::of(map, layer, filter.as_deref()).map(|o| o.extent())
+        }
+        _ => None,
+    })
+}
+
 pub(crate) struct Checked {
     layer: u64,
     pixels: Weak<Raster>,
@@ -105,15 +116,16 @@ fn landed_impl(session: &mut Session, restoring: bool) {
             continue;
         };
         let pixels = Arc::downgrade(raster);
+        let extent = own_box(map, block);
         if checked
             .get(&map_id)
-            .is_some_and(|old: &Checked| old.layer == layer.instance_id() && old.pixels.ptr_eq(&pixels) && old.extent == block.extent)
+            .is_some_and(|old: &Checked| old.layer == layer.instance_id() && old.pixels.ptr_eq(&pixels) && old.extent == extent)
         {
             continue;
         }
-        checked.insert(map_id, Checked { layer: layer.instance_id(), pixels, extent: block.extent });
+        checked.insert(map_id, Checked { layer: layer.instance_id(), pixels, extent });
         let name = crate::project::short_name(name);
-        match check(&name, raster, block.extent) {
+        match check(&name, raster, extent) {
             Err(reason) => {
                 let detail = format!("{} ({reason})", crate::project::short_name(&map.name));
                 if restoring {
