@@ -398,8 +398,6 @@ fn block_polygons(s: &Session, o: &serde_json::Map<String, Value>) -> Result<rus
     Ok(rustgis_map::view::BlockShape::Polygon { layer: name, filter })
 }
 
-/// The name of the polygon layer `name` for `what` (water, a block's walls), checked: a polygon
-/// layer (`holds` says of what) holding all its polygons, of a name of its own.
 /// What simplifying a polygon block's outline lost, past a third of the finest mesh cell or short
 /// of its smallest rings, to stay under 65 535 sides (said when it is set and when a project opens).
 pub(crate) fn outline_simplified(layer: &str, o: &rustgis_render::terrain::Outline) -> Option<String> {
@@ -414,6 +412,8 @@ pub(crate) fn outline_simplified(layer: &str, o: &rustgis_render::terrain::Outli
     ))
 }
 
+/// The name of the polygon layer `name` for `what` (water, a block's walls), checked: a polygon
+/// layer (`holds` says of what) holding all its polygons, of a name of its own.
 fn polygon_layer(s: &Session, name: &str, what: &str, holds: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {

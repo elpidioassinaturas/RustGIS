@@ -2889,7 +2889,10 @@ fn drape_terrain(
             if i % 4096 == 0 && (rustgis_data::progress::check().is_err() || cancel::requested()) {
                 return false;
             }
-            if let Some(parts @ (_, DrapeParts::Parts(_))) = prepare(bi, at, depth, &mut edges) {
+            // Only those with parts: one wholly off the outline gives none and is cheap to read again.
+            if let Some(parts) = prepare(bi, at, depth, &mut edges)
+                && matches!(&parts.1, DrapeParts::Parts(ps) if !ps.is_empty())
+            {
                 cut.insert(i, parts);
             }
         }
