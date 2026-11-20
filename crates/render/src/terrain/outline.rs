@@ -15,6 +15,9 @@ const MAX_SIDES: usize = u16::MAX as usize;
 /// keeps every bend the ground's mesh can show.
 const SPACING: f64 = 1.0 / 2000.0;
 
+/// The most entries the sides' row index holds (each side once in every row it spans): 16 MB.
+const ROW_BUDGET: usize = 4_000_000;
+
 /// One side of an outline: its ends (anticlockwise round its ring), its ring, and how far along
 /// the ring it begins (Web Mercator metres).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,6 +38,12 @@ pub struct Outline {
     rings: Vec<(usize, usize, f64)>,
     extent: [f64; 4],
     rows: Vec<Vec<u32>>,
+    /// How near two corners in a row were let lie (Web Mercator metres; [`SPACING`] of the longer
+    /// side, or more when the sides would have passed [`MAX_SIDES`]), and the rings left out
+    /// (the smallest) when even that wasn't enough.
+    spacing: f64,
+    coarsened: bool,
+    dropped: usize,
 }
 
 /// The rows, layer, queries and outline read last ([`Outline::of`]), kept while the layer's rows
@@ -90,14 +99,35 @@ impl Outline {
         if !(x0 < x1 && y0 < y1) {
             return None;
         }
-        let mut gap = (x1 - x0).max(y1 - y0) * SPACING;
-        let thinned = loop {
-            let thinned: Vec<Vec<Coord>> = rings.iter().filter_map(|r| thin(r, gap)).collect();
-            if thinned.iter().map(Vec::len).sum::<usize>() <= MAX_SIDES {
+        let longer = (x1 - x0).max(y1 - y0);
+        let first = longer * SPACING;
+        let mut gap = first;
+        // Each ring thinned to an eighth of its own size at most, so a small polygon far from the
+        // others keeps a shape.
+        let size = |r: &[Coord]| {
+            let (xs, ys) = (r.iter().map(|c| c.x), r.iter().map(|c| c.y));
+            (xs.clone().fold(f64::NEG_INFINITY, f64::max) - xs.fold(f64::INFINITY, f64::min))
+                .max(ys.clone().fold(f64::NEG_INFINITY, f64::max) - ys.fold(f64::INFINITY, f64::min))
+        };
+        let count = |t: &[Vec<Coord>]| t.iter().map(Vec::len).sum::<usize>();
+        let mut thinned = loop {
+            let thinned: Vec<Vec<Coord>> = rings.iter().filter_map(|r| thin(r, gap.min(size(r) / 8.0))).collect();
+            if count(&thinned) <= MAX_SIDES || gap > longer {
                 break thinned;
             }
             gap *= 2.0;
         };
+        // Still too many (thousands of small rings): the largest that fit are kept.
+        let all = thinned.len();
+        if count(&thinned) > MAX_SIDES {
+            thinned.sort_by(|a, b| area2(b).total_cmp(&area2(a)));
+            let mut used = 0;
+            thinned.retain(|r| {
+                used += r.len();
+                used <= MAX_SIDES
+            });
+        }
+        let dropped = all - thinned.len();
         let (mut sides, mut starts) = (Vec::new(), Vec::new());
         for (i, r) in thinned.iter().enumerate() {
             let first = sides.len();
@@ -112,14 +142,33 @@ impl Outline {
         if sides.is_empty() {
             return None;
         }
-        let n = (sides.len() / 4).clamp(1, 4096);
+        // Rows enough for a few sides each, fewer when tall sides would fill [`ROW_BUDGET`].
+        let tall: f64 = sides.iter().map(|s| (s.a.y - s.z.y).abs() / (y1 - y0)).sum();
+        let n = (sides.len() / 4).clamp(1, 4096).min((ROW_BUDGET.saturating_sub(sides.len()) as f64 / tall.max(1e-9)) as usize).max(1);
         let mut rows = vec![Vec::new(); n];
         let row = |y: f64| (((y - y0) / (y1 - y0) * n as f64).floor().max(0.0) as usize).min(n - 1);
         for (k, s) in sides.iter().enumerate() {
             let (lo, hi) = (row(s.a.y.min(s.z.y)), row(s.a.y.max(s.z.y)));
             rows.iter_mut().take(hi + 1).skip(lo).for_each(|r| r.push(k as u32));
         }
-        Some(Outline { sides, rings: starts, extent: [x0, y0, x1, y1], rows })
+        Some(Outline { sides, rings: starts, extent: [x0, y0, x1, y1], rows, spacing: gap, coarsened: gap > first, dropped })
+    }
+
+    /// How many sides the outline keeps.
+    pub fn side_count(&self) -> usize {
+        self.sides.len()
+    }
+
+    /// How near two corners in a row were let lie (Web Mercator metres), and whether that is more
+    /// than the usual third of the finest mesh cell because the polygons had too many corners.
+    pub fn spacing(&self) -> (f64, bool) {
+        (self.spacing, self.coarsened)
+    }
+
+    /// How many of the polygons' rings were left out (the smallest) to keep the outline under
+    /// 65 535 sides.
+    pub fn dropped(&self) -> usize {
+        self.dropped
     }
 
     /// The box round the outline, `[xmin, ymin, xmax, ymax]` (Web Mercator).
@@ -153,19 +202,28 @@ impl Outline {
 
     /// Whether `m` lies inside the outline: inside any of its rings.
     pub fn contains(&self, m: Coord) -> bool {
+        self.inside_ring(m, |_| true)
+    }
+
+    /// Whether `m` lies inside one of the rings `counted` keeps.
+    pub(crate) fn inside_ring(&self, m: Coord, counted: impl Fn(u32) -> bool) -> bool {
         let [x0, y0, x1, y1] = self.extent;
         if !(m.x >= x0 && m.x <= x1 && m.y >= y0 && m.y <= y1) {
             return false;
         }
         // Each ring is anticlockwise: a ring round `m` winds it once.
-        let mut winding = 0i32;
+        let mut winding: Vec<(u32, i32)> = Vec::new();
         for &k in self.rows.get(*self.rows_of(m.y, m.y).start()).into_iter().flatten() {
-            let Some(Side { a, z, .. }) = self.sides.get(k as usize).copied() else { continue };
-            if (a.y > m.y) != (z.y > m.y) && m.x < a.x + (m.y - a.y) / (z.y - a.y) * (z.x - a.x) {
-                winding += if z.y > a.y { 1 } else { -1 };
+            let Some(Side { a, z, ring, .. }) = self.sides.get(k as usize).copied() else { continue };
+            if counted(ring) && (a.y > m.y) != (z.y > m.y) && m.x < a.x + (m.y - a.y) / (z.y - a.y) * (z.x - a.x) {
+                let turn = if z.y > a.y { 1 } else { -1 };
+                match winding.iter_mut().find(|w| w.0 == ring) {
+                    Some(w) => w.1 += turn,
+                    None => winding.push((ring, turn)),
+                }
             }
         }
-        winding != 0
+        winding.iter().any(|w| w.1 != 0)
     }
 
     /// The sides whose box meets the box from `lo` to `hi`, each once, into `out` (emptied first).
@@ -200,7 +258,7 @@ fn thin(ring: &[Coord], gap: f64) -> Option<Vec<Coord>> {
     while out.len() > 1 && out.last().zip(out.first()).is_some_and(|(l, f)| (l.x - f.x).hypot(l.y - f.y) < gap) {
         out.pop();
     }
-    let area2: f64 = out.iter().zip(out.iter().cycle().skip(1)).map(|(a, b)| a.x * b.y - b.x * a.y).sum();
+    let area2 = area2(&out);
     if out.len() < 3 || area2.abs() <= 0.0 || !area2.is_finite() {
         return None;
     }
@@ -208,4 +266,9 @@ fn thin(ring: &[Coord], gap: f64) -> Option<Vec<Coord>> {
         out.reverse();
     }
     Some(out)
+}
+
+/// Twice the signed area of `ring` (positive anticlockwise).
+fn area2(ring: &[Coord]) -> f64 {
+    ring.iter().zip(ring.iter().cycle().skip(1)).map(|(a, b)| a.x * b.y - b.x * a.y).sum()
 }

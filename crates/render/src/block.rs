@@ -198,8 +198,9 @@ fn corners_box(m: [Coord; 3]) -> (Coord, Coord) {
 /// (concave, maybe) anticlockwise: each stretch of a ring inside the triangle runs from where it
 /// enters to where it leaves, then along the triangle's edge (anticlockwise, as the rings run)
 /// to where the next stretch of the same ring enters, until the part closes. A ring wholly inside
-/// is a part of its own; with no ring crossing it, the triangle is whole inside or left out. A
-/// corner is marked with the outline's side (plus one) the part's edge from it runs along, 0
+/// is a part of its own. A ring that crosses none of it but holds it (its middle) adds the
+/// whole triangle, which several touching or overlapping polygons can give alongside the parts of
+/// another ring that crosses it. A corner is marked with the outline's side (plus one) the part's edge from it runs along, 0
 /// along the triangle's edge. Only the sides near the triangle are looked at ([`Outline::near`]).
 fn clip_outline(m: [Coord; 3], o: &Outline) -> Vec<Vec<Clipped>> {
     const EPS: f64 = 1e-9;
@@ -210,7 +211,12 @@ fn clip_outline(m: [Coord; 3], o: &Outline) -> Vec<Vec<Clipped>> {
     }
     let t = if area > 0.0 { m } else { [m[0], m[2], m[1]] };
     let mark = |p: Coord, on: u32| -> Clipped { ([0, 1, 2].map(|i| cross(m[(i + 1) % 3], m[(i + 2) % 3], p) / area), p, on) };
-    let whole = || if o.contains(t[0]) { vec![t.iter().map(|c| mark(*c, 0)).collect()] } else { Vec::new() };
+    // The whole triangle when a ring that doesn't cross it holds its middle (a point strictly
+    // inside, so a ring only touching it doesn't count).
+    let middle = Coord::new((t[0].x + t[1].x + t[2].x) / 3.0, (t[0].y + t[1].y + t[2].y) / 3.0);
+    let whole = |crossing: &[u32]| -> Option<Vec<Clipped>> {
+        o.inside_ring(middle, |r| !crossing.contains(&r)).then(|| t.iter().map(|c| mark(*c, 0)).collect())
+    };
     // How far inside edge `e` (from corner e to the next) `p` lies.
     let len = [0, 1, 2].map(|e| (t[(e + 1) % 3].x - t[e].x).hypot(t[(e + 1) % 3].y - t[e].y).max(1e-300));
     let inside = |e: usize, p: Coord| cross(t[e], t[(e + 1) % 3], p) / len[e];
@@ -238,8 +244,11 @@ fn clip_outline(m: [Coord; 3], o: &Outline) -> Vec<Vec<Clipped>> {
         }
     }
     if parts.is_empty() {
-        return whole();
+        return whole(&[]).into_iter().collect();
     }
+    let mut crossing: Vec<u32> = parts.iter().map(|p| sides[p.0].ring).collect();
+    crossing.sort_unstable();
+    crossing.dedup();
     let find = |k: usize| parts.binary_search_by_key(&k, |p| p.0).ok();
     let at = |k: usize, u: f64| sides.get(k).map_or(t[0], |s| Coord::new(s.a.x + (s.z.x - s.a.x) * u, s.a.y + (s.z.y - s.a.y) * u));
     // Where on the triangle's edge a point lies: the edge's number plus the share along it.
@@ -295,8 +304,8 @@ fn clip_outline(m: [Coord; 3], o: &Outline) -> Vec<Vec<Clipped>> {
             }
         }
     }
+    out.extend(whole(&crossing));
     if chains.is_empty() {
-        out.extend(whole());
         return out;
     }
     // Each chain, then the triangle's edge on to the next chain of its ring, until back.
@@ -957,9 +966,10 @@ fn draw_patterns(
 /// the contacts between colours.
 ///
 /// A polygon block's outline can be concave: ground and other walls can stand in front of a
-/// wall. Its walls are drawn among the ground instead, far to near: before each side,
-/// `ground_to` draws the ground's triangles at least as far as the nearest of those its
-/// stretches came from (the ground behind it), and the caller the rest after.
+/// wall. Its walls are drawn among the ground instead, far to near, a few stretches of a side at
+/// a time ([`WALL_RUN`]): before each run, `ground_to` draws the ground's triangles at least as
+/// far as the nearest of those its stretches came from (the ground behind it), and the caller
+/// the rest after.
 #[expect(clippy::too_many_arguments, reason = "the walls are drawn with what the frame drew the ground with")]
 pub(crate) fn draw_walls(
     pm: &mut Pixmap,
@@ -1013,17 +1023,25 @@ pub(crate) fn draw_walls(
         let (lo, hi) = (by_side.partition_point(|e| e.side < side), by_side.partition_point(|e| e.side <= side));
         by_side.get(lo..hi).unwrap_or_default()
     };
-    // The sides in drawing order: a polygon block's facing the eye far to near, each as far as the
-    // nearest triangle of ground its stretches came from.
-    let mut walk: Vec<(usize, f64)> = (0..faces.len()).map(|s| (s, f64::INFINITY)).collect();
-    if b.outline.is_some() {
-        walk.retain(|(s, _)| faces[*s].is_some());
-        for (s, key) in &mut walk {
-            *key = of_side(b.side(*s).0).iter().map(|e| e.depth).fold(f64::INFINITY, f64::min);
+    // The sides and their stretches in drawing order: a box's and a circle's sides whole, in
+    // turn; a polygon block's facing the eye in runs of [`WALL_RUN`] stretches along them (a long
+    // side reaches from far to near), far to near, each as far as the nearest triangle of ground
+    // its stretches came from.
+    let walk: Vec<(usize, f64, Vec<&Edge>)> = if b.outline.is_some() {
+        let mut walk = Vec::new();
+        for s in (0..faces.len()).filter(|s| faces[*s].is_some()) {
+            let key = b.side(s).0;
+            let mut stretches = of_side(key).to_vec();
+            stretches.sort_by(|p, q| b.along(key, p.ends[0]).total_cmp(&b.along(key, q.ends[0])));
+            for run in stretches.chunks(WALL_RUN) {
+                walk.push((s, run.iter().map(|e| e.depth).fold(f64::INFINITY, f64::min), run.to_vec()));
+            }
         }
-        walk.retain(|(_, key)| key.is_finite());
         walk.sort_by(|a, b| b.1.total_cmp(&a.1));
-    }
+        walk
+    } else {
+        (0..faces.len()).map(|s| (s, f64::INFINITY, of_side(b.side(s).0).to_vec())).collect()
+    };
     // How sharply the outline turns from side `p` to side `q` (the cosine of the turn).
     let turn = |p: usize, q: usize| {
         let ((_, a, z), (_, c, d)) = (b.side(p), b.side(q));
@@ -1046,7 +1064,8 @@ pub(crate) fn draw_walls(
     let mut mask: Option<Mask> = None;
     // The part of it the last run filled, cleared before the next: a round block has hundreds of sides.
     let mut dirty: Option<tiny_skia::Rect> = None;
-    for &(s, key) in &walk {
+    for (s, key, stretches) in &walk {
+        let (s, key) = (*s, *key);
         let Some(n) = faces[s] else { continue };
         if b.outline.is_some() {
             ground_to(pm, key);
@@ -1065,7 +1084,7 @@ pub(crate) fn draw_walls(
         let mut quads: Vec<([Coord; 2], [(f64, f64); 2], [(f64, f64); 2])> = Vec::new();
         let mut outline = PathBuilder::new();
         let (mut foot_mid, mut top_mid, mut count, mut nearest) = ((0.0, 0.0), (0.0, 0.0), 0.0, f64::INFINITY);
-        for e in of_side(side) {
+        for e in stretches {
             let (Some(fa), Some(fz)) = (foot(e.ends[0]), foot(e.ends[1])) else { continue };
             let [ta, tz] = e.top;
             quads.push((e.ends, [fa, fz], [ta, tz]));
@@ -1225,6 +1244,11 @@ pub(crate) fn draw_walls(
     stroke_outlines(pm, &mut outlines, k);
 }
 
+/// How many stretches of a polygon block's wall side are drawn at once ([`draw_walls`]): about as
+/// many triangles of ground along the outline, near enough in depth for one place in the far to
+/// near order.
+const WALL_RUN: usize = 8;
+
 /// Clears `mask` over the box `r` (physical px), a pixel round it for the anti-aliased edge.
 fn clear_mask(mask: &mut Mask, r: tiny_skia::Rect) {
     let (w, h) = (mask.width() as usize, mask.height() as usize);
@@ -1307,6 +1331,27 @@ mod tests {
         assert!(pieces([Coord::new(6.0, 6.0), Coord::new(9.0, 6.0), Coord::new(6.0, 9.0)], &b).is_empty());
         let inside = pieces([Coord::new(1.0, 1.0), Coord::new(3.0, 1.0), Coord::new(1.0, 3.0)], &b);
         assert!(inside.len() == 1 && (area(&inside) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_polygon_blocks_ring_holding_a_triangle_keeps_it_whole_and_one_touching_it_none() {
+        // A triangle touching the square's south side from outside at one point is left out.
+        let square = polygon_block(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        assert!(pieces([Coord::new(5.0, 0.0), Coord::new(4.0, -2.0), Coord::new(6.0, -2.0)], &square).is_empty());
+        // The square holds a triangle that a strip crosses: the whole triangle is kept, beside the
+        // strip's part, which gives its walls their stretches.
+        let o = Outline::from_rings(vec![
+            vec![Coord::new(0.0, 0.0), Coord::new(10.0, 0.0), Coord::new(10.0, 10.0), Coord::new(0.0, 10.0)],
+            vec![Coord::new(3.0, 0.0), Coord::new(5.0, 0.0), Coord::new(5.0, 10.0), Coord::new(3.0, 10.0)],
+        ])
+        .expect("an outline");
+        let b = Block { outline: Some(Arc::new(o)), x0: 0.0, y0: 0.0, x1: 10.0, y1: 10.0, ..unit_block() };
+        let parts = pieces([Coord::new(2.0, 2.0), Coord::new(8.0, 2.0), Coord::new(2.0, 8.0)], &b);
+        assert!(parts.iter().any(|p| p.len() == 3 && p.iter().all(|c| c.2 == 0) && (area(std::slice::from_ref(p)) - 18.0).abs() < 1e-9));
+        assert!(parts.iter().any(|p| p.iter().any(|c| c.2 != 0)));
+        // Two 10 m squares 100 km apart both stay, each with its four sides.
+        let small = |x: f64| vec![Coord::new(x, 0.0), Coord::new(x + 10.0, 0.0), Coord::new(x + 10.0, 10.0), Coord::new(x, 10.0)];
+        assert_eq!(Outline::from_rings(vec![small(0.0), small(100_000.0)]).map(|o| o.side_count()), Some(8));
     }
 
     #[test]

@@ -403,15 +403,15 @@ fn reset(s: &mut Session, p: Project) {
             rustgis_render::terrain::walls_layer(m, l).is_none().then(|| format!("{} ('{l}')", m.name))
         })
         .collect();
-    // A block cut to polygons (#2318) whose layer is missing isn't drawn: said, and kept, so a
-    // polygon layer of that name brings it back.
+    // A block cut to polygons (#2318) whose layer is missing or picks no polygon with an area
+    // isn't drawn: said, and kept, so a polygon layer of that name, or an edit, brings it back.
     let uncut: Vec<String> = s
         .project
         .maps
         .iter()
         .filter_map(|m| match &m.view.terrain.as_ref()?.block.as_ref()?.shape {
-            rustgis_map::view::BlockShape::Polygon { layer, .. } => {
-                rustgis_render::terrain::walls_layer(m, layer).is_none().then(|| format!("{} ('{layer}')", m.name))
+            rustgis_map::view::BlockShape::Polygon { layer, filter } => {
+                rustgis_render::terrain::Outline::of(m, layer, filter.as_deref()).is_none().then(|| format!("{} ('{layer}')", m.name))
             }
             _ => None,
         })
@@ -419,7 +419,7 @@ fn reset(s: &mut Session, p: Project) {
     if !uncut.is_empty() {
         s.notify(
             format!(
-                "{}: the layer a block diagram is cut to is missing, not a polygon layer, read a view at a time or of a name another layer shares, so no block is drawn",
+                "{}: the layer a block diagram is cut to is missing, not a polygon layer, read a view at a time, of a name another layer shares or picks no polygon with an area, so no block is drawn",
                 uncut.join(", ")
             ),
             false,

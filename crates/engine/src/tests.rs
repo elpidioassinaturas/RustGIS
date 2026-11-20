@@ -13664,6 +13664,7 @@ fn terrain_block_cut_to_polygons() {
         (json!({"shape": {"layer": geo, "x": 1}}), "has no 'x'"),
         (json!({"shape": {"layer": geo}, "extent": [1113194.0, 5621521.0, 1114307.0, 5622000.0]}), "give no extent"),
         (json!({"shape": {"layer": geo}, "radius": 100.0}), "radius is a circle's"),
+        (json!({"shape": {"layer": geo}, "extent": "layer"}), "give no extent"),
     ] {
         let e = s.run("map.terrain", &json!({"layer": dem, "block": block})).unwrap_err();
         assert!(e.contains(said), "{block}: {e}");
@@ -13676,8 +13677,10 @@ fn terrain_block_cut_to_polygons() {
         rustgis_geom::lonlat_to_merc(rustgis_geom::Coord::new(10.005, 45.005)),
         rustgis_geom::lonlat_to_merc(rustgis_geom::Coord::new(10.015, 45.015)),
     );
-    let e: Vec<f64> = v["block"]["extent"].as_array().unwrap().iter().filter_map(Value::as_f64).collect();
-    assert!(e.iter().zip([lo.x, lo.y, hi.x, hi.y]).all(|(a, b)| (a - b).abs() < 1e-3), "{e:?}");
+    let e: Vec<Option<f64>> = v["block"]["extent"].as_array().unwrap().iter().map(Value::as_f64).collect();
+    assert_eq!(e.len(), 4, "{e:?}");
+    assert!(e.iter().zip([lo.x, lo.y, hi.x, hi.y]).all(|(a, b)| a.is_some_and(|a| (a - b).abs() < 1e-3)), "{e:?}");
+    assert_eq!(v["block"]["outline"]["sides"], json!(4));
     // The block follows its layer's renames.
     let id = s.map().layer_by_name(&geo).map(|l| l.id).unwrap();
     s.run("layer.rename", &json!({"layer": id, "name": "bacias"})).unwrap();

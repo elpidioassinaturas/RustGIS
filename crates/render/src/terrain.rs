@@ -395,10 +395,10 @@ impl Ground {
         let n = BLOCK_SAMPLES as f64;
         let (mut lo, mut hi, mut missing) = (f64::INFINITY, f64::NEG_INFINITY, false);
         // A thin polygon can slip between the grid's points: its corners count too (a few
-        // hundred of them).
+        // hundred of them, and each ring's first, so a small ring is never left out).
         let corners = outline.iter().flat_map(|o| {
             let step = (o.sides().len() / (4 * BLOCK_SAMPLES)).max(1);
-            o.sides().iter().step_by(step).map(|s| s.a)
+            o.sides().iter().enumerate().filter(move |(i, s)| i % step == 0 || s.along == 0.0).map(|(_, s)| s.a)
         });
         let grid = (0..=BLOCK_SAMPLES).flat_map(|j| (0..=BLOCK_SAMPLES).map(move |i| (i as f64, j as f64)));
         let grid = grid.map(|(i, j)| (Coord::new(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * j / n), false));

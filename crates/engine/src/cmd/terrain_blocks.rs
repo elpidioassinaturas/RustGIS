@@ -96,6 +96,9 @@ fn landed_impl(session: &mut Session, restoring: bool) {
     let mut dropped = Vec::new();
     let mut restored = Vec::new();
     let mut partial = Vec::new();
+    // Blocks cut to polygons (#2318) that can't be read, and those off their DEM: said, and kept,
+    // so an edit of the polygons brings them back.
+    let (mut uncut, mut off) = (Vec::new(), Vec::new());
     for map in &session.project.maps {
         let map_id = map.instance_id();
         maps.insert(map_id);
@@ -124,11 +127,18 @@ fn landed_impl(session: &mut Session, restoring: bool) {
             continue;
         }
         checked.insert(map_id, Checked { layer: layer.instance_id(), pixels, extent });
+        let polygons = matches!(block.shape, rustgis_map::view::BlockShape::Polygon { .. });
+        if polygons && extent.is_none() {
+            uncut.push(crate::project::short_name(&map.name));
+            continue;
+        }
         let name = crate::project::short_name(name);
         match check(&name, raster, extent) {
             Err(reason) => {
                 let detail = format!("{} ({reason})", crate::project::short_name(&map.name));
-                if restoring {
+                if polygons {
+                    off.push(detail);
+                } else if restoring {
                     restored.push(detail);
                 } else {
                     dropped.push((map_id, detail));
@@ -176,6 +186,25 @@ fn landed_impl(session: &mut Session, restoring: bool) {
                 false,
             );
         }
+    }
+    if !uncut.is_empty() {
+        session.notify(
+            format!(
+                "Terrain: the polygons a block diagram is cut to can't be read (none with an area) on {}: no block is drawn until they can",
+                uncut.join(", ")
+            ),
+            false,
+        );
+    }
+    if !off.is_empty() {
+        session.notify(
+            format!(
+                "Terrain: {} block diagram(s) cut to polygons lie off their DEM, kept for when the polygons change: {}",
+                off.len(),
+                details(off.iter().take(3).cloned().collect(), off.len())
+            ),
+            false,
+        );
     }
     if !restored.is_empty() {
         session.notify_text(NoticeText::format(

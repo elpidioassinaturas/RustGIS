@@ -2875,6 +2875,25 @@ fn drape_terrain(
             pm.fill_path(&path, &fog_paint(f), FillRule::Winding, Transform::identity(), None);
         }
     };
+    // Walls once the base is settled: over elevation tiles still on their way it would move with
+    // each tile (the frame is drawn again when they arrive, `Ground::pending`).
+    let walls = block.as_ref().filter(|b| b.walls_stand(ground));
+    let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
+    let mut edges = Vec::new();
+    // A polygon block's walls stand among the ground (`block::draw_walls`): the stretches of its
+    // outline are read first, and the triangles they came from kept cut for drawing.
+    let polygon = walls.is_some_and(|b| b.outline.is_some());
+    let mut cut: std::collections::HashMap<usize, (Transform, DrapeParts)> = std::collections::HashMap::new();
+    if polygon {
+        for (i, &(depth, bi, at)) in tris.iter().enumerate() {
+            if i % 4096 == 0 && (rustgis_data::progress::check().is_err() || cancel::requested()) {
+                return false;
+            }
+            if let Some(parts @ (_, DrapeParts::Parts(_))) = prepare(bi, at, depth, &mut edges) {
+                cut.insert(i, parts);
+            }
+        }
+    }
     // Draws the triangles still to draw at least `key` away, far to near.
     let (mut next, mut stopped) = (0, false);
     let mut draw_to = |pm: &mut Pixmap, key: f64, edges: &mut Vec<block::Edge>| {
@@ -2886,7 +2905,7 @@ fn drape_terrain(
                 return;
             }
             next += 1;
-            let Some((t, parts)) = prepare(bi, at, depth, edges) else { continue };
+            let Some((t, parts)) = cut.remove(&(next - 1)).or_else(|| prepare(bi, at, depth, edges)) else { continue };
             // Fog from halfway to the reach.
             let f = fog_at(depth);
             match &parts {
@@ -2895,21 +2914,8 @@ fn drape_terrain(
             }
         }
     };
-    // Walls once the base is settled: over elevation tiles still on their way it would move with
-    // each tile (the frame is drawn again when they arrive, `Ground::pending`).
-    let walls = block.as_ref().filter(|b| b.walls_stand(ground));
-    let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
-    let mut edges = Vec::new();
     match walls {
-        // A polygon block's walls stand among the ground (`block::draw_walls`): the stretches of
-        // its outline are read first.
-        Some(b) if b.outline.is_some() => {
-            for (i, &(depth, bi, at)) in tris.iter().enumerate() {
-                if i % 4096 == 0 && (rustgis_data::progress::check().is_err() || cancel::requested()) {
-                    return false;
-                }
-                let _ = prepare(bi, at, depth, &mut edges);
-            }
+        Some(b) if polygon => {
             let mut scratch = Vec::new();
             block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale, env), fog, far, |pm, key| {
                 draw_to(pm, key, &mut scratch);

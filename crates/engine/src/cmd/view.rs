@@ -358,6 +358,10 @@ fn terrain_block(s: &Session, b: &serde_json::Map<String, Value>) -> Result<rust
         Some(Value::Object(o)) => block_polygons(s, o)?,
         Some(_) => return Err("block's shape is \"box\", \"circle\" or {\"layer\", \"where\"?}".into()),
     };
+    // "extent": "layer" names the DEM's box, which a block cut to polygons doesn't take.
+    if matches!(shape, rustgis_map::view::BlockShape::Polygon { .. }) && b.get("extent").is_some_and(|e| !e.is_null()) {
+        return Err("a block cut to polygons takes their box: give no extent".into());
+    }
     if radius.is_some() && !matches!(shape, rustgis_map::view::BlockShape::Circle { .. }) {
         return Err("block's radius is a circle's: give \"shape\": \"circle\" too".into());
     }
@@ -382,18 +386,13 @@ fn block_polygons(s: &Session, o: &serde_json::Map<String, Value>) -> Result<rus
         Some(_) => return Err("block's shape's where is an expression, as a definition query".into()),
     };
     let l = s.map().layer_by_name(&name).ok_or_else(|| format!("no layer '{name}'"))?;
-    let pick = rustgis_data::rows::Query::compile(filter.as_deref(), &l.dataset).map_err(|e| format!("block's shape's where: {e}"))?;
-    let keep = l.query_rows(&l.dataset);
-    let env = rustgis_data::query::Env::default();
-    let picked = |row: usize| {
-        keep.as_ref().is_none_or(|k| k.get(row).copied().unwrap_or(false))
-            && pick.matches(&l.dataset, row, &env)
-            && matches!(&l.dataset.features[row].geometry, Some(rustgis_data::Geometry::Polygon(p)) if !p.is_empty())
-    };
-    if !(0..l.dataset.features.len()).any(picked) {
+    rustgis_data::rows::Query::compile(filter.as_deref(), &l.dataset).map_err(|e| format!("block's shape's where: {e}"))?;
+    // The outline read here (one pass over the layer's rows and the picked rings' corners) is
+    // kept for the frames that follow.
+    if rustgis_render::terrain::Outline::of(s.map(), &name, filter.as_deref()).is_none() {
         return Err(match &filter {
-            Some(w) => format!("block's shape: no polygon of '{name}' matches {w}"),
-            None => format!("block's shape: '{name}' has no polygon to cut the block to"),
+            Some(w) => format!("block's shape: no polygon of '{name}' with an area matches {w}"),
+            None => format!("block's shape: '{name}' has no polygon with an area to cut the block to"),
         });
     }
     Ok(rustgis_map::view::BlockShape::Polygon { layer: name, filter })
@@ -459,7 +458,10 @@ fn terrain_water(s: &Session, w: &serde_json::Map<String, Value>) -> Result<rust
 /// (#1915) it reads the water's shores over a DEM layer for its notices, bounded by the render
 /// crate's `MAX_SHORE_SAMPLES` heights, with no progress or Cancel; the read is kept, so the
 /// frames that follow draw from it instead of reading the shores again. Over elevation tiles it
-/// reads no height (the coarse count comes from the shapes).
+/// reads no height (the coarse count comes from the shapes). With a block cut to polygons
+/// (#2318) it reads them once, as the water's shores: one pass over the layer's rows and each
+/// picked ring's corners once, kept (`Outline::of`) for the frames that follow, which read it
+/// again only after the layer is edited.
 fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     use rustgis_map::view::{MAX_EXAGGERATION, Terrain, TerrainEncoding, TerrainSource};
     if p.get("off").and_then(Value::as_bool) == Some(true) {
@@ -587,8 +589,23 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     };
     // A block this call leaves out is the one the terrain had: the refusal says so, and how to take it off.
     let kept = if block.is_none() { "; the block is the one kept from before, and \"block\": false takes it off" } else { "" };
-    // A block cut to polygons (#2318) is checked on the box round them.
+    // A block cut to polygons (#2318) is checked on the box round them, refused when they can't
+    // be read (a block kept from before whose layer changed).
     let own = t.block.as_ref().and_then(|b| super::terrain_blocks::own_box(m, b));
+    let outline = match t.block.as_ref().map(|b| &b.shape) {
+        Some(rustgis_map::view::BlockShape::Polygon { layer, filter }) => {
+            let Some(o) = rustgis_render::terrain::Outline::of(m, layer, filter.as_deref()) else {
+                let e =
+                    format!("the block's polygons in '{layer}' can't be read: none with an area matches{kept} (Terrain stays as it was)");
+                if let Some(old) = old_terrain {
+                    m.view.terrain = Some(old);
+                }
+                return Err(e);
+            };
+            Some((layer.clone(), o))
+        }
+        _ => None,
+    };
     let refused = match (&dem_box, own) {
         // A DEM whose corners give no box (one off the map's world, say) would draw no block.
         (Some((n, None, _)), None) => Some(format!(
@@ -643,6 +660,11 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
         };
         json!({"extent": extent, "extent_from": from, "depth": b.depth, "walls": walls, "shape": shape, "radius": radius, "radius_capped": capped})
     });
+    // A polygon block's outline as drawn: its sides and how near its corners were let lie.
+    if let Some((_, o)) = &outline {
+        let (spacing, coarsened) = o.spacing();
+        out["block"]["outline"] = json!({"sides": o.side_count(), "spacing": spacing, "coarsened": coarsened, "dropped": o.dropped()});
+    }
     if matches!(t.source, TerrainSource::Layer(_)) && t.block.is_some() && dem_box.is_none() {
         out["block"]["pendingDem"] = json!(true);
     }
@@ -691,6 +713,21 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     };
     let water_layer = t.water.as_ref().filter(|_| water.is_some()).map(|w| w.layer.clone());
     m.view.terrain = Some(t);
+    // A polygon block's outline simplified past a third of the finest mesh cell, or short of its
+    // smallest rings, to stay under 65 535 sides: said, with how far.
+    if let Some((layer, o)) = outline.filter(|(_, o)| o.spacing().1 || o.dropped() > 0) {
+        let left = match o.dropped() {
+            0 => String::new(),
+            n => format!(", and its {n} smallest ring(s) were left out"),
+        };
+        s.notify(
+            format!(
+                "Terrain: the outline of '{layer}' the block is cut to has too many corners: they were kept {:.0} m apart or more{left}, to stay under 65535 sides",
+                o.spacing().0
+            ),
+            false,
+        );
+    }
     if block_cut {
         s.notify(
             "Terrain's block was cut to the DEM's extent and is off with the switch to elevation tiles: give it an extent to keep it"
