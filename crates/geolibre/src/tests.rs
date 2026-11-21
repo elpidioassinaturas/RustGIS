@@ -316,6 +316,112 @@ fn composite_bands_runner_preserves_selected_band_order() {
     }
 }
 
+/// Two rasters on the DEM's grid, `A` holding 1 and `B` holding 2 in every cell.
+struct TwoLayers {
+    a: Raster,
+    b: Raster,
+}
+
+impl TwoLayers {
+    fn new() -> TwoLayers {
+        let f = Fixture::new();
+        let (mut a, mut b) = (f.dem.clone(), f.dem);
+        a.bands[0].data.fill(1.0);
+        b.bands[0].data.fill(2.0);
+        TwoLayers { a, b }
+    }
+}
+
+impl Inputs for TwoLayers {
+    fn dataset(&self, _: &str) -> Option<&Dataset> {
+        None
+    }
+    fn selection(&self, _: &str) -> &[usize] {
+        &[]
+    }
+    fn raster(&self, layer: &str) -> Option<RasterInput<'_>> {
+        match layer {
+            "A" => Some(RasterInput { raster: &self.a, path: None, embedded: None }),
+            "B" => Some(RasterInput { raster: &self.b, path: None, embedded: None }),
+            _ => None,
+        }
+    }
+}
+
+/// The value in the first cell of each staged input, in the order the runner gets them.
+fn staged_values(job: &Job) -> Vec<f32> {
+    job.files.iter().map(|(name, bytes)| rustgis_data::raster::read_bytes(name, bytes).unwrap().bands[0].data[0]).collect()
+}
+
+#[test]
+fn raster_calculator_binds_quoted_names_to_their_layers() {
+    // The input/output subset of `geolibre manifests` in 1.8.1, which calls the list single.
+    let manifest = json!({"id": "raster_calculator", "display_name": "Raster Calculator", "category": "Raster", "params": [
+        {"name": "expression", "data_kind": "string", "required": true, "schema": {"kind": "string"}},
+        {"name": "inputs", "io_role": "input", "data_kind": "raster", "required": true, "description": "Ordered input raster paths.",
+         "schema": {"cardinality": "single", "kind": "input"}},
+        {"name": "output", "io_role": "output", "data_kind": "raster", "required": false, "schema": {"kind": "output"}}
+    ]});
+    let (spec, meta) = spec_of(&manifest).unwrap();
+    // The form picks several layers, and says how they meet the expression.
+    let field = spec.params.iter().find(|p| p.name == "inputs").unwrap();
+    assert_eq!(field.kind, ParamKind::RasterLayers);
+    assert!(field.help.contains(CALCULATOR_INPUTS_HELP), "{}", field.help);
+    let f = TwoLayers::new();
+    let job = |params: Value| {
+        let params = rustgis_analysis::resolve_params(&spec, &params)?;
+        prepare_with(&spec, &meta, &f, &params)
+    };
+    // `"B" + 0 * "A"` is B, in whichever order the layers are listed.
+    for inputs in [json!("A;B"), json!("B;A"), json!(["A", "B"])] {
+        let j = job(json!({"expression": "\"B\" + 0 * \"A\"", "inputs": inputs})).unwrap();
+        assert_eq!(staged_values(&j), [2.0, 1.0], "{inputs}");
+        assert_eq!(
+            j.argv("/work"),
+            ["--expression=\"B\" + 0 * \"A\"", "--inputs=/work/in0-B.tif;/work/in1-A.tif", "--output=/work/output.tif"]
+        );
+    }
+    // Single quotes and a name quoted twice, as the runner reads them: by first appearance.
+    let j = job(json!({"expression": "if('A' > 0, 'B', 'A')", "inputs": "B;A"})).unwrap();
+    assert_eq!(staged_values(&j), [1.0, 2.0]);
+    // A name that isn't an input, and an input the expression doesn't use: refused, not guessed.
+    let e = job(json!({"expression": "\"B\" + \"C\"", "inputs": "A;B"})).unwrap_err();
+    assert!(e.starts_with("Raster Calculator: ") && e.contains("\"C\"") && e.contains("A; B"), "{e}");
+    let e = job(json!({"expression": "\"B\" * 2", "inputs": "A;B"})).unwrap_err();
+    assert!(e.contains("doesn't quote the input(s) A"), "{e}");
+    // Files only: matched by path, file name or name without extension, else by position (the
+    // runner's own contract), so typed paths keep working.
+    let none = Fixture::new();
+    let order = |expression: &str, list: &[&'static str]| calculator_order(expression, list.to_vec(), &none);
+    assert_eq!(order("'nir' - 'red'", &["/d/red.tif", "/d/nir.tif"]).unwrap(), ["/d/nir.tif", "/d/red.tif"]);
+    assert_eq!(order("\"/d/nir.tif\" - \"red.tif\"", &["/d/red.tif", "/d/nir.tif"]).unwrap(), ["/d/nir.tif", "/d/red.tif"]);
+    assert_eq!(order("'x' - 'y'", &["/d/red.tif", "/d/nir.tif"]).unwrap(), ["/d/red.tif", "/d/nir.tif"]);
+    // A layer listed with a file it doesn't name: refused, as a layer's name is the rule then.
+    assert!(order("'dem' - 'x'", &["/d/red.tif", "dem"]).is_err());
+    assert_eq!(order("'dem' - 'red'", &["/d/red.tif", "dem"]).unwrap(), ["dem", "/d/red.tif"]);
+    // Other tools' inputs keep the order they are listed in.
+    let mut other = manifest;
+    other["id"] = json!("other_calculator");
+    let (spec2, meta2) = spec_of(&other).unwrap();
+    assert_eq!(spec2.params.iter().find(|p| p.name == "inputs").unwrap().kind, ParamKind::RasterLayer);
+    let params = rustgis_analysis::resolve_params(&spec2, &json!({"expression": "\"B\" + 0 * \"A\"", "inputs": "A;B"})).unwrap();
+    assert_eq!(staged_values(&prepare_with(&spec2, &meta2, &f, &params).unwrap()), [1.0, 2.0]);
+}
+
+#[test]
+fn raster_calculator_runner_reads_the_quoted_layer() {
+    let Some(_) = setup() else { return };
+    let f = TwoLayers::new();
+    for inputs in ["A;B", "B;A"] {
+        let params = json!({"expression": "\"B\" + 0 * \"A\"", "inputs": inputs});
+        let result = rustgis_analysis::run("geolibre:raster_calculator", &f, &params).unwrap();
+        let Output::Layers(layers) = result.output else { panic!("layers") };
+        let Some(OutputLayer::Raster { bytes, file_name, .. }) = layers.first() else { panic!("a raster: {layers:?}") };
+        let raster = rustgis_data::raster::read_bytes(file_name, bytes).unwrap();
+        assert!((raster.bands[0].data[0] - 2.0).abs() < 1e-6, "{inputs}: {}", raster.bands[0].data[0]);
+    }
+}
+
 #[test]
 fn field_suggestions_keep_categorical_values_and_plural_lists() {
     let manifest = json!({"id": "field_forms", "params": [
