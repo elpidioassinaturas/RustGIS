@@ -45315,7 +45315,8 @@ fn a_pdf_says_which_frames_it_doesnt_georeference() {
 fn a_grib_download_is_read_off_the_frame() {
     use crate::cmd::raster::download_page;
     let asked = json!({"url": "x"});
-    let message = b"GRIB  4";
+    // A GRIB1 message of 52 octets: "GRIB", its length, its edition.
+    let message = b"GRIB\0\0\x34\x01";
     let found = download_page("https://example.org/bam/PREC.grb", &asked, message);
     assert_eq!(found, Some(("PREC.grb".to_string(), None, true)));
     let (sniffed, ..) = download_page("https://example.org/record?id=7", &asked, message).unwrap();

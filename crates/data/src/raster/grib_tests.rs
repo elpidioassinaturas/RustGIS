@@ -1095,3 +1095,95 @@ fn a_field_on_another_grid_takes_none_of_the_room() {
     assert!(matches!(got.first(), Some(Err(Skip::OtherGrid))));
     assert!(matches!(got.get(1), Some(Ok(f)) if f.values == vec![1.0, 2.0]));
 }
+
+#[test]
+fn a_field_whose_sections_come_again_before_its_data_is_damaged() {
+    // Field A's sections 3 to 6, no section 7, then field B whole: A is said, B read.
+    let a = || {
+        let mut a = F2::new(2, 1, vec![1]);
+        a.keep = Some(vec![true, false]);
+        a
+    };
+    let b = F2::new(2, 1, vec![3, 4]);
+    let mut body = without_section(&a(), 7);
+    body.extend(b.sections());
+    let r = read_bytes(&message_of(&body), "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert_eq!(r.bands[0].data, vec![3.0, 4.0]);
+    assert!(r.lost.contains(&"1 field left out: damaged (a field without its data section)".to_string()), "{:?}", r.lost);
+    // Then field B without its bitmap section: never read with A's bitmap.
+    let mut body = without_section(&a(), 7);
+    body.extend(without_section(&b, 6));
+    let got = grib2(&message_of(&body), usize::MAX, None, Uncounted::default());
+    assert_eq!(got.len(), 2);
+    assert!(matches!(&got[0], Err(Skip::Damaged(why)) if why == "a field without its data section"));
+    assert!(matches!(&got[1], Err(Skip::Damaged(why)) if why == "a field without its bitmap section"));
+}
+
+/// The offset in a GRIB2 message of its section `number`.
+fn section_at(message: &[u8], number: u8) -> usize {
+    let mut at = 16;
+    while message[at..at + 4] != *b"7777" {
+        if message[at + 4] == number {
+            return at;
+        }
+        at += u32::from_be_bytes([message[at], message[at + 1], message[at + 2], message[at + 3]]) as usize;
+    }
+    panic!("no section {number}");
+}
+
+#[test]
+fn sections_that_break_before_a_length_that_hides_the_next_message_are_damage() {
+    // GRIB1: the first message's binary data section 2 octets long, its length running to the
+    // end of the second message.
+    let mut first = G1::new(2, 1, vec![1, 2]).bytes();
+    let second = G1::new(2, 1, vec![3, 4]).bytes();
+    let len = (first.len() + second.len()) as u64;
+    first[4..7].copy_from_slice(&u(len, 3));
+    let gds = 8 + be(&first, 8, 3) as usize;
+    let bds = gds + be(&first, gds, 3) as usize;
+    first[bds..bds + 3].copy_from_slice(&u(2, 3));
+    let mut file = first;
+    file.extend(&second);
+    assert_eq!(header(&mut std::io::Cursor::new(&file), 0, len, false).unwrap(), Header::WrongLength);
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert_eq!(r.bands[0].data, vec![3.0, 4.0]);
+    assert!(r.lost.contains(&"1 message left out: damaged".to_string()), "{:?}", r.lost);
+    // GRIB2: a data section shorter than its header, then one running past the first message's
+    // "7777" into the second.
+    for grow in [None, Some(2)] {
+        let mut first = grib2_message(&[F2::new(2, 1, vec![1, 2])]);
+        let second = grib2_message(&[F2::new(2, 1, vec![3, 4])]);
+        let len = (first.len() + second.len()) as u64;
+        first[8..16].copy_from_slice(&u(len, 8));
+        let at = section_at(&first, 7);
+        let size = grow.map_or(2, |n| be(&first, at, 4) + n);
+        first[at..at + 4].copy_from_slice(&u(u64::from(size), 4));
+        let mut file = first;
+        file.extend(&second);
+        assert_eq!(header(&mut std::io::Cursor::new(&file), 0, len, true).unwrap(), Header::WrongLength, "{grow:?}");
+        let r = read_bytes(&file, "t").unwrap();
+        assert_eq!(r.bands.len(), 1);
+        assert_eq!(r.bands[0].data, vec![3.0, 4.0]);
+        assert!(r.lost.contains(&"1 message left out: damaged".to_string()), "{:?}", r.lost);
+    }
+}
+
+#[test]
+fn fields_of_a_message_too_large_to_read_whole_are_said_so() {
+    // Room for 4 values: a message of a 2-point field with a megabyte of local use (section 2) is
+    // larger than that room lets be read; the next message is read.
+    let mut local = u(5 + (1 << 20), 4);
+    local.push(2);
+    local.resize(5 + (1 << 20), 0);
+    local.extend(F2::new(2, 1, vec![1, 2]).sections());
+    let mut file = message_of(&local);
+    file.extend(grib2_message(&[F2::new(2, 1, vec![3, 4])]));
+    let r = read_limited(std::io::Cursor::new(&file), "t", None, 4).unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert_eq!(r.bands[0].data, vec![3.0, 4.0]);
+    let said = "1 field left out: their message is larger than the memory left lets be read whole, even where one of its fields would fit; split the file with a GRIB tool (wgrib2 or CDO) and add its parts";
+    assert!(r.lost.contains(&said.to_string()), "{:?}", r.lost);
+    assert!(!r.lost.iter().any(|l| l.contains("the bands read hold the most")), "{:?}", r.lost);
+}

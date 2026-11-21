@@ -59,11 +59,15 @@ pub fn read<R: Read + Seek>(source: R, name: &str) -> Result<Raster> {
 
 /// [`read`], with the no-data value of a sidecar (`.aux.xml`) beside the file, whose values aren't
 /// counted as rounded ([`Uncounted`]'s rule): GRIB has no no-data value of its own (a bitmap masks).
-pub fn read_with_nodata<R: Read + Seek>(mut source: R, name: &str, sidecar_nodata: Option<f64>) -> Result<Raster> {
+pub fn read_with_nodata<R: Read + Seek>(source: R, name: &str, sidecar_nodata: Option<f64>) -> Result<Raster> {
+    read_limited(source, name, sidecar_nodata, max_samples())
+}
+
+/// [`read_with_nodata`], holding at most `limit` values.
+fn read_limited<R: Read + Seek>(mut source: R, name: &str, sidecar_nodata: Option<f64>, limit: usize) -> Result<Raster> {
     let uncounted = Uncounted::new(None, sidecar_nodata);
     let file_len = source.seek(SeekFrom::End(0))?;
     source.seek(SeekFrom::Start(0))?;
-    let limit = max_samples();
     let mut fields: Vec<Field> = Vec::new();
     let mut skipped = Skipped::default();
     let mut at = 0u64;
@@ -146,8 +150,9 @@ pub fn read_with_nodata<R: Read + Seek>(mut source: R, name: &str, sidecar_nodat
         counted.add(len)?;
         // Past the memory limit, a message none of whose fields fits in the room left, or one
         // larger than those points can take (at most 32 bits each, a bitmap and a megabyte of
-        // sections): only counted, never read. A grid this reader refuses, or too many sections,
-        // leaves the message out unread.
+        // sections): only counted, never read. A message is read whole, so that size bounds the bytes
+        // held: its fields are left out even where one of them would fit, and are said apart.
+        // A grid this reader refuses, or too many sections, leaves the message out unread.
         match header {
             Header::Refused(why) => {
                 skipped.add(why);
@@ -161,8 +166,12 @@ pub fn read_with_nodata<R: Read + Seek>(mut source: R, name: &str, sidecar_nodat
         }
         let room = limit.saturating_sub(held);
         let too_long = len > (room as u64).saturating_mul(5).saturating_add(1 << 20);
-        if held >= limit || too_long || matches!(header, Header::Points(n) if n > room) {
+        if held >= limit || matches!(header, Header::Points(n) if n > room) {
             skipped.over_limit += count_fields(&mut source, start, len, edition == Some(2))?;
+            continue;
+        }
+        if too_long {
+            skipped.too_long += count_fields(&mut source, start, len, edition == Some(2))?;
             continue;
         }
         let mut bytes = Vec::new();
@@ -319,9 +328,10 @@ enum Header {
     /// How many points the smallest of its fields covers (GRIB1's grid description, GRIB2's
     /// number of data points of the grid each data section follows): when not even that one fits
     /// in the room left, the message is left out unread; each of the others is admitted or not as
-    /// it is decoded.
+    /// it is decoded, unless the message's bytes are more than the room left lets be read whole.
     Points(usize),
-    /// Sections that end on a "7777" before the message's length does: the length is damaged.
+    /// Sections that end on a "7777" before the message's length does, or don't chain to its
+    /// end: the length is damaged.
     WrongLength,
     /// Headers the decoder will find damaged: it says why.
     Unknown,
@@ -350,8 +360,9 @@ fn header<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) -> 
             return Ok(Header::Unknown);
         }
         // The sections the flags say are there (product definition, grid description, bitmap,
-        // binary data), by their lengths: ending on a "7777" before the message's end, the
-        // message's length is wrong.
+        // binary data), by their lengths: ending on a "7777" before the message's end, or broken
+        // (a section shorter than its length octets, or past the message's end), the message's
+        // length can't be trusted (it may hide the next message).
         let flags = head[7];
         let mut at = start + 8 + u64::from(be(&head, 0, 3));
         let mut chained = true;
@@ -367,7 +378,7 @@ fn header<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) -> 
             at += u64::from(be(&size, 0, 3));
         }
         let mut tail = [0u8; 4];
-        if chained && at + 4 < end && read(source, at, &mut tail)? && &tail == b"7777" {
+        if !chained || (at + 4 < end && read(source, at, &mut tail)? && &tail == b"7777") {
             return Ok(Header::WrongLength);
         }
         if flags & 0x80 == 0 {
@@ -391,13 +402,15 @@ fn header<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) -> 
     // Each section's 5-octet header (a constant field's data section is no longer, just before
     // "7777"), and the grid's number of data points (octets 7 to 10) when it is section 3. The
     // last "7777" can't be read with a fifth octet: one that can comes before the message's end.
+    // Sections that don't end on the last "7777" (one shorter than its header, or past the
+    // message's end) break the message's length as one: it may hide the next message.
     while read(source, at, &mut head[..5])? {
         if &head[..4] == b"7777" {
             return Ok(Header::WrongLength);
         }
         let size = u64::from(be(&head, 0, 4));
         if size < 5 {
-            break;
+            return Ok(Header::WrongLength);
         }
         sections += 1;
         if sections > MAX_SECTIONS {
@@ -410,6 +423,9 @@ fn header<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: bool) -> 
             _ => {}
         }
         at += size;
+    }
+    if at != end - 4 {
+        return Ok(Header::WrongLength);
     }
     Ok(Header::Points(fewest.unwrap_or(0)))
 }
@@ -464,6 +480,8 @@ struct Skipped {
     damage: Vec<(String, usize)>,
     other_grid: usize,
     over_limit: usize,
+    /// Fields of messages larger than the room left lets be read whole.
+    too_long: usize,
     cut: usize,
     /// Bytes outside every message that aren't zeros.
     junk: u64,
@@ -496,6 +514,12 @@ impl Skipped {
             out.push(format!(
                 "{} left out: the bands read hold the most this computer keeps in memory ({limit} values); split the file with a GRIB tool (wgrib2 or CDO) and add its parts",
                 count(self.over_limit)
+            ));
+        }
+        if self.too_long > 0 {
+            out.push(format!(
+                "{} left out: their message is larger than the memory left lets be read whole, even where one of its fields would fit; split the file with a GRIB tool (wgrib2 or CDO) and add its parts",
+                count(self.too_long)
             ));
         }
         if self.cut > 0 {
@@ -1068,7 +1092,8 @@ fn section2(b: &[u8], at: usize) -> Option<(u8, &[u8])> {
 /// A GRIB2 message (WMO FM 92 GRIB edition 2): each of its fields. A grid (section 3) may serve
 /// the fields after it, but each field has its own sections 4 to 7 (WMO's regulation 92.1.3): a
 /// field without its own product, packing or bitmap section is damaged, never read with the one
-/// before it, and so are sections 4 to 6 the message ends on without a section 7. `first`: the
+/// before it, and so are sections 4 to 6 without a section 7 after them, whether the message ends
+/// on them or another field's sections follow (never read with that field's). `first`: the
 /// grid of the fields kept, if any; a field on another is left out before it is decoded.
 fn grib2(b: &[u8], room: usize, mut first: Option<Grid>, uncounted: Uncounted) -> Vec<std::result::Result<Field, Skip>> {
     let mut out = Vec::new();
@@ -1097,6 +1122,18 @@ fn grib2(b: &[u8], room: usize, mut first: Option<Grid>, uncounted: Uncounted) -
             break;
         };
         at += s.len();
+        // A field's product, packing or bitmap given again before its data section: the field
+        // before ends without one, and gives nothing to the field after it.
+        let again = match number {
+            4 => product.is_some() || packing.is_some() || bitmap.is_some(),
+            5 => packing.is_some() || bitmap.is_some(),
+            6 => bitmap.is_some(),
+            _ => false,
+        };
+        if again {
+            out.push(Err(Skip::Damaged("a field without its data section".to_string())));
+            (product, packing, bitmap) = (None, None, None);
+        }
         match number {
             1 => {
                 reference = date(
