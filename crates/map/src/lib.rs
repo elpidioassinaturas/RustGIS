@@ -693,6 +693,7 @@ impl Layer {
             source::Polled::Done(_, batch) => {
                 src.saw_unread_dates(&batch.unread_dates, &batch.rounded_dates);
                 src.saw_null_text(&batch.null_text);
+                src.saw_read_notes(&batch.notes);
                 self.install(batch.features)
             }
             source::Polled::Failed(_) => self.install(Vec::new()),
@@ -705,6 +706,7 @@ impl Layer {
                 source::Polled::Done(_, batch) => {
                     src.saw_unread_dates(&batch.unread_dates, &batch.rounded_dates);
                     src.saw_null_text(&batch.null_text);
+                    src.saw_read_notes(&batch.notes);
                     self.install(batch.features)
                 }
                 source::Polled::Failed(_) => self.install(Vec::new()),
@@ -1838,13 +1840,20 @@ pub struct Map {
     pub bookmarks: Vec<Bookmark>,
     #[serde(default = "yes")]
     pub graticule: bool,
-    /// What the graticule draws: latitudes and longitudes, a measured grid or the UTM zones.
+    /// What the graticule draws: latitudes and longitudes, a measured grid, the UTM zones or MGRS.
     #[serde(default, skip_serializing_if = "graticule::GraticuleType::is_degrees")]
     pub graticule_type: graticule::GraticuleType,
     /// A measured graticule's coordinate system (`EPSG:2056`, WKT or a PROJ string): none is the
     /// map's own when it is projected, else the UTM zone (WGS 84) at the view's centre.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graticule_crs: Option<String>,
+    /// The graticule's lines drawn over the map's layers and web tile layers (just under the
+    /// labels), rather than with the basemap under them, where filled layers hide them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub graticule_on_top: bool,
+    /// The graticule's color (with its opacity): none is the basemap palette's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graticule_color: Option<Rgba>,
     /// Flat map or 3D globe.
     #[serde(default)]
     pub projection: Projection,
@@ -1986,6 +1995,8 @@ impl Map {
             graticule: true,
             graticule_type: graticule::GraticuleType::Degrees,
             graticule_crs: None,
+            graticule_on_top: false,
+            graticule_color: None,
             projection: Projection::WebMercator,
             popup_mode: PopupMode::Topmost,
             label_display: LabelDisplay::default(),
@@ -2776,6 +2787,27 @@ impl Map {
         out
     }
 
+    /// The order the map's layers are drawn in, top first: the [`Map::stack`] with a higher depth
+    /// priority above whatever the order, as the renderer draws them and [`Map::hits_at`] ranks
+    /// them. A tile layer goes with the layer it's drawn over; those under all of them stay last.
+    pub fn draw_order(&self) -> Vec<Drawn> {
+        let slots = self.tile_slots();
+        let priority = |d: &Drawn| match *d {
+            Drawn::Layer(i) => self.layers.get(i).map_or(0, |l| l.priority),
+            Drawn::Tile(i) => slots.get(i).copied().flatten().and_then(|id| self.layer(id)).map_or(i32::MIN, |l| l.priority),
+        };
+        let mut out = self.stack();
+        // A stable sort: the stack's order among equal priorities.
+        out.sort_by_key(|d| std::cmp::Reverse(priority(d)));
+        out
+    }
+
+    /// The tile layers' indices in [`Map::draw_order`], top first: the order identify asks and
+    /// reads them in. It differs from their order in `tiles` once depth priorities are set.
+    pub fn tiles_in_draw_order(&self) -> Vec<usize> {
+        self.draw_order().into_iter().filter_map(|d| if let Drawn::Tile(i) = d { Some(i) } else { None }).collect()
+    }
+
     /// The tile layers drawn just over the map layer `over` (None: under all of them), top
     /// first, by index.
     pub fn tiles_over(&self, over: Option<u32>) -> Vec<usize> {
@@ -3173,6 +3205,11 @@ impl Map {
         (grey, grey, Rgba::new(0, 0, 0, 0), grat)
     }
 
+    /// The graticule's color: the one set for it, else the basemap palette's.
+    pub fn graticule_rgba(&self) -> Rgba {
+        self.graticule_color.unwrap_or(self.palette().3)
+    }
+
     /// The blank basemap's paper colour, when the map is on the blank basemap and has one: always
     /// opaque, a file's translucent one included (the paper is the backdrop: nothing shows through).
     pub fn blank_paper(&self) -> Option<Rgba> {
@@ -3413,6 +3450,8 @@ impl Map {
             graticule: _,
             graticule_type: _,
             graticule_crs: _,
+            graticule_on_top: _,
+            graticule_color: _,
             projection: _,
             popup_mode: _,
             label_display: _,
@@ -4773,6 +4812,37 @@ mod tests {
             l.definition_query = Some("n = 1".into());
         }
         assert_eq!(m.hits_at(p, 1000.0, 1e6, |l| l.id == below, false, 100), vec![(below, 0)]);
+    }
+
+    #[test]
+    fn draw_order_puts_a_higher_priority_on_top_with_its_tile_layers() {
+        let mut m = Map::new("Map");
+        let below = m.add_dataset(points());
+        let above = m.add_dataset(points());
+        let url = "https://a.tile.example.com/{z}/{x}/{y}.png";
+        let mut over = tiles::TileLayer::new("Over", tiles::TileKind::Raster, url);
+        over.over = Some(below);
+        m.tiles.push(over);
+        m.tiles.push(tiles::TileLayer::new("Under", tiles::TileKind::Raster, url));
+        let (b, a) = (m.layer_index(below).unwrap(), m.layer_index(above).unwrap());
+        // Equal priorities: the stack's order.
+        assert_eq!(m.draw_order(), vec![Drawn::Layer(a), Drawn::Tile(0), Drawn::Layer(b), Drawn::Tile(1)]);
+        assert_eq!(m.draw_order(), m.stack());
+        // A higher depth priority draws on top whatever the order, its tile layer over it, and
+        // those under all the layers stay last.
+        if let Some(l) = m.layers.iter_mut().find(|l| l.id == below) {
+            l.priority = 1;
+        }
+        assert_eq!(m.draw_order(), vec![Drawn::Tile(0), Drawn::Layer(b), Drawn::Layer(a), Drawn::Tile(1)]);
+        assert_eq!(m.tiles_in_draw_order(), [0, 1]);
+        // A tile layer over the layer drawn on top comes first, whatever its index.
+        m.tiles.swap(0, 1);
+        assert_eq!(m.tiles_in_draw_order(), [1, 0]);
+        m.tiles.swap(0, 1);
+        if let Some(l) = m.layers.iter_mut().find(|l| l.id == above) {
+            l.priority = -5;
+        }
+        assert_eq!(m.draw_order(), vec![Drawn::Tile(0), Drawn::Layer(b), Drawn::Layer(a), Drawn::Tile(1)]);
     }
 
     #[test]

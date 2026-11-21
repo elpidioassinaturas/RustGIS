@@ -33,6 +33,9 @@ pub(crate) fn need_raster(s: &Session) -> Option<&'static str> {
 
 pub fn commands() -> Vec<C> {
     vec![
+        C::new("raster.imageGrid", "Original Image Grid", "Analyze › Annotate", crate::image_grid::query)
+            .inputs(crate::cmd::Inputs::single_layer).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).view()
+            .params(r#"{"layer"?:name|id}"#),
         C::new("layer.addDataBytes", "Add Data (from file contents)", "Home › Add", add_bytes::<MAX_UPLOAD_BYTES>).roles(&[]).effects(crate::policy::Effects::NONE)
             .params(r#"{"fileName": "name.tif|.tiff|.asc|.geojson|.csv|.zip|.kml|.kmz|.gpx|.parquet|.fgb|.gpkg|.mbtiles|.jp2|.j2k|.dxf|.pdf (JPEG 2000: desktop, through GDAL; PDF: desktop, command line and Python)", "data": base64, "zoom"?: bool, "layer"?: "one layer of a zip, KML or GPX by name, or a PDF's page number (the first when left out or blank)", "name"?: text, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"?, "paperSpace"?, "blocks"?, "stream"?, "as"? (as layer.addData)}"#),
         C::new("raster.symbology", "Symbology", "Style › Rendering", symbology).when(need_raster).roles(&[]).effects(crate::policy::Effects::NONE).params(
@@ -1235,9 +1238,22 @@ fn geotiff_note(r: &Raster, bi: usize, cog: bool, band_hint: &str) -> Result<Str
 
 /// Pixel values of the topmost visible raster under a longitude/latitude point.
 pub fn identify(s: &Session, lon: f64, lat: f64) -> Option<Value> {
+    pixels_at(s, lon, lat, |_| true, true).into_iter().next().map(|(_, v)| v)
+}
+
+/// The pixel values under a longitude/latitude point of each visible raster `keep` takes that has
+/// a value there, with the raster's index in the map's layers, the one drawn on top first (the
+/// map's drawing order, a higher depth priority above whatever the order); with `first`, the
+/// topmost raster's alone. Identify ranks them with the features by that order (#2488).
+pub fn pixels_at(s: &Session, lon: f64, lat: f64, keep: impl Fn(&rustgis_map::Layer) -> bool, first: bool) -> Vec<(usize, Value)> {
     let scale = s.scale();
     let c = rustgis_geom::Coord::new(lon, lat);
-    s.map().layers.iter().filter(|l| s.map().draws_at(l, scale)).find_map(|l| {
+    let map = s.map();
+    let drawn = map.draw_order().into_iter().filter_map(|d| match d {
+        rustgis_map::Drawn::Layer(i) => Some((i, map.layers.get(i)?)),
+        rustgis_map::Drawn::Tile(_) => None,
+    });
+    let pixels = drawn.filter(|(_, l)| l.is_raster() && keep(l) && map.draws_at(l, scale)).filter_map(|(i, l)| {
         let r = l.raster.as_ref()?.data.as_ref()?;
         let (col, row) = r.pixel_at(c)?;
         let vals: Vec<Option<f32>> = (0..r.band_count()).map(|b| r.value(b, col, row)).collect();
@@ -1249,8 +1265,9 @@ pub fn identify(s: &Session, lon: f64, lat: f64) -> Option<Value> {
             attrs.insert(b.name.clone(), json!(v.map(|v| rustgis_map::symbology::fmt_num(v as f64)).unwrap_or_else(|| "NoData".into())));
         }
         attrs.insert("Pixel".into(), json!(format!("{col}, {row}")));
-        Some(json!({"layer": l.name, "layerId": l.id, "raster": true, "attributes": attrs}))
-    })
+        Some((i, json!({"layer": l.name, "layerId": l.id, "raster": true, "attributes": attrs})))
+    });
+    if first { pixels.take(1).collect() } else { pixels.collect() }
 }
 
 /// Binds the primary raster and optional actual like raster without copying pixel data.

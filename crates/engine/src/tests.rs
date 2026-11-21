@@ -52,6 +52,9 @@ mod scopes_and_redaction;
 #[path = "tests/layout_files.rs"]
 mod layout_files;
 
+#[path = "tests/sde_connections.rs"]
+mod sde_connections;
+
 /// Where the tests' plugins folder keeps what plugins remember: not the user's.
 fn plugin_settings_dir() -> std::path::PathBuf {
     rustgis_plugins::store::dir().unwrap().join("settings")
@@ -1562,6 +1565,150 @@ fn a_streamed_shapefile_says_null_markers_once_and_in_its_exports() {
             }
         }
     }
+}
+
+/// What the map's reads of a layer read in place lost (`Batch::notes`, here a Shapefile line left
+/// out for a NaN point under a stored box that frames the layer) is said once for its opening, not
+/// on each read of the view, and again once after the source is opened anew; a clean file says
+/// nothing.
+#[test]
+fn a_streamed_layer_says_its_view_reads_notes_once() {
+    use rustgis_data::{Dataset, Geometry, GeometryType};
+    struct Dir(std::path::PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = Dir(std::env::temp_dir().join(format!("rustgis-streamed-read-notes-{}-{nanos}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    const SAID: &str = "have a coordinate that isn't a number under a bounding box that is one";
+    for (name, nan) in [("roads", true), ("clean", false)] {
+        let mut ds = Dataset::new(name, GeometryType::Polyline, vec![]);
+        for k in 0..3 {
+            let k = f64::from(k);
+            ds.push(Some(Geometry::Line(vec![vec![rustgis_geom::Coord::new(k, k), rustgis_geom::Coord::new(k + 1.0, k + 1.0)]])), vec![]);
+        }
+        let shp = dir.0.join(format!("{name}.shp"));
+        rustgis_data::io::write_path(&ds, &shp).unwrap();
+        if nan {
+            // The second record's first x (each record 8 + 80 bytes after the 100-byte header, a
+            // point's x 48 bytes into its content), its stored box (1, 1, 2, 2) left as it is.
+            let mut b = std::fs::read(&shp).unwrap();
+            b[244..252].copy_from_slice(&f64::NAN.to_le_bytes());
+            std::fs::write(&shp, b).unwrap();
+        }
+        let mut s = Session::new(Project::default());
+        let added = s.run("layer.addData", &json!({"path": shp.display().to_string(), "stream": true})).unwrap();
+        let id = added["layer"].as_u64().unwrap() as u32;
+        assert!(s.map().layer(id).unwrap().is_streamed(), "{name} is read in place");
+        let notes = |s: &Session, mark| -> Vec<String> {
+            s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains(SAID)).collect()
+        };
+        let expected: &[&str] = if nan {
+            &[
+                "roads: 1 shape(s) have a coordinate that isn't a number under a bounding box that is one: they're left out of the read, but the layer's extent and its index still take in their stored boxes",
+            ]
+        } else {
+            &[]
+        };
+        // The view read again and again, as redraws after a change do, says it once.
+        let reads = |s: &mut Session| {
+            for _ in 0..3 {
+                s.map_mut().layer_mut(id).unwrap().source.as_mut().unwrap().reset();
+                s.map_mut().sync_sources(&rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0), 1000.0, true);
+                s.notice_landed_rasters();
+            }
+        };
+        let mark = s.notice_mark();
+        reads(&mut s);
+        assert_eq!(s.map().layer(id).unwrap().dataset.features.len(), if nan { 2 } else { 3 }, "{name}: the view read");
+        assert_eq!(notes(&s, mark), expected, "{name}: view reads");
+        // Opened anew (the file may have changed), the source says it again, once.
+        let mark = s.notice_mark();
+        s.map_mut().layer_mut(id).unwrap().source.as_mut().unwrap().reopen().unwrap();
+        reads(&mut s);
+        assert_eq!(notes(&s, mark), expected, "{name}: reopened");
+        // Undo and redo bring back the same opening, not what it had said then: a snapshot taken
+        // before the note was read, and one taken while it was read but not yet said, each leave
+        // it said once, by the live layer.
+        let mark = s.notice_mark();
+        let source = s.map_mut().layer_mut(id).unwrap().source.as_mut().unwrap();
+        source.forget_read_notes();
+        source.reset();
+        s.run("layer.rename", &json!({"layer": id, "name": format!("{name} 1")})).unwrap();
+        s.map_mut().sync_sources(&rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0), 1000.0, true);
+        s.run("layer.rename", &json!({"layer": id, "name": format!("{name} 2")})).unwrap();
+        s.notice_landed_rasters();
+        for step in ["edit.undo", "edit.redo", "edit.undo", "edit.undo"] {
+            s.run(step, &Value::Null).unwrap();
+            reads(&mut s);
+        }
+        assert_eq!(s.map().layer(id).unwrap().name, name, "undone");
+        assert_eq!(notes(&s, mark).len(), expected.len(), "{name}: undo and redo: {:?}", notes(&s, mark));
+    }
+}
+
+/// A Shapefile with a NaN point under a backwards stored box: the index can't frame the shape, so
+/// reads by area (the map's) never visit it and no read note counts it. The source's open-time note
+/// says it, "1 shape(s) have no usable bounding box", as Add Data adds the layer read in place:
+/// once, however often the map reads it. The same file with its box in order says nothing of it.
+#[test]
+fn a_streamed_shapefile_says_a_shape_without_a_usable_box_once_as_it_is_added() {
+    use rustgis_data::{Dataset, Geometry, GeometryType};
+    struct Dir(std::path::PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = Dir(std::env::temp_dir().join(format!("rustgis-streamed-unboxed-{}-{nanos}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    const UNBOXED: &str = "1 shape(s) have no usable bounding box";
+    let mut ds = Dataset::new("roads", GeometryType::Polyline, vec![]);
+    for k in 0..3 {
+        let k = f64::from(k);
+        ds.push(Some(Geometry::Line(vec![vec![rustgis_geom::Coord::new(k, k), rustgis_geom::Coord::new(k + 1.0, k + 1.0)]])), vec![]);
+    }
+    let clean = dir.0.join("clean.shp");
+    rustgis_data::io::write_path(&ds, &clean).unwrap();
+    let shp = dir.0.join("roads.shp");
+    rustgis_data::io::write_path(&ds, &shp).unwrap();
+    // The second record's stored box made backwards, (2, 2, 1, 1) at 200..232, and its first x
+    // (at 244) NaN.
+    let mut b = std::fs::read(&shp).unwrap();
+    for (at, v) in [(200, 2.0), (208, 2.0), (216, 1.0), (224, 1.0)] {
+        b[at..at + 8].copy_from_slice(&f64::to_le_bytes(v));
+    }
+    b[244..252].copy_from_slice(&f64::NAN.to_le_bytes());
+    std::fs::write(&shp, b).unwrap();
+    let unboxed = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains(UNBOXED)).collect()
+    };
+    let reads = |s: &mut Session| {
+        for _ in 0..3 {
+            for l in s.map_mut().layers.iter_mut() {
+                if let Some(source) = l.source.as_mut() {
+                    source.reset();
+                }
+            }
+            s.map_mut().sync_sources(&rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0), 1000.0, true);
+            s.notice_landed_rasters();
+        }
+    };
+    let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
+    s.run("layer.addData", &json!({"path": shp.display().to_string(), "stream": true})).unwrap();
+    reads(&mut s);
+    assert!(s.map().layers.iter().any(|l| l.is_streamed()), "read in place");
+    assert_eq!(unboxed(&s, mark).len(), 1, "added: {:?}", s.notices_since(mark));
+    let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
+    s.run("layer.addData", &json!({"path": clean.display().to_string(), "stream": true})).unwrap();
+    reads(&mut s);
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("no usable bounding box")), "{:?}", s.notices_since(mark));
 }
 
 /// Load All Features of a GeoPackage read in place says the date-times it read rounded to the
@@ -5293,6 +5440,109 @@ fn with_raster() -> Session {
     s
 }
 
+/// The pixel identify gives with no feature under the click (Selectable's fallback, and what the
+/// spectral profile reads) is the one of the raster drawn on top: a higher depth priority above
+/// whatever the order, as the renderer draws them (#2488).
+#[test]
+fn identify_takes_the_pixel_of_the_raster_drawn_on_top_by_priority() {
+    let mut s = with_raster();
+    s.run("layer.addDataBytes", &json!({"fileName": "upper.tif", "data": utm_tiff_b64()})).unwrap();
+    for l in ["Cities", "Rivers", "Lakes", "Countries"] {
+        s.run("layer.visibility", &json!({"layer": l, "visible": false})).unwrap();
+    }
+    let top = |s: &Session| crate::cmd::raster::identify(s, -81.0, 42.0).map(|v| v["layer"].clone());
+    let layers =
+        |v: &Value| -> Vec<String> { v["results"].as_array().unwrap().iter().map(|r| r["layer"].as_str().unwrap().to_string()).collect() };
+    // Added last, upper is drawn on top.
+    assert_eq!(top(&s), Some(json!("upper")));
+    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": "visible"})).unwrap();
+    assert_eq!(layers(&v), ["upper", "scene"], "{v}");
+    // A higher priority draws scene over it whatever the order.
+    s.run("layer.priority", &json!({"layer": "scene", "value": 1})).unwrap();
+    assert_eq!(top(&s), Some(json!("scene")));
+    for mode in ["topmost", "selectable"] {
+        let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": mode})).unwrap();
+        assert_eq!(v["layer"], "scene", "{mode}: {v}");
+    }
+    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": "visible"})).unwrap();
+    assert_eq!(layers(&v), ["scene", "upper"], "{v}");
+}
+
+/// A raster's pixel answers a topmost click like a feature does (#2488): a WMS layer drawn over the
+/// raster is asked, one under it isn't (as under a feature, #808); visible asks it either way.
+#[test]
+fn identify_asks_a_wms_layer_under_a_raster_only_in_visible_mode() {
+    const WMS: &str = r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink">
+<Service><Title>Test WMS</Title></Service>
+<Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://maps.example.com/wms?"/></Get></HTTP></DCPType></GetMap>
+<GetFeatureInfo><Format>application/geo+json</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://maps.example.com/info?"/></Get></HTTP></DCPType></GetFeatureInfo></Request>
+<Layer queryable="1"><Title>Root</Title><CRS>EPSG:3857</CRS><Layer><Name>roads</Name><Title>Roads</Title></Layer></Layer></Capability></WMS_Capabilities>"#;
+    let mut s = with_raster();
+    for l in ["Cities", "Rivers", "Lakes", "Countries"] {
+        s.run("layer.visibility", &json!({"layer": l, "visible": false})).unwrap();
+    }
+    s.run("service.add", &json!({"url": "https://maps.example.com/wms", "layer": "roads", "text": WMS})).unwrap();
+    let identify = |s: &mut Session, mode: &str| s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": mode})).unwrap();
+    let asked = |v: &Value| -> Vec<String> {
+        v["featureInfo"].as_array().into_iter().flatten().map(|a| a["tileLayer"].as_str().unwrap_or_default().to_string()).collect()
+    };
+    // Added last, the WMS layer is drawn over the raster: topmost shows the pixel and asks it.
+    let v = identify(&mut s, "topmost");
+    assert_eq!((v["layer"].clone(), asked(&v)), (json!("scene"), vec!["Roads".to_string()]), "{v}");
+    // Under all the map's layers, the raster is drawn over it: only visible asks it.
+    s.run("map.setTiles", &json!({"name": "Roads", "move": "bottom"})).unwrap();
+    let v = identify(&mut s, "topmost");
+    assert_eq!(v["layer"], "scene", "{v}");
+    assert!(asked(&v).is_empty(), "{v}");
+    let v = identify(&mut s, "visible");
+    assert_eq!((v["layer"].clone(), asked(&v)), (json!("scene"), vec!["Roads".to_string()]), "{v}");
+}
+
+/// Identify asks and reads the tile layers in the drawing order, a higher depth priority on top
+/// (#2488): a WMS layer drawn over the feature found is asked even when another, earlier in the
+/// tile list, is drawn under it.
+#[test]
+fn identify_asks_the_wms_layer_drawn_over_a_layer_of_higher_priority() {
+    const WMS: &str = r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink">
+<Service><Title>Test WMS</Title></Service>
+<Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://maps.example.com/wms?"/></Get></HTTP></DCPType></GetMap>
+<GetFeatureInfo><Format>application/geo+json</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://maps.example.com/info?"/></Get></HTTP></DCPType></GetFeatureInfo></Request>
+<Layer queryable="1"><Title>Root</Title><CRS>EPSG:3857</CRS><Layer><Name>roads</Name><Title>Roads</Title></Layer><Layer><Name>rails</Name><Title>Rails</Title></Layer></Layer></Capability></WMS_Capabilities>"#;
+    let square = |x: f64| {
+        format!(
+            r#"{{"type":"FeatureCollection","features":[{{"type":"Feature","properties":{{}},"geometry":{{"type":"Polygon","coordinates":[[[{x},46],[{e},46],[{e},47],[{x},47],[{x},46]]]}}}}]}}"#,
+            e = x + 1.0
+        )
+    };
+    let mut s = Session::new(Project::default());
+    // Area holds the click; Empty, added last and so first in the list, doesn't.
+    s.run("layer.addDataText", &json!({"fileName": "area.geojson", "text": square(8.0), "name": "Area"})).unwrap();
+    s.run("layer.addDataText", &json!({"fileName": "empty.geojson", "text": square(20.0), "name": "Empty"})).unwrap();
+    for layer in ["roads", "rails"] {
+        s.run("service.add", &json!({"url": "https://maps.example.com/wms", "layer": layer, "text": WMS})).unwrap();
+    }
+    let id = |s: &Session, name: &str| s.map().layer_by_name(name).map(|l| l.id);
+    let (area, empty) = (id(&s, "Area"), id(&s, "Empty"));
+    // Roads, first in the tile list, over Empty; Rails over Area.
+    let m = s.map_mut();
+    m.tiles.sort_by_key(|t| t.name != "Roads");
+    m.tiles.iter_mut().for_each(|t| t.over = if t.name == "Roads" { empty } else { area });
+    s.run("map.goToXY", &json!({"lon": 8.5, "lat": 46.5, "scale": 10000})).unwrap();
+    let identify = |s: &mut Session, mode: &str| s.run("identify", &json!({"lon": 8.5, "lat": 46.5, "mode": mode})).unwrap();
+    let asked = |v: &Value| -> Vec<String> {
+        v["featureInfo"].as_array().into_iter().flatten().map(|a| a["tileLayer"].as_str().unwrap_or_default().to_string()).collect()
+    };
+    // As listed, Empty and Roads are drawn over Area: topmost finds Area and asks Roads.
+    let v = identify(&mut s, "topmost");
+    assert_eq!((v["layer"].clone(), asked(&v)), (json!("Area"), vec!["Roads".to_string()]), "{v}");
+    assert_eq!(asked(&identify(&mut s, "visible")), ["Roads", "Rails"]);
+    // A higher priority draws Area, and Rails over it, on top: Rails is the one asked.
+    s.run("layer.priority", &json!({"layer": "Area", "value": 1})).unwrap();
+    let v = identify(&mut s, "topmost");
+    assert_eq!((v["layer"].clone(), asked(&v)), (json!("Area"), vec!["Rails".to_string()]), "{v}");
+    assert_eq!(asked(&identify(&mut s, "visible")), ["Rails", "Roads"]);
+}
+
 /// A box whose corners the raster's system refuses (#1925) is placed by its part over the raster:
 /// a UTM zone 17 scene near 42°N clipped to a box holding it, whose corners on the equator are
 /// 91° and 89° from the zone's meridian, is the whole scene, not a window from the north corners
@@ -6246,9 +6496,42 @@ fn raster_layers_open_style_identify_and_round_trip() {
     s.active_layer = s.map().layer_by_name("Countries").map(|l| l.id);
     s.run("raster.info", &json!({"layer": "scene"})).unwrap();
     s.active_layer = s.map().layer_by_name("scene").map(|l| l.id);
-    // Identify reports features first (Lake Erie is here), then pixel values.
-    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0})).unwrap();
+    // Identify ranks a raster's pixel with the features by the drawing order (#2488): the scene,
+    // added last, is drawn over Lake Erie, so topmost reports its pixel, alone, as before.
+    let erie = json!({"lon": -81.0, "lat": 42.0});
+    let v = s.run("identify", &erie).unwrap();
+    assert_eq!(v["raster"], true, "{v}");
+    assert_eq!(v["layer"], "scene", "{v}");
+    assert!(v.get("results").is_none(), "a pixel alone answers without a list: {v}");
+    // Visible lists the pixel first, then the features drawn under it.
+    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": "visible"})).unwrap();
+    let found: Vec<&str> = v["results"].as_array().unwrap().iter().map(|r| r["layer"].as_str().unwrap()).collect();
+    assert_eq!(found.first(), Some(&"scene"), "{v}");
+    assert!(found.contains(&"Lakes"), "{v}");
+    assert_eq!(v["raster"], true, "the first result's fields stay at the top: {v}");
+    // Selectable picks layers by another rule: the lake, the raster's pixel only with no feature.
+    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": "selectable"})).unwrap();
     assert_eq!(v["layer"], "Lakes", "{v}");
+    // Moved to the bottom, the scene gives way: Lake Erie is drawn over it.
+    s.run("layer.move", &json!({"layer": "scene", "to": 99})).unwrap();
+    let v = s.run("identify", &erie).unwrap();
+    assert_eq!(v["layer"], "Lakes", "{v}");
+    assert!(v["results"].as_array().unwrap().iter().all(|r| r["raster"] != true), "{v}");
+    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": "visible"})).unwrap();
+    let found: Vec<&str> = v["results"].as_array().unwrap().iter().map(|r| r["layer"].as_str().unwrap()).collect();
+    assert_eq!(found.last(), Some(&"scene"), "the pixel comes after the features drawn over it: {v}");
+    // A higher depth priority draws the scene over Lake Erie whatever the order, as the renderer
+    // and the features' hits do: its pixel answers again.
+    s.run("layer.priority", &json!({"layer": "scene", "value": 1})).unwrap();
+    let v = s.run("identify", &erie).unwrap();
+    assert_eq!(v["layer"], "scene", "{v}");
+    assert_eq!(v["raster"], true, "{v}");
+    let v = s.run("identify", &json!({"lon": -81.0, "lat": 42.0, "mode": "visible"})).unwrap();
+    let found: Vec<&str> = v["results"].as_array().unwrap().iter().map(|r| r["layer"].as_str().unwrap()).collect();
+    assert_eq!(found.first(), Some(&"scene"), "a higher priority comes first: {v}");
+    assert!(found.contains(&"Lakes"), "{v}");
+    s.run("layer.priority", &json!({"layer": "scene", "value": 0})).unwrap();
+    s.run("layer.move", &json!({"layer": "scene", "to": 0})).unwrap();
     for l in ["Cities", "Rivers", "Lakes", "Countries"] {
         s.run("layer.visibility", &json!({"layer": l, "visible": false})).unwrap();
     }
@@ -11297,7 +11580,16 @@ fn a_globe_locator_at_the_camera_limit_is_whole_when_its_disc_fits() {
         2.0 * rustgis_map::globe::Globe::new(&cam, side * PT_PER_MM, side * PT_PER_MM).disc_radius() / PT_PER_MM
     };
     let over = smallest(19.0) + 0.5;
-    assert_eq!(crate::cmd::layout::globe_locator_center(&m, area, scale, over), (equator, true), "a {over:.1} mm locator");
+    let (at, whole) = crate::cmd::layout::globe_locator_center(&m, area, scale, over);
+    assert!(whole && at.x == area.x && (0.0..area.y).contains(&at.y) && at.y > 0.0, "a {over:.1} mm locator at {at:?}");
+    let globe_at = |center| {
+        let cam = frame_camera(&m, center, scale, 0.0, 0.0);
+        let side = over * PT_PER_MM;
+        rustgis_map::globe::Globe::new(&cam, side, side)
+    };
+    let globe = globe_at(at);
+    assert!(2.0 * globe.disc_radius() <= over * PT_PER_MM && globe.forward(area).is_some());
+    assert!(2.0 * globe_at(Coord::new(at.x, at.y + 0.01)).disc_radius() > over * PT_PER_MM);
     let under = smallest(19.0) - 0.5;
     assert_eq!(crate::cmd::layout::globe_locator_center(&m, area, scale, under), (area, false), "a {under:.1} mm locator");
 }
@@ -11316,7 +11608,6 @@ fn a_globe_locator_near_a_pole_fits_its_circle() {
         let ElementKind::MapFrame { map, center, scale, .. } = &locator.kind else { panic!() };
         let m = s.project.maps.iter().find(|m| &m.name == map).unwrap();
         let cam = frame_camera(m, *center, *scale, 0.0, 0.0);
-        assert!(cam.res < rustgis_map::camera::MAX_RES, "{case}: the camera at its coarsest, 1:{scale} at {center:?}");
         let across = 2.0 * rustgis_map::globe::Globe::new(&cam, locator.w * PT_PER_MM, locator.h * PT_PER_MM).disc_radius() / PT_PER_MM;
         assert!(across <= locator.w.min(locator.h), "{case}: a disc {across:.0} mm across in a {:.0} mm circle", locator.w);
     };
@@ -11335,12 +11626,12 @@ fn a_globe_locator_near_a_pole_fits_its_circle() {
     let r = s.run("layout.publication", &json!({"profile": "a4-portrait", "extent": [10.0, 76.0, 30.0, 81.0]})).unwrap();
     fits(&s, "Svalbard on a flat map");
     assert!(said(&r, MOVED) && !said(&r, CLIPPED), "Svalbard: {}", r["warnings"]);
-    // A figure's locator, too small for the globe even on the equator: clipped wherever it is, it
-    // keeps the area in the middle and says so.
+    // At the camera's coarsest resolution the globe still fits this 18 mm circle,
+    // and the polar extent is visible from the closest fitting centre (#2394).
     let r =
         s.run("layout.publication", &json!({"profile": "figure-1col", "extent": [10.0, 83.0, 30.0, 84.0], "locator": "globe"})).unwrap();
-    assert!(said(&r, CLIPPED) && !said(&r, MOVED), "a figure's locator: {}", r["warnings"]);
-    centred_with_the_map(&s, "a figure's locator");
+    fits(&s, "an 18 mm polar locator");
+    assert!(said(&r, MOVED) && !said(&r, CLIPPED), "a figure's locator: {}", r["warnings"]);
     s.run("map.projection", &json!({"type": "globe"})).unwrap();
     s.run("map.goToXY", &json!({"lon": 20.0, "lat": 84.0})).unwrap();
     let r = s.run("layout.publication", &json!({"profile": "a4-portrait", "locator": "globe"})).unwrap();
@@ -14010,6 +14301,84 @@ fn a_projects_water_on_a_streamed_layer_is_dropped_as_it_opens() {
     let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn a_projects_water_fields_its_layer_lost_are_cleared_as_it_opens() {
+    use rustgis_data::FieldType;
+    use rustgis_map::view::BlockWater;
+    let said = |s: &Session, t: &str| s.notices.iter().filter(|n| n.text.contains(t)).count();
+    // The fixture: its water layer lost the level field and holds the depth field as text.
+    let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_water_fields_lost.rgis")).unwrap();
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, saved);
+    let t = opened.map().view.terrain.clone().unwrap();
+    assert!(t.water.as_ref().is_some_and(|w| w.level.is_none()), "{t:?}");
+    assert_eq!(t.block.and_then(|b| b.water), Some(BlockWater { depth: Some(8.0), field: None }));
+    assert_eq!(said(&opened, "Map: the terrain's water level field 'nivel' isn't a numeric field of 'lagos'"), 1, "{:?}", opened.notices);
+    let depth = "the block's water depth field 'prof' isn't a numeric field of 'lagos', so its walls show all the water 8 m deep";
+    assert_eq!(said(&opened, depth), 1, "{:?}", opened.notices);
+    // A project whose water layer holds them.
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+    let gj = json!({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"nome": "a", "nivel": 500.0, "prof": 5.0},
+        "geometry": {"type": "Polygon", "coordinates": [[[10.01, 45.01], [10.02, 45.01], [10.02, 45.02], [10.01, 45.02], [10.01, 45.01]]]}}]});
+    s.run("layer.addDataText", &json!({"fileName": "lagos.geojson", "text": gj.to_string()})).unwrap();
+    let lagos = s.map().layers.iter().find(|l| !l.is_raster()).map(|l| l.name.clone()).unwrap();
+    s.run("map.terrain", &json!({"layer": dem, "water": {"layer": lagos, "level": "nivel"}, "block": {"water": {"field": "prof"}}}))
+        .unwrap();
+    let open = |p: &Project| {
+        let mut o = Session::new(Project::default());
+        crate::cmd::project::reset_to(&mut o, p.clone());
+        o
+    };
+    let edit = |p: &mut Project, from: &str, f: &dyn Fn(&mut rustgis_data::Field)| {
+        let l = p.maps.first_mut().and_then(|m| m.layers.iter_mut().find(|l| l.name == lagos)).unwrap();
+        f(l.dataset.fields.iter_mut().find(|x| x.name == from).unwrap());
+    };
+    let clean = open(&s.project);
+    assert_eq!(clean.map().view.terrain, s.map().view.terrain);
+    assert_eq!(said(&clean, "isn't a numeric field"), 0, "{:?}", clean.notices);
+    // Case only.
+    let mut p = s.project.clone();
+    edit(&mut p, "nivel", &|f| f.name = "NIVEL".into());
+    let o = open(&p);
+    assert_eq!(o.map().view.terrain.as_ref().and_then(|t| t.water.as_ref()).and_then(|w| w.level.clone()), Some("nivel".into()));
+    assert_eq!(said(&o, "isn't a numeric field"), 0, "{:?}", o.notices);
+    // Text, no depth.
+    let mut p = s.project.clone();
+    edit(&mut p, "prof", &|f| f.ty = FieldType::Text);
+    let o = open(&p);
+    assert_eq!(o.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).map(|b| b.water.clone()), Some(None));
+    assert_eq!(said(&o, "so its walls show no water"), 1, "{:?}", o.notices);
+    // Several maps.
+    let mut p = s.project.clone();
+    let mut second = p.maps[0].clone();
+    second.name = "Map 2".into();
+    p.maps.push(second);
+    for m in p.maps.iter_mut() {
+        if let Some(f) = m.layers.iter_mut().find(|l| l.name == lagos).and_then(|l| l.dataset.fields.iter_mut().find(|x| x.name == "nivel"))
+        {
+            f.name = "cota".into();
+        }
+    }
+    for m in p.maps.iter_mut() {
+        if let Some(f) = m.layers.iter_mut().find(|l| l.name == lagos).and_then(|l| l.dataset.fields.iter_mut().find(|x| x.name == "prof"))
+        {
+            f.ty = FieldType::Text;
+        }
+    }
+    let o = open(&p);
+    assert_eq!(said(&o, "2 maps have a terrain water level field"), 1, "{:?}", o.notices);
+    let list = "2 maps have a block water depth field that isn't a numeric field of their water layer: Map ('prof' of 'lagos', its walls showing no water), Map 2 ('prof' of 'lagos', its walls showing no water)";
+    assert_eq!(said(&o, list), 1, "{:?}", o.notices);
+    // Water layer missing: left alone.
+    let mut p = s.project.clone();
+    p.maps[0].layers.retain(|l| l.name != lagos);
+    let o = open(&p);
+    assert_eq!(o.map().view.terrain.as_ref().and_then(|t| t.water.as_ref()).and_then(|w| w.level.clone()), Some("nivel".into()));
+    assert_eq!(said(&o, "isn't a numeric field"), 0, "{:?}", o.notices);
+}
+
 /// A 40×40 lon/lat DEM near (10°E, 45°N): a hill in the middle, with a wall to its east.
 fn dem_b64() -> String {
     use base64::Engine;
@@ -14191,6 +14560,135 @@ fn a_viewshed_says_what_it_did_with_its_radius_and_the_seam() {
     }
 }
 
+/// An older RustGIS doesn't know the MGRS graticule (#1042 piece 8): a project showing it names
+/// it among what it requires, so that reader refuses the project by name; other types need nothing.
+#[test]
+fn an_mgrs_graticule_is_required_by_name_in_the_saved_project() {
+    let mut s = world();
+    s.run("map.graticule", &json!({"on": true, "type": "utm"})).unwrap();
+    assert!(serde_json::to_value(&s.project).unwrap().get("requires").is_none());
+    s.run("map.graticule", &json!({"on": true, "type": "mgrs"})).unwrap();
+    assert_eq!(serde_json::to_value(&s.project).unwrap()["requires"], json!(["graticule-mgrs"]));
+    s.run("map.graticule", &json!({"type": "degrees"})).unwrap();
+    assert!(serde_json::to_value(&s.project).unwrap().get("requires").is_none());
+}
+
+/// A saved task or script that sets whether the graticule is on top, or its color, names that among
+/// what the project requires, so an older RustGIS refuses it rather than running it without the
+/// key (and toggling the grid instead); one that sets neither names nothing.
+#[test]
+fn saved_graticule_settings_are_required_by_name() {
+    let s = world();
+    let with_task = |params: Value| {
+        let mut project = s.project.clone();
+        project.tasks = vec![
+            serde_json::from_value(json!({"name": "Grid", "steps": [{"title": "Grid", "command": "map.graticule", "params": params}]}))
+                .unwrap(),
+        ];
+        serde_json::to_value(&project).unwrap().get("requires").cloned()
+    };
+    assert_eq!(with_task(json!({"onTop": true})), Some(json!(["graticule-on-top"])));
+    assert_eq!(with_task(json!({"color": "#ff000080"})), Some(json!(["graticule-color"])));
+    assert_eq!(with_task(json!({"onTop": true, "color": "#000000"})), Some(json!(["graticule-on-top", "graticule-color"])));
+    // Any value, null included: an older reader would toggle the grid where this one keeps it, even
+    // for the defaults, and `onTop` reads "true" and 1 as true.
+    for on_top in [json!(null), json!(false), json!("true"), json!(1)] {
+        assert_eq!(with_task(json!({"onTop": on_top})), Some(json!(["graticule-on-top"])), "{on_top}");
+    }
+    for color in [json!(null), json!(""), json!(" ")] {
+        assert_eq!(with_task(json!({"color": color})), Some(json!(["graticule-color"])), "{color}");
+    }
+    for nothing in [json!({"type": "utm"}), json!({"on": false})] {
+        assert_eq!(with_task(nothing.clone()), None, "{nothing}");
+    }
+    // In a script, too.
+    let mut project = s.project.clone();
+    project.tasks = vec![
+        serde_json::from_value(
+            json!({"name": "Script", "steps": [{"title": "Run", "command": "script.run", "params": {"script": "map.graticule {\"onTop\": true}"}}]}),
+        )
+        .unwrap(),
+    ];
+    assert_eq!(serde_json::to_value(&project).unwrap()["requires"], json!(["graticule-on-top"]));
+}
+
+/// A saved command that switches the graticule to MGRS names the MGRS grid among what the project
+/// requires, its type read as the command reads it; other types don't.
+#[test]
+fn saved_commands_switching_to_mgrs_require_it() {
+    let s = world();
+    let with_step = |command: &str, params: Value| {
+        let mut project = s.project.clone();
+        project.tasks = vec![
+            serde_json::from_value(json!({"name": "Grid", "steps": [{"title": "Grid", "command": command, "params": params}]})).unwrap(),
+        ];
+        serde_json::to_value(&project).unwrap().get("requires").cloned()
+    };
+    for mgrs in ["mgrs", " MGRS ", "Mgrs"] {
+        assert_eq!(with_step("map.graticule", json!({"type": mgrs})), Some(json!(["graticule-mgrs"])), "{mgrs}");
+    }
+    for other in [json!("utm"), json!("degrees"), json!("measured"), json!("ups"), json!(null), json!(1)] {
+        assert_eq!(with_step("map.graticule", json!({"type": other})), None, "{other}");
+    }
+    let script = |line: &str| with_step("script.run", json!({"script": line}));
+    assert_eq!(script("map.graticule {\"type\": \"mgrs\"}"), Some(json!(["graticule-mgrs"])));
+    assert_eq!(script("map.graticule {\"type\": \"utm\"}"), None);
+}
+
+/// The graticule's lines over the layers, and their color (#1042): set without showing or hiding
+/// it, reset to the basemap's with null or "", refused (naming the value) when not a true/false or
+/// a #RRGGBB/#RRGGBBAA color with nothing changed; a project names each among what it requires
+/// only when a map uses it, and keeps them.
+#[test]
+fn the_graticule_goes_on_top_in_a_color_of_its_own() {
+    let mut s = world();
+    let on = s.map().graticule;
+    let r = s.run("map.graticule", &json!({"onTop": true, "color": "#ff000080"})).unwrap();
+    assert_eq!((r["on"].clone(), r["onTop"].clone(), r["color"].clone()), (json!(on), json!(true), json!("#FF000080")));
+    assert_eq!(s.map().graticule_color, Some(rustgis_map::Rgba::new(255, 0, 0, 128)));
+    let r = s.run("map.graticule", &json!({"color": "#00FF00"})).unwrap();
+    assert_eq!((r["on"].clone(), r["onTop"].clone(), r["color"].clone()), (json!(on), json!(true), json!("#00FF00")));
+    for (p, e) in [
+        (json!({"onTop": "maybe"}), "onTop must be true or false, not \"maybe\""),
+        (json!({"onTop": [1]}), "onTop must be true or false, not [1]"),
+        (json!({"color": "red"}), "color must be #RRGGBB or #RRGGBBAA (\"\" or null for the basemap's), not \"red\""),
+        (json!({"color": "#12345"}), "color must be #RRGGBB or #RRGGBBAA"),
+        (json!({"color": 255}), "color must be #RRGGBB or #RRGGBBAA (\"\" or null for the basemap's), not 255"),
+    ] {
+        let got = s.run("map.graticule", &p).unwrap_err();
+        assert!(got.starts_with(e), "{p}: {got}");
+    }
+    // Unchanged by the refusals.
+    assert!(s.map().graticule_on_top);
+    assert_eq!(s.map().graticule_color, Some(rustgis_map::Rgba::rgb(0, 255, 0)));
+    assert_eq!(s.map().graticule_rgba(), rustgis_map::Rgba::rgb(0, 255, 0));
+    // Saved, required by name, and back.
+    let v = serde_json::to_value(&s.project).unwrap();
+    assert_eq!(v["requires"], json!(["graticule-on-top", "graticule-color"]));
+    let back = crate::Project::from_json(&v.to_string()).unwrap();
+    assert!(back.map().graticule_on_top);
+    assert_eq!(back.map().graticule_color, Some(rustgis_map::Rgba::rgb(0, 255, 0)));
+    // Reset: under the layers, in the basemap's color; neither saved nor required.
+    let r = s.run("map.graticule", &json!({"onTop": false, "color": null})).unwrap();
+    assert_eq!((r["onTop"].clone(), r["color"].clone()), (json!(false), json!(null)));
+    s.run("map.graticule", &json!({"color": "#123456"})).unwrap();
+    s.run("map.graticule", &json!({"color": " "})).unwrap();
+    // `onTop: null` puts the default back too, without showing or hiding the grid.
+    s.run("map.graticule", &json!({"onTop": true})).unwrap();
+    let r = s.run("map.graticule", &json!({"onTop": null})).unwrap();
+    assert_eq!((r["on"].clone(), r["onTop"].clone()), (json!(on), json!(false)));
+    assert_eq!(s.map().graticule_color, None);
+    assert_eq!(s.map().graticule_rgba(), s.map().palette().3);
+    assert_eq!(s.map().graticule, on);
+    let text = serde_json::to_string(&s.project).unwrap();
+    assert!(!text.contains("graticule_on_top") && !text.contains("graticule_color") && !text.contains("\"requires\""), "{text}");
+    // An older reader that knows neither refuses such a project by name.
+    let mut v = v;
+    v["requires"] = json!(["graticule-on-top", "graticule-color", "graticule-later"]);
+    let e = crate::Project::from_json(&v.to_string()).unwrap_err();
+    assert!(e.contains("graticule-later"), "{e}");
+}
+
 /// The graticule's type and the measured grid's coordinate system (#1042): a type or system given
 /// shows it; no parameters toggle it as before; a system that isn't projected, can't be read, or
 /// is given for another type is refused, naming it; a project keeps them, and one without them
@@ -14202,15 +14700,25 @@ fn the_graticule_takes_a_type_and_a_measured_grids_system() {
     assert_eq!(s.map().graticule_type, GraticuleType::Degrees);
     s.run("map.graticule", &json!({"on": false})).unwrap();
     let r = s.run("map.graticule", &json!({"type": "UTM"})).unwrap();
-    assert_eq!(r, json!({"on": true, "type": "utm", "crs": null}));
+    assert_eq!(r, json!({"on": true, "type": "utm", "crs": null, "onTop": false, "color": null}));
     // No parameters: toggled, the type kept.
     s.run("map.graticule", &json!({})).unwrap();
     assert!(!s.map().graticule && s.map().graticule_type == GraticuleType::Utm);
     let r = s.run("map.graticule", &json!({"type": "measured", "crs": " EPSG:2056 "})).unwrap();
-    assert_eq!(r, json!({"on": true, "type": "measured", "crs": "EPSG:2056"}));
+    assert_eq!(r, json!({"on": true, "type": "measured", "crs": "EPSG:2056", "onTop": false, "color": null}));
+    // MGRS (#1042), named in any case, and kept with the project; it takes no system either.
+    let r = s.run("map.graticule", &json!({"type": " Mgrs "})).unwrap();
+    // (The measured grid's system is kept for when it is picked again.)
+    assert_eq!(r, json!({"on": true, "type": "mgrs", "crs": "EPSG:2056", "onTop": false, "color": null}));
+    let back = crate::Project::from_json(&serde_json::to_string(&s.project).unwrap()).unwrap();
+    assert_eq!(back.map().graticule_type, GraticuleType::Mgrs);
+    let got = s.run("map.graticule", &json!({"type": "mgrs", "crs": "EPSG:2056"})).unwrap_err();
+    assert!(got.starts_with("crs is the measured grid's; the graticule is \"mgrs\""), "{got}");
+    let r = s.run("map.graticule", &json!({"type": "measured", "crs": " EPSG:2056 "})).unwrap();
+    assert_eq!(r, json!({"on": true, "type": "measured", "crs": "EPSG:2056", "onTop": false, "color": null}));
     for (p, e) in [
-        (json!({"type": "mgrs"}), "type must be one of degrees, measured, utm, not \"mgrs\""),
-        (json!({"type": 3}), "type must be one of \"degrees\", \"measured\", \"utm\", not 3"),
+        (json!({"type": "ups"}), "type must be one of degrees, measured, utm, mgrs, not \"ups\""),
+        (json!({"type": 3}), "type must be one of \"degrees\", \"measured\", \"utm\", \"mgrs\", not 3"),
         (json!({"crs": "EPSG:4326"}), "crs: EPSG:4326 is geographic"),
         (json!({"crs": "EPSG:4978"}), "crs: EPSG:4978 is geocentric"),
         (json!({"type": "utm", "crs": "EPSG:2056"}), "crs is the measured grid's; the graticule is \"utm\""),

@@ -186,7 +186,8 @@ fn with_answers(map: &rustgis_engine::map::Map, info: &Value, found: Vec<Value>)
     // identify.featureInfo tells its answer to the first of them, drawn or not).
     let drawn = |name: &str| map.tiles.iter().position(|t| t.name == name && t.draws());
     all.retain(|v| v["tileLayer"].as_str().is_none_or(|name| drawn(name).is_some()));
-    let stack = map.stack();
+    // As identify ranks them: the drawing order, a higher depth priority on top (#2488).
+    let stack = map.draw_order();
     // A tile layer's feature by its layer's name (two of one name drawn take the higher one's
     // place, as their answers are told apart by name too), a map layer's (or raster's pixel) by
     // its id; anything else after them all.
@@ -3302,13 +3303,7 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
                 let r = app.session.run("identify", &json!({"lon": c.x, "lat": c.y, "tolerancePx": 5}));
                 app.map.popup = match r {
                     Ok(v) if !v.is_null() => {
-                        if let (Some(id), Some(row)) = (v["layerId"].as_u64(), v["row"].as_u64()) {
-                            let _ = app.session.run("select.rows", &json!({"layer": id, "rows": [row]}));
-                        } else if !is_found(&v) {
-                            // Only WMS layers being asked: the click found nothing yet, so it clears
-                            // the selection as an empty click does.
-                            clear_selection_quietly(app);
-                        }
+                        select_first_found(app, &v);
                         Some(Popup::new(v, c, app.session.project.active_map, app.session.opened))
                     }
                     _ => {
@@ -4410,6 +4405,18 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
     }
 }
 
+/// Selects the feature a click's identify shows first. One that isn't a map layer's row (a
+/// raster's pixel drawn over a polygon (#2488), a tile layer's feature, or nothing yet while WMS
+/// layers are asked) clears the selection, as an empty click does and as browsing the pop-up to it
+/// does ([`select_shown`]): the selection is what the pop-up shows.
+fn select_first_found(app: &mut RustGisApp, v: &Value) {
+    if let (Some(id), Some(row)) = (v["layerId"].as_u64(), v["row"].as_u64()) {
+        let _ = app.session.run("select.rows", &json!({"layer": id, "rows": [row]}));
+    } else {
+        clear_selection_quietly(app);
+    }
+}
+
 /// Selects the feature the pop-up shows, as after the click. Not through `select.rows`: browsing
 /// a pop-up mustn't fill the undo history; the new revision redraws the map. Found again by its
 /// feature id: a streamed layer may have read another window since the click, moving the feature
@@ -4825,6 +4832,7 @@ fn shown_layers(session: &rustgis_engine::Session) -> u64 {
         &map.graticule_crs,
     )
         .hash(&mut h);
+    (map.graticule_on_top, map.graticule_color).hash(&mut h);
     for l in &map.layers {
         (l.id, l.visible).hash(&mut h);
     }
@@ -5467,6 +5475,49 @@ mod tests {
         assert_eq!((shown(&popup.info), popup.index), (vec!["Countries".to_string()], 0), "hidden, in the pop-up");
     }
 
+    /// A click whose pop-up shows a raster's pixel first, drawn over a polygon, or a tile layer's
+    /// feature first, selects nothing (#2488): an earlier selection doesn't stay under it, as
+    /// browsing the pop-up to either clears it; a feature shown first is selected.
+    #[test]
+    fn a_click_showing_a_pixel_or_tile_feature_first_leaves_nothing_selected() {
+        let s = rustgis_engine::Session::new(rustgis_engine::sample::world_project());
+        let mut app = RustGisApp::new(s);
+        let countries = app.session.map().layer_by_name("Countries").map(|l| l.id).unwrap();
+        let feature = json!({"layer": "Countries", "layerId": countries, "row": 3, "fid": 3, "attributes": {}});
+        select_first_found(&mut app, &feature);
+        assert_eq!(app.session.map().selection_count(), 1);
+        let pixel = json!({"layer": "scene", "layerId": 999, "raster": true, "attributes": {"Band 1": "7"},
+            "results": [{"layer": "scene", "layerId": 999, "raster": true, "attributes": {"Band 1": "7"}}, feature]});
+        select_first_found(&mut app, &pixel);
+        assert_eq!(app.session.map().selection_count(), 0);
+        // A vector tile layer's feature shown first (it has no row in a map layer) clears it too.
+        select_first_found(&mut app, &feature);
+        assert_eq!(app.session.map().selection_count(), 1);
+        let tile = json!({"layer": "Roads", "tileLayer": "Roads", "sourceLayer": "roads", "attributes": {"name": "Main"},
+            "results": [{"layer": "Roads", "tileLayer": "Roads", "sourceLayer": "roads", "attributes": {"name": "Main"}}, feature]});
+        select_first_found(&mut app, &tile);
+        assert_eq!(app.session.map().selection_count(), 0);
+    }
+
+    /// A WMS layer's answer takes its place by the depth priority too, as identify ranks the
+    /// features (#2488): Countries, with a higher priority, is drawn over the WMS layer and stays
+    /// first.
+    #[test]
+    fn a_wms_answer_goes_under_a_layer_of_higher_priority() {
+        let mut s = rustgis_engine::Session::new(rustgis_engine::sample::world_project());
+        s.run("map.addTiles", &json!({"url": "https://wms.example.org/{z}/{x}/{y}.png", "name": "Over", "overlay": true})).unwrap();
+        s.run("layer.priority", &json!({"layer": "Countries", "value": 1})).unwrap();
+        let answer = json!({"layer": "Over", "tileLayer": "Over", "sourceLayer": null, "attributes": {"name": "Bern"}});
+        s.run("map.popupMode", &json!({"mode": "visible"})).unwrap();
+        let info = s.run("identify", &json!({"lon": 8.6, "lat": 46.65, "tolerancePx": 0})).unwrap();
+        assert_eq!(info["layer"], "Countries");
+        let v = with_answers(s.map(), &info, vec![answer]).unwrap();
+        let shown: Vec<&str> =
+            v["results"].as_array().unwrap().iter().map(|r| r["tileLayer"].as_str().or(r["layer"].as_str()).unwrap()).collect();
+        assert_eq!(shown, ["Countries", "Over"]);
+        assert_eq!(v["layer"], "Countries");
+    }
+
     fn selection_harness() -> egui_kittest::Harness<'static, RustGisApp> {
         let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
         app.run("layer.template", json!({"template": "points", "name": "Points"})).unwrap();
@@ -5688,6 +5739,18 @@ mod tests {
     #[test]
     fn explore_click_asking_only_wms_clears_without_a_notice() {
         let _turn = crate::fetching::turn();
+        use rustgis_engine::render::rustgis_tiles::cache;
+        let (send, requests) = std::sync::mpsc::channel();
+        // Hold only identify requests: a fast network failure used to close the popup in the
+        // release frame, before the assertion. Tile fetches never reach a real server either.
+        cache::set_fetcher(move |url, done| {
+            let lower = url.to_ascii_lowercase();
+            if lower.contains("request=getcapabilities") || lower.contains("request=getfeatureinfo") {
+                send.send((url, done)).unwrap();
+            } else {
+                done(Err("tile fixture failure".into()));
+            }
+        });
         let mut h = selection_harness();
         let url = "https://wms.example.org/?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=over&STYLES=&CRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&FORMAT=image%2Fpng";
         h.state_mut().run("map.addTiles", json!({"url": url, "name": "Over", "overlay": true})).unwrap();
@@ -5697,10 +5760,22 @@ mod tests {
         selection_click(&mut h, [3.5, 1.5]);
         assert!(h.state().map.popup.is_some(), "the click asks the WMS layer");
         assert!(selection_rows(&h).is_empty());
+        let (asked, done) = requests.try_recv().unwrap();
+        assert!(asked.to_ascii_lowercase().contains("request=getcapabilities"));
+        done(Err("WMS fixture failure".into()));
+        h.step();
+        assert!(h.state().map.popup.is_none(), "the completed failure closes the empty popup");
         h.state_mut().run("select.rows", json!({"layer": "Points", "rows": [1]})).unwrap();
         selection_click(&mut h, [1.0, 3.5]);
         assert!(selection_rows(&h).is_empty(), "the click clears the selection");
-        // The made-up WMS server's own failure may land too: only the refusal is checked.
+        assert!(h.state().map.popup.is_some(), "the second click asks the WMS layer");
+        let (_, done) = requests.try_recv().unwrap();
+        done(Err("WMS fixture failure".into()));
+        h.step();
+        assert!(h.state().map.popup.is_none());
+        assert!(selection_rows(&h).is_empty());
+        let failures = h.state().session.notices_since(mark).iter().filter(|n| n.error && n.text.contains("WMS fixture failure")).count();
+        assert_eq!(failures, 2, "both WMS failures completed before checking notices");
         let refused = h.state().session.notices_since(mark).iter().any(|n| n.error && n.text.contains("nothing is selected"));
         assert!(!refused, "no \"nothing is selected\" notice");
     }
