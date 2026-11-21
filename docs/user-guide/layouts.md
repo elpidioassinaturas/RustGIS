@@ -311,6 +311,13 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     symbols grow to hold a large one, up to 2048 points, past which the symbol is cut. A legend
     already on the page keeps its size, so with a larger symbol its last rows may be cut and its
     labels run past its right edge: make it larger to fit.
+  - **Line and polygon symbols**: a line's swatch is drawn with the stacked strokes of its class or
+    layer (casings, offsets, dashes, markers and images along it, by symbol level when the layer
+    draws by levels), and a polygon's with its stacked fills (hatches, dots, gradients,
+    shapeburst), as the map draws them, with the transparency of the layer and its groups and its
+    reference scale at the frame's scale. A stroke wider than the row, or shifted off it, is cut at
+    the row; the row keeps its height. A diagram's categories keep their own colour. A layer with
+    no stacked strokes or fills keeps its plain swatch, see-through with the layer.
   - **Web layers**: a visible WMS or WMTS layer with a legend is listed by its name over its
     service's legend picture, the one for the frame's scale (as the Layers pane shows it), a
     pixel a point and narrowed to fit the legend's width, in the order the map draws its layers
@@ -385,7 +392,15 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   legend title runs off the page, or a text element has more lines than its height allows.
   The notice counts and names the affected elements with their IDs. A line may extend beyond
   its element's width while remaining on the page; that alone is not clipped. Reduce the size,
-  add line breaks, turn on **Wrap to the box**, or resize or move the element to keep all its text.
+  add line breaks, turn on **Wrap to the box**, or resize or move the element to keep all its text;
+  when every text it names is already wrapped, the notice suggests only the size and the box, and
+  a legend's title, which has no wrap, is told to add line breaks. Lines left out below a text's
+  box are said as soon as they are: `layout.addElement` and `layout.update` warn how many lines
+  don't fit when they set a text, its size, font or fallback font, bold, italic, alignment,
+  spacing, wrap or box, or show it, and the Format pane shows the count under **Wrap to the
+  box** (a text wrapped past the 200 lines a text draws counts them as "or more"). A text draws
+  200 lines at most, whatever its box: lines past them are said apart, with the advice to split
+  the text into more than one, since a taller box doesn't draw them.
 - **Text** and **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
   `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn; the Format pane's
   **Insert Dynamic Text** menu, under the text, lists each with what it shows. The text, its
@@ -429,8 +444,9 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   width of its unturned box. The layout view and every export (PNG, PDF, SVG) break the same
   lines. Spaces running together in a wrapped text are drawn as one, and no ordinary space is
   kept at a line's start or end. Lines that don't fit the box's height are left out, and the
-  export notice above names the text. Scripts set `"wrap": true` on `layout.addElement` and
-  `layout.update`. A project with a wrapped text needs this release or a later one to open.
+  commands, the Format pane and the export notice above say so. Scripts set `"wrap": true` on
+  `layout.addElement` and `layout.update`. A project with a wrapped text needs this release or a
+  later one to open.
   Scripts give the family's name: `"font": "Garamond"`, with `"fallback": "serif"` if wanted;
   `labels.fonts` lists the installed families. The project keeps the name, never a file. A PDF
   sets its text in the letters' own outlines, so it shows the family wherever it is opened, and
@@ -480,17 +496,34 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
 - **Chart frame**: a bar chart of a layer of the frame's map. Its properties pick the **Layer**
   and the numeric **Field**, and by default draw a bar per feature, the largest first, each
   labelled by the **Label** field. **Group by** a field draws a bar per value of that field
-  instead (features with none together as "(blank)"), its **Statistic** of the field over that
-  value's features: sum, count (features, numbers or not, so a count can chart a text field),
-  mean, minimum or maximum. A text field charted that way gives way to the layer's first numeric
-  field when the chart stops grouping or counting, and the chart says so. **Order** puts the
-  largest first, the smallest first, the labels A to Z or the bars in the layer's order. **Bars** sets how many are drawn (1 to 100, 20 by default);
-  **Past the limit** leaves the rest out, which the chart says, or gathers them in a last
-  **Other bar**, its statistic over their features (their sum when not grouped), last whatever
-  the order. A negative value is drawn the other way from a line at zero. Features with no number
-  in the field are left out, and the chart says how many. From a command:
+  instead, its **Statistic** of the field over that value's features: sum, count (features,
+  numbers or not, so a count can chart a text field), mean, minimum or maximum. Values are
+  grouped as they are stored, capitals and spaces included: "North" and "north " are two bars.
+  Features with no value, or one that is only spaces, are one "(blank)" bar. A text field
+  charted that way gives way to the layer's first numeric field when the chart stops grouping
+  or counting, and the chart says so. **Order** puts the largest first, the smallest first, the
+  labels A to Z or the bars in the layer's order. **Bars** sets how many are drawn (1 to 100,
+  20 by default); **Past the limit** leaves the rest out, which the chart says, or gathers them
+  in a last **Other bar**, its statistic over their features (their sum when not grouped), last
+  whatever the order. A negative value is drawn the other way from a line at zero. Features
+  with no number in the field are left out, and the chart says how many; a count counts them,
+  since it reads no number. From a command:
   `layout.update={"element":6,"group":"region","statistic":"mean","order":"category","bars":8,"other":true}`,
   and `"group":""` for a bar per feature again; `layout.addElement` takes them too.
+- **Chart look**: **Orientation** draws bars running across (the default) or **Vertical**
+  columns standing on the bottom, each label centred under its column and cut to its width.
+  **Title** is the one the chart is given (its field, or the statistic of its field by the
+  group), **None**, which leaves its room to the bars, or **Own**, typed in **Title text**.
+  **Values** writes each bar's value past its end, its thousands apart with commas (points
+  with a layout's decimal comma), with up to two **Decimals** by default, the zeros they end
+  in dropped, or a fixed 0 to 6; on narrow columns, or beside bars they would leave less than
+  half the chart, they are written smaller to fit. **Bar color** sets the bars' colour.
+  **Labels** puts the labels of bars running across at the left of their column, or **By the
+  bars**, against them. Keep a title out of the chart to style it
+  as you like with a text element. From a command:
+  `layout.update={"element":6,"orientation":"vertical","values":true,"decimals":0,"title":"","barColor":"#C2185B","labelAlign":"right"}`,
+  `"title":null` for the title it is given again and `"barColor":null` for the default blue;
+  `layout.addElement` takes them too.
 - **Rulers and guides**: rulers start on along the top and left and show millimetres from the page's corner.
   Drag out of a ruler to add a guide, drag a guide to move it, and drag it back onto a ruler to
   remove it. Guides are saved with the layout but never printed or exported. **Clear Guides**

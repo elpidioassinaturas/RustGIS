@@ -107,8 +107,10 @@ features present in the saved payload: `terrain-block`, `terrain-block-shape` (a
 diagram cut to a circle or to polygons), `terrain-block-polygon` (one cut to polygons),
 `terrain-water`,
 `terrain-water-shore` (a terrain water's shore band other than the default),
+`terrain-block-water` (water in a block diagram's walls),
 `shaded-relief-effects` (cast shadows, sky visibility, fill light or rock colour),
-`shaded-relief-light` (a Shaded Relief's ambient or balanced light) and
+`shaded-relief-light` (a Shaded Relief's ambient or balanced light),
+`blank-paper` (a blank basemap's paper colour) and
 `normalized-legend-urls` for normalized legend addresses. Project
 requirements include offline map snapshots. `table-export-order` protects saved task commands,
 command notebook cells and replayable history using Export Table sort or limit options.
@@ -137,7 +139,8 @@ cell or history entry that gives one (`layout.addElement` or `layout.update` wit
 `background` other than `null`), require `layout-element-background`, so an older reader
 refuses them instead of opening the layout and saving it again, or running the command,
 without the background. Layout files (`.rgislayout`) carry no format header yet and are not
-covered (#2277).
+covered. `layout.import` already reads one, ahead of the release that writes it: it refuses a
+newer format or an unknown `requires` entry by name (#2277).
 
 Projects, map files and layer files with a window of a Zarr variable that follows the time slider
 (`layer.addZarr` with `"time": true` and `"cells"` or `"bbox"`) require `zarr-window`, so an older
@@ -169,6 +172,17 @@ and `layout.update` commands that set one of them require it too, and so does a 
 that gives a chart's `label` (`""` too), which an older reader's update doesn't take; giving the
 defaults, or `"group": ""`, needs nothing. A saved `layout.import` whose `text` has such a chart
 requires it as well. Layout files are not covered, as for backgrounds (#2277).
+
+Projects with a layout chart drawn as columns, with its values or their decimals, its own title
+or none, a bar colour or labels against its bars (`orientation`, `values`, `decimals`, `title`,
+`bar_color`, `label_align` on a chart element) require `layout-chart-look`, so an older reader
+refuses them instead of drawing bars running across in the default blue, with the title the
+chart is given, and saving it again without them. Saved `layout.addElement` commands for a chart
+that set one of them require it too. A saved `layout.update` requires it for `values`,
+`decimals`, `barColor` and `labelAlign` only: its `title` and `orientation` may be a legend's or
+a colorbar's, which the command alone doesn't tell, and the project the update ran on requires it
+for its chart anyway. Giving the defaults needs nothing. A saved `layout.import` whose `text` has
+such a chart requires it as well. Layout files are not covered, as for backgrounds (#2277).
 
 A coordinate system read from WKT is saved with its PROJ definition, which older readers read,
 and its WKT beside it (`wkt`), which this release reads first. Projects, map files and layer

@@ -515,6 +515,7 @@ fn styled_features(l: &Layer, budget: &mut usize) -> Result<Vec<Value>, String> 
     let mut out = Vec::new();
     // Its symbol by expression (no map scale: the page zooms on its own).
     let styler = l.styler(None);
+    let to = l.dataset.lonlat_conversion().map_err(|e| format!("{}: {e}", l.name))?;
     for (row, ft) in l.dataset.features.rows().enumerate() {
         if *budget == 0 {
             break;
@@ -523,7 +524,7 @@ fn styled_features(l: &Layer, budget: &mut usize) -> Result<Vec<Value>, String> 
             continue;
         }
         let Some(g) = ft.geometry() else { continue };
-        let g = l.dataset.geometry_to_lonlat(g).map_err(|e| format!("{}: feature {}: {e}", l.name, ft.id()))?;
+        let g = rustgis_data::Dataset::geometry_to_lonlat_by(&to, g).map_err(|e| format!("{}: feature {}: {e}", l.name, ft.id()))?;
         let sym = styler.symbol(row);
         let props: serde_json::Map<String, Value> =
             l.dataset.fields.iter().enumerate().map(|(i, f)| (f.name.clone(), json!(l.dataset.value(row, i).to_string()))).collect();
@@ -1007,6 +1008,8 @@ struct SceneBytes {
     skipped_outer: usize,
     holes_dropped: usize,
     single_vertex_lines: usize,
+    /// Features left out because a place of theirs can't be given in longitude/latitude.
+    unplaced: usize,
     /// Per layer, in scene order: its name and how many features had their base or height held
     /// to [`SCENE_TOP`].
     held: Vec<(String, usize)>,
@@ -1024,6 +1027,9 @@ impl SceneBytes {
         }
         if self.limited > 0 {
             notes.push(format!("{} feature(s) left out of the scene: the {MAX_FEATURES} feature limit was reached", self.limited));
+        }
+        if self.unplaced > 0 {
+            notes.push(format!("{} feature(s) left out of the scene: a place can't be given in longitude/latitude", self.unplaced));
         }
         if self.skipped_outer > 0 {
             notes.push(format!("Skipped {} polygon(s) whose outer ring has fewer than 3 vertices", self.skipped_outer));
@@ -1079,6 +1085,9 @@ fn gltf(m: &Map, view: (f64, f64)) -> Result<SceneBytes, String> {
         };
         let (mut built, mut last): (usize, Option<([u8; 4], usize)>) = (0, None);
         let mut held = 0usize;
+        // The layer's conversion to longitude/latitude, made once (none: a system that can't be
+        // converted, whose features are all left out, and said).
+        let to_lonlat = l.dataset.lonlat_conversion().ok();
         for (row, ft) in l.dataset.features.iter().enumerate() {
             if let Some((k, before)) = last.take() {
                 built += size(&tri, &lines, &k).saturating_sub(before);
@@ -1091,6 +1100,13 @@ fn gltf(m: &Map, view: (f64, f64)) -> Result<SceneBytes, String> {
                 scene.limited += 1;
                 continue;
             }
+            // Placed from longitude/latitude, whatever system the layer holds its coordinates in; a
+            // feature with a place that can't be given there is left out, and said, as one too far.
+            let Some(lonlat) = to_lonlat.as_ref().and_then(|to| rustgis_data::Dataset::converted_to_lonlat(to, g)) else {
+                scene.unplaced += 1;
+                continue;
+            };
+            let g = &*lonlat;
             // A position too far for 32 bits would make the scene invalid: the feature is left out,
             // and said. Only what would be drawn counts (not a degenerate ring or a one-vertex line).
             let far = |c: &Coord| {

@@ -629,6 +629,7 @@ pub fn project(ds: &Dataset, crs: Crs) -> Result<Dataset> {
     let mut out = ds.clone();
     let to = from.to(crs).map_err(DataError::Format)?;
     project_features(&mut out.features, &to)?;
+    out.held_in = crs;
     Ok(out)
 }
 
@@ -685,6 +686,9 @@ pub fn define_projection(ds: &Dataset, crs: Crs) -> Result<Dataset> {
             f.geometry = Some(g);
         }
     }
+    // Its coordinates read in `crs` and are held in longitude/latitude, as every dataset's are
+    // until #2032 C2 lets a layer hold its own system (defining one then only relabels it).
+    out.held_in = Crs::LonLat;
     out.crs = Some(crs);
     Ok(out)
 }
@@ -1074,7 +1078,15 @@ pub fn write_atomic_with<T, E: From<std::io::Error>>(
 /// regular files keep their permissions; a replaced link uses a new file's permissions.
 pub fn replace_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    atomic_write_at(path, |out| out.write_all(bytes))
+    replace_atomic_with(path, |out| out.write_all(bytes))
+}
+
+/// [`replace_atomic`] with the content written through a buffer, without concatenating it first.
+pub fn replace_atomic_with<T, E: From<std::io::Error>>(
+    path: &Path,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    atomic_write_at(path, write)
 }
 
 /// Stages content beside the chosen destination; errors and cancellation retain the old file.
@@ -7894,7 +7906,7 @@ mod tests {
         let at = utm.transformer().unwrap().from_lonlat(lonlat).unwrap();
         let mut ds = Dataset::new("held", GeometryType::Point, vec![]);
         ds.push(Some(Geometry::Point(at)), vec![]);
-        let _held = crate::tests::HeldIn::new(utm);
+        ds.held_in = utm;
         assert_eq!(ds.coord_crs(), utm);
         // GeoJSON: longitude/latitude.
         let (bytes, _) = write_bytes_in(&ds, "geojson", Crs::LonLat).unwrap();
@@ -7937,7 +7949,7 @@ mod tests {
         }
         let want = export_losses_notes(&lonlat, "csv", None, "out.csv").unwrap();
         let held = project(&lonlat, utm).unwrap();
-        let _held = crate::tests::HeldIn::new(utm);
+        assert_eq!(held.coord_crs(), utm);
         assert_eq!(export_losses_notes(&held, "csv", None, "out.csv").unwrap(), want);
         // A line with a missing coordinate: its vertex is left out of a Shapefile written as
         // held, and noted; in any other system the export's conversion refuses the line instead
@@ -7945,6 +7957,7 @@ mod tests {
         let mut line = Dataset::new("line", GeometryType::Polyline, vec![]);
         let parts = vec![vec![Coord::new(500_000.0, 5_400_000.0), Coord::new(f64::NAN, 5_400_100.0), Coord::new(500_100.0, 5_400_200.0)]];
         line.push(Some(Geometry::Line(parts)), vec![]);
+        line.held_in = utm;
         let own = shapefile_geometry_notes(&line, "out.shp", utm);
         assert!(own.iter().any(|n| n.contains("1 vertex with a missing or infinite coordinate")), "{own:?}");
         assert!(shapefile_geometry_notes(&line, "out.shp", Crs::Epsg(25832)).is_empty());

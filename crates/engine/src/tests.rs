@@ -27,6 +27,9 @@ mod block_model;
 #[path = "tests/write_notices.rs"]
 mod write_notices;
 
+#[path = "tests/held_layers.rs"]
+mod held_layers;
+
 #[path = "tests/task_reentry.rs"]
 mod task_reentry;
 
@@ -45,6 +48,9 @@ mod service_logins;
 
 #[path = "tests/scopes_and_redaction.rs"]
 mod scopes_and_redaction;
+
+#[path = "tests/layout_files.rs"]
+mod layout_files;
 
 /// Where the tests' plugins folder keeps what plugins remember: not the user's.
 fn plugin_settings_dir() -> std::path::PathBuf {
@@ -9178,6 +9184,7 @@ fn terrain_block_is_checked_kept_and_taken_off() {
             depth: None,
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            water: None,
             shape: rustgis_map::view::BlockShape::Box,
         }),
         water: None,
@@ -9289,6 +9296,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: None,
+                water: None,
                 shape: rustgis_map::view::BlockShape::Box,
             }),
             water: None,
@@ -9310,6 +9318,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: None,
+                water: None,
                 shape: rustgis_map::view::BlockShape::Box,
             }),
             water: None,
@@ -9335,6 +9344,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: None,
+                water: None,
                 shape: rustgis_map::view::BlockShape::Box,
             }),
             water: None,
@@ -13620,6 +13630,7 @@ fn terrain_block_is_read_back_from_a_saved_project() {
             depth: Some(150.0),
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            water: None,
             shape: rustgis_map::view::BlockShape::Box,
         })
     );
@@ -13632,6 +13643,12 @@ fn terrain_block_is_read_back_from_a_saved_project() {
     let block = saved.maps[0].view.terrain.as_ref().and_then(|t| t.block.clone()).unwrap();
     assert_eq!(block.shape, rustgis_map::view::BlockShape::Circle { radius: Some(250_000.0) });
     assert_eq!(serde_json::to_value(&saved).unwrap()["requires"], json!(["terrain-block", "terrain-block-shape"]));
+    // With the water in its walls (#2317, `terrain_block_water_v2.rgis`), which it requires.
+    let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_block_water_v2.rgis")).unwrap();
+    let block = saved.maps[0].view.terrain.as_ref().and_then(|t| t.block.clone()).unwrap();
+    assert_eq!(block.water, Some(rustgis_map::view::BlockWater { depth: Some(8.0), field: Some("prof".into()) }));
+    let again = serde_json::to_value(&saved).unwrap();
+    assert_eq!(again["requires"], json!(["terrain-block", "terrain-water", "terrain-block-water"]));
     // One cut to polygons (`terrain_block_polygon.rgis`), its layer and query kept by name.
     let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_block_polygon.rgis")).unwrap();
     let block = saved.maps[0].view.terrain.as_ref().and_then(|t| t.block.clone()).unwrap();
@@ -13815,6 +13832,86 @@ fn terrain_block_walls_follow_a_polygon_layer() {
     assert!(said.iter().any(|t| t.starts_with("Terrain turned off")), "{said:?}");
     assert!(!said.iter().any(|t| t.contains("walls layer")), "{said:?}");
     assert!(s.map().view.terrain.is_none());
+}
+
+#[test]
+fn terrain_block_water_needs_the_terrains_water_and_a_depth() {
+    // #2317: the water a block's walls cut through, deep by a number or a numeric field.
+    use base64::Engine;
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+    let square = |x: f64| json!([[[x, 45.0], [x + 0.01, 45.0], [x + 0.01, 45.01], [x, 45.01], [x, 45.0]]]);
+    let lakes = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"prof": 12.0, "fundo": 3.0, "nome": "a"}, "geometry": {"type": "Polygon", "coordinates": square(10.0)}},
+        {"type": "Feature", "properties": {"prof": null, "nome": "b"}, "geometry": {"type": "Polygon", "coordinates": square(10.02)}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(lakes.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "lagos.geojson", "data": data})).unwrap();
+    let lagos = s.map().layers.iter().find(|l| !l.is_raster()).map(|l| l.name.clone()).unwrap();
+    for (water, terrain_water, said) in [
+        (json!({}), json!({"layer": lagos}), "needs a depth"),
+        (json!({"depth": -1}), json!({"layer": lagos}), "0 to 20000"),
+        (json!({"depth": 5, "bed": "x"}), json!({"layer": lagos}), "has no 'bed'"),
+        (json!({"field": "nome"}), json!({"layer": lagos}), "isn't numeric"),
+        (json!({"field": "x"}), json!({"layer": lagos}), "has no field 'x'"),
+        (json!({"depth": 5}), json!(null), "give the terrain a water layer"),
+        (json!(3), json!({"layer": lagos}), "or false"),
+    ] {
+        let e = s.run("map.terrain", &json!({"layer": dem, "water": terrain_water, "block": {"water": water}})).unwrap_err();
+        assert!(e.contains(said), "{water}: {e}");
+        assert!(s.map().view.terrain.is_none(), "{water}: refused whole");
+    }
+    // By a field: the lake with no value is said; reported and saved with the project.
+    let mark = s.notice_mark();
+    let v = s.run("map.terrain", &json!({"layer": dem, "water": {"layer": lagos}, "block": {"water": {"field": "prof"}}})).unwrap();
+    assert_eq!(v["block"]["water"], json!({"field": "prof"}));
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("1 polygon of") && t.contains("no depth in 'prof'")), "{said:?}");
+    let saved = serde_json::to_value(&s.project).unwrap();
+    assert!(saved["requires"].as_array().unwrap().contains(&json!("terrain-block-water")), "{}", saved["requires"]);
+    // With a depth for those, nothing is said; `false` takes the water out of the walls.
+    let mark = s.notice_mark();
+    s.run("map.terrain", &json!({"block": {"water": {"field": "prof", "depth": 5}}})).unwrap();
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("no depth")));
+    // Nor when the layer's definition query leaves the lake without a value out: it draws no water.
+    if let Some(l) = s.map_mut().layers.iter_mut().find(|l| l.name == lagos) {
+        l.definition_query = Some("nome = 'a'".into());
+    }
+    let mark = s.notice_mark();
+    s.run("map.terrain", &json!({"block": {"water": {"field": "prof"}}})).unwrap();
+    assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("no depth")));
+    // The terrain's water can't go, or become a layer without the field, under the block's water:
+    // refused, the terrain as it was.
+    let sea = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"nome": "c"}, "geometry": {"type": "Polygon", "coordinates": square(10.03)}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(sea.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "mar.geojson", "data": data})).unwrap();
+    let before = s.map().view.terrain.clone();
+    for (water, said) in [(json!(false), "take the block's water off"), (json!({"layer": "mar"}), "has no field 'prof'")] {
+        let e = s.run("map.terrain", &json!({"water": water})).unwrap_err();
+        assert!(e.contains(said), "{water}: {e}");
+        assert_eq!(s.map().view.terrain, before, "{water}");
+    }
+    let v = s.run("map.terrain", &json!({"block": {"water": false}})).unwrap();
+    assert_eq!(v["block"]["water"], json!(null));
+    let saved = serde_json::to_value(&s.project).unwrap();
+    assert!(!saved["requires"].as_array().unwrap().contains(&json!("terrain-block-water")));
+    // Deleting the field the depths came from keeps the block's depth for all the water, else takes
+    // the water out of the walls, said both ways.
+    for (water, field, left, said) in [
+        (json!({"field": "fundo", "depth": 5}), "fundo", json!({"depth": 5.0}), "all of it 5 m deep"),
+        (json!({"field": "prof"}), "prof", json!(null), "show no water"),
+    ] {
+        s.run("map.terrain", &json!({"block": {"water": water}})).unwrap();
+        let mark = s.notice_mark();
+        s.run("edit.deleteField", &json!({"layer": lagos, "field": field})).unwrap();
+        let b = s.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).unwrap();
+        assert_eq!(serde_json::to_value(&b.water).unwrap(), left, "{field}");
+        let notes: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        assert!(notes.iter().any(|t| t.contains(field) && t.contains(said)), "{notes:?}");
+    }
 }
 
 /// A terrain's water on a layer read a view at a time (#2305), which `map.terrain` refuses: the
@@ -15474,6 +15571,70 @@ fn the_globe_has_stars_that_turn_off() {
     assert!(serde_json::from_str::<rustgis_map::view::ViewEffects>("{}").unwrap().stars);
     s.run("map.effects", &json!({"reset": true})).unwrap();
     assert!(corner(&mut s) == starry);
+}
+
+/// A publication's globe locator keeps the map's blank paper (#2532), so the space around its
+/// disc is the page's colour too.
+#[test]
+fn a_globe_locator_keeps_the_blank_paper() {
+    let mut s = world();
+    s.run("map.basemap", &json!({"name": "blank", "color": "#F1EADF"})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": [-46.8, -11.6, -38.5, -2.2]})).unwrap();
+    let globe = r["locator"].as_str().unwrap().to_string();
+    let m = s.project.maps.iter().find(|m| m.name == globe).unwrap();
+    assert_eq!(m.blank_paper(), Some(rustgis_map::Rgba::rgb(0xF1, 0xEA, 0xDF)));
+}
+
+/// A blank basemap's paper colour (#2532): kept until null or another basemap, opaque #RRGGBB only,
+/// a warning (not an error) when given with another basemap, and drawn in a layout's map frame.
+#[test]
+fn a_blank_basemap_takes_a_paper_colour() {
+    let cream = rustgis_map::Rgba::rgb(0xF1, 0xEA, 0xDF);
+    let mut s = Session::new(Project::default());
+    s.map_mut().graticule = false;
+    assert_eq!(s.run("map.basemap", &json!({"name": "blank", "color": "#F1EADF"})).unwrap(), Value::Null);
+    assert_eq!(s.map().paper, Some(cream));
+    assert_eq!(s.map().palette().0, cream);
+    s.run("map.basemap", &json!({"name": "blank"})).unwrap();
+    assert_eq!(s.map().paper, Some(cream), "no color keeps it");
+    for bad in [json!("#F1EADF80"), json!("F1EADF"), json!("#F1EA"), json!("#+F0000"), json!("cream"), json!(3)] {
+        let e = s.run("map.basemap", &json!({"name": "blank", "color": bad})).unwrap_err();
+        assert!(e.contains("#RRGGBB"), "{e}");
+        assert_eq!(s.map().paper, Some(cream), "a refused colour changes nothing");
+    }
+    // A new map starts on the same basemap, its paper included.
+    let first = s.project.active_map;
+    s.run("map.new", &json!({"name": "Second"})).unwrap();
+    assert_eq!((s.map().basemap, s.map().paper), (rustgis_map::Basemap::Blank, Some(cream)));
+    s.project.active_map = first;
+    // A layout's map frame on a cream page draws the cream paper, not a white box.
+    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "blank"})).unwrap();
+    s.run("layout.addFrame", &json!({"x": 20, "y": 20, "w": 150, "h": 100})).unwrap();
+    let dir = std::env::temp_dir().join(format!("rustgis-blank-paper-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("paper.png");
+    s.run("layout.export", &json!({"path": path.display().to_string(), "dpi": 72})).unwrap();
+    let pm = crate::render::decode_png(&std::fs::read(&path).unwrap()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    // 72 dpi: a point a pixel; 25 mm in from the page's corner lies inside the frame.
+    let inside = pm.pixel(71, 71).unwrap();
+    assert_eq!((inside.red(), inside.green(), inside.blue()), (0xF1, 0xEA, 0xDF));
+    s.run("map.basemap", &json!({"name": "blank", "color": "#ffffff"})).unwrap();
+    assert_eq!(s.map().paper, None, "white is the blank basemap's own paper");
+    s.run("map.basemap", &json!({"name": "blank", "color": "#F1EADF"})).unwrap();
+    s.run("map.basemap", &json!({"name": "blank", "color": null})).unwrap();
+    assert_eq!(s.map().paper, None, "null: white again");
+    s.run("map.basemap", &json!({"name": "blank", "color": "#F1EADF"})).unwrap();
+    // Another basemap: no error, a warning, and the paper goes.
+    let mark = s.notice_mark();
+    let v = s.run("map.basemap", &json!({"name": "paper", "color": "#F1EADF"})).unwrap();
+    assert!(v["warning"].as_str().is_some_and(|w| w.contains("blank basemap only")), "{v}");
+    assert!(s.notices_since(mark).iter().any(|n| n.text.contains("blank basemap only")));
+    assert_eq!(s.map().basemap, rustgis_map::Basemap::Paper);
+    assert_eq!(s.map().paper, None);
+    s.run("map.basemap", &json!({"name": "blank"})).unwrap();
+    assert_eq!(s.map().palette().0, rustgis_map::Rgba::rgb(0xFF, 0xFF, 0xFF), "back on blank: white");
+    assert_eq!(s.run("map.basemap", &json!({"name": "ocean"})).unwrap(), Value::Null, "no color, no warning");
 }
 
 #[test]
@@ -29726,6 +29887,39 @@ fn open_data_portal_search_and_add() {
     }
 }
 
+/// A GeoLens dataset (a local server's) is added with every page of its features, not only the
+/// server's first 1,000.
+#[test]
+fn geolens_datasets_are_added_page_by_page() {
+    let page = |from: u32, to: u32, next: Option<&str>| {
+        let features: Vec<Value> = (from..to)
+            .map(|i| json!({"type": "Feature", "id": i, "properties": {"n": i}, "geometry": {"type": "Point", "coordinates": [f64::from(i % 90), 1.0]}}))
+            .collect();
+        let mut p = json!({"type": "FeatureCollection", "numberMatched": 1500, "numberReturned": features.len(), "features": features});
+        if let Some(h) = next {
+            p["links"] = json!([{"rel": "next", "type": "application/geo+json", "href": h}]);
+        }
+        p.to_string()
+    };
+    let search = r#"{"type": "FeatureCollection", "features": [{"type": "Feature", "id": "trees",
+        "properties": {"title": "Street Trees", "record_type": "vector_dataset", "geometry_type": "POINT", "feature_count": 1500}}]}"#;
+    let base = serve_routes(
+        vec![
+            ("/api/search/datasets/", search.to_string()),
+            ("/api/collections/trees/items?limit=1000&after=1000", page(1000, 1500, None)),
+            ("/api/collections/trees/items", page(0, 1000, Some("{base}/api/collections/trees/items?limit=1000&after=1000"))),
+        ],
+        8,
+    );
+    let mut s = Session::new(Project::default());
+    let r = s.run("portal.search", &json!({"portal": "geolens", "url": base, "query": "trees"})).unwrap();
+    let resource = &r["datasets"][0]["resources"][0];
+    assert_eq!(resource["use"], "features", "{r}");
+    let r = s.run("portal.add", &json!({"url": resource["url"], "use": resource["use"], "name": "Street Trees", "portal": base})).unwrap();
+    assert_eq!(r["features"], 1500, "{r}");
+    assert_eq!(s.map().layer_by_name("Street Trees").unwrap().dataset.features.len(), 1500);
+}
+
 /// A LAS 1.2 file of point format 0 in longitude/latitude: (x, y, z, class) per point.
 fn las_bytes(points: &[(f64, f64, f64, u8)]) -> Vec<u8> {
     let mut b = vec![0u8; 227];
@@ -39429,6 +39623,44 @@ fn text_elements_take_wrap() {
     assert!(wraps(&s, plain));
 }
 
+/// `layout.addElement` and `layout.update` say how many lines of a text don't fit its box when
+/// they set what it breaks into or its room, or show it, wrapped or not (#2346); a move says
+/// nothing, nor a hidden text, nor a text that fits.
+#[test]
+fn text_elements_say_the_lines_left_out_of_their_box() {
+    let mut s = Session::new(Project::default());
+    s.run("layout.new", &json!({"template": "blank", "width": 120, "height": 90})).unwrap();
+    let said = |s: &mut Session, cmd: &str, p: Value| {
+        s.notices.clear();
+        let out = s.run(cmd, &p).unwrap();
+        let said: Vec<String> = s.notices.iter().filter(|n| n.text.contains("fit its box")).map(|n| n.text.clone()).collect();
+        (out, said)
+    };
+    let (out, notes) = said(&mut s, "layout.addElement", json!({"kind":"text", "text":"one\ntwo\nthree", "x":10, "y":10, "w":60, "h":2}));
+    let id = out["element"].as_u64().unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].starts_with(&format!("2 lines of the text \"Text\" ({id}) don't fit its box")), "{notes:?}");
+    // Moved, it loses the same lines: not said again.
+    assert!(said(&mut s, "layout.update", json!({"element": id, "x": 20})).1.is_empty());
+    // Hidden, it loses nothing on the page; shown again, it says what it loses.
+    assert!(said(&mut s, "layout.update", json!({"element": id, "visible": false})).1.is_empty());
+    assert_eq!(said(&mut s, "layout.update", json!({"element": id, "visible": true})).1.len(), 1);
+    // Without ink it shows nothing; given ink again, it says what it loses, and another colour after
+    // that (each step of a pick) says nothing more.
+    assert!(said(&mut s, "layout.update", json!({"element": id, "color": "#00000000"})).1.is_empty());
+    assert_eq!(said(&mut s, "layout.update", json!({"element": id, "color": "#1F2937"})).1.len(), 1);
+    assert!(said(&mut s, "layout.update", json!({"element": id, "color": "#374151"})).1.is_empty());
+    // Room for them all: nothing to say.
+    assert!(said(&mut s, "layout.update", json!({"element": id, "h": 40})).1.is_empty());
+    // Wrapped in a narrow box, its sentence breaks into more lines than the box holds.
+    let sentence = "Population counts from the 2020 census; boundaries simplified for print";
+    let (_, notes) = said(&mut s, "layout.update", json!({"element": id, "text": sentence, "w": 20, "h": 6, "wrap": true}));
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains(&format!("of the text \"Text\" ({id}) don't fit its box")), "{notes:?}");
+    // A text that fits, added: nothing said.
+    assert!(said(&mut s, "layout.addElement", json!({"kind":"text", "text":"Source", "x":10, "y":60, "w":60, "h":10})).1.is_empty());
+}
+
 /// A layout chart groups, orders and cuts its bars by the options of `layout.addElement` and
 /// `layout.update`, writes none of them at their defaults, refuses a bad one (changing nothing)
 /// and refuses them for other kinds; it says what it leaves out: bars past its limit, features
@@ -39576,6 +39808,107 @@ fn layout_charts_group_order_cut_and_say_what_they_leave_out() {
     let told = said(&s, mark);
     assert!(!told.iter().any(|t| t.contains("no longer")), "{told:?}");
     assert_eq!(options(&s).2, None);
+}
+
+/// A chart's look (#2487): columns, values and their decimals, its own title or none, a bar
+/// colour and labels against the bars, taken by `layout.addElement` and `layout.update`, written
+/// only when set, given back their defaults with null (title, bar colour), "auto" (decimals) or
+/// "left" (labels), refused when bad (changing nothing) and for other kinds; a look change says
+/// nothing of what the chart leaves out, and a chart whose layer is gone still takes one.
+#[test]
+fn layout_charts_take_a_look() {
+    use rustgis_data::{Dataset, Field, FieldType, GeometryType, Value};
+    use rustgis_map::layout::{ElementKind, Orientation, TextAlign};
+    let mut s = Session::new(sample::world_project());
+    let mut ds =
+        Dataset::new("Places", GeometryType::Point, vec![Field::new("name", FieldType::Text), Field::new("people", FieldType::Double)]);
+    for i in 0..25 {
+        ds.push(None, vec![Value::Text(format!("P{i}")), Value::Float(i as f64 * 1000.5)]);
+    }
+    s.map_mut().add_dataset(ds);
+    s.run("layout.new", &json!({"name": "Charts"})).unwrap();
+    let r = s
+        .run(
+            "layout.addElement",
+            &json!({"kind": "chart", "layer": "Places", "orientation": "vertical", "values": true, "decimals": 1, "title": "People", "barColor": "#C2185B", "labelAlign": "right"}),
+        )
+        .unwrap();
+    let chart = r["element"].as_u64().unwrap() as u32;
+    let look = |s: &Session| match s.project.layouts[0].element(chart).map(|e| &e.kind) {
+        Some(ElementKind::Chart { orientation, values, decimals, title, bar_color, label_align, .. }) => {
+            (*orientation, *values, *decimals, title.clone(), bar_color.map(|c| c.hex()), *label_align)
+        }
+        _ => panic!("a chart"),
+    };
+    assert_eq!(look(&s), (Orientation::Vertical, true, Some(1), Some("People".into()), Some("#C2185B".into()), TextAlign::Right));
+    // Back to the defaults: none of them written then.
+    s.run(
+        "layout.update",
+        &json!({"element": chart, "orientation": "horizontal", "values": false, "decimals": "auto", "title": null, "barColor": null, "labelAlign": "left"}),
+    )
+    .unwrap();
+    assert_eq!(look(&s), (Orientation::Horizontal, false, None, None, None, TextAlign::Left));
+    // The chart's own keys: the layout's legend has a title of its own.
+    let saved = serde_json::to_string(&s.project.layouts[0].element(chart).unwrap().kind).unwrap();
+    for key in ["orientation", "values", "decimals", "title", "bar_color", "label_align"] {
+        assert!(!saved.contains(&format!("\"{key}\"")), "{key} isn't written at its default");
+    }
+    // A look change says nothing of the bars it leaves out; a title of "" is none.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": chart, "title": "", "values": true})).unwrap();
+    assert!(s.notices_since(mark).is_empty(), "{:?}", s.notices_since(mark).iter().map(|n| &n.text).collect::<Vec<_>>());
+    assert_eq!(look(&s).3, Some(String::new()));
+    // A bad one is refused, naming it, and nothing changes.
+    let before = look(&s);
+    for (bad, key) in [
+        (json!({"orientation": "diagonal"}), "orientation"),
+        (json!({"values": "maybe"}), "values"),
+        (json!({"decimals": 7}), "decimals"),
+        (json!({"decimals": -1}), "decimals"),
+        (json!({"title": 5}), "title"),
+        (json!({"title": "x".repeat(201)}), "title"),
+        (json!({"barColor": "pink"}), "barColor"),
+        (json!({"labelAlign": "center"}), "labelAlign"),
+    ] {
+        let mut p = bad.clone();
+        p["element"] = json!(chart);
+        p["x"] = json!(99);
+        let err = s.run("layout.update", &p).unwrap_err();
+        assert!(err.contains(key), "{bad}: {err}");
+        let mut add = bad.clone();
+        add["kind"] = json!("chart");
+        add["layer"] = json!("Places");
+        assert!(s.run("layout.addElement", &add).unwrap_err().contains(key), "{bad}");
+    }
+    assert_eq!(look(&s), before);
+    assert!(s.project.layouts[0].element(chart).is_some_and(|e| e.x != 99.0));
+    // An over-long title is refused as a chart's.
+    let err = s.run("layout.update", &json!({"element": chart, "title": "x".repeat(201)})).unwrap_err();
+    assert!(err.contains("chart's title"), "{err}");
+    // Only a chart takes those of its own; a legend keeps its title.
+    let rect =
+        s.run("layout.addElement", &json!({"kind": "rectangle", "x": 1, "y": 1, "w": 5, "h": 5})).unwrap()["element"].as_u64().unwrap();
+    for key in ["values", "decimals", "barColor", "labelAlign"] {
+        let mut p = json!({"element": rect});
+        p[key] = json!("x");
+        assert!(s.run("layout.update", &p).unwrap_err().contains("only charts"), "{key}");
+        let mut p = json!({"kind": "table", "layer": "Places"});
+        p[key] = json!("x");
+        assert!(s.run("layout.addElement", &p).unwrap_err().contains("only charts"), "{key}");
+    }
+    let legend = s.run("layout.addElement", &json!({"kind": "legend", "title": "Key"})).unwrap()["element"].as_u64().unwrap() as u32;
+    s.run("layout.update", &json!({"element": legend, "title": "Places"})).unwrap();
+    assert!(matches!(s.project.layouts[0].element(legend).map(|e| &e.kind), Some(ElementKind::Legend { title, .. }) if title == "Places"));
+    // A locked chart takes no null either: it is a change.
+    s.run("layout.update", &json!({"element": chart, "title": "People", "locked": true})).unwrap();
+    assert!(s.run("layout.update", &json!({"element": chart, "title": null})).is_err());
+    assert_eq!(look(&s).3, Some("People".into()));
+    // Its layer gone, the chart is drawn as a placeholder and still takes a look, not data.
+    s.run("layout.update", &json!({"element": chart, "locked": false})).unwrap();
+    s.run("layer.remove", &json!({"layer": "Places"})).unwrap();
+    s.run("layout.update", &json!({"element": chart, "barColor": "#00796B", "title": null, "orientation": "vertical"})).unwrap();
+    assert_eq!(look(&s), (Orientation::Vertical, true, None, None, Some("#00796B".into()), TextAlign::Left));
+    assert!(s.run("layout.update", &json!({"element": chart, "group": "name"})).is_err());
 }
 
 /// Text elements take a font family (#517): sans by default and not written then, serif when
