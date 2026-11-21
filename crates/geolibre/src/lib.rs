@@ -578,27 +578,42 @@ fn calculator_order<'a>(expression: &str, list: Vec<&'a str>, inputs: &dyn Input
         let p = Path::new(n);
         [p.file_name(), p.file_stem()].into_iter().flatten().filter_map(|part| part.to_str())
     };
-    let matches =
-        |q: &str, i: usize, same: fn(&str, &str) -> bool| same(q, list[i]) || (!layer[i] && file_parts(list[i]).any(|part| same(q, part)));
+    // `whole`: the input's whole name (a layer's, or a file's path); else a file's name or stem.
+    let matches = |q: &str, i: usize, same: fn(&str, &str) -> bool, whole: bool| {
+        if whole { same(q, list[i]) } else { !layer[i] && file_parts(list[i]).any(|part| same(q, part)) }
+    };
     let exact: fn(&str, &str) -> bool = |a, b| a == b;
     let any_case: fn(&str, &str) -> bool = |a, b| a.eq_ignore_ascii_case(b);
-    // Each quoted name takes the first input it matches that no earlier name took, so one
-    // layer listed twice can be quoted under two names (a path and a file name, say).
+    // Exact before any case, and a whole name before a file's name, each pass over every name
+    // before the next: a layer `A` isn't taken by `/x/A.tif` listed before it, nor `nir.tif` by
+    // `'NIR'` before `'nir'` matches it exactly.
+    let passes = [(exact, true), (exact, false), (any_case, true), (any_case, false)];
+    // Each quoted name takes the first input it matches that no other name took, so one layer
+    // listed twice can be quoted under two names (a path and a file name, say).
     let mut taken = vec![false; list.len()];
-    let mut order = Vec::with_capacity(quoted.len());
-    let mut missing = Vec::new();
-    for q in &quoted {
-        let free = |same| (0..list.len()).find(|&i| !taken[i] && matches(q, i, same));
-        let found = free(exact).or_else(|| free(any_case));
-        match found {
-            Some(i) => {
+    let mut bound: Vec<Option<usize>> = vec![None; quoted.len()];
+    for (same, whole) in passes {
+        for (k, q) in quoted.iter().enumerate() {
+            if bound[k].is_none()
+                && let Some(i) = (0..list.len()).find(|&i| !taken[i] && matches(q, i, same, whole))
+            {
                 taken[i] = true;
-                order.push(list[i]);
+                bound[k] = Some(i);
             }
-            None => missing.push(format!("\"{q}\"")),
         }
     }
+    let order: Vec<&'a str> = bound.iter().flatten().map(|&i| list[i]).collect();
+    let missing: Vec<String> = quoted.iter().zip(&bound).filter(|(_, b)| b.is_none()).map(|(q, _)| format!("\"{q}\"")).collect();
     if order.is_empty() && !layer.contains(&true) {
+        // By position, one file per name: a file left over, or a name without a file, is refused
+        // here, so the notice below names every pair.
+        if quoted.len() != list.len() {
+            return Err(format!(
+                "the expression quotes {} name(s) but {} file(s) are listed: list one file per quoted name, in the order they first appear",
+                quoted.len(),
+                list.len()
+            ));
+        }
         let pairs: Vec<String> = quoted.iter().zip(&list).map(|(q, n)| format!("\"{q}\" from {n}")).collect();
         let note =
             format!("no quoted name matches an input file's path or name, so they are read in the order listed: {}", pairs.join(", "));

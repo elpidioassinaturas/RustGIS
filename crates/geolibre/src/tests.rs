@@ -407,6 +407,17 @@ fn raster_calculator_binds_quoted_names_to_their_layers() {
     assert_eq!(kept, files);
     let note = note.unwrap();
     assert!(note.contains("\"x\" from /d/red.tif, \"y\" from /d/nir.tif"), "{note}");
+    // By position, one file per name: a file left over, or a name without a file, is refused.
+    let e = order("'x' - 'y'", &["/d/a.tif", "/d/b.tif", "/d/c.tif"]).unwrap_err();
+    assert!(e.contains("2 name(s) but 3 file(s)"), "{e}");
+    assert!(order("'x' - 'y' - 'z'", &files).unwrap_err().contains("3 name(s) but 2 file(s)"));
+    // Every exact match before any in another case, whichever name comes first.
+    assert_eq!(order("'NIR' - 'nir'", &["/d/nir.tif", "/d/Nir.tif"]).unwrap(), (vec!["/d/Nir.tif", "/d/nir.tif"], None));
+    assert_eq!(order("'nIr' - 'nir'", &["/a/nir.tif", "/b/NIR.tif"]).unwrap(), (vec!["/b/NIR.tif", "/a/nir.tif"], None));
+    // Every whole path before any file name, whichever name comes first.
+    assert_eq!(order("'red' - '/a/red.tif'", &["/a/red.tif", "/b/red.tif"]).unwrap(), (vec!["/b/red.tif", "/a/red.tif"], None));
+    // A layer's whole name before a file's stem, whichever is listed first.
+    assert_eq!(order("'dem' + 0 * 'dem.tif'", &["/x/dem.tif", "dem"]).unwrap(), (vec!["dem", "/x/dem.tif"], None));
     // One name matched and one not: refused, never the matched one read from another file.
     let e = order("'nir' - 'x'", &files).unwrap_err();
     assert!(e.contains("\"x\"") && e.contains("/d/red.tif; /d/nir.tif"), "{e}");
