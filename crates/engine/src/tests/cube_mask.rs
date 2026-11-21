@@ -96,11 +96,6 @@ fn a_cloud_free_summary_of_a_stac_collection() {
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
     assert!(said.iter().any(|t| t.contains("1 item(s) left out") && t.contains("SCL")), "{said:?}");
     assert!(!said.iter().any(|t| t.contains("ignores") || t.contains("outside")), "{said:?}");
-    // Every item masked (from January, without the fourth): nothing left out, nothing said.
-    let mark = s.notice_mark();
-    reduce(&mut s, &with(json!({"stat": "first", "start": "2024-01-01"})));
-    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
-    assert!(!said.iter().any(|t| t.contains("left out")), "{said:?}");
     let by = |order: &'static [usize]| {
         move |col: usize, row: usize| order.iter().find(|k| clear(col, row).contains(k)).map(|k| red(*k, col, row))
     };
@@ -221,7 +216,8 @@ fn band_pixels_outside_their_mask_are_said() {
             assert!(v.is_nan(), "({col}, {row}): {v}");
         }
     }
-    // 32 pixels a date, two dates.
+    // 32 pixels a date, two dates, said once; every item has its mask, so none is said left out.
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
-    assert!(said.iter().any(|t| t.starts_with("64 band pixel(s) lie outside") && t.contains("/m")), "{said:?}");
+    assert_eq!(said.iter().filter(|t| t.contains("64 band pixel(s) lie outside") && t.contains("/m")).count(), 1, "{said:?}");
+    assert!(!said.iter().any(|t| t.contains("item(s) left out")), "{said:?}");
 }
