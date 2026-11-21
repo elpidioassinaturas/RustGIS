@@ -2093,21 +2093,24 @@ within the run's 64 million values on the desktop and 16 million in the web app 
 4 bytes each: up to 256 MB; a STAC collection is read in pieces that keep to it), and like first
 is the data cube summary's only.
 
-- **Cloud-free composites:** a STAC collection's dates can be masked by each item's own quality
-  band with `"mask"`: `{"asset": "SCL", "keep": [4, 5, 6]}` takes a cell at a date only where the
-  same item's SCL has one of those classes, `"drop": [0, 1, 3, 8, 9, 10]` every class but those,
-  and `"bits": {"set": [6], "unset": [1, 3, 4]}` the cells of a bit mask (Landsat's `qa_pixel`)
-  with every bit of `set` on and every bit of `unset` off. Classes are whole numbers. A cell with
-  no-data in the mask (its header's, or the value its STAC metadata names) is never taken, nor
-  one outside the mask's file (said, with how many). The mask is read onto the band's grid by nearest neighbour (SCL at 20 m under a
-  10 m band), at its overview nearest the band's cells, and an item without the mask's asset is
-  left out and said. With a mask, **first** takes the dates by their clear share of the area by
-  default (`"order": "clear"`): each date's masks are read over the area first, overlapping tiles counted once (at an overview of
-  about a million pixels for a large area), and the clearest date gives each cell its value, the
-  next clearest the cells still empty, and so on (the best pixel). A tile's `eo:cloud_cover` says
-  little about a small area, so it isn't used. **median** of the masked dates gives a smoother
-  composite, with no seams between dates, where several dates are clear. Any statistic takes a
-  mask, and so does a trend (`cube.trend`). A cell no date has clear is left empty.
+- **Cloud-free composites:** a STAC collection's dates can be masked by each item's own quality band
+  with `"mask"`: `{"asset": "SCL", "keep": [4, 5, 6]}` takes a cell at a date only where the same
+  item's SCL has one of those classes, `"drop": [0, 1, 3, 8, 9, 10]` every class but those, and
+  `"bits": {"set": [6], "unset": [1, 3, 4]}` the cells of a bit mask (Landsat's `qa_pixel`) with
+  every bit of `set` on and every bit of `unset` off. Classes are whole numbers. A cell with no-data
+  in the mask (its header's, or the value its STAC metadata names) is never taken, nor one outside
+  the mask's file (said, with how many). The mask is read onto the band's grid by nearest neighbour
+  (SCL at 20 m under a 10 m band), at its overview nearest the band's cells, and an item without the
+  mask's asset is left out and said. With a mask, **first** takes the dates by their clear share of
+  the area by default (`"order": "clear"`): each date's masks are read over the area first,
+  overlapping tiles counted once (at an overview of about a million pixels for a large area), and
+  the clearest date gives each cell its value, the next clearest the cells still empty, and so on
+  (the best pixel). A tile's `eo:cloud_cover` says little about a small area, so it isn't used.
+  **median** of the masked dates gives a smoother composite, with no seams between dates, where
+  several dates are clear. Any statistic takes a mask, and so does a trend (`cube.trend`). With
+  first and median, a cell no date has clear is left empty; the counts give 0 there (see Missing
+  values below). The example below keeps SCL's dark areas (2) and unclassified pixels (7), which a
+  hilly area needs (they can hold shadows or low cloud): drop them for a stricter mask.
 
 - **Classes:** a series of categorical rasters, such as yearly land-cover maps (MapBiomas, ESA
   WorldCover), is summarised as classes with eight more statistics:

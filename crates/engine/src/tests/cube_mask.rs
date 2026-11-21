@@ -218,7 +218,7 @@ fn band_pixels_outside_their_mask_are_said() {
     }
     // 32 pixels a date, two dates, said once; every item has its mask, so none is said left out.
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
-    assert_eq!(said.iter().filter(|t| t.contains("64 band pixel(s) lie outside") && t.contains("/m")).count(), 1, "{said:?}");
+    assert_eq!(said.iter().filter(|t| t.contains("64 band pixel(s) with a value lie outside") && t.contains("/m")).count(), 1, "{said:?}");
     assert!(!said.iter().any(|t| t.contains("item(s) left out")), "{said:?}");
 }
 

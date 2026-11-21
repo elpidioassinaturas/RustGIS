@@ -1014,7 +1014,8 @@ fn level_near(layout: &rustgis_data::raster::cog::Layout, size: f64) -> usize {
 impl StacCube {
     /// The mask's say over a window of a band file's level (`lt` its grid; columns `cols`, rows
     /// `rows`), pixel by pixel in the window's order: the mask file `href` read at its level
-    /// nearest the band's pixels, each band pixel taking the mask pixel holding its centre.
+    /// nearest the band's pixels, each band pixel taking the mask pixel holding its centre;
+    /// `None` for a pixel the mask file doesn't cover.
     fn mask_window(
         &self,
         (href, stored): &Mask,
@@ -1022,7 +1023,7 @@ impl StacCube {
         lt: &rustgis_data::raster::GeoTransform,
         cols: (u32, u32),
         rows: (u32, u32),
-    ) -> Result<Vec<bool>, String> {
+    ) -> Result<Vec<Option<bool>>, String> {
         use super::cube_mask::{nearest, span};
         use crate::render::rustgis_tiles::cog;
         let info = cog::info_blocking(href)?;
@@ -1034,34 +1035,18 @@ impl StacCube {
         let mt = info.layout.transform_of(lv);
         let xs = nearest(lt.origin_x, lt.pixel_width, cols, mt.origin_x, mt.pixel_width, lv.width);
         let ys = nearest(lt.origin_y, lt.pixel_height, rows, mt.origin_y, mt.pixel_height, lv.height);
-        let mut outside = 0u64;
-        let out = match (span(&xs), span(&ys)) {
-            (Some(mc), Some(mr)) => {
-                let m = cog::read_values_blocking(&info, href, level, 0, mc, mr)?;
-                let across = (mc.1 - mc.0) as usize;
-                let mut out = Vec::with_capacity(xs.len() * ys.len());
-                for y in &ys {
-                    for x in &xs {
-                        let v = match (x, y) {
-                            (Some(x), Some(y)) => m.get((y - mr.0) as usize * across + (x - mc.0) as usize),
-                            _ => None,
-                        };
-                        outside += u64::from(v.is_none());
-                        out.push(v.is_some_and(|v| !stored.contains(v) && test.accepts(*v)));
-                    }
-                }
-                out
+        let (Some(mc), Some(mr)) = (span(&xs), span(&ys)) else { return Ok(vec![None; xs.len() * ys.len()]) };
+        let m = cog::read_values_blocking(&info, href, level, 0, mc, mr)?;
+        let across = (mc.1 - mc.0) as usize;
+        let mut out = Vec::with_capacity(xs.len() * ys.len());
+        for y in &ys {
+            for x in &xs {
+                let v = match (x, y) {
+                    (Some(x), Some(y)) => m.get((y - mr.0) as usize * across + (x - mc.0) as usize),
+                    _ => None,
+                };
+                out.push(v.map(|v| !stored.contains(v) && test.accepts(*v)));
             }
-            _ => {
-                outside = (xs.len() * ys.len()) as u64;
-                vec![false; xs.len() * ys.len()]
-            }
-        };
-        if outside > 0
-            && let Ok(mut u) = self.uncovered.lock()
-        {
-            u.0 += outside;
-            u.1.get_or_insert_with(|| href.clone());
         }
         Ok(out)
     }
@@ -1103,8 +1088,11 @@ impl super::cube::TimeCube for StacCube {
     /// their count and the first such mask.
     fn lost(&self) -> Vec<String> {
         match self.uncovered.lock().map(|u| u.clone()) {
-            Ok((n, Some(href))) if n > 0 => vec![format!(
-                "{n} band pixel(s) lie outside their item's mask file, so they were left out as not clear (the first: {href})"
+            Ok((n, Some(href))) if n > 0 => vec![crate::sources::message_with_address(
+                &href,
+                &format!(
+                    "{n} band pixel(s) with a value lie outside their item's mask file (this one the first), so they were left out as not clear"
+                ),
             )],
             _ => Vec::new(),
         }
@@ -1231,23 +1219,43 @@ impl super::cube::TimeCube for StacCube {
             // A masked cube's pixels go in only where the same item's mask lets them through.
             let keep = match (&self.mask, mask) {
                 (Some(test), Some(m)) => Some(self.mask_window(m, test, &lt, cols, rows)?),
+                // Every file of a masked cube has its item's mask (cube_files leaves out the items
+                // without one): one that doesn't would let clouds through unsaid.
+                (Some(_), None) => return Err(crate::sources::message_with_address(href, "has no quality band to mask its cells by")),
                 _ => None,
             };
+            // The band pixels with a value that the mask file doesn't cover.
+            let mut outside = 0u64;
             let across = (fc1 - fc0) as usize;
             for (r, line) in read.chunks(across).enumerate() {
                 let row = ((fr0 - dy - top_f) as usize + r) / f as usize;
                 for (c, v) in line.iter().enumerate() {
                     let col = ((fc0 - dx) as usize + c) / f as usize;
                     let cell = row * w as usize + col;
-                    if v.is_finite()
-                        && !fill.contains(v)
-                        && keep.as_ref().is_none_or(|k| k.get(r * across + c).copied().unwrap_or(false))
-                        && let (Some(s), Some(n)) = (sum.get_mut(cell), count.get_mut(cell))
-                    {
+                    if !v.is_finite() || fill.contains(v) {
+                        continue;
+                    }
+                    let clear = match &keep {
+                        None => true,
+                        Some(kept) => match kept.get(r * across + c).copied().flatten() {
+                            Some(clear) => clear,
+                            None => {
+                                outside += 1;
+                                false
+                            }
+                        },
+                    };
+                    if clear && let (Some(s), Some(n)) = (sum.get_mut(cell), count.get_mut(cell)) {
                         *s += f64::from(*v) * k + o;
                         *n += 1;
                     }
                 }
+            }
+            if outside > 0
+                && let (Ok(mut u), Some((m, _))) = (self.uncovered.lock(), mask)
+            {
+                u.0 += outside;
+                u.1.get_or_insert_with(|| m.clone());
             }
         }
         let vals: Vec<f32> = sum.iter().zip(&count).map(|(s, n)| if *n > 0 { (s / f64::from(*n)) as f32 } else { f32::NAN }).collect();
