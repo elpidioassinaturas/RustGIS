@@ -4427,7 +4427,7 @@ fn render_frame(
     // The lines point labels are turned square to (#2263), on the screen.
     let square_lines = square_lines(map, &ctx, &flat);
     // And the lines labels are curved along (#2262).
-    let guide_lines = guide_lines(map, &ctx, &flat, scale, distance);
+    let guide_lines = guide_lines(map, &ctx, &flat, &key, scale, distance);
     // Bottom first; a higher depth priority draws later (on top) whatever the order.
     let mut order: Vec<usize> = (0..n_layers).rev().collect();
     order.sort_by_key(|i| map.layers.get(*i).map_or(0, |l| l.priority));
@@ -6458,56 +6458,99 @@ fn screen_pieces(ctx: &Ctx<'_>, flat: &rustgis_map::projection::Flat, part: &[Co
 /// The lines of the guide layers ([`rustgis_map::LabelClass::guide`], #2262) of the label classes
 /// shown at `scale` and `distance`, keyed by layer name in ASCII lower case (as
 /// [`Map::layer_by_name`] matches names) and field, on the screen ([`guides_of`]). Worked out once
-/// a frame, before the layers are drawn (each layer is then borrowed to draw it).
+/// a frame, before the layers are drawn (each layer is then borrowed to draw it). On the flat map
+/// each guide layer's projected copy, thinned as it is drawn at this scale, is made as for drawing
+/// it (`key` names the projection), and kept: made again only when its geometry, the projection or
+/// the level of thinning changes.
 fn guide_lines(
-    map: &Map,
+    map: &mut Map,
     ctx: &Ctx<'_>,
     flat: &rustgis_map::projection::Flat,
+    key: &str,
     scale: f64,
     distance: f64,
 ) -> std::collections::HashMap<(String, Option<String>), guide_labels::Guides> {
-    let mut out = std::collections::HashMap::new();
     let shown = map.layers.iter().filter(|l| l.visible && l.labels.enabled).flat_map(|l| l.labels.in_order());
-    for c in shown.filter(|c| c.visible && c.in_range(scale, distance)) {
-        if let Some(g) = &c.guide {
-            let key = (g.layer.to_ascii_lowercase(), g.field.clone());
-            if let std::collections::hash_map::Entry::Vacant(e) = out.entry(key) {
-                let guides = guides_of(map, ctx, flat, e.key());
-                e.insert(guides);
+    let mut wanted: Vec<(String, Option<String>)> = shown
+        .filter(|c| c.visible && c.in_range(scale, distance))
+        .filter_map(|c| c.guide.as_ref().map(|g| (g.layer.to_ascii_lowercase(), g.field.clone())))
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    if ctx.globe.is_none() {
+        for (name, _) in &wanted {
+            if let Some(l) = map.layers.iter_mut().find(|l| l.name.eq_ignore_ascii_case(name)) {
+                l.thinned_in(flat, key, ctx.view.lod_tolerance());
             }
         }
     }
-    out
+    let map = &*map;
+    wanted
+        .into_iter()
+        .map(|k| {
+            let guides = guides_of(map, ctx, flat, key, &k);
+            (k, guides)
+        })
+        .collect()
 }
 
 /// The lines of the guide layer `name` (shown or not) on the screen, their stretches in view
 /// ([`screen_pieces`], thinned as [`guide_labels::Guides`] keeps them), each with its value in
-/// `field`, read only for a line with a stretch in view. Each vertex is projected once, as for
-/// [`square_lines`]; what is kept is at most about 24 bytes a point of the stretches in view,
-/// which thinning bounds by their length on the screen, and dropped with the frame. A layer read
-/// in chunks from its source has none to hand.
+/// `field`, read only for a line with a stretch in view. On the flat map a line whose projected
+/// extent is out of view is passed over by it, and those in view are read from their copy there
+/// as drawn, projected and thinned for `key` by [`guide_lines`]; on the globe each vertex is
+/// projected, as for [`square_lines`]. A frame thus costs a look at each line's extent, and a pass
+/// over the vertices of those in view; what is kept is at most about 24 bytes a point of the
+/// stretches in view, which thinning bounds by their length on the screen, and dropped with the
+/// frame. A layer read in chunks from its source has none to hand.
 fn guides_of(
     map: &Map,
     ctx: &Ctx<'_>,
     flat: &rustgis_map::projection::Flat,
+    key: &str,
     (name, field): &(String, Option<String>),
 ) -> guide_labels::Guides {
     let mut guides = guide_labels::Guides::default();
     let Some(layer) = map.layer_by_name(name) else { return guides };
-    // Read in longitude/latitude, as the lines labels are square to.
-    let Ok(to) = layer.dataset.lonlat_conversion() else { return guides };
+    let features = &layer.dataset.features;
     let field = field.as_deref().and_then(|f| layer.dataset.field_index(f));
     let (w, h) = (ctx.view.width as f32, ctx.view.height as f32);
-    for row in layer.dataset.features.rows() {
-        let Some(g) = row.geometry().and_then(|g| rustgis_data::Dataset::converted_to_lonlat(&to, g)) else { continue };
-        let Geometry::Line(parts) = &*g else { continue };
+    let mut add = |row: usize, pieces: Vec<Vec<(f32, f32)>>| {
         let mut value: Option<Option<String>> = None;
-        for piece in parts.iter().flat_map(|part| screen_pieces(ctx, flat, part)) {
+        for piece in pieces {
             for stretch in line_labels::in_view(piece.into_iter().map(Some), w, h) {
-                let v = value.get_or_insert_with(|| field.map(|fi| row.value(fi)).filter(|v| !v.is_null()).map(|v| v.to_string()));
+                let v =
+                    value.get_or_insert_with(|| field.map(|fi| features.value(row, fi)).filter(|v| !v.is_null()).map(|v| v.to_string()));
                 guides.push(&stretch, v.as_deref());
             }
         }
+    };
+    if ctx.globe.is_none() && layer.is_cached(key) {
+        let (geoms, extents) = (layer.thinned_cache(ctx.view.lod_tolerance()), layer.projected_extents());
+        // A point the projection can't show is NaN in the copy, and breaks the line there.
+        let screen = |c: &Coord| c.is_finite().then(|| ctx.view.to_screen(*c)).map(|(x, y)| (x as f32, y as f32));
+        for (row, g) in geoms.iter().enumerate() {
+            if !extents.get(row).is_some_and(|e| e.intersects(&ctx.cull)) {
+                continue;
+            }
+            let Some(Geometry::Line(parts)) = g else { continue };
+            let pieces = parts
+                .iter()
+                .flat_map(|part| {
+                    let points: Vec<Option<(f32, f32)>> = part.iter().map(screen).collect();
+                    points.split(Option::is_none).map(|r| r.iter().flatten().copied().collect()).collect::<Vec<_>>()
+                })
+                .collect();
+            add(row, pieces);
+        }
+        return guides;
+    }
+    // Read in longitude/latitude, as the lines labels are square to.
+    let Ok(to) = layer.dataset.lonlat_conversion() else { return guides };
+    for (row, r) in features.rows().enumerate() {
+        let Some(g) = r.geometry().and_then(|g| rustgis_data::Dataset::converted_to_lonlat(&to, g)) else { continue };
+        let Geometry::Line(parts) = &*g else { continue };
+        add(row, parts.iter().flat_map(|part| screen_pieces(ctx, flat, part)).collect());
     }
     guides
 }

@@ -30,11 +30,13 @@ struct Guide {
 #[derive(Default)]
 pub(crate) struct Guides {
     lines: Vec<Guide>,
+    /// The box of all of them: the grid cells looked in are those in it.
+    extent: Option<[f32; 4]>,
     by_value: HashMap<String, Vec<usize>>,
     cells: HashMap<(i32, i32), Vec<usize>>,
 }
 
-/// The grid cells a box covers, clamped to the view's (a label's box may run far out of it).
+/// The grid cells a box covers (a stretch's, so in view, or one cut to [`Guides`]' extent).
 fn cells_of(b: [f32; 4]) -> impl Iterator<Item = (i32, i32)> {
     let at = |v: f32| (v / CELL).floor().clamp(-2.0, 1024.0) as i32;
     (at(b[0])..=at(b[2])).flat_map(move |x| (at(b[1])..=at(b[3])).map(move |y| (x, y)))
@@ -58,15 +60,22 @@ impl Guides {
         if let Some(v) = value {
             self.by_value.entry(v.trim().to_lowercase()).or_default().push(id);
         }
+        self.extent = Some(self.extent.map_or(bbox, |e| [e[0].min(bbox[0]), e[1].min(bbox[1]), e[2].max(bbox[2]), e[3].max(bbox[3])]));
         for cell in cells_of(bbox) {
             self.cells.entry(cell).or_default().push(id);
         }
         self.lines.push(Guide { line, bbox });
     }
 
-    /// The stretches whose boxes meet box `b`, each once.
+    /// The stretches whose boxes meet box `b`, each once: looked for in the cells of `b` cut to
+    /// their extent (a label's box may run far out of view, a polygon's zoomed into).
     fn meeting(&self, b: [f32; 4]) -> Vec<usize> {
-        let mut ids: Vec<usize> = cells_of(b).filter_map(|c| self.cells.get(&c)).flatten().copied().collect();
+        let Some(e) = self.extent else { return Vec::new() };
+        let cut = [b[0].max(e[0]), b[1].max(e[1]), b[2].min(e[2]), b[3].min(e[3])];
+        if cut[0] > cut[2] || cut[1] > cut[3] {
+            return Vec::new();
+        }
+        let mut ids: Vec<usize> = cells_of(cut).filter_map(|c| self.cells.get(&c)).flatten().copied().collect();
         ids.sort_unstable();
         ids.dedup();
         ids.retain(|i| {
@@ -94,7 +103,7 @@ pub(crate) enum Near<'a> {
 /// Per frame, for each label with a guide and its label point in view; it looks at no Cancel: it
 /// reads the stretches listed in the grid cells round its point or polygon, and tries at most
 /// [`MOST_TRIED`] lines, a polygon's inside tested against its outline thinned as for its centre
-/// line (#2295).
+/// line (#2295): at most 3 points a position tried, each against every edge of the outline.
 pub(super) fn glyphs(
     guides: &Guides,
     value: Option<&str>,
