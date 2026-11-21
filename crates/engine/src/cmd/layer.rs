@@ -6667,6 +6667,7 @@ fn terrain_follows_removal(s: &mut Session, names: &[String]) {
             format!("Terrain: the layer '{c}' the block is cut to was removed, so no block is drawn until a layer of that name comes back"),
             false,
         );
+        super::terrain_blocks::said_removed(s, &c);
     }
     let Some(dem) = dem else { return };
     s.map_mut().view.terrain = None;

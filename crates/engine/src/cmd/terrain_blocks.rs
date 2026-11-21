@@ -89,6 +89,24 @@ pub(crate) fn told_uncut(session: &mut Session) {
     }
 }
 
+/// Blocks cut to polygons of layer `cut`, which was just removed: said by that removal
+/// (`terrain_follows_removal`), so remembered as said here. Otherwise the landing check would say
+/// them again as blocks whose polygons can't be read (#2318).
+pub(crate) fn said_removed(session: &mut Session, cut: &str) {
+    for map in &session.project.maps {
+        let Some(terrain) = &map.view.terrain else { continue };
+        let (TerrainSource::Layer(name), Some(block)) = (&terrain.source, &terrain.block) else { continue };
+        let rustgis_map::view::BlockShape::Polygon { layer: shape, .. } = &block.shape else { continue };
+        if !shape.eq_ignore_ascii_case(cut) || map.layer_by_name(cut).is_some() {
+            continue;
+        }
+        let Some(dem) = map.layer_by_name(name) else { continue };
+        let pixels = dem.raster.as_ref().and_then(|raster| raster.data.as_ref()).map(Arc::downgrade).unwrap_or_default();
+        let checked = Checked { layer: dem.instance_id(), pixels, extent: None };
+        session.terrain_blocks_checked.insert(map.instance_id(), checked);
+    }
+}
+
 /// Called after a command commits and when the frame reports newly landed raster pixels.
 /// A Weak retains allocation identity without retaining the DEM's pixel buffers.
 pub(crate) fn landed(session: &mut Session) {

@@ -13810,6 +13810,32 @@ fn terrain_block_cut_to_polygons() {
     assert!(simplified(&opened), "{:?}", opened.notices);
 }
 
+/// Removing the layer a block is cut to, with its DEM's pixels in, says it once: the removal says
+/// it, and the landing check after it doesn't say the block can't be read again (#2318).
+#[test]
+fn removing_a_layer_a_block_is_cut_to_says_it_once() {
+    use base64::Engine;
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+    let square = |x: f64, y: f64| json!([[[x, y], [x + 0.01, y], [x + 0.01, y + 0.01], [x, y + 0.01], [x, y]]]);
+    let areas = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"nome": "a"}, "geometry": {"type": "Polygon", "coordinates": square(10.005, 45.005)}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(areas.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "areas.geojson", "data": data})).unwrap();
+    let geo = s.map().layers.iter().find(|l| !l.is_raster()).map(|l| l.name.clone()).unwrap();
+    s.run("map.terrain", &json!({"layer": dem, "block": {"shape": {"layer": geo}}})).unwrap();
+    s.notices.clear();
+    let id = s.map().layer_by_name(&geo).map(|l| l.id).unwrap();
+    s.run("layer.remove", &json!({"layer": id})).unwrap();
+    let said = |s: &Session| s.notices.iter().filter(|n| n.text.contains("no block is drawn")).count();
+    assert_eq!(said(&s), 1, "{:?}", s.notices);
+    s.notice_landed_rasters();
+    assert_eq!(said(&s), 1, "{:?}", s.notices);
+    assert!(s.map().view.terrain.as_ref().is_some_and(|t| t.block.is_some()));
+}
+
 /// A block's walls coloured by a polygon layer (#1914): the layer checked before anything changes,
 /// reported and saved with the walls' colour, following its renames, and said when it is removed
 /// or a saved project's is missing.
