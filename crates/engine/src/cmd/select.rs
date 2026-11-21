@@ -422,7 +422,8 @@ fn identify(s: &mut Session, p: &Value) -> CmdResult {
         None if mode == PopupMode::SelectedInContents && active.and_then(|id| map.layer(id)).is_some_and(|l| !l.is_raster()) => {
             return Ok(Value::Null);
         }
-        None => match super::raster::identify(s, lon, lat) {
+        // (Topmost and Visible found no pixel either: no raster has one there.)
+        None => match if matches!(mode, PopupMode::Topmost | PopupMode::Visible) { None } else { super::raster::identify(s, lon, lat) } {
             Some(pixel) => pixel,
             None if asks.is_empty() => return Ok(Value::Null),
             None => json!({}),
