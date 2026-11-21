@@ -1130,7 +1130,7 @@ fn draw_patterns(
 /// wall. Its walls are drawn among the ground instead, far to near, a few stretches of a side at
 /// a time ([`WALL_RUN`]): before each run, `ground_to` draws the ground's triangles at least as
 /// far as the nearest of those its stretches came from (the ground behind it), and the caller
-/// the rest after.
+/// the rest after. It says whether to go on: a frame cancelled meanwhile draws no more walls.
 #[expect(clippy::too_many_arguments, reason = "the walls are drawn with what the frame drew the ground with")]
 pub(crate) fn draw_walls(
     pm: &mut Pixmap,
@@ -1142,7 +1142,7 @@ pub(crate) fn draw_walls(
     water: &WaterRuns,
     fog: Rgba,
     far: f64,
-    mut ground_to: impl FnMut(&mut Pixmap, f64),
+    mut ground_to: impl FnMut(&mut Pixmap, f64) -> bool,
 ) {
     let fog_at = |depth: f64| crate::fog_share(depth, far);
     let k = f64::from(pm.width()) / view.width.max(1e-9);
@@ -1231,8 +1231,8 @@ pub(crate) fn draw_walls(
     for (s, key, stretches) in &walk {
         let (s, key) = (*s, *key);
         let Some(n) = faces[s] else { continue };
-        if b.outline.is_some() {
-            ground_to(pm, key);
+        if b.outline.is_some() && !ground_to(pm, key) {
+            return;
         }
         let (side, a, z) = b.side(s);
         // A box's corners go straight down; a round block's only where its walls turn away, a
@@ -2173,6 +2173,49 @@ mod tests {
     }
 
     #[test]
+    fn a_polygon_blocks_walls_stop_when_its_ground_does() {
+        // #2318: a frame cancelled while its ground is drawn among the walls (`ground_to` says
+        // stop) draws no more of them.
+        let square: [(&[[f64; 4]], _); 1] = [(&[[-1000.0, -1000.0, 1000.0, 1000.0]], None)];
+        let shape = rustgis_map::view::BlockShape::Polygon { layer: "lagos".into(), filter: None };
+        let (m, b, g, res) = block_over_lakes_shaped(&square, None, shape);
+        assert!(b.outline.is_some());
+        let camera = rustgis_map::Camera { center: Coord::new(0.0, 0.0), res, bearing: 0.0, pitch: 60.0 };
+        let view = View { width: 600.0, height: 500.0, pixels_per_point: 1.0, camera, sky: false };
+        // The south side, which faces the eye.
+        let south = (0..b.sides())
+            .find(|&k| {
+                let (_, a, z) = b.side(k);
+                (a.y + 1000.0).abs() < 1.0 && (z.y + 1000.0).abs() < 1.0
+            })
+            .expect("a south side");
+        let top = |x: f64| {
+            let m = Coord::new(x, -1000.0);
+            let (u, v) = camera.ground_px(m);
+            camera.project_raised(u, v, g.up_px(m, &camera), view.width, view.height).expect("in view")
+        };
+        let edges: Vec<Edge> = (0..8)
+            .map(|i| {
+                let (x0, x1) = (-1000.0 + 250.0 * f64::from(i), -750.0 + 250.0 * f64::from(i));
+                Edge { side: south as u16, ends: [Coord::new(x0, -1000.0), Coord::new(x1, -1000.0)], top: [top(x0), top(x1)], depth: 1.0 }
+            })
+            .collect();
+        let runs = runs(&m, &b, 1.0, &Default::default());
+        let water: WaterRuns = (0..b.sides()).map(|_| Vec::new()).collect();
+        let draw = |go_on: bool| {
+            let (mut pm, mut asked) = (Pixmap::new(600, 500).unwrap(), 0);
+            draw_walls(&mut pm, &view, &g, &b, &edges, &runs, &water, Rgba::rgb(255, 255, 255), rustgis_map::camera::FAR, |_, _| {
+                asked += 1;
+                go_on
+            });
+            (pm.pixels().iter().filter(|p| p.alpha() > 0).count(), asked)
+        };
+        let (drawn, asked) = draw(true);
+        assert!(drawn > 0 && asked >= 1, "{drawn} {asked}");
+        assert_eq!(draw(false), (0, 1));
+    }
+
+    #[test]
     fn a_wall_in_pieces_keeps_its_water_to_each_piece() {
         use rustgis_map::view::BlockWater;
         // #2317: the south side crosses a lake from x −800 to 800, but a band of ground that
@@ -2206,7 +2249,7 @@ mod tests {
         let runs = runs(&m, &b, 1.0, &Default::default());
         let draw = |water: &WaterRuns| {
             let mut pm = Pixmap::new(600, 500).unwrap();
-            draw_walls(&mut pm, &view, &g, &b, &edges, &runs, water, Rgba::rgb(255, 255, 255), rustgis_map::camera::FAR, |_, _| {});
+            draw_walls(&mut pm, &view, &g, &b, &edges, &runs, water, Rgba::rgb(255, 255, 255), rustgis_map::camera::FAR, |_, _| true);
             pm
         };
         let (wet, dry) = (draw(&water), draw(&(0..b.sides()).map(|_| Vec::new()).collect()));

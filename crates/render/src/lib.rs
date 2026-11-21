@@ -2913,15 +2913,19 @@ fn drape_terrain(
             }
         }
     }
-    // Draws the triangles still to draw at least `key` away, far to near.
+    // Draws the triangles still to draw at least `key` away, far to near, and says whether to go
+    // on. Called before each run of a polygon block's walls, it looks at Cancel each time.
     let (mut next, mut stopped) = (0, false);
-    let mut draw_to = |pm: &mut Pixmap, key: f64, edges: &mut Vec<block::Edge>| {
+    let mut draw_to = |pm: &mut Pixmap, key: f64, edges: &mut Vec<block::Edge>| -> bool {
+        if !stopped && (rustgis_data::progress::check().is_err() || cancel::requested()) {
+            stopped = true;
+        }
         while let Some(&(depth, bi, at)) = tris.get(next).filter(|t| t.0 >= key && !stopped) {
             // An export cancelled meanwhile (see `rustgis_data::progress`) stops here: it writes
             // nothing. So does a settled frame on screen gone out of date (see `cancel`).
             if next % 4096 == 0 && (rustgis_data::progress::check().is_err() || cancel::requested()) {
                 stopped = true;
-                return;
+                return false;
             }
             next += 1;
             let Some((t, parts)) = cut.remove(&(next - 1)).or_else(|| prepare(bi, at, depth, edges)) else { continue };
@@ -2932,13 +2936,15 @@ fn drape_terrain(
                 DrapeParts::Parts(ps) => ps.iter().for_each(|p| fill(pm, bi, t, f, p)),
             }
         }
+        !stopped
     };
     match walls {
         Some(b) if polygon => {
             let mut scratch = Vec::new();
             block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale, env), &water, fog, far, |pm, key| {
-                draw_to(pm, key, &mut scratch);
+                let go_on = draw_to(pm, key, &mut scratch);
                 scratch.clear();
+                go_on
             });
             draw_to(pm, f64::NEG_INFINITY, &mut scratch);
         }
@@ -2946,7 +2952,7 @@ fn drape_terrain(
             draw_to(pm, f64::NEG_INFINITY, &mut edges);
             // A cancelled frame is thrown away: its walls aren't drawn.
             if let Some(b) = walls.filter(|_| !stopped) {
-                block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale, env), &water, fog, far, |_, _| {});
+                block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale, env), &water, fog, far, |_, _| true);
             }
         }
     }
