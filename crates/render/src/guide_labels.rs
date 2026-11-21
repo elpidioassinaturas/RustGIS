@@ -87,9 +87,10 @@ impl Guides {
 
 /// What the label's feature is, for the guide lines that don't match it by value.
 pub(crate) enum Near<'a> {
-    /// A polygon, its outline on the screen ([`crate::area_labels::screen_rings`]) worked out
-    /// only when asked: the text goes on a guide line where it is inside it.
-    Polygon(Box<dyn FnOnce() -> Option<Vec<Vec<(f32, f32)>>> + 'a>),
+    /// A polygon: its box on the screen where it is had cheaply (from its projected extent; none
+    /// on the globe), and its outline there ([`crate::area_labels::screen_rings`]), worked out
+    /// only when that box meets a guide stretch: the text goes on a guide line where it is inside it.
+    Polygon(Option<[f32; 4]>, Box<dyn FnOnce() -> Option<Vec<Vec<(f32, f32)>>> + 'a>),
     /// A point: the text goes on the nearest guide line within the text's width, as near it as fits.
     Point((f32, f32)),
 }
@@ -155,7 +156,10 @@ fn curved(guides: &Guides, value: Option<&str>, near: Near<'_>, advances: &[f32]
                 l.curved(advances, gap, size, 0.0, Some(at.clamp(len / 2.0, l.length() - len / 2.0)))
             })
         }
-        Near::Polygon(rings) => {
+        Near::Polygon(within, rings) => {
+            if within.is_some_and(|b| guides.meeting(b).is_empty()) {
+                return None;
+            }
             let rings = rings()?;
             let b = rings
                 .iter()
@@ -209,11 +213,22 @@ mod tests {
         assert!(turns.iter().all(|t| ((c.0 + t.0).hypot(c.1 + t.1 - 400.0) - 300.0).abs() < 6.0), "{c:?} {turns:?}");
         // No value: the line inside the polygon, here a box round the straight line.
         let rings = vec![vec![(480.0, 560.0), (920.0, 560.0), (920.0, 640.0), (480.0, 640.0)]];
-        let (c, _) = curved(&guides, None, Near::Polygon(Box::new(|| Some(rings))), &advances(), 1.0, 10.0).expect("inside");
+        let (c, _) = curved(&guides, None, Near::Polygon(None, Box::new(|| Some(rings))), &advances(), 1.0, 10.0).expect("inside");
         assert!((c.1 - 600.0).abs() < 1.0 && (600.0..800.0).contains(&c.0), "{c:?}");
         // A polygon that neither line runs inside: none.
         let away = vec![vec![(0.0, 900.0), (100.0, 900.0), (100.0, 990.0), (0.0, 990.0)]];
-        assert!(curved(&guides, None, Near::Polygon(Box::new(|| Some(away))), &advances(), 1.0, 10.0).is_none());
+        assert!(curved(&guides, None, Near::Polygon(None, Box::new(|| Some(away))), &advances(), 1.0, 10.0).is_none());
+        // A polygon whose box meets no guide line: its outline isn't worked out.
+        let asked = std::cell::Cell::new(false);
+        let far = Near::Polygon(
+            Some([5000.0, 5000.0, 5100.0, 5100.0]),
+            Box::new(|| {
+                asked.set(true);
+                None
+            }),
+        );
+        assert!(curved(&guides, None, far, &advances(), 1.0, 10.0).is_none());
+        assert!(!asked.get(), "its outline isn't worked out");
     }
 
     /// A dense stretch keeps a point every half a point at least, and its ends; the grid finds a

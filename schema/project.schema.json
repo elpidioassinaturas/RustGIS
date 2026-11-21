@@ -1088,7 +1088,8 @@
           "field-generation",
           "offline-map-area-id",
           "crs-wkt",
-          "zarr-window"
+          "zarr-window",
+          "label-guide"
         ],
         "type": "string"
       },
@@ -1174,7 +1175,8 @@
     "field-generation",
     "offline-map-area-id",
     "crs-wkt",
-    "zarr-window"
+    "zarr-window",
+    "label-guide"
   ],
   "x-rustgis-reads-format": 2,
   "x-rustgis-writes-format": 2

@@ -5549,7 +5549,19 @@ fn render_frame(
                                 let value = value.filter(|v| !v.is_null()).map(|v| v.to_string());
                                 let near = match g {
                                     Geometry::Polygon(polys) => {
-                                        guide_labels::Near::Polygon(Box::new(|| area_labels::screen_rings(ctx, polys)))
+                                        // Its projected extent on the screen, cheaper than its
+                                        // outline, to look for a guide line near (on the flat map).
+                                        let within = globe.is_none().then(|| {
+                                            let e = extents.get(row).copied().unwrap_or_else(|| g.extent());
+                                            [(e.min_x, e.min_y), (e.max_x, e.min_y), (e.min_x, e.max_y), (e.max_x, e.max_y)]
+                                                .into_iter()
+                                                .map(|(cx, cy)| ctx.view.to_screen(Coord::new(cx, cy)))
+                                                .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, (sx, sy)| {
+                                                    let (sx, sy) = (sx as f32, sy as f32);
+                                                    [b[0].min(sx), b[1].min(sy), b[2].max(sx), b[3].max(sy)]
+                                                })
+                                        });
+                                        guide_labels::Near::Polygon(within, Box::new(|| area_labels::screen_rings(ctx, polys)))
                                     }
                                     _ => guide_labels::Near::Point((x as f32, y as f32)),
                                 };

@@ -4511,6 +4511,8 @@ fn labels_are_guided_along_a_line_layer() {
     place(&mut s, "Lakes", json!({"layer": "rivers", "field": "name"})).unwrap();
     assert_eq!(guide(&s), Some(crate::map::LabelGuide { layer: "Rivers".into(), field: Some("name".into()) }));
     place(&mut s, "Cities", json!({"layer": "Rivers", "field": ""})).unwrap();
+    let square = json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "Rivers"}});
+    assert!(s.run("labels.placement", &square).is_err(), "square to a line or along a guide, not both");
     let back: crate::map::LabelClass =
         serde_json::from_value(serde_json::to_value(&s.map().layer_by_name("Lakes").unwrap().labels.default).unwrap()).unwrap();
     assert_eq!(back.guide, guide(&s));
@@ -4544,6 +4546,9 @@ fn labels_are_guided_along_a_line_layer() {
     let class = &saved.maps[0].layers[0].labels.default;
     assert_eq!(class.guide, Some(crate::map::LabelGuide { layer: "rios".into(), field: Some("nome".into()) }));
     assert!(saved.take_read_notices(&crate::project::ALL_PARTS).is_empty());
+    // Saved, it requires `label-guide`, which an older reader refuses rather than drop.
+    assert_eq!(serde_json::to_value(&saved).unwrap()["requires"], json!(["label-guide"]));
+    assert!(clean.get("requires").is_none());
 }
 
 #[test]

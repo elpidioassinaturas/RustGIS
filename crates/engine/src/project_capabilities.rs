@@ -309,6 +309,12 @@ fn zarr_window(layer: &Layer) -> bool {
     layer.raster.as_ref().and_then(|r| r.time_zarr.as_ref()).is_some_and(|z| z.window.is_some())
 }
 
+/// Whether a layer's labels follow a guide line layer (#2262): an older reader would drop the
+/// guide, and place and save them as without it.
+fn label_guide(layer: &Layer) -> bool {
+    layer.labels.in_order().any(|c| c.guide.is_some())
+}
+
 /// The capabilities a layer needs, in [`map_capabilities`]'s order.
 fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
     [
@@ -317,6 +323,7 @@ fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
         (layer.size_by.is_some(), super::SIZE_BY_CAPABILITY),
         (layer.has_picture_markers(), "picture-markers"),
         (zarr_window(layer), "zarr-window"),
+        (label_guide(layer), "label-guide"),
     ]
     .into_iter()
     .filter_map(|(used, name)| used.then_some(name))
@@ -326,9 +333,10 @@ fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
 fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static str> {
     let (mut block, mut shape, mut water, mut shore, mut relief, mut light, mut legends, mut sized, mut pictures, mut zarr) =
         (false, false, false, false, false, false, false, false, false, false);
-    let mut offline_area_id = false;
+    let (mut offline_area_id, mut guided) = (false, false);
     for map in maps {
         offline_area_id |= map.offline_area_id.is_some();
+        guided |= map.layers.iter().any(label_guide);
         if let Some(t) = &map.view.terrain {
             block |= t.block.is_some();
             // A round block (#2318), which an older reader would draw and save as a box.
@@ -357,6 +365,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         (sized, super::SIZE_BY_CAPABILITY),
         (pictures, "picture-markers"),
         (zarr, "zarr-window"),
+        (guided, "label-guide"),
         (offline_area_id, "offline-map-area-id"),
     ]
     .into_iter()
