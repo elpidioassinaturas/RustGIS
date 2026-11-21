@@ -442,7 +442,6 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         mut pictures,
         mut zarr,
     ) = (false, false, false, false, false, false, false, false, false, false, false);
-    let (mut offline_area_id, mut paper) = (false, false);
     let mut polygon = false;
     let (mut offline_area_id, mut paper, mut native) = (false, false, false);
     for map in maps {

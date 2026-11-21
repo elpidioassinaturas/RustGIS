@@ -440,7 +440,7 @@ fn reset(s: &mut Session, p: Project) {
     if !uncut.is_empty() {
         s.notify(
             format!(
-                "{}: the layer a block diagram is cut to is missing, not a polygon layer, read a view at a time, of a name another layer shares or picks no polygon with an area, so no block is drawn",
+                "{}: the layer a block diagram is cut to is missing, isn't a polygon layer, is read a view at a time, shares its name with another layer or picks no polygon with an area, so no block is drawn",
                 uncut.join(", ")
             ),
             false,
