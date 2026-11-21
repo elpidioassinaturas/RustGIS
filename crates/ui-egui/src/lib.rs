@@ -5972,13 +5972,20 @@ impl RustGisApp {
         let bytes = std::sync::Arc::new(bytes);
         let mine = bytes.clone();
         let spawned = std::thread::Builder::new().name("download-read".into()).spawn(move || {
-            let read = match window_turn(&leaving) {
+            let turn = window_turn(&leaving);
+            let read = match turn {
                 // On a thread no command's catch reaches: a bug must not leave it running forever.
-                Some(_turn) => read_download(&name, &bytes, page.as_deref(), place, &leaving),
+                Some(_) => read_download(&name, &bytes, page.as_deref(), place, &leaving),
                 None => Err(tl!("given up before it was read: it was cancelled, or its project was closed").to_string()),
             };
             let bytes = std::sync::Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone());
             *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(read.map(|r| (bytes, r)));
+            // As a window's read: the next read waits for the frame to take this one (or for it to
+            // be cancelled, or the app to be gone), so one read raster at most waits to be added.
+            while std::sync::Arc::strong_count(&land) > 1 && land.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            drop(turn);
         });
         match spawned {
             Ok(_) => {

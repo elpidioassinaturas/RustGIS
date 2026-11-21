@@ -684,6 +684,52 @@ fn a_repeated_first_column_is_left_out_and_the_globe_laid_out_from_180() {
 }
 
 #[test]
+fn a_repeated_first_column_is_not_counted_as_rounded_or_past_the_range() {
+    // 7 columns of 60° from 0° to 360°, the last left out: only the 6 laid out are counted.
+    // 0.1 to 0.7 less 0.5 (which f32 holds), each rounded by f32: 6, not 7.
+    let mut g = G1::new(7, 1, vec![1, 2, 3, 4, 6, 7, 1]);
+    (g.lat1, g.lat2, g.lon1, g.lon2, g.di, g.dj, g.d) = (0, 0, 0, 0, 60_000, 60_000, 1);
+    assert_eq!(read_bytes(&g.bytes(), "t").unwrap().rounded, vec![6]);
+    // Past f32's range: 6 values said, not 7.
+    let mut g = G1::new(7, 1, vec![1, 2, 3, 4, 5, 6, 1]);
+    (g.lat1, g.lat2, g.lon1, g.lon2, g.di, g.dj, g.d) = (0, 0, 0, 0, 60_000, 60_000, -400);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert!(r.lost.contains(&"6 values past the range of 32-bit floats (±3.4 × 10^38) have no value".to_string()), "{:?}", r.lost);
+}
+
+#[test]
+fn fine_global_grids_a_step_short_of_360_have_no_repeated_column() {
+    // 1440 columns of 0.25° and 3600 of 0.1° from 0°, ending a step short of 360°: all read, the
+    // 180° column first, from −180°.
+    for (di, ni) in [(250, 1440), (100, 3600)] {
+        let mut g = G1::new(ni, 1, (0..ni as u32).collect());
+        (g.lat1, g.lat2, g.lon1, g.lon2, g.di, g.dj) = (0, 0, 0, (ni as i64 - 1) * di as i64, di, di);
+        let r = read_bytes(&g.bytes(), "t").unwrap();
+        assert_eq!(r.width as usize, ni);
+        assert!(!r.lost.iter().any(|l| l.contains("repeats the first")), "{:?}", r.lost);
+        assert_eq!(r.bands[0].data[0], (ni / 2) as f32);
+        assert!((r.transform.origin_x - (-180.0 - di as f64 / 2000.0)).abs() < 1e-9, "{}", r.transform.origin_x);
+    }
+    // One column more, at 360°: the first again, left out.
+    let mut g = G1::new(1441, 1, (0..1441).collect());
+    (g.lat1, g.lat2, g.lon1, g.lon2, g.di, g.dj) = (0, 0, 0, 360_000, 250, 250);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert_eq!(r.width, 1440);
+    assert!(r.lost.iter().any(|l| l.contains("repeats the first")), "{:?}", r.lost);
+}
+
+#[test]
+fn a_sum_of_0_past_f64s_decimal_scale_is_0() {
+    // R = −1, D = −400: X = 1 gives (−1 + 1) × 10^400, exactly 0; X = 0 gives −10^400, past f32.
+    let mut g = G1::new(2, 1, vec![1, 0]);
+    (g.r, g.d, g.bits) = (0xC110_0000, -400, 16);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert_eq!(r.bands[0].data[0], 0.0);
+    assert!(r.bands[0].data[1].is_nan());
+    assert!(r.lost.contains(&"1 value past the range of 32-bit floats (±3.4 × 10^38) has no value".to_string()), "{:?}", r.lost);
+}
+
+#[test]
 fn header_counts_a_last_constant_field() {
     // A constant field's data section is 5 octets, just before "7777".
     let mut c = F2::new(3, 2, vec![]);

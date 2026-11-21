@@ -626,13 +626,13 @@ impl Grid {
 
     /// Whether the columns go round the whole globe.
     fn whole_turn(&self) -> bool {
-        (self.columns() as f64 * self.dx - 360.0).abs() <= turn_tolerance(self.columns())
+        (self.columns() as f64 * self.dx - 360.0).abs() <= turn_tolerance(self.columns(), self.dx)
     }
 
     /// Whether the last column is the first again, 360° on (a grid given from 0° to 360°
     /// inclusive): it is left out, and the grid is a whole turn.
     fn repeats_first_column(&self) -> bool {
-        self.ni > 1 && ((self.ni - 1) as f64 * self.dx - 360.0).abs() <= turn_tolerance(self.ni - 1)
+        self.ni > 1 && ((self.ni - 1) as f64 * self.dx - 360.0).abs() <= turn_tolerance(self.ni - 1, self.dx)
     }
 
     /// The columns laid out: all of them, less a last one that repeats the first.
@@ -683,9 +683,10 @@ impl Grid {
 
 /// How far `n` steps of a grid's increment may come from 360° and still be a whole turn: half a
 /// millidegree a step, as GRIB1 rounds increments to millidegrees (GRIB2's are finer). A grid whose
-/// increment doesn't divide 360° (seven columns of 50°) isn't one.
-fn turn_tolerance(n: usize) -> f64 {
-    n as f64 * 0.0005 + 1e-9
+/// increment doesn't divide 360° (seven columns of 50°) isn't one. Never half a step or more: a
+/// grid a whole step short of 360° (1440 columns of 0.25° from 0° to 359.75°) isn't one either.
+fn turn_tolerance(n: usize, dx: f64) -> f64 {
+    (n as f64 * 0.0005 + 1e-9).min(dx * 0.5)
 }
 
 /// `v` to a millionth, for a notice (89.91, not 89.91000000000001).
@@ -791,10 +792,11 @@ fn ibm(v: u32) -> f64 {
 /// `count` values `next` gives (in `f64`), held as `f32`, over the points a bitmap keeps (NaN at
 /// the others), or all of them without one. Also how many of them `f32` rounded, and how many
 /// are past its range (about ±3.4 × 10^38, `f64`'s too): those have no value (NaN) rather than
-/// an infinity. A sidecar's no-data value isn't counted either way ([`Uncounted`]'s rule). The
-/// values are never held apart from the field, so it costs 4 bytes a point.
+/// an infinity. A sidecar's no-data value isn't counted either way ([`Uncounted`]'s rule), and
+/// neither is a point of a repeated first column (`grid`'s, which [`to_raster`] doesn't lay out).
+/// The values are never held apart from the field, so it costs 4 bytes a point.
 fn field_values(
-    points: usize,
+    (points, grid): (usize, &Grid),
     mask: Option<&[u8]>,
     count: usize,
     uncounted: Uncounted,
@@ -810,26 +812,28 @@ fn field_values(
     let mut out = Vec::new();
     out.try_reserve_exact(points).map_err(|_| Skip::TooLarge)?;
     let (mut rounded, mut past, mut left) = (0u64, 0u64, count);
+    let (repeats, columns) = (grid.repeats_first_column(), grid.columns());
     for k in 0..points {
         let kept = mask.is_none_or(|bits| bits.get(k / 8).is_some_and(|b| b & (0x80 >> (k % 8)) != 0));
         if kept && left > 0 {
             left -= 1;
             let wide = next();
             let v = wide as f32;
+            let laid = u64::from(!repeats || grid.place(k).0 < columns);
             match uncounted.decides(v, || Some(Exact::Float(wide))) {
                 // The no-data value itself (masked when the sidecar is applied).
                 Some(true) => out.push(if v.is_finite() { v } else { f32::NAN }),
                 _ if !v.is_finite() => {
-                    past += 1;
+                    past += laid;
                     out.push(f32::NAN);
                 }
                 // A value that became the no-data value.
                 Some(false) => {
-                    rounded += 1;
+                    rounded += laid;
                     out.push(v);
                 }
                 None => {
-                    rounded += u64::from(f64::from(v) != wide);
+                    rounded += laid * u64::from(f64::from(v) != wide);
                     out.push(v);
                 }
             }
@@ -848,7 +852,7 @@ fn unpack(
     (count, bits): (usize, u32),
     (r, e, d): (f64, i64, i64),
     mask: Option<&[u8]>,
-    points: usize,
+    at: (usize, &Grid),
     uncounted: Uncounted,
 ) -> std::result::Result<(Vec<f32>, u64, u64), Skip> {
     if bits > MAX_BITS {
@@ -859,24 +863,27 @@ fn unpack(
         return Err(Skip::Damaged("a data section shorter than its values".to_string()));
     }
     reference(r)?;
-    // 2^E and 10^D, where `f64` holds them; past that (no producer writes such an E or D, but
-    // they are kept), and where `R + X × 2^E` is past `f64` but the division brings it back, the
-    // value is made as `R / 10^D + X × (2^E / 10^D)`, each by [`scaled_by`]. A value past `f64`
-    // either way is past `f32`'s range.
-    let scale = decimal(d).filter(|_| (-1000..=1000).contains(&e)).map(|ten| (2f64.powi(e as i32), ten));
+    // 2^E and 10^D, where `f64` holds them. Past that (no producer writes such an E or D, but
+    // they are kept), `R + X × 2^E` is divided by [`scaled_by`] where `f64` holds it (so a sum of
+    // 0 stays 0); where it is past `f64` but the division brings it back, the value is made as
+    // `R / 10^D + X × (2^E / 10^D)`, each by [`scaled_by`]. A value past `f64` either way is past
+    // `f32`'s range.
+    let two = (-1000..=1000).contains(&e).then(|| 2f64.powi(e as i32));
+    let ten = decimal(d);
     let (base, step) = (scaled_by(r, 0, d), scaled_by(1.0, e, d));
     let mut bit = 0u64;
-    field_values(points, mask, count, uncounted, || {
+    field_values(at, mask, count, uncounted, || {
         // The 8 octets from the value's first: at most 7 bits before it, and its 32 at most.
         let byte = (bit / 8) as usize;
         let word = (0..8).fold(0u64, |w, i| (w << 8) | u64::from(data.get(byte + i).copied().unwrap_or(0)));
         let x = ((word << (bit % 8)) >> (64 - bits)) as f64;
         bit += u64::from(bits);
-        let wide = scale.map_or(f64::INFINITY, |(s, ten)| (r + x * s) / ten);
+        let sum = two.map_or(f64::INFINITY, |s| r + x * s);
+        let wide = ten.map_or(f64::INFINITY, |ten| sum / ten);
         if wide.is_finite() {
             wide
-        } else if x == 0.0 {
-            base
+        } else if sum.is_finite() {
+            scaled_by(sum, 0, d)
         } else {
             base + x * step
         }
@@ -926,12 +933,12 @@ fn constant(
     (r, d): (f64, i64),
     count: usize,
     mask: Option<&[u8]>,
-    points: usize,
+    at: (usize, &Grid),
     uncounted: Uncounted,
 ) -> std::result::Result<(Vec<f32>, u64, u64), Skip> {
     reference(r)?;
     let v = decimal(d).map_or_else(|| scaled_by(r, 0, d), |ten| r / ten);
-    field_values(points, mask, count, uncounted, || v)
+    field_values(at, mask, count, uncounted, || v)
 }
 
 /// `n` bitmap bits set among the first `points`.
@@ -1017,9 +1024,9 @@ fn grib1(b: &[u8], room: usize, first: Option<Grid>, uncounted: Uncounted) -> st
     let count = bitmap.map_or(points, |m| kept(m, points));
     let data = bds.get(11..).unwrap_or_default();
     let (values, rounded, past) = if bits == 0 {
-        constant((r, d), count, bitmap, points, uncounted)?
+        constant((r, d), count, bitmap, (points, &grid), uncounted)?
     } else {
-        unpack(data, (count, bits), (r, e, d), bitmap, points, uncounted)?
+        unpack(data, (count, bits), (r, e, d), bitmap, (points, &grid), uncounted)?
     };
     Ok(Field { name, grid, values, rounded, past })
 }
@@ -1189,9 +1196,9 @@ fn grib2(b: &[u8], room: usize, mut first: Option<Grid>, uncounted: Uncounted) -
                         return Err(Skip::Damaged("a field whose values don't fill its grid".to_string()));
                     }
                     let (values, rounded, past) = if bits == 0 {
-                        constant((r, d), count, mask, points, uncounted)?
+                        constant((r, d), count, mask, (points, &grid), uncounted)?
                     } else {
-                        unpack(s.get(5..).unwrap_or_default(), (count, bits), (r, e, d), mask, points, uncounted)?
+                        unpack(s.get(5..).unwrap_or_default(), (count, bits), (r, e, d), mask, (points, &grid), uncounted)?
                     };
                     held += points;
                     first.get_or_insert(grid);
