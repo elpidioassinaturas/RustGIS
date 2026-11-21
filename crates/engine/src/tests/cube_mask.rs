@@ -304,3 +304,35 @@ fn the_clear_share_counts_overlapping_tiles_once_and_skips_declared_no_data() {
         }
     }
 }
+
+/// Two items of one day on two tiles that share one data file each keep their own mask: the
+/// first tile's clear in the west half, the second's in the east, so every cell has that day's
+/// value once; the other day is all cloud.
+#[test]
+fn items_sharing_a_data_file_keep_their_own_masks() {
+    let band = cog((0..64).map(|c| red(0, c % 8, c / 8)).collect(), 8, None);
+    let half = |west: bool| cog((0..64).map(|c| if (c % 8 < 4) == west { 4.0 } else { 9.0 }).collect(), 8, None);
+    let (files, _) = serve_ranged_files(vec![
+        ("/b.tif".into(), band),
+        ("/mw.tif".into(), half(true)),
+        ("/me.tif".into(), half(false)),
+        ("/mc.tif".into(), cog(vec![9.0; 64], 8, None)),
+    ]);
+    let item = |id: &str, d: &str, tile: &str, m: &str| {
+        format!(
+            r#"{{"type": "Feature", "id": "{id}", "collection": "s2", "bbox": [10, 45, 11, 46], "geometry": null,
+               "properties": {{"datetime": "{d}T00:00:00Z", "bdc:tiles": ["{tile}"]}},
+               "assets": {{"B04": {{"href": "{files}/b.tif"}}, "SCL": {{"href": "{files}/{m}"}}}}}}"#
+        )
+    };
+    let features =
+        [item("w", "2024-01-01", "t1", "mw.tif"), item("e", "2024-01-01", "t2", "me.tif"), item("c", "2024-01-17", "t1", "mc.tif")];
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, features.join(","));
+    let api = format!("{}/v1", serve_routes(vec![("/v1/search", search)], 8));
+    let mut s = Session::new(Project::default());
+    let p = json!({"url": api, "collection": "s2", "asset": "B04", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31",
+        "mask": {"asset": "SCL", "keep": [4]}, "stat": "count"});
+    let r = s.run("cube.reduce", &p).unwrap_or_else(|e| panic!("{e}"));
+    let data = s.map().layer(r["layers"][0].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    assert!(data.bands[0].data.iter().all(|v| *v == 1.0), "{:?}", data.bands[0].data);
+}

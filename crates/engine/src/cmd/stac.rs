@@ -447,8 +447,8 @@ pub struct CubeFiles {
     /// Files whose metadata names codes for a failed retrieval (JAXA Earth's `dn.error`).
     pub coded: usize,
     /// Each file's mask, the same item's quality asset, with the values its metadata says aren't
-    /// values, by the file's address and day: only when a mask is asked for (`cube.reduce`'s
-    /// `"mask"`).
+    /// values, by the file's tile and day (one item each): only when a mask is asked for
+    /// (`cube.reduce`'s `"mask"`).
     pub masks: std::collections::HashMap<(String, i64), (String, Vec<f64>)>,
     pub collection: String,
     pub asset: String,
@@ -618,7 +618,7 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize, mask: Option<&st
             None => i.id.clone(),
         });
         let d = (ms / 86_400_000.0).floor() as i64;
-        let by_day = tiles.entry(key).or_default();
+        let by_day = tiles.entry(key.clone()).or_default();
         if by_day.contains_key(&d) {
             // A tile and day already have a file; this one is left out (and counted), its scale too.
             duplicates += 1;
@@ -633,7 +633,7 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize, mask: Option<&st
             let mh = crate::render::rustgis_tiles::logins::inherit(&api, m.href.split('#').next().unwrap_or(&m.href));
             let mh = if s3::is_s3(&mh) { public_web(&mh, &mut regions)? } else { mh };
             let stored = m.nodata.iter().chain(&m.invalid).copied().collect();
-            masks.insert((href.clone(), d), (mh, stored));
+            masks.insert((key, d), (mh, stored));
         }
         // No scale or offset in the metadata reads as 1 and 0, the values as stored.
         let this = (a.scale.unwrap_or(1.0), a.offset.unwrap_or(0.0));
@@ -867,10 +867,10 @@ pub fn stac_cube(s: &mut Session, p: &Value) -> Result<StacCube, String> {
         cube_files(s, &searched, max_items, mask.as_ref().map(|m| m.asset.as_str()))?;
     // Every tile's file for a date, by day.
     let mut by_day: std::collections::BTreeMap<i64, Vec<(String, (f64, f64), Vec<f64>, Option<Mask>)>> = Default::default();
-    for days in tiles.values() {
+    for (tile, days) in &tiles {
         for (d, href) in days {
             let scale = scales.get(href).copied().unwrap_or((1.0, 0.0));
-            let mask = masks.get(&(href.clone(), *d)).map(|(m, stored)| (m.clone(), stored.iter().map(|v| *v as f32).collect()));
+            let mask = masks.get(&(tile.clone(), *d)).map(|(m, stored)| (m.clone(), stored.iter().map(|v| *v as f32).collect()));
             let file = (href.clone(), scale, nodata.get(href).cloned().unwrap_or_default(), mask);
             by_day.entry(*d).or_default().push(file);
         }
