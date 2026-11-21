@@ -113,12 +113,9 @@ pub fn nearest(origin: f64, size: f64, (from, to): (u32, u32), m_origin: f64, m_
         .collect()
 }
 
-/// The pixels along one axis of a grid (`origin`, `size`, `count` pixels) whose centres lie
-/// between `a` and `b`, as a range: a mask's pixels inside the area, for its clear share.
-pub fn within(origin: f64, size: f64, count: u32, a: f64, b: f64) -> (u32, u32) {
-    let (u0, u1) = ((a - origin) / size - 0.5, (b - origin) / size - 0.5);
-    let clamp = |u: f64| if u.is_finite() { u.ceil().clamp(0.0, f64::from(count)) as u32 } else { 0 };
-    (clamp(u0.min(u1)), clamp(u0.max(u1)))
+/// The range of the pixels [`nearest`] found, to read them in one window; `None` when none.
+pub fn span(v: &[Option<u32>]) -> Option<(u32, u32)> {
+    v.iter().flatten().fold(None, |s, j| Some(s.map_or((*j, j + 1), |(a, b): (u32, u32)| (a.min(*j), b.max(j + 1)))))
 }
 
 #[cfg(test)]
@@ -168,9 +165,7 @@ mod tests {
         assert_eq!(nearest(100.0, 10.0, (2, 6), 100.0, 20.0, 2), vec![Some(1), Some(1), None, None]);
         assert_eq!(nearest(500.0, -10.0, (0, 4), 500.0, -20.0, 2), vec![Some(0), Some(0), Some(1), Some(1)]);
         assert_eq!(nearest(90.0, 10.0, (0, 2), 100.0, 10.0, 5), vec![None, Some(0)]);
-        // Centres between 110 and 130 on a grid of 10 from 100: pixels 1 and 2 (centres 115, 125).
-        assert_eq!(within(100.0, 10.0, 8, 110.0, 130.0), (1, 3));
-        assert_eq!(within(500.0, -10.0, 8, 450.0, 480.0), (2, 5));
-        assert_eq!(within(100.0, 10.0, 8, 0.0, 1000.0), (0, 8));
+        assert_eq!(span(&[None, Some(3), Some(1), None]), Some((1, 4)));
+        assert_eq!(span(&[None, None]), None);
     }
 }

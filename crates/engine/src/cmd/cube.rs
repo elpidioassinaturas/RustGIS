@@ -108,9 +108,9 @@ pub trait TimeCube: Send + Sync {
         false
     }
     /// Date `i`'s clear share of the area, 0 to 1: the part its quality band lets through.
-    /// `None` for a cube with no mask.
-    fn clear_share(&self, i: usize) -> Result<Option<f64>, String> {
-        let _ = i;
+    /// `None` for a cube with no mask. `cancel` stops it within its reads.
+    fn clear_share(&self, i: usize, cancel: &AtomicBool) -> Result<Option<f64>, String> {
+        let _ = (i, cancel);
         Ok(None)
     }
 }
@@ -1722,7 +1722,7 @@ impl ReduceRun {
             Order::Clear => {
                 let mut share = vec![0.0f64; self.steps.len()];
                 let cube = self.cube.as_ref();
-                read_each(cube, &self.steps, cancel, false, &|i| cube.clear_share(i), &mut |k, got| {
+                read_each(cube, &self.steps, cancel, false, &|i| cube.clear_share(i, cancel), &mut |k, got| {
                     if let Some(s) = share.get_mut(k) {
                         *s = got.unwrap_or(0.0);
                     }

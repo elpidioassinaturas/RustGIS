@@ -2073,10 +2073,11 @@ is the data cube summary's only.
   same item's SCL has one of those classes, `"drop": [0, 1, 3, 8, 9, 10]` every class but those,
   and `"bits": {"set": [6], "unset": [1, 3, 4]}` the cells of a bit mask (Landsat's `qa_pixel`)
   with every bit of `set` on and every bit of `unset` off. Classes are whole numbers. A cell with
-  no-data in the mask is never taken, nor one outside the mask's file (said, with how many). The mask is read onto the band's grid by nearest neighbour (SCL at 20 m under a
+  no-data in the mask (its header's, or the value its STAC metadata names) is never taken, nor
+  one outside the mask's file (said, with how many). The mask is read onto the band's grid by nearest neighbour (SCL at 20 m under a
   10 m band), at its overview nearest the band's cells, and an item without the mask's asset is
   left out and said. With a mask, **first** takes the dates by their clear share of the area by
-  default (`"order": "clear"`): each date's masks are read over the area first (at an overview of
+  default (`"order": "clear"`): each date's masks are read over the area first, overlapping tiles counted once (at an overview of
   about a million pixels for a large area), and the clearest date gives each cell its value, the
   next clearest the cells still empty, and so on (the best pixel). A tile's `eo:cloud_cover` says
   little about a small area, so it isn't used. **median** of the masked dates gives a smoother

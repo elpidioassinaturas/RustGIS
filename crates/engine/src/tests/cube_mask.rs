@@ -221,3 +221,50 @@ fn band_pixels_outside_their_mask_are_said() {
     assert_eq!(said.iter().filter(|t| t.contains("64 band pixel(s) lie outside") && t.contains("/m")).count(), 1, "{said:?}");
     assert!(!said.iter().any(|t| t.contains("item(s) left out")), "{said:?}");
 }
+
+/// The clearest date is the one whose masks let through the most of the area, counting once
+/// what two overlapping tiles both let through: date 0's two tiles are both clear in the west
+/// half only (a share of 0.5, not 1), date 1's one tile in the west three quarters (0.75), so
+/// date 1 comes first. Date 1's mask stores 0 in the east, a no-data its STAC metadata names but
+/// its header doesn't: never let through, even by a mask that drops only the clouds.
+#[test]
+fn the_clear_share_counts_overlapping_tiles_once_and_skips_declared_no_data() {
+    let band = |k: usize| cog((0..64).map(|c| red(k, c % 8, c / 8)).collect(), 8, None);
+    let west = || cog((0..64).map(|c| if c % 8 < 4 { 4.0 } else { 9.0 }).collect(), 8, None);
+    let three = cog((0..64).map(|c| if c % 8 < 6 { 4.0 } else { 0.0 }).collect(), 8, None);
+    let (files, _) = serve_ranged_files(vec![
+        ("/a1.tif".into(), band(0)),
+        ("/a2.tif".into(), band(0)),
+        ("/b.tif".into(), band(1)),
+        ("/ma1.tif".into(), west()),
+        ("/ma2.tif".into(), west()),
+        ("/mb.tif".into(), three),
+    ]);
+    let item = |id: &str, d: &str, tile: &str, b: &str, m: &str, extra: &str| {
+        format!(
+            r#"{{"type": "Feature", "id": "{id}", "collection": "s2", "bbox": [10, 45, 11, 46], "geometry": null,
+               "properties": {{"datetime": "{d}T00:00:00Z", "bdc:tiles": ["{tile}"]}},
+               "assets": {{"B04": {{"href": "{files}/{b}"}}, "SCL": {{"href": "{files}/{m}"{extra}}}}}}}"#
+        )
+    };
+    let features = [
+        item("a1", "2024-01-01", "t1", "a1.tif", "ma1.tif", ""),
+        item("a2", "2024-01-01", "t2", "a2.tif", "ma2.tif", ""),
+        item("b", "2024-01-17", "t1", "b.tif", "mb.tif", r#", "raster:bands": [{"nodata": 0}]"#),
+    ];
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, features.join(","));
+    let api = format!("{}/v1", serve_routes(vec![("/v1/search", search)], 8));
+    let mut s = Session::new(Project::default());
+    let p = json!({"url": api, "collection": "s2", "asset": "B04", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31",
+        "mask": {"asset": "SCL", "drop": [9]}, "stat": "first"});
+    let r = s.run("cube.reduce", &p).unwrap_or_else(|e| panic!("{e}"));
+    let data = s.map().layer(r["layers"][0].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    for (c, v) in data.bands[0].data.iter().enumerate() {
+        let (col, row) = (c % 8, c / 8);
+        if col < 6 {
+            assert_eq!(*v, red(1, col, row), "({col}, {row}): date 1 first");
+        } else {
+            assert!(v.is_nan(), "({col}, {row}): {v}, not empty");
+        }
+    }
+}
