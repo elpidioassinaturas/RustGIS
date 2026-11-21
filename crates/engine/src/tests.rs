@@ -15353,6 +15353,53 @@ fn exporting_a_raster_as_a_cog() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Mensuration measures the Earth on the WGS 84 ellipsoid, as the Measure tool does, so the same
+/// points give the same numbers in both; another body keeps its sphere (#2568).
+#[test]
+fn mensuration_measures_the_earth_on_the_ellipsoid() {
+    use rustgis_geom::Coord;
+    let mut s = world();
+    let pts = [[10.0, 60.0], [11.0, 60.0], [11.0, 61.0], [10.0, 61.0]];
+    let ring: Vec<Coord> = pts.iter().chain(pts.first()).map(|p| Coord::new(p[0], p[1])).collect();
+    let line: Vec<Coord> = ring[..4].to_vec();
+    let area = s.run("raster.measure", &json!({"kind": "area", "points": pts})).unwrap();
+    let (perimeter, expected) = rustgis_geom::wgs84_ring_perimeter_area_m2(&ring);
+    assert_eq!(area["squareMetres"].as_f64(), Some(expected), "{area}");
+    assert_eq!(area["perimeterMetres"].as_f64(), Some(perimeter), "{area}");
+    // At 60° the sphere is about half a percent away: the two must not agree by accident.
+    let sphere = rustgis_geom::geodesic_ring_area_m2(&ring);
+    assert!((expected / sphere - 1.0).abs() > 0.003, "{expected} {sphere}");
+    let distance = s.run("raster.measure", &json!({"kind": "distance", "points": &pts[..]})).unwrap();
+    assert_eq!(distance["metres"].as_f64(), Some(rustgis_geom::wgs84_length_m(&line)), "{distance}");
+    // Over level ground the surface distance is the flat one; over a slope it is longer.
+    {
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 70.0, pixel_width: 0.5, pixel_height: -0.5 };
+        for (name, z) in [("Level", vec![100.0f32; 1600]), ("Slope", (0..1600).map(|i| (i % 40) as f32 * 5000.0).collect())] {
+            let dem = Raster::new(name, 40, 40, vec![z], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+            let bytes = rustgis_data::raster::geotiff::write(&dem, 0).unwrap();
+            crate::cmd::raster::add_raster(&mut s, name, rustgis_map::RasterLayer::from_bytes(dem, format!("{name}.tif"), bytes)).unwrap();
+        }
+        let path = json!([[2.0, 60.0], [12.0, 60.0], [12.0, 55.0]]);
+        let level = s.run("raster.measure", &json!({"layer": "Level", "kind": "distance", "points": path})).unwrap();
+        let flat = level["metres"].as_f64().unwrap();
+        assert!((level["surfaceMetres"].as_f64().unwrap() / flat - 1.0).abs() < 1e-9, "{level}");
+        let slope = s.run("raster.measure", &json!({"layer": "Slope", "kind": "distance", "points": path})).unwrap();
+        assert!(slope["surfaceMetres"].as_f64().unwrap() > flat * 1.001, "{slope}");
+        // Every leg counts, even where the samples skip vertices (a zigzag of 998 short legs), and a
+        // path across the antimeridian is its short way, as the flat length takes it.
+        let zigzag: Vec<[f64; 2]> = (0..999).map(|i| [10.0 + 0.001 * (i % 2) as f64, 60.0]).collect();
+        for path in [json!(zigzag), json!([[179.0, 0.0], [-179.0, 0.0]])] {
+            let m = s.run("raster.measure", &json!({"layer": "Level", "kind": "distance", "points": path})).unwrap();
+            assert!((m["surfaceMetres"].as_f64().unwrap() / m["metres"].as_f64().unwrap() - 1.0).abs() < 1e-9, "{m}");
+        }
+    }
+    s.run("map.body", &json!({"name": "mars", "basemap": false})).unwrap();
+    let k = rustgis_geom::Body::get("mars").ratio();
+    let on_mars = s.run("raster.measure", &json!({"kind": "area", "points": pts})).unwrap();
+    assert_eq!(on_mars["squareMetres"].as_f64(), Some(sphere * k * k), "{on_mars}");
+}
+
 #[test]
 fn layer_effects_and_imagery_tools() {
     use crate::render::View;
@@ -39345,17 +39392,19 @@ fn celestial_bodies_set_the_basemap_and_the_measurements() {
     // The built-in basemap's Earth land isn't drawn on Mars: a plain background under its tiles.
     let (background, land, ..) = s.map().palette();
     assert_eq!(background, land);
-    // A quarter of Mars' equator, and the scale of a smaller world.
+    // A quarter of Mars' equator, on its sphere (the Earth's is on the ellipsoid, #2568), and the
+    // scale of a smaller world.
     let on_mars = earth(&mut s);
     let k = rustgis_geom::Body::get("mars").ratio();
-    assert!((on_mars / on_earth - k).abs() < 1e-9 && (on_mars - std::f64::consts::FRAC_PI_2 * 3_389_526.7).abs() < 1.0, "{on_mars}");
+    assert!((on_earth - std::f64::consts::FRAC_PI_2 * 6_378_137.0).abs() < 1.0, "{on_earth}");
+    assert!((on_mars - std::f64::consts::FRAC_PI_2 * 3_389_526.7).abs() < 1.0, "{on_mars}");
     assert!((s.map().scale() / earth_scale - k).abs() < 1e-9);
     let area = s.run("raster.measure", &json!({"kind": "area", "points": [[0, 0], [1, 0], [1, 1]]})).unwrap();
     // Leaving Mars without a new basemap still takes Mars' off.
     s.run("map.body", &json!({"name": "earth", "basemap": false})).unwrap();
     assert!(s.map().tiles.is_empty());
-    let earth_area = s.run("raster.measure", &json!({"kind": "area", "points": [[0, 0], [1, 0], [1, 1]]})).unwrap();
-    let ratio = area["squareMetres"].as_f64().unwrap() / earth_area["squareMetres"].as_f64().unwrap();
+    let triangle = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]].map(|[x, y]| rustgis_geom::Coord::new(x, y));
+    let ratio = area["squareMetres"].as_f64().unwrap() / rustgis_geom::geodesic_ring_area_m2(&triangle);
     assert!((ratio - k * k).abs() < 1e-9, "{ratio}");
     // Another of Mars' basemaps, named alone; saved and opened again, the map is still on Mars.
     s.run("map.body", &json!({"basemap": "mars-hillshade"})).unwrap();
@@ -39892,6 +39941,119 @@ fn layout_charts_take_a_look() {
     s.run("layout.update", &json!({"element": chart, "barColor": "#00796B", "title": null, "orientation": "vertical"})).unwrap();
     assert_eq!(look(&s), (Orientation::Vertical, true, None, None, Some("#00796B".into()), TextAlign::Left));
     assert!(s.run("layout.update", &json!({"element": chart, "group": "name"})).is_err());
+}
+
+/// A chart coloured by its layer's classes (#2487 part 3): grouped by the field the layer's Unique
+/// Values class by, each bar takes its class's colour, and follows the symbology when it
+/// changes; grouped otherwise, a bar whose features are in several classes keeps the bar colour,
+/// which a warning counts, on `layout.addElement` and on `layout.update` alike. `classes` is
+/// written only when on, refused when not a yes or no, and only charts take it.
+#[test]
+fn layout_charts_take_their_layers_classes() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value};
+    use rustgis_map::layout::ElementKind;
+    let mut s = Session::new(sample::world_project());
+    let mut ds = Dataset::new(
+        "Places",
+        GeometryType::Point,
+        vec![Field::new("region", FieldType::Text), Field::new("kind", FieldType::Text), Field::new("people", FieldType::Double)],
+    );
+    for (region, kind, people) in [("N", "town", 10.0), ("N", "town", 2.0), ("S", "city", 4.0), ("E", "city", 7.0), ("E", "town", 1.0)] {
+        ds.push(
+            Some(Geometry::Point(rustgis_data::Coord::new(0.0, 0.0))),
+            vec![Value::Text(region.into()), Value::Text(kind.into()), Value::Float(people)],
+        );
+    }
+    s.map_mut().add_dataset(ds);
+    s.run("layer.symbology", &json!({"layer": "Places", "type": "unique", "field": "region"})).unwrap();
+    s.run("layout.new", &json!({"name": "Charts"})).unwrap();
+    let said = |s: &Session, mark| s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>();
+    let mark = s.notice_mark();
+    let r = s
+        .run("layout.addElement", &json!({"kind": "chart", "layer": "Places", "field": "people", "group": "region", "classes": true}))
+        .unwrap();
+    let chart = r["element"].as_u64().unwrap() as u32;
+    assert!(!said(&s, mark).iter().any(|t| t.contains("bar colour")), "{:?}", said(&s, mark));
+    let data = |s: &Session| {
+        let layer = s.map().layers.iter().find(|l| l.name == "Places").unwrap();
+        s.project.layouts[0].element(chart).unwrap().kind.chart_data_of(layer, &rustgis_data::query::Env::default()).unwrap()
+    };
+    let class_colour = |s: &Session, region: &str| {
+        let layer = s.map().layers.iter().find(|l| l.name == "Places").unwrap();
+        let fi = layer.dataset.field_index("region").unwrap();
+        let row = (0..layer.dataset.features.len()).find(|r| layer.dataset.value(*r, fi).to_string() == region).unwrap();
+        layer.symbol(row).fill
+    };
+    // N (12), E (8), S (4): each in its class's colour.
+    let d = data(&s);
+    assert_eq!(d.bars.iter().map(|b| b.1.as_str()).collect::<Vec<_>>(), ["N", "E", "S"]);
+    let expected = ["N", "E", "S"].map(|r| Some(class_colour(&s, r)));
+    assert!(expected[0] != expected[1] && expected[1] != expected[2], "{expected:?}");
+    assert_eq!(d.colors, expected);
+    assert_eq!(d.mixed, 0);
+    // The layer drawn in a single symbol, every bar is in its colour.
+    s.run("layer.symbology", &json!({"layer": "Places", "type": "single"})).unwrap();
+    let single = Some(class_colour(&s, "N"));
+    assert_eq!(data(&s).colors, vec![single; 3]);
+    s.run("layer.symbology", &json!({"layer": "Places", "type": "unique", "field": "region"})).unwrap();
+    // Grouped by kind, both kinds have features in several regions: both keep the bar colour.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": chart, "group": "kind"})).unwrap();
+    assert_eq!(data(&s).colors, vec![None, None]);
+    assert!(said(&s, mark).iter().any(|t| t.contains("2 bars keep the chart's bar colour")), "{:?}", said(&s, mark));
+    // Turned on by an update alone, it says so too; turned off, it holds no colours and isn't written.
+    s.run("layout.update", &json!({"element": chart, "classes": false})).unwrap();
+    assert!(data(&s).colors.is_empty());
+    let saved = serde_json::to_string(&s.project.layouts[0].element(chart).unwrap().kind).unwrap();
+    assert!(!saved.contains("\"classes\""), "{saved}");
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": chart, "classes": true})).unwrap();
+    assert!(said(&s, mark).iter().any(|t| t.contains("keep the chart's bar colour")), "{:?}", said(&s, mark));
+    assert!(matches!(s.project.layouts[0].element(chart).map(|e| &e.kind), Some(ElementKind::Chart { classes: true, .. })));
+    // Added that way, it says so as it is added.
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "chart", "layer": "Places", "field": "people", "group": "kind", "classes": true})).unwrap();
+    assert!(said(&s, mark).iter().any(|t| t.contains("2 bars keep the chart's bar colour")), "{:?}", said(&s, mark));
+    // A colour that changes at the frame's own scale: the notice reads it at the scale the page
+    // draws at (a little under the stored one), so East's city and town differ, as drawn.
+    let Some(ElementKind::Chart { frame, .. }) = s.project.layouts[0].element(chart).map(|e| &e.kind) else { panic!("no chart") };
+    let frame = *frame;
+    let Some(ElementKind::MapFrame { scale: stored, .. }) = s.project.layouts[0].element(frame).map(|e| &e.kind) else {
+        panic!("no frame")
+    };
+    let stored = *stored;
+    s.map_mut().layers.iter_mut().find(|l| l.name == "Places").unwrap().symbol_by.fill =
+        Some(format!("CASE WHEN @map_scale < {stored} AND kind = 'city' THEN '#ff0000' ELSE '#0000ff' END"));
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": chart, "group": "region"})).unwrap();
+    let (m, env) = rustgis_render::layout::frame_page_env(&s.project.layouts[0], &s.project.maps, frame).unwrap();
+    assert!(env.map_scale.is_some_and(|drawn| drawn < stored), "{env:?} {stored}");
+    let places = m.layers.iter().find(|l| l.name == "Places").unwrap();
+    assert_eq!(s.project.layouts[0].element(chart).unwrap().kind.chart_data_of(places, &env).unwrap().mixed, 1);
+    assert!(
+        said(&s, mark).iter().any(|t| t.contains("1 bar keeps the chart's bar colour: its features have several colours")),
+        "{:?}",
+        said(&s, mark)
+    );
+    s.map_mut().layers.iter_mut().find(|l| l.name == "Places").unwrap().symbol_by.fill = None;
+    // Points drawn with nothing show no colour: every bar keeps the bar colour, and it says so.
+    let l = s.map_mut().layers.iter_mut().find(|l| l.name == "Places").unwrap();
+    let mut sym = l.renderer.base_symbol();
+    sym.size = 0.0;
+    l.renderer = rustgis_map::Renderer::Single(sym);
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": chart, "group": "region"})).unwrap();
+    assert_eq!(data(&s).colors, vec![None; 3]);
+    let said = said(&s, mark);
+    assert!(said.iter().any(|t| t.contains("3 bars keep the chart's bar colour: their features show no colour")), "{said:?}");
+    assert!(!said.iter().any(|t| t.contains("several colours")), "{said:?}");
+    // Not a yes or no: refused, naming it; only charts take it.
+    let err = s.run("layout.update", &json!({"element": chart, "classes": "maybe"})).unwrap_err();
+    assert!(err.contains("classes"), "{err}");
+    let rect =
+        s.run("layout.addElement", &json!({"kind": "rectangle", "x": 1, "y": 1, "w": 5, "h": 5})).unwrap()["element"].as_u64().unwrap();
+    assert!(s.run("layout.update", &json!({"element": rect, "classes": true})).unwrap_err().contains("only charts"));
+    assert!(s.run("layout.addElement", &json!({"kind": "table", "layer": "Places", "classes": true})).unwrap_err().contains("only charts"));
 }
 
 /// Text elements take a font family (#517): sans by default and not written then, serif when
