@@ -132,6 +132,34 @@ features (not one read a view at a time), with a name of its own; it follows the
 and when it is removed, or a project opens without it, the walls are `color` (said) until a
 polygon layer of that name comes back. A plain `"walls": "#RRGGBB"` takes the layer off.
 
+`"shape": "circle"` cuts a round block: the largest circle inside the box (the DEM's extent or
+`"extent"`), centred in it, or a smaller one with `"radius"` (map units; one larger than the
+box's circle takes the box's). It reads the same at any bearing, which suits a figure that
+turns or an orbit. Only the ground inside the circle is drawn and sets the base, and the wall
+runs round its near half, with everything a box's walls have: colour, a walls layer's units and
+their patterns (which run on round the wall), light and fog. `"shape": "box"` (the default)
+takes it back to the box.
+
+With water on the terrain (below), `"block": {"water": {"depth": 12}}` shows it in the walls'
+section: where the block's edge (a round block's circle too) runs inside a water polygon (the first in the layer's rows where
+they overlap, among the features its definition query keeps), the wall shows a band of water from
+the water's level down to its floor, over the walls' colours, in the water layer's solid fill (the
+topmost of its fill layers; one partly transparent laid over a light blue, as a section is opaque),
+lit as the wall is and darker with depth, half as bright at the full
+depth, with a line at the level and one along the floor as dark as the shore band. A DEM holds the
+water's surface, not its bed, so the depth is given: `"depth"` in metres for every water body, or
+`"field": "prof"` names a numeric field of the water layer holding each one's depth (`"depth"` then
+serves the rows with no value, empty or 0). Both are stretched by the exaggeration, and the floor
+goes no lower than the base. The floor follows the shore: no depth at the shoreline, the full depth
+from about the shore band's width in (a few pixels at the view's centre), so the section shows a
+basin, not a cliff. A water body with no depth, or no level, shows none, and setting the block or
+the water says how many of those its definition query keeps have no value in the field. These depths
+are schematic unless they come from a field: say so in the figure's caption. `"water": false` in the
+block takes the water out of the walls (give the block whole again: a `"block"` object sets all of
+it, its extent, depth and walls too); while it is there, taking the terrain's water off, or giving
+it a layer without the depth field, is refused. Deleting the depth field keeps the water's own
+`depth` for all the water, or takes the water out of the walls when there is none, and says so.
+
 **Water** on the terrain lies flat: `map.terrain` with `{"water": {"layer": "Lakes"}}` names a
 polygon layer of water bodies, and inside each polygon the ground is level, at the lowest height
 of the DEM along its shore, instead of rising and falling with a surface model that is noisy or
@@ -400,7 +428,11 @@ place names there. On the desktop, its optional `url` selects another Valhalla s
 </figure>
 
 **Home › Add › Basemap** offers five built-in basemaps drawn from a world outline (Paper, Midnight,
-Ocean, Atlas, Blank), which need no network, and web tile layers over them:
+Ocean, Atlas, Blank), which need no network, and web tile layers over them. On Blank, **Paper
+color** under the basemaps sets the colour the map draws where it would draw white, a tilted view's
+sky included, so a map frame sits on a coloured layout page without a white box around it
+(`map.basemap {"name": "blank", "color": "#F1EADF"}`). Choosing another basemap takes the paper
+colour off, as that basemap draws its own colours:
 
 - **Raster tiles** from an XYZ or TMS template (`https://…/{z}/{x}/{y}.png`; `{-y}` for rows
   from the south, `{s}` for subdomains, `{q}` for Bing-style quadkeys) or a WMS through
@@ -762,6 +794,31 @@ so EPSG:8857 (Equal Earth) works too. So is the sinusoidal projection, on a sphe
 ellipsoid: MODIS rasters, whose GeoTIFFs give it as their own projection, open and draw, and
 World, Sphere and Africa Sinusoidal (`ESRI:54008`, `53008`, `102011`) can be the map's.
 
+### Finding a coordinate system
+
+The coordinate system boxes of the Coordinate System dialog, Define Projection, the Shapefile, DXF
+and CSV imports, the measured grid, **Settings › Start-up › Projection** and the analysis
+environment search as you type. A box finds a system by its code (`3035`, `EPSG:3035`,
+`esri:102033`), by words of its name (`lv95`, `utm 32n wgs`), by its projection method (`albers`,
+`oblique mercator`) or by its area of use (`switzerland`), and lists the matches under the box: the
+systems you used last first (the ten last applied, kept between sessions), the map's own
+projections by name where the box sets the map (`robinson`), then the EPSG and ESRI systems. Among
+equal matches, names whose words begin with the words typed come first (`lambert 93` finds
+Lambert-93 before ISN93 / Lambert 1993), then WGS 84 and ETRS89 systems, and a plain system before
+its axis-order variants.
+
+↑/↓ move through the list, Enter or a click takes a system, and Escape closes the list. In a
+dialog, taking a system fills the box, and Apply or OK confirms the dialog; Enter on a code typed in
+full, such as `2263` or `EPSG:2263`, takes it and confirms the dialog at once. In the graticule and
+start-up menus a system taken applies at once; in the analysis environment, **Set Coordinate
+System** applies it.
+
+Enter in an empty box leaves it empty (no system, or the map's own for the measured grid) unless ↑
+or ↓ chose a row. A box for the map, the measured grid or the analysis environment lists projected
+systems only. Text the list doesn't hold, such as WKT or a PROJ string, is used as typed. A system
+is remembered once it is applied or its import starts; **Clear** beside **Recently used** in the
+Coordinate System dialog forgets them all.
+
 ## Globe
 
 <figure markdown="span">
@@ -804,7 +861,8 @@ picking one shows it:
 - **Latitude and Longitude** (the default): parallels and meridians, more of them as you zoom in.
 - **Measured Grid**: eastings and northings in a projected coordinate system, at a round interval
   that suits the scale (about eight lines across the view), as a layout's measured grid draws them.
-  The system is the one typed under **Measured grid's coordinate system** (an EPSG code such as
+  The system is the one chosen under **Measured grid's coordinate system** (found by name or
+  code, see [Finding a coordinate system](#finding-a-coordinate-system); an EPSG code such as
   `2056`, WKT or a PROJ string; `"crs"` in the command); left empty, it is the map's own when the
   map is projected, else the WGS 84 UTM zone at the centre of the view. A system that can't be read
   or is geographic is refused, with a message naming it.
