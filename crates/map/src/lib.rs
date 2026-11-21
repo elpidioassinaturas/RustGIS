@@ -2545,6 +2545,21 @@ impl Map {
         out
     }
 
+    /// The order the map's layers are drawn in, top first: the [`Map::stack`] with a higher depth
+    /// priority above whatever the order, as the renderer draws them and [`Map::hits_at`] ranks
+    /// them. A tile layer goes with the layer it's drawn over; those under all of them stay last.
+    pub fn draw_order(&self) -> Vec<Drawn> {
+        let slots = self.tile_slots();
+        let priority = |d: &Drawn| match *d {
+            Drawn::Layer(i) => self.layers.get(i).map_or(0, |l| l.priority),
+            Drawn::Tile(i) => slots.get(i).copied().flatten().and_then(|id| self.layer(id)).map_or(i32::MIN, |l| l.priority),
+        };
+        let mut out = self.stack();
+        // A stable sort: the stack's order among equal priorities.
+        out.sort_by_key(|d| std::cmp::Reverse(priority(d)));
+        out
+    }
+
     /// The tile layers drawn just over the map layer `over` (None: under all of them), top
     /// first, by index.
     pub fn tiles_over(&self, over: Option<u32>) -> Vec<usize> {
@@ -4283,6 +4298,32 @@ mod tests {
             l.definition_query = Some("n = 1".into());
         }
         assert_eq!(m.hits_at(p, 1000.0, 1e6, |l| l.id == below, false, 100), vec![(below, 0)]);
+    }
+
+    #[test]
+    fn draw_order_puts_a_higher_priority_on_top_with_its_tile_layers() {
+        let mut m = Map::new("Map");
+        let below = m.add_dataset(points());
+        let above = m.add_dataset(points());
+        let url = "https://a.tile.example.com/{z}/{x}/{y}.png";
+        let mut over = tiles::TileLayer::new("Over", tiles::TileKind::Raster, url);
+        over.over = Some(below);
+        m.tiles.push(over);
+        m.tiles.push(tiles::TileLayer::new("Under", tiles::TileKind::Raster, url));
+        let (b, a) = (m.layer_index(below).unwrap(), m.layer_index(above).unwrap());
+        // Equal priorities: the stack's order.
+        assert_eq!(m.draw_order(), vec![Drawn::Layer(a), Drawn::Tile(0), Drawn::Layer(b), Drawn::Tile(1)]);
+        assert_eq!(m.draw_order(), m.stack());
+        // A higher depth priority draws on top whatever the order, its tile layer over it, and
+        // those under all the layers stay last.
+        if let Some(l) = m.layers.iter_mut().find(|l| l.id == below) {
+            l.priority = 1;
+        }
+        assert_eq!(m.draw_order(), vec![Drawn::Tile(0), Drawn::Layer(b), Drawn::Layer(a), Drawn::Tile(1)]);
+        if let Some(l) = m.layers.iter_mut().find(|l| l.id == above) {
+            l.priority = -5;
+        }
+        assert_eq!(m.draw_order(), vec![Drawn::Tile(0), Drawn::Layer(b), Drawn::Layer(a), Drawn::Tile(1)]);
     }
 
     #[test]

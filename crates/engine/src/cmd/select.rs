@@ -366,8 +366,9 @@ fn identify(s: &mut Session, p: &Value) -> CmdResult {
     };
     let map = s.map();
     // Features and the vector tile layers' features (tiles are never selectable), in the drawing
-    // order of all the map's layers (#808): topmost takes the layer drawn on top of those with any.
-    let order = map.stack();
+    // order of all the map's layers (#808), a higher depth priority on top as drawn: topmost takes
+    // the layer drawn on top of those with any.
+    let order = map.draw_order();
     let place = |d: rustgis_map::Drawn| order.iter().position(|o| *o == d).unwrap_or(usize::MAX);
     let mut ranked: Vec<(usize, Value)> = hits
         .iter()

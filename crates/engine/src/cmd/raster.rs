@@ -1239,14 +1239,18 @@ pub fn identify(s: &Session, lon: f64, lat: f64) -> Option<Value> {
 }
 
 /// The pixel values under a longitude/latitude point of each visible raster `keep` takes that has
-/// a value there, with the raster's index in the map's layers (their drawing order, top first),
-/// the topmost first; with `first`, the topmost raster's alone. Identify ranks them with the
-/// features by that order (#2488).
+/// a value there, with the raster's index in the map's layers, the one drawn on top first (the
+/// map's drawing order, a higher depth priority above whatever the order); with `first`, the
+/// topmost raster's alone. Identify ranks them with the features by that order (#2488).
 pub fn pixels_at(s: &Session, lon: f64, lat: f64, keep: impl Fn(&rustgis_map::Layer) -> bool, first: bool) -> Vec<(usize, Value)> {
     let scale = s.scale();
     let c = rustgis_geom::Coord::new(lon, lat);
     let map = s.map();
-    let pixels = map.layers.iter().enumerate().filter(|(_, l)| l.is_raster() && keep(l) && map.draws_at(l, scale)).filter_map(|(i, l)| {
+    let drawn = map.draw_order().into_iter().filter_map(|d| match d {
+        rustgis_map::Drawn::Layer(i) => Some((i, map.layers.get(i)?)),
+        rustgis_map::Drawn::Tile(_) => None,
+    });
+    let pixels = drawn.filter(|(_, l)| l.is_raster() && keep(l) && map.draws_at(l, scale)).filter_map(|(i, l)| {
         let r = l.raster.as_ref()?.data.as_ref()?;
         let (col, row) = r.pixel_at(c)?;
         let vals: Vec<Option<f32>> = (0..r.band_count()).map(|b| r.value(b, col, row)).collect();
