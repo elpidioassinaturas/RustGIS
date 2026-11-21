@@ -4586,6 +4586,38 @@ fn a_guide_layer_read_in_place_is_refused_and_said() {
     let _ = std::fs::remove_file(path);
 }
 
+/// A guide (#2262) its labels can't follow as written, in a project written by hand: along a layer
+/// that isn't there or has no lines, by a field one of the two layers lacks, or on a perpendicular
+/// label (square to its line where one is near): said once a kind on opening; a clean one isn't.
+#[test]
+fn a_guide_its_labels_cant_follow_is_said_on_opening() {
+    let guided = |s: &Session| {
+        let mut read = Project::from_json(&serde_json::to_string(&s.project).unwrap()).unwrap();
+        let said: Vec<String> = read.take_read_notices(&crate::project::ALL_PARTS).iter().map(|n| n.english()).collect();
+        said.into_iter().filter(|n| n.contains("guide")).collect::<Vec<_>>()
+    };
+    let mut s = world();
+    s.run("labels.placement", &json!({"layer": "Lakes", "guide": {"layer": "Rivers"}})).unwrap();
+    assert!(guided(&s).is_empty(), "a clean guide isn't said: {:?}", guided(&s));
+    let set = |s: &mut Session, name: &str, layer: &str, field: Option<&str>| {
+        let l = s.map_mut().layers.iter_mut().find(|l| l.name == name).unwrap();
+        l.labels.default.guide = Some(crate::map::LabelGuide { layer: layer.into(), field: field.map(Into::into) });
+    };
+    set(&mut s, "Lakes", "Serras", None);
+    set(&mut s, "Countries", "Lakes", None);
+    let said = guided(&s);
+    assert!(said.len() == 1 && said[0].contains("2 label guide(s) along 'Lakes', 'Serras'"), "{said:?}");
+    set(&mut s, "Lakes", "Rivers", Some("nome"));
+    set(&mut s, "Countries", "Rivers", None);
+    let said = guided(&s);
+    assert!(said.len() == 1 && said[0].contains("1 label guide field(s)") && said[0].contains("'nome'"), "{said:?}");
+    set(&mut s, "Lakes", "Rivers", None);
+    s.run("labels.placement", &json!({"layer": "Cities", "position": "perpendicular", "to": {"layer": "Rivers"}})).unwrap();
+    set(&mut s, "Cities", "Rivers", None);
+    let said = guided(&s);
+    assert!(said.len() == 1 && said[0].contains("1 perpendicular label class(es)"), "{said:?}");
+}
+
 #[test]
 fn rivers_are_labelled_along_their_lines_in_italics() {
     let mut s = world();

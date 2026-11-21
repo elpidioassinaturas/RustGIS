@@ -364,7 +364,7 @@ pub(super) fn notices_for_maps(text: &str, project: &Project, maps_only: bool) -
     notices.extend(refused_reference_scales(file.maps.iter().chain(file.offline_areas.iter().map(|a| &a.data)).flat_map(|m| &m.layers)));
     // Offline snapshots say so when `offline.open` opens them as maps.
     notices.extend(hidden(project.maps.iter().flat_map(|m| &m.layers)));
-    notices.extend(streamed_guides(project.maps.iter()));
+    notices.extend(unfollowed_guides(project.maps.iter()));
     Ok(notices)
 }
 
@@ -379,34 +379,64 @@ pub(crate) fn map_notices(text: &str, map: &rustgis_map::Map, diagrams: bool) ->
         notices.extend(refused_reference_scales(raw.layers.iter()));
     }
     notices.extend(hidden(map.layers.iter()));
-    notices.extend(streamed_guides(std::iter::once(map)));
+    notices.extend(unfollowed_guides(std::iter::once(map)));
     only(notices, diagrams)
 }
 
-/// One notice with a count and the first few names, for the label classes whose guide layer
-/// (#2262) is read in place from its file: only a view's window of it is at hand, so their labels
-/// are placed as without it until it is loaded whole, as `labels.placement` says when it is set.
-fn streamed_guides<'a>(maps: impl Iterator<Item = &'a rustgis_map::Map>) -> Vec<(ReadPart, String)> {
-    let mut guides = Vec::new();
+/// One notice a kind, with a count and the first few names, for the label guides (#2262) of a file
+/// that its labels can't follow as written, which `labels.placement` refuses when they are set:
+/// along a layer read in place from its file (only a view's window of it at hand), or one that
+/// isn't there or has no lines (placed as without it), by a field one of the two layers lacks
+/// (matched by place, not by value), or on a perpendicular label (square to its line where one is
+/// near).
+fn unfollowed_guides<'a>(maps: impl Iterator<Item = &'a rustgis_map::Map>) -> Vec<(ReadPart, String)> {
+    use rustgis_data::GeometryType;
+    let (mut streamed, mut missing, mut fields, mut square) = (Vec::new(), Vec::new(), Vec::new(), 0usize);
     for map in maps {
-        let streamed = |name: &str| map.layer_by_name(name).is_some_and(|l| l.source.is_some());
-        let classes = map.layers.iter().flat_map(|l| l.labels.in_order());
-        guides.extend(classes.filter_map(|c| c.guide.as_ref()).filter(|g| streamed(&g.layer)).map(|g| &g.layer));
+        for labelled in &map.layers {
+            for (c, g) in labelled.labels.in_order().filter_map(|c| Some((c, c.guide.as_ref()?))) {
+                match map.layer_by_name(&g.layer) {
+                    Some(l) if l.source.is_some() => streamed.push(&g.layer),
+                    Some(l) if l.has_geometry(GeometryType::Polyline) => {
+                        if let Some(f) = g.field.as_ref().filter(|f| [l, labelled].iter().any(|l| l.dataset.field_index(f).is_none())) {
+                            fields.push(f);
+                        }
+                    }
+                    _ => missing.push(&g.layer),
+                }
+                square += usize::from(c.placement == rustgis_map::LabelPlacement::Perpendicular);
+            }
+        }
     }
-    if guides.is_empty() {
-        return Vec::new();
+    let named = |mut v: Vec<&String>| {
+        let n = v.len();
+        v.sort_unstable();
+        v.dedup();
+        (n, names(&v))
+    };
+    let mut notices = Vec::new();
+    if !streamed.is_empty() {
+        let (n, names) = named(streamed);
+        notices.push(format!(
+            "{n} label guide(s) along {names}, read in place from its file, are placed as without it: Load All Features (layer.loadAll) to guide them"
+        ));
     }
-    let mut named: Vec<&String> = guides.clone();
-    named.sort_unstable();
-    named.dedup();
-    vec![(
-        ReadPart::Labels,
-        format!(
-            "{} label guide(s) along {}, read in place from its file, are placed as without it: Load All Features (layer.loadAll) to guide them",
-            guides.len(),
-            names(&named)
-        ),
-    )]
+    if !missing.is_empty() {
+        let (n, names) = named(missing);
+        notices.push(format!("{n} label guide(s) along {names}, not a line layer of the map, are placed as without it"));
+    }
+    if !fields.is_empty() {
+        let (n, names) = named(fields);
+        notices.push(format!(
+            "{n} label guide field(s) {names} that aren't a field of both layers: matched to guide lines by place, not by value"
+        ));
+    }
+    if square > 0 {
+        notices.push(format!(
+            "{square} perpendicular label class(es) with a guide: square to their line where one is near, guided only where none is"
+        ));
+    }
+    notices.into_iter().map(|m| (ReadPart::Labels, m)).collect()
 }
 
 /// The same audit for a layer file read on its own.

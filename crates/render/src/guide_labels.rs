@@ -345,5 +345,15 @@ mod tests {
         let again = crate::render(&mut m, &view).unwrap().labels;
         let serra = again.iter().find(|l| l.text == "Serra Grande").expect("placed");
         assert_eq!(serra.glyphs.len(), "Serra Grande".chars().count(), "hidden and held, still along its ridge");
+        // Read in place from its file (a project written by hand): passed over, and no copy of it
+        // made for the guide.
+        let ridges = m.layers.iter_mut().find(|l| l.name == "Cumeadas").unwrap();
+        ridges.source = Some(Default::default());
+        ridges.clear_cache();
+        let streamed = crate::render(&mut m, &view).unwrap().labels;
+        let ridges = m.layers.iter().find(|l| l.name == "Cumeadas").unwrap();
+        assert!(ridges.projected_cache().is_empty() && ridges.display_cache().is_none(), "no copy made");
+        let serra = streamed.iter().find(|l| l.text == "Serra Grande").expect("placed");
+        assert!(serra.glyphs.is_empty(), "placed as without its guide");
     }
 }

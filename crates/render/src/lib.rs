@@ -6734,6 +6734,7 @@ fn guide_lines(
     if ctx.globe.is_none() {
         for (name, _) in &wanted {
             if let Some(l) = map.layers.iter_mut().find(|l| l.name.eq_ignore_ascii_case(name))
+                && l.source.is_none()
                 && !l.is_cached(key)
             {
                 // As its drawing asks for it, so that the two share it (a guide layer isn't
