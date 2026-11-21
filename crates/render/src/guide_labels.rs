@@ -336,5 +336,14 @@ mod tests {
         }
         let low = labels.iter().find(|l| l.text == "Serra Baixa").expect("placed");
         assert!(low.glyphs.is_empty(), "no ridge: level");
+        // Hidden and held in another system (UTM zone 31 south), so read point by point, the
+        // lines out of view passed over: the same.
+        let ridges = m.layers.iter_mut().find(|l| l.name == "Cumeadas").unwrap();
+        ridges.visible = false;
+        ridges.dataset.hold_in(rustgis_data::raster::Crs::Epsg(32731)).unwrap();
+        ridges.touch_geometry();
+        let again = crate::render(&mut m, &view).unwrap().labels;
+        let serra = again.iter().find(|l| l.text == "Serra Grande").expect("placed");
+        assert_eq!(serra.glyphs.len(), "Serra Grande".chars().count(), "hidden and held, still along its ridge");
     }
 }

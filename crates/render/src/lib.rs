@@ -6675,8 +6675,9 @@ fn screen_pieces(ctx: &Ctx<'_>, flat: &rustgis_map::projection::Flat, part: &[Co
 /// a frame, before the layers are drawn (each layer is then borrowed to draw it). On the flat map
 /// a guide layer is read from its copy there as it is drawn (`key` names the projection): the
 /// projected one its drawing keeps, else a display copy of it at this scale, which the layer's
-/// budget for those bounds ([`rustgis_map::Layer::prepare_display`]). No full copy is made for a
-/// guide: a hidden layer has none, and one with neither is read point by point.
+/// budget for those bounds ([`rustgis_map::Layer::prepare_display`]), else (held in another
+/// system, small, or in a projection those aren't made for) the projected copy its drawing would
+/// keep, about its geometry's size again, as a shown layer's.
 fn guide_lines(
     map: &mut Map,
     ctx: &Ctx<'_>,
@@ -6697,9 +6698,15 @@ fn guide_lines(
             if let Some(l) = map.layers.iter_mut().find(|l| l.name.eq_ignore_ascii_case(name))
                 && !l.is_cached(key)
             {
-                // As its drawing asks for it, so that the two share it.
-                let complete = l.source.is_some();
-                l.prepare_display(flat, ctx.view.lod_tolerance(), complete);
+                // As its drawing asks for it, so that the two share it (a guide layer isn't
+                // read from a source: see `guides_of`). None is made from a layer held in another
+                // system, nor for a small one or another projection: it gets the projected copy
+                // its drawing would keep, as converting it again each frame costs far more (a
+                // whole view of 2 M vertices held in Polyconic, 0.85 s).
+                let tol = ctx.view.lod_tolerance();
+                if !l.prepare_display(flat, tol, false) {
+                    l.thinned_in(flat, key, tol);
+                }
             }
         }
     }
@@ -6717,11 +6724,12 @@ fn guide_lines(
 /// ([`screen_pieces`], thinned as [`guide_labels::Guides`] keeps them), each with its value in
 /// `field`, read only for a line with a stretch in view. On the flat map, read from its copy there
 /// as drawn ([`guide_lines`]), a line whose extent is out of view is passed over by it: a frame
-/// costs a look at each line's extent and a pass over the vertices of those in view. Without such
-/// a copy (on the globe; a small layer, or one held in another system, not drawn), each vertex is
-/// projected, as for [`square_lines`]. What is kept is at most about 24 bytes a point of the
-/// stretches in view, which thinning bounds by their length on the screen, and dropped with the
-/// frame. A layer read in chunks from its source has none to hand.
+/// costs a look at each line's extent and a pass over the vertices of those in view. On the globe
+/// each vertex is projected, as for [`square_lines`] (the view's extent, worked out in the layer's
+/// system once to pass over lines unconverted, is the whole world there). What is kept is at most about
+/// 24 bytes a point of the stretches in view, which thinning bounds by their length on the screen,
+/// and dropped with the frame. A layer read in place from its source gives none: only a view's
+/// window of it is at hand (`labels.placement` refuses it, and a file that has one says so).
 fn guides_of(
     map: &Map,
     ctx: &Ctx<'_>,
@@ -6730,7 +6738,7 @@ fn guides_of(
     (name, field): &(String, Option<String>),
 ) -> guide_labels::Guides {
     let mut guides = guide_labels::Guides::default();
-    let Some(layer) = map.layer_by_name(name) else { return guides };
+    let Some(layer) = map.layer_by_name(name).filter(|l| l.source.is_none()) else { return guides };
     // Read, even when it gives no lines (its system can't be converted).
     note_held_read(layer);
     let features = &layer.dataset.features;
@@ -6769,10 +6777,13 @@ fn guides_of(
         }
         return guides;
     }
-    // Read in longitude/latitude, as the lines labels are square to.
+    // Read in longitude/latitude, as the lines labels are square to; those whose extent misses the
+    // view's, in the layer's own system, aren't (the whole world on the globe).
     let Ok(to) = layer.dataset.lonlat_conversion() else { return guides };
+    let reach = layer.dataset.extent_from_lonlat(&view_lonlat(map, ctx.view)).padded(0.05, 0.0);
     for (row, r) in features.rows().enumerate() {
-        let Some(g) = r.geometry().and_then(|g| rustgis_data::Dataset::converted_to_lonlat(&to, g)) else { continue };
+        let Some(g) = r.geometry().filter(|g| g.extent().intersects(&reach)) else { continue };
+        let Some(g) = rustgis_data::Dataset::converted_to_lonlat(&to, g) else { continue };
         let Geometry::Line(parts) = &*g else { continue };
         add(row, parts.iter().flat_map(|part| screen_pieces(ctx, flat, part)).collect());
     }

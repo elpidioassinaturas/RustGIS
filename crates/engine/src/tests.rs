@@ -4554,6 +4554,38 @@ fn labels_are_guided_along_a_line_layer() {
     assert!(clean.get("requires").is_none());
 }
 
+/// A guide layer read in place from its file (#2262) has only a view's window at hand: refused
+/// until it is loaded whole, and said once when a project or map file has one.
+#[test]
+fn a_guide_layer_read_in_place_is_refused_and_said() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    let mut ds = Dataset::new("cumeadas", GeometryType::Polyline, vec![Field::new("name", FieldType::Text)]);
+    for i in 0..4 {
+        let y = f64::from(i) * 5.0;
+        ds.push(Some(Geometry::Line(vec![vec![Coord::new(-10.0, y), Coord::new(10.0, y + 1.0)]])), vec![V::Text(format!("Serra {i}"))]);
+    }
+    let path = std::env::temp_dir().join(format!("rustgis-engine-{}-guide-streamed.fgb", std::process::id()));
+    rustgis_data::io::write_path(&ds, &path).unwrap();
+    let mut s = world();
+    s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap();
+    assert!(s.map().layer_by_name("cumeadas").unwrap().is_streamed());
+    let e = s.run("labels.placement", &json!({"layer": "Lakes", "guide": {"layer": "cumeadas"}})).unwrap_err();
+    assert!(e.contains("layer.loadAll"), "{e}");
+    // A project that has one anyway (written by hand, or the layer made streamed since): said once.
+    for name in ["Lakes", "Cities"] {
+        let l = s.map_mut().layers.iter_mut().find(|l| l.name == name).unwrap();
+        l.labels.default.guide = Some(crate::map::LabelGuide { layer: "cumeadas".into(), field: None });
+    }
+    let mut read = Project::from_json(&serde_json::to_string(&s.project).unwrap()).unwrap();
+    let said: Vec<String> =
+        read.take_read_notices(&crate::project::ALL_PARTS).iter().map(|n| n.english()).filter(|n| n.contains("read in place")).collect();
+    assert!(said.len() == 1 && said[0].contains("2 label guide(s) along 'cumeadas'"), "{said:?}");
+    // Loaded whole, it guides.
+    s.run("layer.loadAll", &json!({"layer": "cumeadas"})).unwrap();
+    s.run("labels.placement", &json!({"layer": "Lakes", "guide": {"layer": "cumeadas"}})).unwrap();
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn rivers_are_labelled_along_their_lines_in_italics() {
     let mut s = world();

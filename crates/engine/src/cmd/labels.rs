@@ -550,6 +550,12 @@ fn label_guide(s: &Session, p: &Value, labelled: &Layer) -> Result<Option<Option
     if !layer.has_geometry(GeometryType::Polyline) {
         return Err(format!("'{name}' has no lines to guide labels along"));
     }
+    // Only a window of it at hand, a view's worth: labels couldn't follow the lines out of it.
+    if layer.source.is_some() {
+        return Err(format!(
+            "'{name}' is read in place from its file, a view at a time: Load All Features (layer.loadAll) before guiding labels along it"
+        ));
+    }
     let field = match g.get("field") {
         None | Some(Value::Null) => None,
         Some(Value::String(f)) if f.trim().is_empty() => None,
