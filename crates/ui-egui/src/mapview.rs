@@ -186,7 +186,8 @@ fn with_answers(map: &rustgis_engine::map::Map, info: &Value, found: Vec<Value>)
     // identify.featureInfo tells its answer to the first of them, drawn or not).
     let drawn = |name: &str| map.tiles.iter().position(|t| t.name == name && t.draws());
     all.retain(|v| v["tileLayer"].as_str().is_none_or(|name| drawn(name).is_some()));
-    let stack = map.stack();
+    // As identify ranks them: the drawing order, a higher depth priority on top (#2488).
+    let stack = map.draw_order();
     // A tile layer's feature by its layer's name (two of one name drawn take the higher one's
     // place, as their answers are told apart by name too), a map layer's (or raster's pixel) by
     // its id; anything else after them all.
@@ -5465,6 +5466,25 @@ mod tests {
         follow_popup(&mut app);
         let popup = app.map.popup.as_ref().unwrap();
         assert_eq!((shown(&popup.info), popup.index), (vec!["Countries".to_string()], 0), "hidden, in the pop-up");
+    }
+
+    /// A WMS layer's answer takes its place by the depth priority too, as identify ranks the
+    /// features (#2488): Countries, with a higher priority, is drawn over the WMS layer and stays
+    /// first.
+    #[test]
+    fn a_wms_answer_goes_under_a_layer_of_higher_priority() {
+        let mut s = rustgis_engine::Session::new(rustgis_engine::sample::world_project());
+        s.run("map.addTiles", &json!({"url": "https://wms.example.org/{z}/{x}/{y}.png", "name": "Over", "overlay": true})).unwrap();
+        s.run("layer.priority", &json!({"layer": "Countries", "value": 1})).unwrap();
+        let answer = json!({"layer": "Over", "tileLayer": "Over", "sourceLayer": null, "attributes": {"name": "Bern"}});
+        s.run("map.popupMode", &json!({"mode": "visible"})).unwrap();
+        let info = s.run("identify", &json!({"lon": 8.6, "lat": 46.65, "tolerancePx": 0})).unwrap();
+        assert_eq!(info["layer"], "Countries");
+        let v = with_answers(s.map(), &info, vec![answer]).unwrap();
+        let shown: Vec<&str> =
+            v["results"].as_array().unwrap().iter().map(|r| r["tileLayer"].as_str().or(r["layer"].as_str()).unwrap()).collect();
+        assert_eq!(shown, ["Countries", "Over"]);
+        assert_eq!(v["layer"], "Countries");
     }
 
     fn selection_harness() -> egui_kittest::Harness<'static, RustGisApp> {
