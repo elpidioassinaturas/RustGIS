@@ -152,7 +152,7 @@ const MAX_OUTPUT_NAME: usize = 200;
 /// ([`calculator_order`]).
 const CALCULATOR: &str = "raster_calculator";
 /// How the Raster Calculator's inputs meet its expression, added to the `inputs` field's help.
-const CALCULATOR_INPUTS_HELP: &str = "Each name quoted in the expression is the name of one of these layers (or a file's path, file name or name without extension), and is read from that input whatever the order here. With only files listed and a quoted name that matches none of them, the k-th quoted name is the k-th file.";
+const CALCULATOR_INPUTS_HELP: &str = "Each name quoted in the expression is the name of one of these layers (or a file's path, file name or name without extension), and is read from that input whatever the order here. With only files listed and no quoted name matching any of them, the k-th quoted name is the k-th file.";
 
 /// `p` is the [`OUTPUT`] field RustGIS adds, not one of the manifest's parameters.
 pub fn is_output_name(p: &ParamSpec) -> bool {
@@ -558,32 +558,39 @@ fn quoted_names(expression: &str) -> Vec<&str> {
     names
 }
 
-/// The Raster Calculator's `list` of inputs in the order its `expression` first quotes them.
-/// The runner binds the k-th quoted name to the k-th input whatever that input is called, and
-/// RustGIS stages a layer under a file name of its own, so without this a layer's name in the
-/// expression reads another layer's cells, silently. A quoted name matches an input by layer
-/// name, or, for a file, by its path, file name or name without extension. A name that matches
-/// none, or an input the expression doesn't use, is refused, unless only files are listed: the
-/// runner's own contract (`'nir'` for the first of `nir.tif;red.tif`) then holds as before.
-fn calculator_order<'a>(expression: &str, list: Vec<&'a str>, inputs: &dyn Inputs) -> Result<Vec<&'a str>, String> {
+/// The Raster Calculator's `list` of inputs in the order its `expression` first quotes them,
+/// and a notice when they keep their order instead. The runner binds the k-th quoted name to the
+/// k-th input whatever that input is called, and RustGIS stages a layer under a file name of its
+/// own, so without this a layer's name in the expression reads another layer's cells, silently.
+/// A quoted name matches an input by layer name, or, for a file, by its path, file name or name
+/// without extension; ASCII case aside, as layers are found by name, with an exact match first.
+/// A name that matches none, or an input the expression doesn't use, is refused, unless only
+/// files are listed and no name matches any: the runner's own contract (the k-th quoted name is
+/// the k-th file) then holds as before, and the notice says which name reads which file.
+fn calculator_order<'a>(expression: &str, list: Vec<&'a str>, inputs: &dyn Inputs) -> Result<(Vec<&'a str>, Option<String>), String> {
     let quoted = quoted_names(expression);
     if quoted.is_empty() {
         // The runner says an expression needs a quoted name.
-        return Ok(list);
+        return Ok((list, None));
     }
-    let is_layer = |n: &str| inputs.raster(n).is_some() || inputs.dataset(n).is_some();
-    let names_file = |q: &str, n: &str| {
+    let layer: Vec<bool> = list.iter().map(|n| inputs.raster(n).is_some() || inputs.dataset(n).is_some()).collect();
+    let file_parts = |n: &'a str| {
         let p = Path::new(n);
-        [p.file_name(), p.file_stem()].into_iter().flatten().any(|part| part.to_str() == Some(q))
+        [p.file_name(), p.file_stem()].into_iter().flatten().filter_map(|part| part.to_str())
     };
-    let matches = |q: &str, n: &str| q == n || (!is_layer(n) && names_file(q, n));
+    let matches =
+        |q: &str, i: usize, same: fn(&str, &str) -> bool| same(q, list[i]) || (!layer[i] && file_parts(list[i]).any(|part| same(q, part)));
+    let exact: fn(&str, &str) -> bool = |a, b| a == b;
+    let any_case: fn(&str, &str) -> bool = |a, b| a.eq_ignore_ascii_case(b);
     // Each quoted name takes the first input it matches that no earlier name took, so one
     // layer listed twice can be quoted under two names (a path and a file name, say).
     let mut taken = vec![false; list.len()];
     let mut order = Vec::with_capacity(quoted.len());
     let mut missing = Vec::new();
     for q in &quoted {
-        match (0..list.len()).find(|&i| !taken[i] && matches(q, list[i])) {
+        let free = |same| (0..list.len()).find(|&i| !taken[i] && matches(q, i, same));
+        let found = free(exact).or_else(|| free(any_case));
+        match found {
             Some(i) => {
                 taken[i] = true;
                 order.push(list[i]);
@@ -591,12 +598,15 @@ fn calculator_order<'a>(expression: &str, list: Vec<&'a str>, inputs: &dyn Input
             None => missing.push(format!("\"{q}\"")),
         }
     }
-    if !list.iter().any(|n| is_layer(n)) && !missing.is_empty() {
-        return Ok(list);
+    if order.is_empty() && !layer.contains(&true) {
+        let pairs: Vec<String> = quoted.iter().zip(&list).map(|(q, n)| format!("\"{q}\" from {n}")).collect();
+        let note =
+            format!("no quoted name matches an input file's path or name, so they are read in the order listed: {}", pairs.join(", "));
+        return Ok((list, Some(note)));
     }
     if !missing.is_empty() {
         return Err(format!(
-            "the expression quotes {} but the input layers are {}: quote each input layer's name as it is listed",
+            "the expression quotes {} but the inputs are {}: quote each input layer's name, or a file's path or name, as it is listed",
             missing.join(", "),
             list.join("; ")
         ));
@@ -605,7 +615,7 @@ fn calculator_order<'a>(expression: &str, list: Vec<&'a str>, inputs: &dyn Input
     if !unused.is_empty() {
         return Err(format!("the expression doesn't quote the input(s) {}: list only the layers it uses", unused.join("; ")));
     }
-    Ok(order)
+    Ok((order, None))
 }
 
 /// Whether `p` names something on disk (never in the browser, which has no file system).
@@ -745,7 +755,9 @@ fn prepare_with(spec: &ToolSpec, meta: &Meta, inputs: &dyn Inputs, params: &Valu
                     && p.name == "inputs"
                     && let Some(expression) = params.get("expression").and_then(Value::as_str)
                 {
-                    list = calculator_order(expression, list, inputs).map_err(|e| format!("{}: {e}", spec.name))?;
+                    let (order, note) = calculator_order(expression, list, inputs).map_err(|e| format!("{}: {e}", spec.name))?;
+                    list = order;
+                    job.notes.extend(note.map(|n| format!("{}: {n}", spec.name)));
                 }
                 let files = list.into_iter().map(|n| stage(inputs, n, p.data, &tf, &mut job)).collect::<Result<Vec<_>, _>>()?;
                 if !files.is_empty() {

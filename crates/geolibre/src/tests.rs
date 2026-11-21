@@ -389,16 +389,32 @@ fn raster_calculator_binds_quoted_names_to_their_layers() {
     assert!(e.starts_with("Raster Calculator: ") && e.contains("\"C\"") && e.contains("A; B"), "{e}");
     let e = job(json!({"expression": "\"B\" * 2", "inputs": "A;B"})).unwrap_err();
     assert!(e.contains("doesn't quote the input(s) A"), "{e}");
-    // Files only: matched by path, file name or name without extension, else by position (the
-    // runner's own contract), so typed paths keep working.
+    // Layers are found by name whatever the ASCII case, so the expression may quote them so too.
+    let j = job(json!({"expression": "\"b\" + 0 * \"a\"", "inputs": "A;B"})).unwrap();
+    assert_eq!(staged_values(&j), [2.0, 1.0]);
+    assert!(j.notes.is_empty(), "{:?}", j.notes);
+    let j = job(json!({"expression": "'a' * 2", "inputs": "A"})).unwrap();
+    assert_eq!(staged_values(&j), [1.0]);
+    // Files only: matched by path, file name or name without extension (any case), else by
+    // position (the runner's own contract), so typed paths keep working; that is said.
     let none = Fixture::new();
     let order = |expression: &str, list: &[&'static str]| calculator_order(expression, list.to_vec(), &none);
-    assert_eq!(order("'nir' - 'red'", &["/d/red.tif", "/d/nir.tif"]).unwrap(), ["/d/nir.tif", "/d/red.tif"]);
-    assert_eq!(order("\"/d/nir.tif\" - \"red.tif\"", &["/d/red.tif", "/d/nir.tif"]).unwrap(), ["/d/nir.tif", "/d/red.tif"]);
-    assert_eq!(order("'x' - 'y'", &["/d/red.tif", "/d/nir.tif"]).unwrap(), ["/d/red.tif", "/d/nir.tif"]);
+    let files = ["/d/red.tif", "/d/nir.tif"];
+    assert_eq!(order("'nir' - 'red'", &files).unwrap(), (vec!["/d/nir.tif", "/d/red.tif"], None));
+    assert_eq!(order("\"/d/nir.tif\" - \"red.tif\"", &files).unwrap(), (vec!["/d/nir.tif", "/d/red.tif"], None));
+    assert_eq!(order("\"B04\" - \"SCL\"", &["/d/scl.tif", "/d/b04.tif"]).unwrap(), (vec!["/d/b04.tif", "/d/scl.tif"], None));
+    let (kept, note) = order("'x' - 'y'", &files).unwrap();
+    assert_eq!(kept, files);
+    let note = note.unwrap();
+    assert!(note.contains("\"x\" from /d/red.tif, \"y\" from /d/nir.tif"), "{note}");
+    // One name matched and one not: refused, never the matched one read from another file.
+    let e = order("'nir' - 'x'", &files).unwrap_err();
+    assert!(e.contains("\"x\"") && e.contains("/d/red.tif; /d/nir.tif"), "{e}");
     // A layer listed with a file it doesn't name: refused, as a layer's name is the rule then.
     assert!(order("'dem' - 'x'", &["/d/red.tif", "dem"]).is_err());
-    assert_eq!(order("'dem' - 'red'", &["/d/red.tif", "dem"]).unwrap(), ["dem", "/d/red.tif"]);
+    assert_eq!(order("'dem' - 'red'", &["/d/red.tif", "dem"]).unwrap(), (vec!["dem", "/d/red.tif"], None));
+    // An exact match comes before one of another case.
+    assert_eq!(order("'nir' - 'NIR'", &["/d/NIR.tif", "/d/nir.tif"]).unwrap(), (vec!["/d/nir.tif", "/d/NIR.tif"], None));
     // Other tools' inputs keep the order they are listed in.
     let mut other = manifest;
     other["id"] = json!("other_calculator");
