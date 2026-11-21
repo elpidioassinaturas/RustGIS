@@ -104,7 +104,8 @@ in the fixtures' README and in the test's `SKIPS` when a release has no such fil
 
 New project saves and map/layer exports write format 2. Their `requires` header names only
 features present in the saved payload: `terrain-block`, `terrain-block-shape` (a block
-diagram cut to a circle), `terrain-water`,
+diagram cut to a circle or to polygons), `terrain-block-polygon` (one cut to polygons),
+`terrain-water`,
 `terrain-water-shore` (a terrain water's shore band other than the default),
 `terrain-block-water` (water in a block diagram's walls),
 `shaded-relief-effects` (cast shadows, sky visibility, fill light or rock colour),
@@ -194,6 +195,15 @@ the chart's bar colour and saving it again without. Saved `layout.addElement` co
 chart and `layout.update` commands that set `"classes": true` require it too (only a chart takes
 the key); `false` needs nothing. A saved `layout.import` whose `text` has such a chart requires it
 as well. Layout files are not covered, as for backgrounds (#2277).
+
+Projects with a layout chart stacked by a second field (`stack` on a chart element) require
+`layout-chart-stack`, so an older reader refuses them instead of drawing each bar whole and
+saving it again without the field. It is required whenever the field is stored, even where the
+chart doesn't draw it stacked (ungrouped, or not summing or counting, which commands refuse or
+let go). Saved `layout.addElement` commands for a chart and `layout.update` commands that set a
+`stack` field require it too (only a chart takes the key); `""` needs nothing. A saved
+`layout.import` whose `text` has such a chart requires it as well. Layout files are not covered,
+as for backgrounds (#2277).
 
 Projects with a map frame whose border isn't the default dark grey 0.8 pt line (`border_color`,
 `border_width` on a map frame, a width of 0 drawing none) require `layout-frame-border`, so an

@@ -86,6 +86,9 @@ impl Project {
         if !required.contains(&"layout-chart-classes") && self.layouts.iter().any(|l| l.elements.iter().any(charts_classes)) {
             required.push("layout-chart-classes");
         }
+        if !required.contains(&"layout-chart-stack") && self.layouts.iter().any(|l| l.elements.iter().any(charts_stack)) {
+            required.push("layout-chart-stack");
+        }
         if !required.contains(&"layout-frame-border") && self.layouts.iter().any(|l| l.elements.iter().any(|e| e.kind.has_custom_border()))
         {
             required.push("layout-frame-border");
@@ -135,6 +138,7 @@ const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] = &[
     ("layout-chart-data", command_uses_chart_data),
     ("layout-chart-look", command_uses_chart_look),
     ("layout-chart-classes", command_uses_chart_classes),
+    ("layout-chart-stack", command_uses_chart_stack),
     ("blank-paper", command_uses_blank_paper),
     ("layout-frame-border", command_uses_frame_border),
 ];
@@ -326,6 +330,26 @@ fn command_uses_chart_classes(id: &str, params: &Value) -> bool {
     }
 }
 
+fn charts_stack(e: &rustgis_map::layout::Element) -> bool {
+    e.kind.chart_uses_stack()
+}
+
+/// A layout command that stacks a chart's bars by a second field (#2487 part 3b): an older reader
+/// ignores the key and draws each bar whole. `""` keeps a chart as an older reader draws it; only
+/// a chart takes the key, so a `layout.update` is read by it alone.
+fn command_uses_chart_stack(id: &str, params: &Value) -> bool {
+    let stack = || params.get("stack").and_then(Value::as_str).is_some_and(|f| !f.trim().is_empty());
+    match id {
+        "layout.addElement" => {
+            params.get("kind").and_then(Value::as_str).is_some_and(|k| k.trim().eq_ignore_ascii_case("chart")) && stack()
+        }
+        "layout.update" => stack(),
+        "layout.import" => imported_layout_uses(params, "\"stack\"", charts_stack),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_chart_stack)),
+        _ => false,
+    }
+}
+
 /// Whether a `layout.import` carries its layout as `"text"` with an element `uses`: an older
 /// reader reads it without the keys it doesn't know. One read from a `"path"` is a layout file,
 /// which carries no format header yet (#2277). Every save asks, so a text without the feature's
@@ -491,6 +515,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         mut on_top,
         mut grid_color,
     ) = (false, false, false, false, false, false, false, false, false, false, false, false, false, false);
+    let mut polygon = false;
     let (mut offline_area_id, mut paper, mut native, mut guided) = (false, false, false, false);
     for map in maps {
         offline_area_id |= map.offline_area_id.is_some();
@@ -505,8 +530,10 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         grid_color |= map.graticule_color.is_some();
         if let Some(t) = &map.view.terrain {
             block |= t.block.is_some();
-            // A round block (#2318), which an older reader would draw and save as a box.
+            // A round block (#2318), which an older reader would draw and save as a box; one cut
+            // to polygons, which a reader of round blocks only couldn't read.
             shape |= t.block.as_ref().is_some_and(|b| !b.shape.is_box());
+            polygon |= t.block.as_ref().is_some_and(|b| matches!(b.shape, rustgis_map::view::BlockShape::Polygon { .. }));
             water |= t.water.is_some();
             // A shore band other than the default, which an older reader would save away.
             shore |= t.water.as_ref().is_some_and(|w| w.shore != rustgis_map::view::WATER_SHORE);
@@ -526,6 +553,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
     [
         (block, "terrain-block"),
         (shape, "terrain-block-shape"),
+        (polygon, "terrain-block-polygon"),
         (water, "terrain-water"),
         (shore, "terrain-water-shore"),
         (block_water, "terrain-block-water"),
@@ -1136,6 +1164,53 @@ mod tests {
                 document["tasks"] = value;
                 let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
                 let expected = if required { json!(["layout-chart-classes"]) } else { Value::Null };
+                assert_eq!(saved.get("requires").cloned().unwrap_or(Value::Null), expected, "{id} {params}");
+            }
+        }
+    }
+
+    /// A chart stacked by a second field (#2487 part 3b) is required where it is saved, so an older
+    /// reader refuses the project instead of drawing each bar whole; so is a saved command that
+    /// stacks one. `""` needs nothing, nor is a chart without a stack field written with one.
+    #[test]
+    fn chart_stack_capability_follows_saved_layouts_and_commands() {
+        use rustgis_map::layout::ElementKind;
+        let fixture = Project::from_json(include_str!("../../../schema/fixtures/layout_chart_stack.rgis")).unwrap();
+        let saved = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(saved["requires"], json!(["layout-chart-data", "layout-chart-stack"]));
+        let reread = Project::from_json(&saved.to_string()).unwrap();
+        assert_eq!(reread.layouts[0].elements[1].kind.chart_stack(), Some("kind"));
+        let mut clean = fixture;
+        for e in &mut clean.layouts[0].elements {
+            if let ElementKind::Chart { group, stack, .. } = &mut e.kind {
+                (*group, *stack) = (None, None);
+            }
+        }
+        let base = serde_json::to_value(&clean).unwrap();
+        assert!(base.get("requires").is_none(), "a chart with whole bars needs nothing");
+        assert!(!base["layouts"].to_string().contains("\"stack\""), "nor writes stack");
+        let mut document = base.clone();
+        document["tasks"] = json!([{"name": "Task", "steps": [{"title": "Chart", "command": "layout.import", "params": {"text": saved["layouts"][0].to_string()}}]}]);
+        let imported = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+        assert_eq!(imported["requires"], json!(["layout-chart-data", "layout-chart-stack"]));
+        for (id, params, required) in [
+            ("layout.addElement", json!({"kind": "chart", "stack": "kind"}), true),
+            ("layout.addElement", json!({"kind": "chart", "stack": ""}), false),
+            ("layout.addElement", json!({"kind": "legend", "stack": "kind"}), false),
+            ("layout.update", json!({"element": 2, "stack": "kind"}), true),
+            ("layout.update", json!({"element": 2, "stack": ""}), false),
+            ("layout.update", json!({"element": 2, "stack": null}), false),
+            ("layout.import", json!({"text": base["layouts"][0].to_string()}), false),
+        ] {
+            let script = format!("{id}= {params}");
+            for value in [
+                json!([{"name": "Task", "steps": [{"title": "Chart", "command": id, "params": params}]}]),
+                json!([{"name": "Script", "steps": [{"title": "Chart", "command": "script.run", "params": {"script": script}}]}]),
+            ] {
+                let mut document = base.clone();
+                document["tasks"] = value;
+                let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+                let expected = if required { json!(["layout-chart-stack"]) } else { Value::Null };
                 assert_eq!(saved.get("requires").cloned().unwrap_or(Value::Null), expected, "{id} {params}");
             }
         }

@@ -73,6 +73,7 @@ pub const READ_FORMAT: u32 = 2;
 pub const CAPABILITIES: &[&str] = &[
     "terrain-block",
     "terrain-block-shape",
+    "terrain-block-polygon",
     "terrain-water",
     "terrain-water-shore",
     "terrain-block-water",
@@ -95,6 +96,7 @@ pub const CAPABILITIES: &[&str] = &[
     "layout-chart-data",
     "layout-chart-look",
     "layout-chart-classes",
+    "layout-chart-stack",
     "field-generation",
     "offline-map-area-id",
     "crs-wkt",
