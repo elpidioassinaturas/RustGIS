@@ -242,6 +242,31 @@ pub fn summary(call: &ToolCall) -> String {
 /// The largest map image `view_map` draws (pixels a side).
 pub(crate) const MAX_VIEW: f64 = 2048.0;
 
+/// The most a `view_map` picture may weigh: Anthropic takes an image of up to 5 MB once
+/// base64-encoded, which is 3.75 MiB of PNG (OpenAI and Gemini take more). A satellite basemap
+/// weighs about 3.9 MB at 2048 × 1229, so some 6.5 MB at 2048 × 2048.
+pub(crate) const MAX_PNG_BYTES: usize = 5 * 1024 * 1024 / 4 * 3;
+
+/// Draws at `w` × `h` and, while the picture weighs more than `max` bytes, again smaller (both
+/// sides by the square root of the ratio, with a margin), down to 64 pixels a side. A picture a
+/// provider refuses for its size would otherwise stay among the newest two and fail every later
+/// request. Returns the picture and the size it was drawn at.
+pub(crate) fn draw_within(
+    mut w: f64,
+    mut h: f64,
+    max: usize,
+    mut draw: impl FnMut(f64, f64) -> Result<Vec<u8>, String>,
+) -> Result<(Vec<u8>, f64, f64), String> {
+    loop {
+        let png = draw(w, h)?;
+        if png.len() <= max || w.min(h) <= 64.0 {
+            return Ok((png, w, h));
+        }
+        let k = (max as f64 / png.len() as f64).sqrt() * 0.9;
+        (w, h) = ((w * k).round().max(64.0), (h * k).round().max(64.0));
+    }
+}
+
 /// `view_map`: the current view drawn offscreen at the size asked (default 1024 × 640), and a
 /// caption naming it. It goes through its adapter, so the policy sees what the picture draws.
 ///
@@ -262,7 +287,7 @@ fn draw_view(s: &mut Session, a: &Value) -> Result<(String, ToolImage), String> 
     let size =
         |k: &str, default: f64| a.get(k).and_then(Value::as_f64).filter(|v| v.is_finite()).unwrap_or(default).clamp(64.0, MAX_VIEW).round();
     let (w, h) = (size("width", 1024.0), size("height", 640.0));
-    let png = rustgis_engine::cmd::share::map_png(s, Some(w), Some(h), None)?;
+    let (png, w, h) = draw_within(w, h, MAX_PNG_BYTES, |w, h| rustgis_engine::cmd::share::map_png(s, Some(w), Some(h), None))?;
     let m = s.map();
     let c = m.center_lonlat();
     let caption = format!(

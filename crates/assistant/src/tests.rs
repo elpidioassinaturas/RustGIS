@@ -4910,6 +4910,30 @@ fn view_map_shows_the_assistant_the_map_and_only_the_last_two_pictures_are_sent(
 }
 
 #[test]
+fn a_heavy_map_picture_is_drawn_again_smaller() {
+    // A satellite basemap weighs about 1.55 bytes a pixel: 3.9 MB at 2048 × 1229, 6.5 MB at
+    // 2048 × 2048, over the 5 MB Anthropic takes once base64-encoded.
+    let mut sizes = vec![];
+    let (png, w, h) = crate::tools::draw_within(2048.0, 2048.0, crate::tools::MAX_PNG_BYTES, |w, h| {
+        sizes.push((w, h));
+        Ok(vec![0; (w * h * 1.55) as usize])
+    })
+    .unwrap();
+    assert!(png.len() <= crate::tools::MAX_PNG_BYTES, "{}", png.len());
+    assert!(png.len().div_ceil(3) * 4 <= 5 * 1024 * 1024);
+    assert_eq!(w, h, "the shape is kept");
+    assert_eq!(sizes.len(), 2, "{sizes:?}");
+    // A light picture is drawn once, at the size asked.
+    let mut calls = 0;
+    let (_, w, h) = crate::tools::draw_within(2048.0, 1280.0, crate::tools::MAX_PNG_BYTES, |w, h| {
+        calls += 1;
+        Ok(vec![0; (w * h * 0.2) as usize])
+    })
+    .unwrap();
+    assert_eq!((calls, w, h), (1, 2048.0, 1280.0));
+}
+
+#[test]
 fn a_model_that_refuses_images_is_asked_again_with_captions() {
     let mut s = sample();
     let mut a = Agent::new(cfg("ollama"), &s);
