@@ -43,6 +43,9 @@ struct Dialog {
     opening: bool,
     /// A tab clicked while a run was going: it runs once that run has answered.
     again: bool,
+    /// The run going is for a tab left by a click that couldn't run (a field to fill in): its
+    /// answer isn't shown under the tab now selected.
+    stale: bool,
 }
 
 /// `ui.pluginForm`: `{"plugin": id, "command": id}` opens that plugin command's dialog.
@@ -92,6 +95,7 @@ pub fn open(app: &mut RustGisApp, p: &Value) -> Result<Value, String> {
         footer: 0.0,
         opening: true,
         again: false,
+        stale: false,
     });
     Ok(Value::Null)
 }
@@ -116,6 +120,9 @@ pub(crate) fn answered(app: &mut RustGisApp, id: &str, answer: &Result<Value, St
     }
     let Some(d) = app.ui.plugin_dialog.open.as_mut() else { return };
     d.asked = None;
+    if std::mem::take(&mut d.stale) {
+        return;
+    }
     d.result = Some(answer.as_ref().map(|a| shown(report(a))).map_err(|e| error_shown(e)));
 }
 
@@ -228,6 +235,9 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         && !crate::pluginstart::waits(app, &id, params)
     {
         d.asked = None;
+        // A tab clicked meanwhile doesn't run then either: it was left to the run that stopped.
+        d.again = false;
+        d.stale = false;
         d.result = Some(Err(tl!("It stopped without an answer: see the notices.").to_string()));
     }
     // The field drawn as tabs, if the form has one: its clicks run the command, and no Run shows.
@@ -358,8 +368,13 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         let ready = missing.is_empty() && bad.is_empty();
         if tab_clicked && d.asked.is_some() {
             // Only a click that could run now is left to run after: one with a field to fill
-            // in only selects its tab, even if the field is filled in before the run answers.
+            // in only selects its tab, even if the field is filled in before the run answers,
+            // and the answer of the run going, for the tab left, isn't shown under it.
             d.again = ready;
+            d.stale = !ready;
+            if !ready {
+                d.result = None;
+            }
         } else if tab_clicked || again || d.opening {
             run = ready;
             d.again = false;
@@ -936,7 +951,8 @@ mod tests {
     }
 
     /// A tab clicked during a run while a required field is empty only selects it: filling the
-    /// field in before that run answers doesn't run it then.
+    /// field in before that run answers doesn't run it then, and that run's answer, for the tab
+    /// left, isn't shown under it.
     #[test]
     fn a_tab_clicked_while_running_and_not_ready_is_not_run_after() {
         let mut h = launch("ui-dialog-tabs-not-ready");
@@ -953,8 +969,37 @@ mod tests {
         h.state_mut().ui.plugin_dialog.open.as_mut().unwrap().values.insert("note".into(), json!("hi"));
         h.run();
         assert!(!dialog(&h).again && dialog(&h).asked.is_none());
-        assert_eq!(echoed(&h), json!({"note": "hi", "part": "Sources"}), "only the ready click ran");
+        // The Sources run answered, but under Authors it isn't shown: only a click runs Authors.
+        assert!(dialog(&h).result.is_none(), "{:?}", dialog(&h).result);
+        h.get_by_label("Authors").click();
+        h.run();
+        assert_eq!(echoed(&h), json!({"note": "hi", "part": "Authors"}));
         plugins::unload("ui-dialog-tabs-not-ready");
+    }
+
+    /// A tab clicked during a run that then stops without an answer (another project opened
+    /// before it started) isn't run after it: the dialog says it stopped.
+    #[test]
+    fn a_tab_clicked_while_running_is_dropped_with_a_run_that_stopped() {
+        let mut h = launch("ui-dialog-tabs-stopped");
+        h.state_mut().run_by_user("plugin:ui-dialog-tabs-stopped/qt", Value::Null).unwrap();
+        h.run();
+        h.get_by_label("Contributing").click();
+        h.step();
+        assert!(dialog(&h).asked.is_some(), "waits to start");
+        h.get_by_label("Authors").click();
+        h.step();
+        assert!(dialog(&h).again);
+        // Another project opened: the run waiting is dropped (`pluginstart::drop_replaced`).
+        h.state_mut().session.run("project.new", &Value::Null).unwrap();
+        h.run();
+        assert!(!dialog(&h).again && dialog(&h).asked.is_none());
+        assert_eq!(
+            dialog(&h).result,
+            Some(Err(tl!("It stopped without an answer: see the notices.").to_string())),
+            "the queued tab didn't run"
+        );
+        plugins::unload("ui-dialog-tabs-stopped");
     }
 
     /// A `report` text is shown as it is; any other answer as JSON, without its panel state; a
