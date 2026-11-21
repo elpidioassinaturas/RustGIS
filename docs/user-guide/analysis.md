@@ -2063,15 +2063,16 @@ of values, or **countAbove** a threshold (`"above"`), as Summarise over time doe
 variable (see [Data](data.md)); or **first**, each cell's value at its first date with one, in the
 order `"order"` gives: `"date"` (the earliest first, the default without a mask), `"-date"` (the
 latest first) or `"clear"` (below). The median holds every date's value of the cells being read,
-within the run's 64 million values (cells × dates; a STAC collection is read in pieces that keep
-to it), and like first is the data cube summary's only.
+within the run's 64 million values on the desktop and 16 million in the web app (cells × dates,
+4 bytes each: up to 256 MB; a STAC collection is read in pieces that keep to it), and like first
+is the data cube summary's only.
 
 - **Cloud-free composites:** a STAC collection's dates can be masked by each item's own quality
   band with `"mask"`: `{"asset": "SCL", "keep": [4, 5, 6]}` takes a cell at a date only where the
   same item's SCL has one of those classes, `"drop": [0, 1, 3, 8, 9, 10]` every class but those,
   and `"bits": {"set": [6], "unset": [1, 3, 4]}` the cells of a bit mask (Landsat's `qa_pixel`)
-  with every bit of `set` on and every bit of `unset` off. A cell with no-data in the mask is
-  never taken. The mask is read onto the band's grid by nearest neighbour (SCL at 20 m under a
+  with every bit of `set` on and every bit of `unset` off. Classes are whole numbers. A cell with
+  no-data in the mask is never taken, nor one outside the mask's file (said, with how many). The mask is read onto the band's grid by nearest neighbour (SCL at 20 m under a
   10 m band), at its overview nearest the band's cells, and an item without the mask's asset is
   left out and said. With a mask, **first** takes the dates by their clear share of the area by
   default (`"order": "clear"`): each date's masks are read over the area first (at an overview of

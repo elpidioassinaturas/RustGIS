@@ -750,6 +750,9 @@ pub struct StacCube {
     files: Vec<Vec<(String, (f64, f64), Vec<f64>, Option<String>)>>,
     /// The quality values that let a cell through, for a cube masked by its items' quality band.
     mask: Option<super::cube_mask::Test>,
+    /// Band pixels read that their item's mask file doesn't cover, left out as not clear, and the
+    /// first such mask's address: said once the run has read its slices.
+    uncovered: std::sync::Mutex<(u64, Option<String>)>,
     /// The level read (0: the full images), and how many of its pixels a cell's side takes: 1
     /// when the cells are that level's own pixels (`"resampling": "nearest"`, an overview as the
     /// file stores it), more when a cell is the mean of the full images' pixels in it.
@@ -982,6 +985,7 @@ pub fn stac_cube(s: &mut Session, p: &Value) -> Result<StacCube, String> {
         met: Default::default(),
         label: format!("{collection} {asset}"),
         mask: mask.map(|m| m.test),
+        uncovered: Default::default(),
     })
 }
 
@@ -1024,17 +1028,34 @@ impl StacCube {
         let span = |v: &[Option<u32>]| {
             v.iter().flatten().fold(None, |s: Option<(u32, u32)>, j| Some(s.map_or((*j, j + 1), |(a, b)| (a.min(*j), b.max(j + 1)))))
         };
-        let (Some(mc), Some(mr)) = (span(&xs), span(&ys)) else { return Ok(vec![false; xs.len() * ys.len()]) };
-        let m = cog::read_values_blocking(&info, href, level, 0, mc, mr)?;
-        let across = (mc.1 - mc.0) as usize;
-        let mut out = Vec::with_capacity(xs.len() * ys.len());
-        for y in &ys {
-            for x in &xs {
-                out.push(match (x, y) {
-                    (Some(x), Some(y)) => m.get((y - mr.0) as usize * across + (x - mc.0) as usize).is_some_and(|v| test.accepts(*v)),
-                    _ => false,
-                });
+        let mut outside = 0u64;
+        let out = match (span(&xs), span(&ys)) {
+            (Some(mc), Some(mr)) => {
+                let m = cog::read_values_blocking(&info, href, level, 0, mc, mr)?;
+                let across = (mc.1 - mc.0) as usize;
+                let mut out = Vec::with_capacity(xs.len() * ys.len());
+                for y in &ys {
+                    for x in &xs {
+                        let v = match (x, y) {
+                            (Some(x), Some(y)) => m.get((y - mr.0) as usize * across + (x - mc.0) as usize),
+                            _ => None,
+                        };
+                        outside += u64::from(v.is_none());
+                        out.push(v.is_some_and(|v| test.accepts(*v)));
+                    }
+                }
+                out
             }
+            _ => {
+                outside = (xs.len() * ys.len()) as u64;
+                vec![false; xs.len() * ys.len()]
+            }
+        };
+        if outside > 0
+            && let Ok(mut u) = self.uncovered.lock()
+        {
+            u.0 += outside;
+            u.1.get_or_insert_with(|| href.to_string());
         }
         Ok(out)
     }
@@ -1071,6 +1092,16 @@ impl super::cube::TimeCube for StacCube {
     }
     fn masked(&self) -> bool {
         self.mask.is_some()
+    }
+    /// Band pixels their item's mask file doesn't cover: left out as not clear, and said with
+    /// their count and the first such mask.
+    fn lost(&self) -> Vec<String> {
+        match self.uncovered.lock().map(|u| u.clone()) {
+            Ok((n, Some(href))) if n > 0 => vec![format!(
+                "{n} band pixel(s) lie outside their item's mask file, so they were left out as not clear (the first: {href})"
+            )],
+            _ => Vec::new(),
+        }
     }
     /// The part of the area date `i`'s masks let through: each mask read over the area at its
     /// level nearest [`SHARE_PIXELS`] pixels across it (an overview, for a large area), in bands of

@@ -1996,7 +1996,7 @@ pub fn reduce_start(s: &mut Session, p: &Value) -> Result<ReduceRun, String> {
         Some(v) => Some(match v.as_str().map(str::trim) {
             Some(x) if x.eq_ignore_ascii_case("clear") => Order::Clear,
             Some(x) if x.eq_ignore_ascii_case("date") => Order::Date,
-            Some("-date") => Order::Latest,
+            Some(x) if x.eq_ignore_ascii_case("-date") => Order::Latest,
             _ => return Err(format!("order is clear, date or -date, not {v}")),
         }),
     };

@@ -3,12 +3,16 @@
 //! `order`), over a small collection served here.
 use super::*;
 
-/// 8 × 8 cells of 1/8° over [10, 11] × [45, 46], in degrees, as `values` (row by row) say.
+/// `size` × `size` cells over [10, 11] × [45, 46], in degrees, as `values` (row by row) say.
 fn cog(values: Vec<f32>, size: u32, nodata: Option<f64>) -> Vec<u8> {
+    cog_of(values, size, size, 1.0 / f64::from(size), nodata)
+}
+
+/// `width` × `height` cells of `px` degrees from (10, 46), as `values` (row by row) say.
+fn cog_of(values: Vec<f32>, width: u32, height: u32, px: f64, nodata: Option<f64>) -> Vec<u8> {
     use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
-    let px = 1.0 / f64::from(size);
     let t = GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: px, pixel_height: -px };
-    let r = Raster::new("r", size, size, vec![values], t, Crs::LonLat, nodata, ColorHint::Gray, "Float32").unwrap();
+    let r = Raster::new("r", width, height, vec![values], t, Crs::LonLat, nodata, ColorHint::Gray, "Float32").unwrap();
     rustgis_data::raster::cogwrite::write(&r, 0).unwrap()
 }
 
@@ -91,7 +95,12 @@ fn a_cloud_free_summary_of_a_stac_collection() {
     let first = reduce(&mut s, &with(json!({"stat": "first"})));
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
     assert!(said.iter().any(|t| t.contains("1 item(s) left out") && t.contains("SCL")), "{said:?}");
-    assert!(!said.iter().any(|t| t.contains("ignores")), "{said:?}");
+    assert!(!said.iter().any(|t| t.contains("ignores") || t.contains("outside")), "{said:?}");
+    // Every item masked (from January, without the fourth): nothing left out, nothing said.
+    let mark = s.notice_mark();
+    reduce(&mut s, &with(json!({"stat": "first", "start": "2024-01-01"})));
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(!said.iter().any(|t| t.contains("left out")), "{said:?}");
     let by = |order: &'static [usize]| {
         move |col: usize, row: usize| order.iter().find(|k| clear(col, row).contains(k)).map(|k| red(*k, col, row))
     };
@@ -171,4 +180,48 @@ fn median_and_first_of_a_stack() {
     assert!(e.contains("give \"mask\""), "{e}");
     let e = s.run("zarr.reduce", &json!({"layer": names[0], "stat": "median"})).unwrap_err();
     assert!(e.contains("cube.reduce's"), "{e}");
+}
+
+/// A band pixel its item's mask file doesn't cover (masks of the west half only) is left out as
+/// not clear, and said with the count and the mask.
+#[test]
+fn band_pixels_outside_their_mask_are_said() {
+    let band = |k: usize| cog((0..64).map(|c| red(k, c % 8, c / 8)).collect(), 8, None);
+    let west = || cog_of(vec![4.0; 32], 4, 8, 0.125, Some(0.0));
+    let (files, _) = serve_ranged_files(vec![
+        ("/b0.tif".into(), band(0)),
+        ("/b1.tif".into(), band(1)),
+        ("/m0.tif".into(), west()),
+        ("/m1.tif".into(), west()),
+    ]);
+    let features: Vec<String> = ["2024-01-01", "2024-01-17"]
+        .iter()
+        .enumerate()
+        .map(|(k, d)| {
+            format!(
+                r#"{{"type": "Feature", "id": "s{k}", "collection": "s2", "bbox": [10, 45, 11, 46], "geometry": null,
+                   "properties": {{"datetime": "{d}T00:00:00Z", "bdc:tiles": ["t1"]}},
+                   "assets": {{"B04": {{"href": "{files}/b{k}.tif"}}, "SCL": {{"href": "{files}/m{k}.tif"}}}}}}"#
+            )
+        })
+        .collect();
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, features.join(","));
+    let api = format!("{}/v1", serve_routes(vec![("/v1/search", search)], 8));
+    let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
+    let p = json!({"url": api, "collection": "s2", "asset": "B04", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31",
+        "mask": {"asset": "SCL", "keep": [4]}, "stat": "first", "order": "date"});
+    let r = s.run("cube.reduce", &p).unwrap();
+    let data = s.map().layer(r["layers"][0].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    for (c, v) in data.bands[0].data.iter().enumerate() {
+        let (col, row) = (c % 8, c / 8);
+        if col < 4 {
+            assert_eq!(*v, red(0, col, row), "({col}, {row})");
+        } else {
+            assert!(v.is_nan(), "({col}, {row}): {v}");
+        }
+    }
+    // 32 pixels a date, two dates.
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.starts_with("64 band pixel(s) lie outside") && t.contains("/m")), "{said:?}");
 }

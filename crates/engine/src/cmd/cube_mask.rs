@@ -58,18 +58,21 @@ pub fn parse(p: &Value) -> Result<Option<Mask>, String> {
         return Err(format!("mask takes asset, keep, drop or bits, not {k}"));
     }
     let asset = o.get("asset").and_then(Value::as_str).map(str::trim).filter(|a| !a.is_empty()).ok_or(SHAPE)?;
-    let classes = |k: &str, v: &Value| -> Result<Vec<f32>, String> {
-        let list = v.as_array().filter(|l| !l.is_empty() && l.len() <= MAX_CLASSES);
-        let need = || format!("mask's {k} is a list of 1 to {MAX_CLASSES} classes (numbers)");
-        list.ok_or_else(need)?.iter().map(|c| c.as_f64().filter(|c| c.is_finite()).map(|c| c as f32).ok_or_else(need)).collect()
+    // Classes are whole numbers, as a quality band stores them: 4.5 would never match a cell.
+    // Within ±2^24, so f32 holds each one exactly.
+    let classes = |k: &str| -> Result<Vec<f32>, String> {
+        let list = o.get(k).and_then(Value::as_array).filter(|l| !l.is_empty() && l.len() <= MAX_CLASSES);
+        let need = || format!("mask's {k} is a list of 1 to {MAX_CLASSES} classes (whole numbers)");
+        let whole = |c: &f64| c.fract() == 0.0 && c.abs() <= 16_777_216.0;
+        list.ok_or_else(need)?.iter().map(|c| c.as_f64().filter(whole).map(|c| c as f32).ok_or_else(need)).collect()
     };
     let given: Vec<&str> = ["keep", "drop", "bits"].into_iter().filter(|k| o.get(*k).is_some_and(|v| !v.is_null())).collect();
     let test = match given.as_slice() {
-        ["keep"] => Test::Keep(classes("keep", &o["keep"])?),
-        ["drop"] => Test::Drop(classes("drop", &o["drop"])?),
+        ["keep"] => Test::Keep(classes("keep")?),
+        ["drop"] => Test::Drop(classes("drop")?),
         ["bits"] => {
             const BITS: &str = "mask's bits is {\"set\": [bits on], \"unset\": [bits off]}, bits 0 to 63, at least one";
-            let b = o["bits"].as_object().ok_or(BITS)?;
+            let b = o.get("bits").and_then(Value::as_object).ok_or(BITS)?;
             if b.keys().any(|k| k != "set" && k != "unset") {
                 return Err(BITS.into());
             }
@@ -144,6 +147,8 @@ mod tests {
             (json!({"asset": "SCL", "keep": [4], "drop": [8]}), "mask is"),
             (json!({"asset": "SCL", "keep": []}), "keep is a list"),
             (json!({"asset": "SCL", "keep": ["4"]}), "keep is a list"),
+            (json!({"asset": "SCL", "keep": [4.5]}), "whole numbers"),
+            (json!({"asset": "SCL", "drop": [1e30]}), "whole numbers"),
             (json!({"asset": "SCL", "keep": [4], "keeps": [5]}), "not keeps"),
             (json!({"asset": "qa", "bits": {"set": [64]}}), "bits 0 to 63"),
             (json!({"asset": "qa", "bits": {}}), "at least one"),
