@@ -1706,6 +1706,22 @@ mod tests {
     }
 
     #[test]
+    fn a_polygon_blocks_spacing_and_count_leave_out_rings_without_an_area() {
+        // A far ring without an area doesn't widen the spacing a 5 km square is thinned at.
+        let square = |x: f64, w: f64| vec![Coord::new(x, 0.0), Coord::new(x + w, 0.0), Coord::new(x + w, w), Coord::new(x, w)];
+        let flat = vec![Coord::new(5.0e6, 0.0), Coord::new(5.0e6 + 10.0, 0.0), Coord::new(5.0e6 + 20.0, 0.0)];
+        let alone = Outline::from_rings(vec![square(0.0, 5000.0)]).expect("an outline");
+        let with = Outline::from_rings(vec![square(0.0, 5000.0), flat]).expect("an outline");
+        assert_eq!(with.spacing(), alone.spacing());
+        assert_eq!(alone.narrow(), 0);
+        // A 1000 m by 5 m strip beside a square 100 km away: thinned at 50 m it has no area left,
+        // and is counted as left out.
+        let strip = vec![Coord::new(0.0, 0.0), Coord::new(1000.0, 0.0), Coord::new(1000.0, 5.0), Coord::new(0.0, 5.0)];
+        let o = Outline::from_rings(vec![strip, square(100_000.0, 1000.0)]).expect("an outline");
+        assert_eq!((o.side_count(), o.narrow(), o.dropped()), (4, 1, 0));
+    }
+
+    #[test]
     fn a_polygon_block_cuts_a_triangle_across_a_narrow_bay_in_two() {
         // A U, its bay 2 wide from y = 2 up: a triangle over the bay's mouth, reaching past the
         // U's top, keeps the two arms' parts below the top, apart.
@@ -1890,6 +1906,19 @@ mod tests {
         l.touch_geometry();
         assert_eq!(cuts(&m), plain);
         assert!(plain.iter().flatten().any(|c| c.2.is_some()), "the layer cuts the sides");
+    }
+
+    /// A polygon block's layer held in another system gives the outline it gives in
+    /// longitude/latitude (#2598): its coordinates aren't read as degrees.
+    #[test]
+    fn a_held_polygon_blocks_outline_is_where_its_lonlat_one_is() {
+        let (mut m, _) = walls_by_units();
+        let plain = Outline::of(&m, "geo", None).expect("an outline").extent();
+        let l = m.layers.iter_mut().find(|l| l.name == "geo").unwrap();
+        l.dataset.hold_in(rustgis_data::raster::Crs::Epsg(32631)).unwrap();
+        l.touch_geometry();
+        let held = Outline::of(&m, "geo", None).expect("an outline").extent();
+        assert!(held.iter().zip(plain).all(|(a, b)| (a - b).abs() < 0.01), "{held:?} {plain:?}");
     }
 
     /// The north side's stretches when unit A's east edge lies `gap` west of x 0 and unit B's

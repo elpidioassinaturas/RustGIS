@@ -46,6 +46,8 @@ pub struct Outline {
     dropped: usize,
     /// How many holes (inner rings with an area) the picked polygons have: not cut, so said.
     holes: usize,
+    /// How many rings with an area had none left once thinned (narrower than the spacing).
+    narrow: usize,
 }
 
 /// The rows, layer, queries and outline read last ([`Outline::of`]), kept while the layer's rows
@@ -71,11 +73,17 @@ impl Outline {
         let pick = rustgis_data::rows::Query::compile(filter, &l.dataset).ok()?;
         let env = rustgis_data::query::Env::default();
         let (mut rings, mut holes) = (Vec::new(), 0);
+        // In longitude/latitude whatever system the layer holds its coordinates in, as the walls
+        // read it (`block::units`); a polygon that can't be given there isn't drawn by the map either.
+        let to = l.dataset.shown_conversion().ok();
         for (row, ft) in l.dataset.features.rows().enumerate() {
             if keep.as_ref().is_some_and(|k| !k.get(row).copied().unwrap_or(false)) || !pick.matches(&l.dataset, row, &env) {
                 continue;
             }
-            let Some(Geometry::Polygon(parts)) = ft.geometry() else { continue };
+            let Some(lonlat) = ft.geometry().zip(to.as_ref()).and_then(|(g, to)| rustgis_data::Dataset::converted_to_lonlat(to, g)) else {
+                continue;
+            };
+            let Geometry::Polygon(parts) = &*lonlat else { continue };
             rings.extend(parts.iter().filter_map(|p| p.first()).map(|r| r.iter().map(|c| lonlat_to_merc(*c)).collect()));
             holes += parts.iter().flat_map(|p| p.iter().skip(1)).filter(|h| area2(h).abs() > 0.0).count();
         }
@@ -94,8 +102,12 @@ impl Outline {
     /// [`SPACING`] of its longer side to the last one kept left out (more spaced still if it
     /// would have over [`MAX_SIDES`] sides). `None` when no ring has an area.
     pub(crate) fn from_rings(rings: Vec<Vec<Coord>>) -> Option<Outline> {
-        let rings: Vec<Vec<Coord>> =
-            rings.into_iter().map(|r| r.into_iter().filter(|c| c.x.is_finite() && c.y.is_finite()).collect()).collect();
+        // Only rings with an area count: one without gives no ground and sets no spacing.
+        let rings: Vec<Vec<Coord>> = rings
+            .into_iter()
+            .map(|r| r.into_iter().filter(|c| c.x.is_finite() && c.y.is_finite()).collect::<Vec<_>>())
+            .filter(|r| r.len() >= 3 && area2(r).abs() > 0.0 && area2(r).is_finite())
+            .collect();
         let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
         for c in rings.iter().flatten() {
             (x0, y0, x1, y1) = (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y));
@@ -122,6 +134,7 @@ impl Outline {
             }
             gap *= 2.0;
         };
+        let narrow = rings.len() - thinned.len();
         // Still too many (thousands of small rings): the largest that fit are kept.
         let all = thinned.len();
         if count(&thinned) > MAX_SIDES {
@@ -165,7 +178,17 @@ impl Outline {
             let (lo, hi) = (row(s.a.y.min(s.z.y)), row(s.a.y.max(s.z.y)));
             rows.iter_mut().take(hi + 1).skip(lo).for_each(|r| r.push(k as u32));
         }
-        Some(Outline { sides, rings: starts, extent: [x0, y0, x1, y1], rows, spacing, coarsened: spacing > first, dropped, holes: 0 })
+        Some(Outline {
+            sides,
+            rings: starts,
+            extent: [x0, y0, x1, y1],
+            rows,
+            spacing,
+            coarsened: spacing > first,
+            dropped,
+            holes: 0,
+            narrow,
+        })
     }
 
     /// How many sides the outline keeps.
@@ -188,6 +211,12 @@ impl Outline {
     /// How many holes the picked polygons have: the ground inside them is kept, not cut.
     pub fn holes(&self) -> usize {
         self.holes
+    }
+
+    /// How many of the polygons' rings were left out as narrower than the spacing: thinned, no
+    /// area was left.
+    pub fn narrow(&self) -> usize {
+        self.narrow
     }
 
     /// The box round the outline, `[xmin, ymin, xmax, ymax]` (Web Mercator).

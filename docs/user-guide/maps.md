@@ -150,7 +150,8 @@ with everything a box's walls have; a wall's corner is outlined where the outlin
 than 45°. A `"where"` that picks no polygon is refused. Holes are not cut: the ground inside
 them is drawn, and a notice says how many. Several polygons each stand as their own block on the
 same base (dissolve touching ones first for one outline). The outline follows the polygons to about a third of the
-finest mesh cell, and is read again when the layer is edited.
+finest mesh cell (a ring narrower than that is left out, and said), and is read again when the
+layer is edited.
 
 With water on the terrain (below), `"block": {"water": {"depth": 12}}` shows it in the walls'
 section: where the block's edge (a round block's circle too) runs inside a water polygon (the first in the layer's rows where
