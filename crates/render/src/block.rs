@@ -1921,6 +1921,24 @@ mod tests {
         assert!(held.iter().zip(plain).all(|(a, b)| (a - b).abs() < 0.01), "{held:?} {plain:?}");
     }
 
+    /// A held polygon block's polygon with a place that can't be given in longitude/latitude is
+    /// left out of the outline and counted by the drawing that read it, as a walls layer's are.
+    #[test]
+    fn a_held_polygon_blocks_unplaced_polygon_is_counted() {
+        let (mut m, _) = walls_by_units();
+        let l = m.layers.iter_mut().find(|l| l.name == "geo").unwrap();
+        l.dataset.hold_in(rustgis_data::raster::Crs::Epsg(32631)).unwrap();
+        let far = |x: f64| Coord::new(1e12 + x, 1e12);
+        l.dataset.push(
+            Some(Geometry::Polygon(vec![vec![vec![far(0.0), far(1.0), far(2.0), far(0.0)]]])),
+            vec![rustgis_data::Value::Text("D".into())],
+        );
+        l.touch_geometry();
+        let o = crate::held_reads_counted(&mut m, |m| Outline::of(m, "geo", None)).expect("an outline");
+        assert_eq!(o.extent().map(|v| v.round()), Outline::of(&m, "geo", Some("unit <> 'D'")).unwrap().extent().map(|v| v.round()));
+        assert_eq!(m.layer_by_name("geo").and_then(|l| l.unplaced()), Some(&Ok(1)));
+    }
+
     /// The north side's stretches when unit A's east edge lies `gap` west of x 0 and unit B's
     /// (without its hole) `gap` east of it.
     fn north_with_a_gap(gap: f64) -> Vec<(f64, f64, Option<usize>)> {

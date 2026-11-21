@@ -64,6 +64,9 @@ impl Outline {
     /// `None` when there is no such layer, the filter doesn't read, or it picks no polygon.
     pub fn of(map: &Map, layer: &str, filter: Option<&str>) -> Option<Arc<Outline>> {
         let l = super::walls_layer(map, layer)?;
+        // Its places that can't be given in longitude/latitude are counted and said, as a walls
+        // layer's are.
+        crate::note_held_read(l);
         let rows = l.dataset.features.allocation_key();
         let same = |k: &Kept| k.0.ptr_eq(&rows) && k.1 == l.name && k.2 == l.definition_query && k.3.as_deref() == filter;
         if let Some(o) = LAST.lock().ok().and_then(|last| last.iter().find(|k| same(k)).map(|k| k.4.clone())) {
