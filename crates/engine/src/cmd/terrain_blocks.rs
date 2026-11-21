@@ -73,7 +73,8 @@ pub(super) fn check(name: &str, raster: &Raster, extent: Option<[f64; 4]>) -> Re
 }
 
 /// Blocks cut to polygons that can't be read, said as the project opened: remembered as checked,
-/// so the landing check right after doesn't say them again (an edit, or new pixels, checks again).
+/// so the landing check doesn't say them again, now or when the DEM's pixels land (an edit that
+/// changes their box checks again).
 pub(crate) fn told_uncut(session: &mut Session) {
     for map in &session.project.maps {
         let Some(terrain) = &map.view.terrain else { continue };
@@ -82,8 +83,8 @@ pub(crate) fn told_uncut(session: &mut Session) {
             continue;
         }
         let Some(layer) = map.layer_by_name(name) else { continue };
-        let Some(raster) = layer.raster.as_ref().and_then(|raster| raster.data.as_ref()) else { continue };
-        let checked = Checked { layer: layer.instance_id(), pixels: Arc::downgrade(raster), extent: None };
+        let pixels = layer.raster.as_ref().and_then(|raster| raster.data.as_ref()).map(Arc::downgrade).unwrap_or_default();
+        let checked = Checked { layer: layer.instance_id(), pixels, extent: None };
         session.terrain_blocks_checked.insert(map.instance_id(), checked);
     }
 }
@@ -130,20 +131,24 @@ fn landed_impl(session: &mut Session, restoring: bool) {
             checked.remove(&map_id);
             continue;
         };
+        let polygons = matches!(block.shape, rustgis_map::view::BlockShape::Polygon { .. });
         let Some(raster) = layer.raster.as_ref().and_then(|raster| raster.data.as_ref()) else {
-            checked.remove(&map_id);
+            // A block cut to polygons that can't be read keeps its mark while its pixels are on
+            // their way: it was said as the project opened (`told_uncut`).
+            if !(polygons && checked.get(&map_id).is_some_and(|old| old.extent.is_none())) {
+                checked.remove(&map_id);
+            }
             continue;
         };
         let pixels = Arc::downgrade(raster);
         let extent = own_box(map, block);
-        if checked
-            .get(&map_id)
-            .is_some_and(|old: &Checked| old.layer == layer.instance_id() && old.pixels.ptr_eq(&pixels) && old.extent == extent)
-        {
+        // One that still can't be read was said already, whatever pixels have landed.
+        if checked.get(&map_id).is_some_and(|old: &Checked| {
+            old.layer == layer.instance_id() && old.extent == extent && (old.pixels.ptr_eq(&pixels) || (polygons && extent.is_none()))
+        }) {
             continue;
         }
         checked.insert(map_id, Checked { layer: layer.instance_id(), pixels, extent });
-        let polygons = matches!(block.shape, rustgis_map::view::BlockShape::Polygon { .. });
         if polygons && extent.is_none() {
             uncut.push(crate::project::short_name(&map.name));
             continue;

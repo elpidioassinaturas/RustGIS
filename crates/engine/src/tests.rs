@@ -13726,10 +13726,24 @@ fn terrain_block_cut_to_polygons() {
         b.shape = rustgis_map::view::BlockShape::Polygon { layer: "bacias".into(), filter: Some("nome = 'z'".into()) };
     }
     let mut opened = Session::new(Project::default());
-    crate::cmd::project::reset_to(&mut opened, none);
+    crate::cmd::project::reset_to(&mut opened, none.clone());
     crate::cmd::terrain_blocks::landed(&mut opened);
-    let uncut = opened.notices.iter().filter(|n| n.text.contains("no block is drawn")).count();
-    assert_eq!(uncut, 1, "{:?}", opened.notices);
+    let uncut = |s: &Session| s.notices.iter().filter(|n| n.text.contains("no block is drawn")).count();
+    assert_eq!(uncut(&opened), 1, "{:?}", opened.notices);
+    // Also when the DEM's pixels land after the project opens.
+    let mut late = none;
+    fn dem_of(p: &mut Project) -> Option<&mut rustgis_map::raster::RasterLayer> {
+        p.maps[0].layers.iter_mut().find(|l| l.is_raster()).and_then(|l| l.raster.as_mut())
+    }
+    let pixels = dem_of(&mut late).and_then(|r| r.data.take()).unwrap();
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, late);
+    crate::cmd::terrain_blocks::landed(&mut opened);
+    if let Some(r) = dem_of(&mut opened.project) {
+        r.data = Some(pixels);
+    }
+    crate::cmd::terrain_blocks::landed(&mut opened);
+    assert_eq!(uncut(&opened), 1, "{:?}", opened.notices);
     // A toothed ring of 70 000 corners is, to stay under 65 535 sides: said when it is set and when the
     // project opens again.
     let star: Vec<Value> = (0..=70_000)
