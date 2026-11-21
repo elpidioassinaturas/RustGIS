@@ -263,14 +263,17 @@ impl F2 {
 
 /// A GRIB2 message of `fields` (meteorological products, discipline 0).
 fn grib2_message(fields: &[F2]) -> Vec<u8> {
+    message_of(&fields.iter().flat_map(F2::sections).collect::<Vec<_>>())
+}
+
+/// A GRIB2 message of these sections, after its section 1 (meteorological products, discipline 0).
+fn message_of(sections: &[u8]) -> Vec<u8> {
     let mut s1 = u(21, 4);
     s1.extend([1, 0, 7, 0, 0, 2, 1, 1]);
     s1.extend(u(2026, 2));
     s1.extend([11, 18, 0, 0, 0, 0, 1]);
     let mut body = s1;
-    for f in fields {
-        body.extend(f.sections());
-    }
+    body.extend(sections);
     let mut out = b"GRIB".to_vec();
     out.extend([0, 0, 0, 2]);
     out.extend(u(16 + body.len() as u64 + 4, 8));
@@ -719,7 +722,7 @@ fn a_message_of_too_many_sections_is_left_out() {
     assert_eq!(r.bands.len(), 1);
     assert!(r.lost.contains(&"1 message left out: damaged (more than 1024 sections)".to_string()), "{:?}", r.lost);
     // The decoder refuses one too, should it get one.
-    let first = grib2(&file, usize::MAX, Uncounted::default());
+    let first = grib2(&file, usize::MAX, None, Uncounted::default());
     assert!(matches!(first.first(), Some(Err(Skip::Damaged(m))) if m.contains("more than 1024 sections")));
 }
 
@@ -952,4 +955,143 @@ fn reasons_past_the_most_said_apart_are_counted_together() {
 fn grib_is_known_by_its_first_bytes() {
     assert_eq!(crate::io::sniff_extension(&grib2_message(&[F2::new(2, 1, vec![1, 2])])), Some("grb"));
     assert_eq!(crate::io::sniff_extension(&G1::new(2, 1, vec![1, 2]).bytes()), Some("grb"));
+}
+
+#[test]
+fn a_field_the_message_ends_without_its_data_is_damaged() {
+    let first = F2::new(2, 1, vec![1, 2]);
+    let mut second = F2::new(2, 1, vec![3, 4]);
+    second.number = 1;
+    let mut body = first.sections();
+    body.extend(without_section(&second, 7));
+    let r = read_bytes(&message_of(&body), "t").unwrap();
+    assert_eq!(r.bands.len(), 1);
+    assert_eq!(r.bands[0].data, vec![1.0, 2.0]);
+    assert!(r.lost.contains(&"1 field left out: damaged (a field without its data section)".to_string()), "{:?}", r.lost);
+}
+
+#[test]
+fn one_byte_outside_the_messages_is_said_as_one() {
+    let mut file = G1::new(2, 1, vec![1, 2]).bytes();
+    file.push(9);
+    file.extend(G1::new(2, 1, vec![3, 4]).bytes());
+    let r = read_bytes(&file, "t").unwrap();
+    assert!(r.lost.contains(&"1 byte outside its messages isn't GRIB, and is passed over".to_string()), "{:?}", r.lost);
+}
+
+#[test]
+fn grid_notices_past_the_most_said_are_counted() {
+    // BAM's latitudes, each pair centred on 0°: the same rows, given by other values each time.
+    let mut file = Vec::new();
+    for k in 0..20 {
+        let mut g = G1::new(2, 2, vec![1, 2, 3, 4]);
+        (g.lat1, g.lat2, g.dj) = (-30_000 - k, 30_000 + k, 60_000);
+        file.extend(g.bytes());
+    }
+    // The last grid again: it says what the one before said.
+    let mut g = G1::new(2, 2, vec![1, 2, 3, 4]);
+    (g.lat1, g.lat2, g.dj) = (-30_019, 30_019, 60_000);
+    file.extend(g.bytes());
+    let r = read_bytes(&file, "t").unwrap();
+    assert_eq!(r.bands.len(), 21);
+    // GRIB1's earth is said once too: 15 of the latitudes' notices, then the 6 fields with more.
+    assert!(r.lost.iter().any(|l| l.starts_with("its earth is")), "{:?}", r.lost);
+    assert_eq!(r.lost.iter().filter(|l| l.contains("gives its first row")).count(), MAX_REASONS - 1);
+    assert!(r.lost.contains(&"more notices about the grids of 6 fields aren't listed".to_string()), "{:?}", r.lost);
+}
+
+#[test]
+fn a_grid_one_point_across_without_its_spacing_is_refused_by_name() {
+    // The resolution flags (GDS octet 17): no increments given.
+    let mut b = G1::new(1, 2, vec![1, 2]).bytes();
+    b[8 + 28 + 16] = 0;
+    let e = read_bytes(&b, "t").unwrap_err().to_string();
+    assert!(e.contains("grids one point across that don't give their spacing"), "{e}");
+    // Three columns from 0° back to 0°: the only regular grid that ends where it starts goes
+    // round once, its last column on its first, which is said and left out.
+    let mut g = G1::new(3, 2, vec![1, 2, 3, 4, 5, 6]);
+    (g.lon1, g.lon2) = (0, 0);
+    let mut b = g.bytes();
+    b[8 + 28 + 16] = 0;
+    let r = read_bytes(&b, "t").unwrap();
+    assert_eq!((r.width, r.transform.pixel_width), (2, 180.0));
+    assert!(r.lost.iter().any(|l| l.contains("its last column repeats the first")), "{:?}", r.lost);
+}
+
+#[test]
+fn surface_values_are_unsigned_or_missing() {
+    let mut f = F2::new(2, 1, vec![1, 2]);
+    (f.surface_scale, f.surface_value) = (9, 3_000_000_000);
+    let name = read_bytes(&grib2_message(&[f]), "t").unwrap().bands[0].name.clone();
+    assert!(name.contains(":surface=103:value=3:"), "{name}");
+    let mut f = F2::new(2, 1, vec![1, 2]);
+    (f.surface_scale, f.surface_value) = (255, u64::from(u32::MAX));
+    let name = read_bytes(&grib2_message(&[f]), "t").unwrap().bands[0].name.clone();
+    assert!(name.contains(":surface=103:value=missing:"), "{name}");
+}
+
+/// A field's sections with its product definition made template 4.`template`, `tail` its octets
+/// from 35 on.
+fn with_template(field: &F2, template: u8, tail: &[u8]) -> Vec<u8> {
+    let mut s = field.sections();
+    // Section 4 is at 72 (after section 3), 34 octets long.
+    let at = 72;
+    s[at + 8] = template;
+    s.splice(at + 34..at + 34, tail.iter().copied());
+    s[at + 3] = (34 + tail.len()) as u8;
+    s
+}
+
+#[test]
+fn statistics_probabilities_and_percentiles_are_named_apart() {
+    // Template 4.8: accumulations (process 1) over 6 and 12 hours from the same forecast time.
+    let period = |hours: u64| {
+        let mut tail = u(2026, 2);
+        tail.extend([11, 18, 12, 0, 0, 1]);
+        tail.extend(u(0, 4));
+        tail.extend([1, 2, 1]);
+        tail.extend(u(hours, 4));
+        tail.extend([255]);
+        tail.extend(u(0, 4));
+        with_template(&F2::new(2, 1, vec![1, 2]), 8, &tail)
+    };
+    let mut body = period(6);
+    body.extend(period(12));
+    let r = read_bytes(&message_of(&body), "t").unwrap();
+    assert!(r.bands[0].name.ends_with(":forecast=6:statistic=1:rangeU=1:range=6"), "{}", r.bands[0].name);
+    assert!(r.bands[1].name.ends_with(":forecast=6:statistic=1:rangeU=1:range=12"), "{}", r.bands[1].name);
+    // Template 4.5: above a lower limit of −5 (type 3), the upper one missing.
+    let mut tail = vec![1, 1, 3, 0];
+    tail.extend(sm(-5, 4));
+    tail.push(255);
+    tail.extend(u(u64::from(u32::MAX), 4));
+    let r = read_bytes(&message_of(&with_template(&F2::new(2, 1, vec![1, 2]), 5, &tail)), "t").unwrap();
+    assert!(r.bands[0].name.ends_with(":probability=3:lower=-5:upper=missing"), "{}", r.bands[0].name);
+    // Template 4.6: the 90th percentile.
+    let r = read_bytes(&message_of(&with_template(&F2::new(2, 1, vec![1, 2]), 6, &[90])), "t").unwrap();
+    assert!(r.bands[0].name.ends_with(":percentile=90"), "{}", r.bands[0].name);
+}
+
+#[test]
+fn fields_named_alike_are_named_by_their_band_too() {
+    let mut file = G1::new(2, 1, vec![1, 2]).bytes();
+    file.extend(G1::new(2, 1, vec![3, 4]).bytes());
+    let r = read_bytes(&file, "t").unwrap();
+    assert!(!r.bands[0].name.contains(":band="), "{}", r.bands[0].name);
+    assert_eq!(r.bands[1].name, format!("{}:band=2", r.bands[0].name));
+}
+
+#[test]
+fn a_field_on_another_grid_takes_none_of_the_room() {
+    let a = || F2::new(2, 1, vec![1, 2]);
+    // Two points 10° east of A's.
+    let mut b = F2::new(2, 1, vec![3, 4]);
+    (b.lon1, b.lon2) = (310_000_000, 310_500_000);
+    let kept = grib2(&grib2_message(&[a()]), usize::MAX, None, Uncounted::default());
+    let grid = kept.first().and_then(|f| f.as_ref().ok()).map(|f| f.grid);
+    assert!(grid.is_some());
+    // Room for two points: B is told apart before it is decoded, so A still fits.
+    let got = grib2(&grib2_message(&[b, a()]), 2, grid, Uncounted::default());
+    assert!(matches!(got.first(), Some(Err(Skip::OtherGrid))));
+    assert!(matches!(got.get(1), Some(Ok(f)) if f.values == vec![1.0, 2.0]));
 }

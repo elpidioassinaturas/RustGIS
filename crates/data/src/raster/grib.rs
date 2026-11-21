@@ -169,7 +169,8 @@ pub fn read_with_nodata<R: Read + Seek>(mut source: R, name: &str, sidecar_nodat
         bytes.try_reserve_exact(len as usize).map_err(|_| bad("not enough memory for a message"))?;
         source.seek(SeekFrom::Start(start))?;
         source.by_ref().take(len).read_to_end(&mut bytes)?;
-        let decoded = if edition == Some(1) { vec![grib1(&bytes, room, uncounted)] } else { grib2(&bytes, room, uncounted) };
+        let first = fields.first().map(|f| f.grid);
+        let decoded = if edition == Some(1) { vec![grib1(&bytes, room, first, uncounted)] } else { grib2(&bytes, room, first, uncounted) };
         for d in decoded {
             match d {
                 Ok(f) => {
@@ -184,6 +185,7 @@ pub fn read_with_nodata<R: Read + Seek>(mut source: R, name: &str, sidecar_nodat
                     }
                 }
                 Err(Skip::TooLarge) => skipped.over_limit += 1,
+                Err(Skip::OtherGrid) => skipped.other_grid += 1,
                 Err(Skip::Other(why)) => skipped.add(why),
                 Err(Skip::Damaged(why)) => skipped.damaged(why),
             }
@@ -196,14 +198,35 @@ pub fn read_with_nodata<R: Read + Seek>(mut source: R, name: &str, sidecar_nodat
         return Err(bad(format!("nothing in it can be read here: {}", skipped.notes(limit).join("; "))));
     }
     // Each grid's notices, once: grids at the same places may still say different things (one
-    // laid out from BAM's latitudes, one not).
+    // laid out from BAM's latitudes, one not). Past [`MAX_REASONS`] of them, the fields with more
+    // are counted, so the list and the time spent on it stay small; a field on the grid of the one
+    // before says what it said.
     let mut notes: Vec<String> = Vec::new();
+    let mut unlisted = 0usize;
+    let mut last: Option<(Grid, bool)> = None;
     for f in &fields {
-        for n in f.grid.notes() {
-            if !notes.contains(&n) {
-                notes.push(n);
+        let more = match last {
+            Some((g, more)) if g == f.grid => more,
+            _ => {
+                let mut more = false;
+                for n in f.grid.notes() {
+                    if notes.contains(&n) {
+                        continue;
+                    }
+                    if notes.len() < MAX_REASONS {
+                        notes.push(n);
+                    } else {
+                        more = true;
+                    }
+                }
+                more
             }
-        }
+        };
+        last = Some((f.grid, more));
+        unlisted += usize::from(more);
+    }
+    if unlisted > 0 {
+        notes.push(format!("more notices about the grids of {} aren't listed", count(unlisted)));
     }
     let mut r = to_raster(fields, name)?;
     r.lost.extend(notes);
@@ -423,6 +446,9 @@ fn count_fields<R: Read + Seek>(source: &mut R, start: u64, len: u64, grib2: boo
 #[derive(Clone)]
 enum Skip {
     TooLarge,
+    /// On another grid than the first field kept: told before it is decoded, so it takes none of
+    /// the room a later field on that grid may need.
+    OtherGrid,
     Other(String),
     Damaged(String),
 }
@@ -475,7 +501,9 @@ impl Skipped {
         if self.cut > 0 {
             out.push("the file ends inside a message, which is left out".to_string());
         }
-        if self.junk > 0 {
+        if self.junk == 1 {
+            out.push("1 byte outside its messages isn't GRIB, and is passed over".to_string());
+        } else if self.junk > 1 {
             out.push(format!("{} bytes outside its messages aren't GRIB, and are passed over", self.junk));
         }
         out
@@ -670,7 +698,10 @@ fn to_raster(fields: Vec<Field>, name: &str) -> Result<Raster> {
     };
     let origin_x = if roll > 0 { west - (roll as f64) * grid.dx } else { west } - grid.dx / 2.0;
     let origin_y = grid.north() + grid.dy / 2.0;
-    let mut names = Vec::with_capacity(fields.len());
+    let mut names: Vec<String> = Vec::with_capacity(fields.len());
+    // Each name's first band: a field named as one before it (the same message twice, a GRIB1
+    // ensemble's members, octets a name doesn't read) is named by its band number too.
+    let mut taken = std::collections::HashSet::with_capacity(fields.len());
     let mut rounded = Vec::with_capacity(fields.len());
     let mut past = 0u64;
     let mut bands = Vec::with_capacity(fields.len());
@@ -689,7 +720,9 @@ fn to_raster(fields: Vec<Field>, name: &str) -> Result<Raster> {
                 *cell = *v;
             }
         }
-        names.push(f.name);
+        let name = if taken.contains(&f.name) { format!("{}:band={}", f.name, names.len() + 1) } else { f.name };
+        taken.insert(name.clone());
+        names.push(name);
         rounded.push(f.rounded);
         past += f.past;
         bands.push(band);
@@ -885,7 +918,7 @@ fn section1(b: &[u8], at: usize) -> std::result::Result<&[u8], Skip> {
 }
 
 /// A GRIB1 message (WMO FM 92 GRIB edition 1): its one field.
-fn grib1(b: &[u8], room: usize, uncounted: Uncounted) -> std::result::Result<Field, Skip> {
+fn grib1(b: &[u8], room: usize, first: Option<Grid>, uncounted: Uncounted) -> std::result::Result<Field, Skip> {
     let pds = section1(b, 8)?;
     if pds.len() < 28 {
         return Err(Skip::Damaged("a damaged product definition section".to_string()));
@@ -911,6 +944,9 @@ fn grib1(b: &[u8], room: usize, uncounted: Uncounted) -> std::result::Result<Fie
     let gds_at = 8 + pds.len();
     let gds = section1(b, gds_at)?;
     let grid = grib1_grid(gds)?;
+    if first.is_some_and(|g| !g.same(&grid)) {
+        return Err(Skip::OtherGrid);
+    }
     let points = grid.ni.checked_mul(grid.nj).filter(|n| *n <= room).ok_or(Skip::TooLarge)?;
     let mut at = gds_at + gds.len();
     let bitmap = if flags & 0x40 != 0 {
@@ -972,18 +1008,27 @@ fn grib1_grid(g: &[u8]) -> std::result::Result<Grid, Skip> {
     let scan = g[27];
     let (di, dj) = (be(g, 23, 2), be(g, 25, 2));
     let given = res & 0x80 != 0;
-    let dx = if given && di != 0xffff { f64::from(di) / 1000.0 } else { lon_span(lon1, lon2, scan) / (ni.saturating_sub(1)).max(1) as f64 };
-    let dy = if given && dj != 0xffff { f64::from(dj) / 1000.0 } else { (lat2 - lat1).abs() / (nj.saturating_sub(1)).max(1) as f64 };
+    let dx = if given && di != 0xffff { f64::from(di) / 1000.0 } else { spacing(lon_span(lon1, lon2, scan), ni) };
+    let dy = if given && dj != 0xffff { f64::from(dj) / 1000.0 } else { spacing((lat2 - lat1).abs(), nj) };
     let earth =
         Some(if res & 0x40 != 0 { "the IAU 1965 spheroid (GRIB1's oblate earth)" } else { "a sphere of radius 6,367,470 m (GRIB1's)" });
     checked(Grid { ni, nj, lat1, lon1, lat2, lon2, dx, dy, scan, earth })
 }
 
 /// The distance from the first longitude to the last in the direction the grid scans its columns
-/// (east, or west when the scanning mode says), wrapping round the globe.
+/// (east, or west when the scanning mode says), wrapping round the globe. The same longitude first
+/// and last is a whole turn: a regular grid of more than one column that ends where it starts has
+/// its last column on its first, 360° on ([`Grid::repeats_first_column`], said and left out).
 fn lon_span(first: f64, last: f64, scan: u8) -> f64 {
     let d = (if scan & SCAN_I_NEGATIVE != 0 { first - last } else { last - first }).rem_euclid(360.0);
     if d == 0.0 { 360.0 } else { d }
+}
+
+/// An increment the file leaves out: the span from the first point to the last over the steps
+/// between them. A grid one point across has no steps, and the file doesn't say how wide its
+/// point is: NaN, which [`checked`] refuses by name.
+fn spacing(span: f64, points: usize) -> f64 {
+    if points > 1 { span / (points - 1) as f64 } else { f64::NAN }
 }
 
 /// A grid whose increments and corners are usable, or why it isn't.
@@ -992,6 +1037,9 @@ fn checked(g: Grid) -> std::result::Result<Grid, Skip> {
     // them 0. Placing such a grid's points on one grid of cells would move them.
     if g.scan & 0x0f != 0 {
         return Err(Skip::Other("grids whose rows are offset or shortened (scanning mode bits 5 to 8)".to_string()));
+    }
+    if g.dx.is_nan() || g.dy.is_nan() {
+        return Err(Skip::Other("grids one point across that don't give their spacing".to_string()));
     }
     let ok = g.dx.is_finite()
         && g.dy.is_finite()
@@ -1020,8 +1068,9 @@ fn section2(b: &[u8], at: usize) -> Option<(u8, &[u8])> {
 /// A GRIB2 message (WMO FM 92 GRIB edition 2): each of its fields. A grid (section 3) may serve
 /// the fields after it, but each field has its own sections 4 to 7 (WMO's regulation 92.1.3): a
 /// field without its own product, packing or bitmap section is damaged, never read with the one
-/// before it.
-fn grib2(b: &[u8], room: usize, uncounted: Uncounted) -> Vec<std::result::Result<Field, Skip>> {
+/// before it, and so are sections 4 to 6 the message ends on without a section 7. `first`: the
+/// grid of the fields kept, if any; a field on another is left out before it is decoded.
+fn grib2(b: &[u8], room: usize, mut first: Option<Grid>, uncounted: Uncounted) -> Vec<std::result::Result<Field, Skip>> {
     let mut out = Vec::new();
     let discipline = b.get(6).copied().unwrap_or(255);
     let mut at = 16usize;
@@ -1033,14 +1082,18 @@ fn grib2(b: &[u8], room: usize, uncounted: Uncounted) -> Vec<std::result::Result
     let mut previous_bitmap: Option<&[u8]> = None;
     let mut held = 0usize;
     let mut sections = 0usize;
+    // Whether the sections stop at damage (said already) rather than at the message's end.
+    let mut broken = false;
     while b.get(at..at + 4).is_some_and(|m| m != b"7777") {
         sections += 1;
         if sections > MAX_SECTIONS {
             out.push(Err(Skip::Damaged(format!("a message of more than {MAX_SECTIONS} sections"))));
+            broken = true;
             break;
         }
         let Some((number, s)) = section2(b, at) else {
             out.push(Err(Skip::Damaged("a damaged GRIB2 section".to_string())));
+            broken = true;
             break;
         };
         at += s.len();
@@ -1079,6 +1132,9 @@ fn grib2(b: &[u8], room: usize, uncounted: Uncounted) -> Vec<std::result::Result
                     let product = product.ok_or_else(|| Skip::Damaged("a field without its product definition".to_string()))?;
                     let (count, r, e, d, bits) = packing.ok_or_else(|| Skip::Damaged("a field without its packing".to_string()))??;
                     let mask = bitmap.ok_or_else(|| Skip::Damaged("a field without its bitmap section".to_string()))??;
+                    if first.is_some_and(|g| !g.same(&grid)) {
+                        return Err(Skip::OtherGrid);
+                    }
                     let points = grid.ni.checked_mul(grid.nj).filter(|n| held.saturating_add(*n) <= room).ok_or(Skip::TooLarge)?;
                     if mask.is_some_and(|m| kept(m, points) != count) || (mask.is_none() && count != points) {
                         return Err(Skip::Damaged("a field whose values don't fill its grid".to_string()));
@@ -1089,12 +1145,17 @@ fn grib2(b: &[u8], room: usize, uncounted: Uncounted) -> Vec<std::result::Result
                         unpack(s.get(5..).unwrap_or_default(), (count, bits), (r, e, d), mask, points, uncounted)?
                     };
                     held += points;
+                    first.get_or_insert(grid);
                     Ok(Field { name: format!("{reference}:discipline={discipline}:{product}"), grid, values, rounded, past })
                 })();
                 out.push(field);
             }
             _ => {}
         }
+    }
+    // A field's sections the message ends on, without its data section.
+    if !broken && (product.is_some() || packing.is_some() || bitmap.is_some()) {
+        out.push(Err(Skip::Damaged("a field without its data section".to_string())));
     }
     if out.is_empty() {
         out.push(Err(Skip::Damaged("a GRIB2 message without a data section".to_string())));
@@ -1146,38 +1207,74 @@ fn grib2_grid(s: &[u8]) -> std::result::Result<Grid, Skip> {
     let res = s[54];
     let scan = s[71];
     let (di, dj) = (be(s, 63, 4), be(s, 67, 4));
-    let dx = if res & 0x20 != 0 && di != u32::MAX {
-        f64::from(di) * unit
-    } else {
-        lon_span(lon1, lon2, scan) / (ni.saturating_sub(1)).max(1) as f64
-    };
-    let dy =
-        if res & 0x10 != 0 && dj != u32::MAX { f64::from(dj) * unit } else { (lat2 - lat1).abs() / (nj.saturating_sub(1)).max(1) as f64 };
+    let dx = if res & 0x20 != 0 && di != u32::MAX { f64::from(di) * unit } else { spacing(lon_span(lon1, lon2, scan), ni) };
+    let dy = if res & 0x10 != 0 && dj != u32::MAX { f64::from(dj) * unit } else { spacing((lat2 - lat1).abs(), nj) };
     checked(Grid { ni, nj, lat1, lon1, lat2, lon2, dx, dy, scan, earth })
 }
 
 /// A GRIB2 product definition section, as part of a band name: the parameter's category and
 /// number (its discipline is section 0's), the template, and for templates 4.0 to 4.15 the first
-/// fixed surface, the forecast time and, for a layer between two surfaces, the second.
+/// fixed surface, the forecast time and, for a layer between two surfaces, the second. What tells
+/// the fields of one template apart follows: an ensemble's member, a derived forecast's kind, a
+/// probability's limits, a percentile, and a statistic's process and period.
 fn grib2_product(s: &[u8]) -> String {
     let template = be(s, 7, 2);
     let (category, number) = (s.get(9).copied().unwrap_or(255), s.get(10).copied().unwrap_or(255));
     let mut name = format!("category={category}:number={number}:template=4.{template}");
-    // Templates 4.0 to 4.15 share these octets; a surface's value is scaled by 10^-(its scale
-    // factor).
-    let value = |o: usize| round6(signed(s, o + 1, 4) as f64 / 10f64.powi(signed(s, o, 1) as i32));
+    // Templates 4.0 to 4.15 share these octets; a surface's scaled value is unsigned.
     if template <= 15 && s.len() >= 28 {
-        name.push_str(&format!(":surface={}:value={}:TimeU={}:forecast={}", s[22], value(23), s[17], be(s, 18, 4)));
+        name.push_str(&format!(":surface={}:value={}:TimeU={}:forecast={}", s[22], scaled(s, 23, false), s[17], be(s, 18, 4)));
         // The second fixed surface (255: none).
         if let Some(&second) = s.get(28).filter(|t| **t != 255 && s.len() >= 34) {
-            name.push_str(&format!(":surface2={second}:value2={}", value(29)));
+            name.push_str(&format!(":surface2={second}:value2={}", scaled(s, 29, false)));
         }
     }
     // An ensemble's member (templates 4.1 and 4.11): its type and perturbation number.
     if matches!(template, 1 | 11) && s.len() >= 37 {
         name.push_str(&format!(":ensemble={}:member={}", s[34], s[35]));
     }
+    // A derived forecast (4.2, 4.12): its kind (code table 4.7).
+    if matches!(template, 2 | 12) && s.len() >= 35 {
+        name.push_str(&format!(":derived={}", s[34]));
+    }
+    // A probability (4.5, 4.9): its type (code table 4.9) and limits, whose scaled values are
+    // signed.
+    if matches!(template, 5 | 9) && s.len() >= 47 {
+        name.push_str(&format!(":probability={}:lower={}:upper={}", s[36], scaled(s, 37, true), scaled(s, 42, true)));
+    }
+    // A percentile (4.6, 4.10).
+    if matches!(template, 6 | 10) && s.len() >= 35 {
+        name.push_str(&format!(":percentile={}", s[34]));
+    }
+    // A statistic over a period (4.8 to 4.12): its first time range's process (code table 4.10),
+    // time unit and length, after the period's end, how many ranges and the values missing. The
+    // period starts at the forecast time, so two accumulations from one forecast time over
+    // different periods are named apart.
+    let period = match template {
+        8 => Some(34),
+        9 => Some(47),
+        10 => Some(35),
+        11 => Some(37),
+        12 => Some(36),
+        _ => None,
+    };
+    if let Some(at) = period.filter(|at| s.len() >= at + 19) {
+        name.push_str(&format!(":statistic={}:rangeU={}:range={}", s[at + 12], s[at + 14], be(s, at + 15, 4)));
+    }
     name
+}
+
+/// The value at octets `o + 1..o + 5` scaled by 10^-(the signed scale factor at octet `o`), as
+/// part of a band name: `missing` when either is all ones (GRIB2's missing value). `value_signed`:
+/// whether the scaled value is signed (a probability's limits) or not (a fixed surface's, as
+/// ecCodes reads them).
+fn scaled(s: &[u8], o: usize, value_signed: bool) -> String {
+    let raw = be(s, o + 1, 4);
+    if s.get(o) == Some(&0xff) || raw == u32::MAX {
+        return "missing".to_string();
+    }
+    let v = if value_signed { signed(s, o + 1, 4) as f64 } else { f64::from(raw) };
+    round6(v / 10f64.powi(signed(s, o, 1) as i32)).to_string()
 }
 
 /// A GRIB2 data representation section: template 5.0 (simple packing) only, as the number of

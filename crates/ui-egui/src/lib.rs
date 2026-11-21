@@ -285,6 +285,25 @@ fn window_turn(left: &std::sync::atomic::AtomicBool) -> Option<std::sync::MutexG
     }
 }
 
+/// Reads a downloaded PDF's page or GRIB file ([`read_download_page`]) on the calling thread, with
+/// `left` as its Cancel: the reader's progress checks look at it there, so a GRIB file's read
+/// stops within a moment of Cancel and gives up its turn. A bug is said, not left to end the
+/// thread (no command's catch reaches it).
+///
+/// [`read_download_page`]: rustgis_engine::cmd::raster::read_download_page
+#[cfg(not(target_arch = "wasm32"))]
+fn read_download(
+    name: &str,
+    bytes: &[u8],
+    page: Option<&str>,
+    place: bool,
+    left: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<rustgis_engine::data::raster::Raster, String> {
+    let _probe = rustgis_engine::data::progress::install(Some(std::sync::Arc::new(syncmark::Stop(left.clone()))));
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rustgis_engine::cmd::raster::read_download_page(name, bytes, page, place)))
+        .unwrap_or_else(|_| Err(tl!("Reading the download failed unexpectedly").to_string()))
+}
+
 /// A shell's overrides of the Settings › Start-up preferences for one launch.
 #[derive(Clone, Debug, Default)]
 pub struct Start {
@@ -5792,8 +5811,9 @@ impl RustGisApp {
             left.store(true, std::sync::atomic::Ordering::Relaxed);
             Some((url, p))
         });
-        // A PDF page waiting for its turn gives it up; one being drawn is left to finish, its
-        // page dropped (drawing a page is one step that can't be stopped).
+        // A PDF page or GRIB file waiting for its turn gives it up; a GRIB file being read stops
+        // within a moment ([`read_download`]), and a page being drawn is left to finish, its page
+        // dropped (drawing a page is one step that can't be stopped).
         #[cfg(not(target_arch = "wasm32"))]
         let cancelled = cancelled.or_else(|| {
             let i = self.ui.page_reads.iter().position(|(l, ..)| l.id == id)?;
@@ -5930,8 +5950,9 @@ impl RustGisApp {
     /// [`UiState::page_queue`] and is tried again each frame: held, listed under way and
     /// cancellable, until a thread can be had (never drawn on the frame, and the download isn't
     /// lost). Whether it started now. Cancel takes it
-    /// off the list and gives up its turn; a drawing under way (one step the renderer can't stop)
-    /// finishes, its page dropped.
+    /// off the list and gives up its turn; a GRIB file's read under way stops within a moment
+    /// ([`read_download`]), and a drawing under way (one step the renderer can't stop) finishes,
+    /// its page dropped.
     ///
     /// [`download_page`]: rustgis_engine::cmd::raster::download_page
     #[cfg(not(target_arch = "wasm32"))]
@@ -5951,10 +5972,7 @@ impl RustGisApp {
         let spawned = std::thread::Builder::new().name("download-read".into()).spawn(move || {
             let read = match window_turn(&leaving) {
                 // On a thread no command's catch reaches: a bug must not leave it running forever.
-                Some(_turn) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    rustgis_engine::cmd::raster::read_download_page(&name, &bytes, page.as_deref(), place)
-                }))
-                .unwrap_or_else(|_| Err(tl!("Reading the download failed unexpectedly").to_string())),
+                Some(_turn) => read_download(&name, &bytes, page.as_deref(), place, &leaving),
                 None => Err(tl!("given up before it was read: it was cancelled, or its project was closed").to_string()),
             };
             let bytes = std::sync::Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone());
@@ -7649,6 +7667,24 @@ mod record_tests {
         held.lock().unwrap().pop().unwrap()(Ok(br#"{"type":"Point","coordinates":[1,2]}"#.to_vec()));
         app.poll_data_downloads();
         assert!(app.session.map().layer_by_name("Cancelled download").is_none());
+    }
+
+    /// A GRIB download's read looks at its Cancel as it goes: once cancelled, it stops and says so
+    /// rather than reading on to its end with the turn held.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_cancelled_grib_read_stops() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // A GRIB2 message whose length runs past these bytes: read through, it is cut short.
+        let mut bytes = b"GRIB\0\0\0\x02".to_vec();
+        bytes.extend(1000u64.to_be_bytes());
+        bytes.resize(64, 0);
+        let left = std::sync::Arc::new(AtomicBool::new(false));
+        let read = crate::read_download("t.grb", &bytes, None, true, &left).unwrap_err();
+        assert!(!read.contains("cancel"), "{read}");
+        left.store(true, Ordering::Relaxed);
+        let cancelled = crate::read_download("t.grb", &bytes, None, true, &left).unwrap_err();
+        assert!(cancelled.to_lowercase().contains("cancel"), "{cancelled}");
     }
 
     /// A PDF download's page waiting for its turn to be drawn is cancelled like a download: taken
