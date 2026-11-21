@@ -171,7 +171,12 @@ to about 4 million heights in all (and one a ring); when the water layer's shore
 longer, all of them are read at one wider step, and a notice says how
 many polygons were. A layer read a view at a time (in chunks, by range) can't be the water. `{"water": false}` takes the water off;
 left out (or `null`), it stays as it was. The water layer is kept by name, follows its renames, and can stay
-hidden; its own symbology still draws it. Rivers stay lines. Over elevation tiles, the levels are
+hidden; its own symbology still draws it. A project that opens with a water layer that no longer holds
+its `"level"` field as a number (the layer's data replaced outside RustGIS, a field renamed other than
+only in case, or turned to text) clears it, as deleting the field does, and says so: its lakes lie at
+their shores' lowest heights.
+So does the block's water `"field"`: its walls show all the water at the block water's `"depth"`, or no
+water without one. Rivers stay lines. Over elevation tiles, the levels are
 read again until the tiles along the shores have come. A Shaded Relief layer draws the water's
 cells at their level with the even light of flat ground, flat or tilted: no hillshade, cast
 shadow, sky, fill light or rock on the water, so a semi-transparent water fill over it shows one
@@ -787,7 +792,12 @@ both sides of the map. Each projection has an area of use: polar projections sho
 their hemisphere poleward of 30°, regional ones their region, transverse Mercator (UTM) zones
 30° either side of their meridian, and data outside it isn't drawn. Switching keeps the centre
 and scale, and the choice is saved with the map (`map.projection` from the command line). A
-raster already in the map's coordinate system draws without being reprojected. To open every new
+raster already in the map's coordinate system draws without being reprojected, and so does a
+vector layer read from a file in it. On a map in another EPSG or ESRI system limited to an area of
+use, a layer is drawn into it by the direct transformation between the two systems (the datum
+shift PROJ picks for the pair, not one through WGS 84), and its vertices are edited and snapped
+where they are drawn; Web Mercator, the globe and world projections draw through
+longitude/latitude. To open every new
 session in a projection, set it in **Settings › Start-up › Projection**. Robinson, Equal
 Earth, Natural Earth, Winkel Tripel and Eckert IV are computed by RustGIS itself on a sphere,
 so EPSG:8857 (Equal Earth) works too. So is the sinusoidal projection, on a sphere or an
