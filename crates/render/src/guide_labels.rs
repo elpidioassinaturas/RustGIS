@@ -96,8 +96,10 @@ pub(crate) enum Near<'a> {
 }
 
 /// One line of `text`, each character `measure` wide and `gap` apart, curved along a guide line:
-/// the label's centre and its characters. The lines whose field holds `value` (the feature's, as
-/// text, ignoring case) are tried first, longest first; with none such, those `near` its feature.
+/// the label's centre and its characters. A polygon's tries the lines whose field holds `value`
+/// (the feature's, as text, ignoring case) first, longest first, wherever they run; with none
+/// such, those inside it. A point's takes the nearest line within the text's width, one holding
+/// its value before the others there: a line of its value farther off isn't its own.
 /// Along each line its middle is tried, then places either side ([`line_labels::positions`]).
 /// `None` when the text follows none of them: the label is placed as without a guide.
 ///
@@ -138,25 +140,29 @@ fn curved(guides: &Guides, value: Option<&str>, near: Near<'_>, advances: &[f32]
             .filter_map(|at| line.curved(advances, gap, size, 0.0, Some(at)))
             .find(|c| fits(c))
     };
-    if let Some(ids) = value.and_then(|v| guides.by_value.get(&v.trim().to_lowercase())) {
-        return longest_first(ids.clone()).iter().filter_map(line).find_map(|l| along(l, &|_| true));
-    }
+    let matched = value.and_then(|v| guides.by_value.get(&v.trim().to_lowercase()));
     match near {
         Near::Point(p) => {
-            // Nearest first, each within the text's width: centred at its nearest place, or as
-            // near it as the text fits on the line.
-            let mut nearest: Vec<(f32, usize, f32)> = guides
+            // Nearest first, each within the text's width, those of its value before the others:
+            // centred at its nearest place, or as near it as the text fits on the line.
+            let mut nearest: Vec<(bool, f32, usize, f32)> = guides
                 .meeting([p.0 - len, p.1 - len, p.0 + len, p.1 + len])
                 .into_iter()
-                .filter_map(|i| line(&i)?.nearest(p, 0.0).filter(|(d2, _)| *d2 <= len * len).map(|(d2, at)| (d2, i, at)))
+                .filter_map(|i| {
+                    let (d2, at) = line(&i)?.nearest(p, 0.0).filter(|(d2, _)| *d2 <= len * len)?;
+                    Some((!matched.is_some_and(|m| m.contains(&i)), d2, i, at))
+                })
                 .collect();
-            nearest.sort_by(|a, b| a.0.total_cmp(&b.0));
-            nearest.into_iter().take(MOST_TRIED).find_map(|(_, i, at)| {
+            nearest.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            nearest.into_iter().take(MOST_TRIED).find_map(|(_, _, i, at)| {
                 let l = line(&i).filter(|l| l.length() >= len)?;
                 l.curved(advances, gap, size, 0.0, Some(at.clamp(len / 2.0, l.length() - len / 2.0)))
             })
         }
         Near::Polygon(within, rings) => {
+            if let Some(ids) = matched {
+                return longest_first(ids.clone()).iter().filter_map(line).find_map(|l| along(l, &|_| true));
+            }
             if within.is_some_and(|b| guides.meeting(b).is_empty()) {
                 return None;
             }
@@ -207,9 +213,11 @@ mod tests {
         let straight: Vec<(f32, f32)> = (0..=10).map(|i| (500.0 + 40.0 * i as f32, 600.0)).collect();
         guides.push(&straight, Some("Serra Reta"));
         guides.push(&arc(), Some("Serra Curva"));
-        // By value, ignoring case and spaces round it: along the arc, every character on it.
-        let (_, turns) = curved(&guides, Some(" serra curva"), Near::Point((900.0, 900.0)), &advances(), 1.0, 10.0).expect("on its line");
-        let (c, _) = curved(&guides, Some("SERRA CURVA"), Near::Point((0.0, 0.0)), &advances(), 1.0, 10.0).expect("on its line");
+        // A polygon's by value, ignoring case and spaces round it, wherever its line runs: along the
+        // arc, every character on it (its outline isn't needed).
+        let unread = || Near::Polygon(None, Box::new(|| None));
+        let (_, turns) = curved(&guides, Some(" serra curva"), unread(), &advances(), 1.0, 10.0).expect("on its line");
+        let (c, _) = curved(&guides, Some("SERRA CURVA"), unread(), &advances(), 1.0, 10.0).expect("on its line");
         assert!(turns.iter().all(|t| ((c.0 + t.0).hypot(c.1 + t.1 - 400.0) - 300.0).abs() < 6.0), "{c:?} {turns:?}");
         // No value: the line inside the polygon, here a box round the straight line.
         let rings = vec![vec![(480.0, 560.0), (920.0, 560.0), (920.0, 640.0), (480.0, 640.0)]];
@@ -260,6 +268,18 @@ mod tests {
         let mut short = Guides::default();
         short.push(&[(0.0, 0.0), (20.0, 0.0)], None);
         assert!(curved(&short, None, Near::Point((10.0, 5.0)), &advances(), 1.0, 10.0).is_none());
+        // A line of its value far off isn't its own: the nearest within the text's width is, and
+        // one of its value there before a nearer one.
+        let mut named = Guides::default();
+        named.push(&arc(), None);
+        let far: Vec<(f32, f32)> = (0..=10).map(|i| (2000.0 + 40.0 * i as f32, 2000.0)).collect();
+        named.push(&far, Some("Pico"));
+        let (c, _) = curved(&named, Some("Pico"), Near::Point(p), &advances(), 1.0, 10.0).expect("the arc beside it");
+        assert!((c.0 - p.0).hypot(c.1 - p.1) < text, "{c:?}");
+        let beside: Vec<(f32, f32)> = (0..=10).map(|i| (p.0 - 200.0 + 40.0 * i as f32, p.1 + 90.0)).collect();
+        named.push(&beside, Some("pico"));
+        let (c, _) = curved(&named, Some("Pico"), Near::Point(p), &advances(), 1.0, 10.0).expect("its own beside it");
+        assert!((c.1 - (p.1 + 90.0)).abs() < 1.0, "{c:?}");
     }
 
     /// Drawn: a range's name follows the ridge line with its name, a peak's the ridge beside it,

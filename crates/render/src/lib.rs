@@ -6547,9 +6547,10 @@ fn screen_pieces(ctx: &Ctx<'_>, flat: &rustgis_map::projection::Flat, part: &[Co
 /// shown at `scale` and `distance`, keyed by layer name in ASCII lower case (as
 /// [`Map::layer_by_name`] matches names) and field, on the screen ([`guides_of`]). Worked out once
 /// a frame, before the layers are drawn (each layer is then borrowed to draw it). On the flat map
-/// each guide layer's projected copy, thinned as it is drawn at this scale, is made as for drawing
-/// it (`key` names the projection), and kept: made again only when its geometry, the projection or
-/// the level of thinning changes.
+/// a guide layer is read from its copy there as it is drawn (`key` names the projection): the
+/// projected one its drawing keeps, else a display copy of it at this scale, which the layer's
+/// budget for those bounds ([`rustgis_map::Layer::prepare_display`]). No full copy is made for a
+/// guide: a hidden layer has none, and one with neither is read point by point.
 fn guide_lines(
     map: &mut Map,
     ctx: &Ctx<'_>,
@@ -6567,8 +6568,12 @@ fn guide_lines(
     wanted.dedup();
     if ctx.globe.is_none() {
         for (name, _) in &wanted {
-            if let Some(l) = map.layers.iter_mut().find(|l| l.name.eq_ignore_ascii_case(name)) {
-                l.thinned_in(flat, key, ctx.view.lod_tolerance());
+            if let Some(l) = map.layers.iter_mut().find(|l| l.name.eq_ignore_ascii_case(name))
+                && !l.is_cached(key)
+            {
+                // As its drawing asks for it, so that the two share it.
+                let complete = l.source.is_some();
+                l.prepare_display(flat, ctx.view.lod_tolerance(), complete);
             }
         }
     }
@@ -6584,11 +6589,11 @@ fn guide_lines(
 
 /// The lines of the guide layer `name` (shown or not) on the screen, their stretches in view
 /// ([`screen_pieces`], thinned as [`guide_labels::Guides`] keeps them), each with its value in
-/// `field`, read only for a line with a stretch in view. On the flat map a line whose projected
-/// extent is out of view is passed over by it, and those in view are read from their copy there
-/// as drawn, projected and thinned for `key` by [`guide_lines`]; on the globe each vertex is
-/// projected, as for [`square_lines`]. A frame thus costs a look at each line's extent, and a pass
-/// over the vertices of those in view; what is kept is at most about 24 bytes a point of the
+/// `field`, read only for a line with a stretch in view. On the flat map, read from its copy there
+/// as drawn ([`guide_lines`]), a line whose extent is out of view is passed over by it: a frame
+/// costs a look at each line's extent and a pass over the vertices of those in view. Without such
+/// a copy (on the globe; a small layer, or one held in another system, not drawn), each vertex is
+/// projected, as for [`square_lines`]. What is kept is at most about 24 bytes a point of the
 /// stretches in view, which thinning bounds by their length on the screen, and dropped with the
 /// frame. A layer read in chunks from its source has none to hand.
 fn guides_of(
@@ -6615,8 +6620,11 @@ fn guides_of(
             }
         }
     };
-    if ctx.globe.is_none() && layer.is_cached(key) {
-        let (geoms, extents) = (layer.thinned_cache(ctx.view.lod_tolerance()), layer.projected_extents());
+    let drawn = || match layer.is_cached(key) {
+        true => Some((layer.thinned_cache(ctx.view.lod_tolerance()), layer.projected_extents())),
+        false => layer.display_cache(),
+    };
+    if let Some((geoms, extents)) = ctx.globe.is_none().then(drawn).flatten() {
         // A point the projection can't show is NaN in the copy, and breaks the line there.
         let screen = |c: &Coord| c.is_finite().then(|| ctx.view.to_screen(*c)).map(|(x, y)| (x as f32, y as f32));
         for (row, g) in geoms.iter().enumerate() {
