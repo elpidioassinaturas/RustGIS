@@ -571,16 +571,34 @@ fn a_length_past_its_message_hides_nothing() {
 }
 
 #[test]
-fn scale_factors_past_f64_are_damage() {
-    for (d, bits) in [(400, 16), (-400, 16), (400, 0)] {
-        let mut g = G1::new(2, 1, vec![1, 2]);
-        (g.d, g.bits) = (d, bits);
-        if bits == 0 {
-            g.x.clear();
-        }
-        let e = read_bytes(&g.bytes(), "t").unwrap_err().to_string();
-        assert!(e.contains("damaged (a decimal scale factor its values can't take)"), "{d}: {e}");
-    }
+fn scale_factors_past_f64_give_the_values_they_make() {
+    // D = 400: 1 / 10^400 and 2 / 10^400 are 0 in f32, counted as rounded, never an exact 0.
+    let mut g = G1::new(2, 1, vec![1, 2]);
+    (g.d, g.bits) = (400, 16);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert_eq!(r.bands[0].data, vec![0.0, 0.0]);
+    assert_eq!(r.rounded.first(), Some(&2));
+    // D = −400: 10^400 and 2 × 10^400, past f32's range, said.
+    let mut g = G1::new(2, 1, vec![1, 2]);
+    (g.d, g.bits) = (-400, 16);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert!(r.bands[0].data.iter().all(|v| v.is_nan()));
+    assert!(r.lost.contains(&"2 values past the range of 32-bit floats (±3.4 × 10^38) have no value".to_string()), "{:?}", r.lost);
+    // A constant field of 0 with D = 400: exactly 0, nothing said.
+    let mut g = G1::new(2, 1, vec![]);
+    (g.d, g.bits) = (400, 0);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert_eq!(r.bands[0].data, vec![0.0, 0.0]);
+    assert!(r.rounded.iter().all(|n| *n == 0), "{:?}", r.rounded);
+    assert!(!r.lost.iter().any(|l| l.contains("past the range") || l.contains("decimal")), "{:?}", r.lost);
+    // E = 1030 and D = 310, each past f64 alone: 2^1030 / 10^310, about 1.15, read.
+    let mut g = G1::new(2, 1, vec![1, 0]);
+    (g.e, g.d, g.bits) = (1030, 310, 16);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    let want = (2f64.powi(1000) / 1e300) * (2f64.powi(30) / 1e10);
+    assert!((f64::from(r.bands[0].data[0]) / want - 1.0).abs() < 1e-6, "{:?} {want}", r.bands[0].data);
+    assert_eq!(r.bands[0].data[1], 0.0);
+    assert!(!r.lost.iter().any(|l| l.contains("past the range")), "{:?}", r.lost);
     // Values past f64 with E = 1000: past f32's range, said (not the whole field refused).
     let mut g = G1::new(2, 1, vec![1, 2]);
     (g.e, g.bits) = (1000, 32);

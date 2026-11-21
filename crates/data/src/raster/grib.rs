@@ -858,13 +858,13 @@ fn unpack(
     if (data.len() as u64) < need {
         return Err(Skip::Damaged("a data section shorter than its values".to_string()));
     }
-    let ten = decimal(d)?;
     reference(r)?;
-    // 2^E, where `f64` holds it; past that (no producer writes such an E, but it is kept), and
-    // where `R + X × 2^E` is past `f64` but the division brings it back, the value is made as
-    // `R / 10^D + X × (2^E / 10^D)`. A value past `f64` either way is past `f32`'s range.
-    let scale = (-1000..=1000).contains(&e).then(|| 2f64.powi(e as i32));
-    let (base, step) = (r / ten, times_two_to(1.0 / ten, e));
+    // 2^E and 10^D, where `f64` holds them; past that (no producer writes such an E or D, but
+    // they are kept), and where `R + X × 2^E` is past `f64` but the division brings it back, the
+    // value is made as `R / 10^D + X × (2^E / 10^D)`, each by [`scaled_by`]. A value past `f64`
+    // either way is past `f32`'s range.
+    let scale = decimal(d).filter(|_| (-1000..=1000).contains(&e)).map(|ten| (2f64.powi(e as i32), ten));
+    let (base, step) = (scaled_by(r, 0, d), scaled_by(1.0, e, d));
     let mut bit = 0u64;
     field_values(points, mask, count, uncounted, || {
         // The 8 octets from the value's first: at most 7 bits before it, and its 32 at most.
@@ -872,7 +872,7 @@ fn unpack(
         let word = (0..8).fold(0u64, |w, i| (w << 8) | u64::from(data.get(byte + i).copied().unwrap_or(0)));
         let x = ((word << (bit % 8)) >> (64 - bits)) as f64;
         bit += u64::from(bits);
-        let wide = scale.map_or(f64::INFINITY, |s| (r + x * s) / ten);
+        let wide = scale.map_or(f64::INFINITY, |(s, ten)| (r + x * s) / ten);
         if wide.is_finite() {
             wide
         } else if x == 0.0 {
@@ -883,22 +883,35 @@ fn unpack(
     })
 }
 
-/// `v` × 2^`e`, by at most 2^±1000 at a time, so an `e` past `f64`'s exponents still gives a
-/// value `v` brings back into its range.
-fn times_two_to(mut v: f64, mut e: i64) -> f64 {
-    while e != 0 && v != 0.0 && v.is_finite() {
-        let s = e.clamp(-1000, 1000);
-        v *= 2f64.powi(s as i32);
-        e -= s;
-    }
-    v
+/// 10^`d`, the decimal scale factor's divisor, where `f64` holds it at full precision.
+fn decimal(d: i64) -> Option<f64> {
+    let ten = 10f64.powi(d.clamp(-1000, 1000) as i32);
+    ten.is_normal().then_some(ten)
 }
 
-/// 10^`d`, the decimal scale factor's divisor; damage when `f64` can't hold it (every value
-/// would be 0 or infinite).
-fn decimal(d: i64) -> std::result::Result<f64, Skip> {
-    let ten = 10f64.powi(d.clamp(-1000, 1000) as i32);
-    if ten.is_finite() && ten > 0.0 { Ok(ten) } else { Err(Skip::Damaged("a decimal scale factor its values can't take".to_string())) }
+/// `v` × 2^`e` / 10^`d`, by steps of at most 2^±500 and 10^±150, each taken toward 1 while one
+/// that way is left: the result is past `f64` only when the value is. A value too small for
+/// `f64` that isn't 0 is kept as its smallest, so it is counted as rounded to 0 in `f32`, never
+/// read as an exact 0.
+fn scaled_by(mut v: f64, mut e: i64, mut d: i64) -> f64 {
+    let sign = v.signum();
+    let zero = v == 0.0;
+    while (e != 0 || d != 0) && v != 0.0 && v.is_finite() {
+        // Toward 1: down by 2^-n (e < 0) or 10^-n (d > 0) from above 1, up from below.
+        let down = v.abs() > 1.0;
+        let two = if down { e < 0 } else { e > 0 };
+        let ten = if down { d > 0 } else { d < 0 };
+        if two || (!ten && e != 0) {
+            let s = e.clamp(-500, 500);
+            v *= 2f64.powi(s as i32);
+            e -= s;
+        } else {
+            let s = d.clamp(-150, 150);
+            v /= 10f64.powi(s as i32);
+            d -= s;
+        }
+    }
+    if v == 0.0 && !zero { sign * f64::from_bits(1) } else { v }
 }
 
 /// A reference value that is a number: GRIB2's IEEE bits may give an infinity or NaN, which no
@@ -916,9 +929,8 @@ fn constant(
     points: usize,
     uncounted: Uncounted,
 ) -> std::result::Result<(Vec<f32>, u64, u64), Skip> {
-    let ten = decimal(d)?;
     reference(r)?;
-    let v = r / ten;
+    let v = decimal(d).map_or_else(|| scaled_by(r, 0, d), |ten| r / ten);
     field_values(points, mask, count, uncounted, || v)
 }
 

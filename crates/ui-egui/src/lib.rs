@@ -286,8 +286,10 @@ fn window_turn(left: &std::sync::atomic::AtomicBool) -> Option<std::sync::MutexG
 }
 
 /// Reads a downloaded PDF's page or GRIB file ([`read_download_page`]) on the calling thread, with
-/// `left` as its Cancel: the reader's progress checks look at it there, so a GRIB file's read
-/// stops within a moment of Cancel and gives up its turn. A bug is said, not left to end the
+/// `left` as its Cancel: the reader's progress checks look at it there, between messages and
+/// before each band is laid out, so a GRIB file's read stops once the message or band under way
+/// is done (one message's decode, of at most `max_samples` values, isn't stopped) and gives up
+/// its turn. A bug is said, not left to end the
 /// thread (no command's catch reaches it).
 ///
 /// [`read_download_page`]: rustgis_engine::cmd::raster::read_download_page
@@ -5812,8 +5814,8 @@ impl RustGisApp {
             Some((url, p))
         });
         // A PDF page or GRIB file waiting for its turn gives it up; a GRIB file being read stops
-        // within a moment ([`read_download`]), and a page being drawn is left to finish, its page
-        // dropped (drawing a page is one step that can't be stopped).
+        // once the message or band under way is done ([`read_download`]), and a page being drawn
+        // is left to finish, its page dropped (drawing a page is one step that can't be stopped).
         #[cfg(not(target_arch = "wasm32"))]
         let cancelled = cancelled.or_else(|| {
             let i = self.ui.page_reads.iter().position(|(l, ..)| l.id == id)?;
@@ -5950,9 +5952,9 @@ impl RustGisApp {
     /// [`UiState::page_queue`] and is tried again each frame: held, listed under way and
     /// cancellable, until a thread can be had (never drawn on the frame, and the download isn't
     /// lost). Whether it started now. Cancel takes it
-    /// off the list and gives up its turn; a GRIB file's read under way stops within a moment
-    /// ([`read_download`]), and a drawing under way (one step the renderer can't stop) finishes,
-    /// its page dropped.
+    /// off the list and gives up its turn; a GRIB file's read under way stops once the message or
+    /// band it is on is done ([`read_download`]), and a drawing under way (one step the renderer
+    /// can't stop) finishes, its page dropped.
     ///
     /// [`download_page`]: rustgis_engine::cmd::raster::download_page
     #[cfg(not(target_arch = "wasm32"))]
