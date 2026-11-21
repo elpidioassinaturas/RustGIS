@@ -471,7 +471,8 @@ fn tile_features(
     let map = s.map();
     let Some((at, m_per_px)) = info::merc_at(s, lon, lat).filter(|_| limit > 0) else { return Vec::new() };
     let mut out = Vec::new();
-    for (i, t) in map.tiles.iter().enumerate() {
+    // Top first as drawn (#2488): topmost reads the one drawn on top of those with any.
+    for (i, t) in map.tiles_in_draw_order().into_iter().filter_map(|i| Some((i, map.tiles.get(i)?))) {
         let data = picked.is_none_or(|p| p == i) && lists_features(t, picked.is_some());
         if !data || !t.draws() || t.opacity <= 0.0 || !keep(i) {
             continue;

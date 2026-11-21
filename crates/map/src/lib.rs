@@ -2730,6 +2730,12 @@ impl Map {
         out
     }
 
+    /// The tile layers' indices in [`Map::draw_order`], top first: the order identify asks and
+    /// reads them in. It differs from their order in `tiles` once depth priorities are set.
+    pub fn tiles_in_draw_order(&self) -> Vec<usize> {
+        self.draw_order().into_iter().filter_map(|d| if let Drawn::Tile(i) = d { Some(i) } else { None }).collect()
+    }
+
     /// The tile layers drawn just over the map layer `over` (None: under all of them), top
     /// first, by index.
     pub fn tiles_over(&self, over: Option<u32>) -> Vec<usize> {
@@ -4579,6 +4585,11 @@ mod tests {
             l.priority = 1;
         }
         assert_eq!(m.draw_order(), vec![Drawn::Tile(0), Drawn::Layer(b), Drawn::Layer(a), Drawn::Tile(1)]);
+        assert_eq!(m.tiles_in_draw_order(), [0, 1]);
+        // A tile layer over the layer drawn on top comes first, whatever its index.
+        m.tiles.swap(0, 1);
+        assert_eq!(m.tiles_in_draw_order(), [1, 0]);
+        m.tiles.swap(0, 1);
         if let Some(l) = m.layers.iter_mut().find(|l| l.id == above) {
             l.priority = -5;
         }
