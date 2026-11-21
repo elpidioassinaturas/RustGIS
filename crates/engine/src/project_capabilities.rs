@@ -39,6 +39,10 @@ impl Project {
         {
             required.push("field-generation");
         }
+        // A table saved in a coordinate system of its own, as a layer's is (map_capabilities).
+        if !required.contains(&super::NATIVE_COORDINATES) && self.tables.iter().any(|t| held_natively(&t.dataset)) {
+            required.push(super::NATIVE_COORDINATES);
+        }
         // Saved symbology keeps its images too.
         if !required.contains(&"picture-markers") && self.styles.iter().any(|s| s.renderer.has_picture_markers()) {
             required.push("picture-markers");
@@ -78,6 +82,13 @@ impl Project {
         }
         if !required.contains(&"layout-chart-look") && self.layouts.iter().any(|l| l.elements.iter().any(charts_look)) {
             required.push("layout-chart-look");
+        }
+        if !required.contains(&"layout-chart-classes") && self.layouts.iter().any(|l| l.elements.iter().any(charts_classes)) {
+            required.push("layout-chart-classes");
+        }
+        if !required.contains(&"layout-frame-border") && self.layouts.iter().any(|l| l.elements.iter().any(|e| e.kind.has_custom_border()))
+        {
+            required.push("layout-frame-border");
         }
         // A coordinate system whose PROJ definition, which an older reader reads, doesn't place
         // points as its WKT does (angles in grads, a datum transformation the definition can't
@@ -120,8 +131,22 @@ const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] = &[
     ("layout-element-wrap", command_uses_element_wrap),
     ("layout-chart-data", command_uses_chart_data),
     ("layout-chart-look", command_uses_chart_look),
+    ("layout-chart-classes", command_uses_chart_classes),
     ("blank-paper", command_uses_blank_paper),
+    ("layout-frame-border", command_uses_frame_border),
 ];
+
+/// A layout command that changes a map frame's border (#2557): an older reader warns that it
+/// ignores `border` and draws the default one. `null` only gives the default back, which an older
+/// reader's frames always have.
+fn command_uses_frame_border(id: &str, params: &Value) -> bool {
+    match id {
+        "layout.update" => params.get("border").is_some_and(|b| !b.is_null()),
+        "layout.import" => imported_layout_uses(params, "\"border_", |e| e.kind.has_custom_border()),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_frame_border)),
+        _ => false,
+    }
+}
 
 /// A `map.basemap` command that gives the blank basemap a paper colour (#2532): an older reader
 /// ignores `color` and draws white. White, `null` or another basemap leaves no paper to keep.
@@ -237,6 +262,27 @@ fn command_uses_chart_look(id: &str, params: &Value) -> bool {
             .iter()
             .any(|key| imported_layout_uses(params, key, charts_look)),
         "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_chart_look)),
+        _ => false,
+    }
+}
+
+fn charts_classes(e: &rustgis_map::layout::Element) -> bool {
+    e.kind.chart_uses_classes()
+}
+
+/// A layout command that colours a chart's bars by its layer's classes (#2487 part 3): an older
+/// reader ignores the key and draws every bar in the chart's bar colour. `false` keeps a chart
+/// as an older reader draws it; only a chart takes the key, so a `layout.update` is read by it
+/// alone.
+fn command_uses_chart_classes(id: &str, params: &Value) -> bool {
+    let classes = || params.get("classes").and_then(crate::cmd::bool_value) == Some(true);
+    match id {
+        "layout.addElement" => {
+            params.get("kind").and_then(Value::as_str).is_some_and(|k| k.trim().eq_ignore_ascii_case("chart")) && classes()
+        }
+        "layout.update" => classes(),
+        "layout.import" => imported_layout_uses(params, "\"classes\"", charts_classes),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_chart_classes)),
         _ => false,
     }
 }
@@ -360,6 +406,13 @@ fn zarr_window(layer: &Layer) -> bool {
     layer.raster.as_ref().and_then(|r| r.time_zarr.as_ref()).is_some_and(|z| z.window.is_some())
 }
 
+/// Whether a dataset is saved in a coordinate system of its own (`Dataset::held_in`): an older
+/// reader would take its coordinates for longitude/latitude, and save it again without its
+/// system (one with no features too, such as a template's layers).
+fn held_natively(ds: &rustgis_data::Dataset) -> bool {
+    !ds.windowed && ds.coord_crs() != rustgis_data::raster::Crs::LonLat
+}
+
 /// The capabilities a layer needs, in [`map_capabilities`]'s order.
 fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
     [
@@ -368,6 +421,7 @@ fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
         (layer.size_by.is_some(), super::SIZE_BY_CAPABILITY),
         (layer.has_picture_markers(), "picture-markers"),
         (zarr_window(layer), "zarr-window"),
+        (held_natively(&layer.dataset), super::NATIVE_COORDINATES),
     ]
     .into_iter()
     .filter_map(|(used, name)| used.then_some(name))
@@ -390,6 +444,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
     ) = (false, false, false, false, false, false, false, false, false, false, false);
     let (mut offline_area_id, mut paper) = (false, false);
     let mut polygon = false;
+    let (mut offline_area_id, mut paper, mut native) = (false, false, false);
     for map in maps {
         offline_area_id |= map.offline_area_id.is_some();
         // A blank basemap's paper colour (#2532), which an older reader would draw and save white.
@@ -411,6 +466,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         sized |= map.layers.iter().any(|layer| layer.size_by.is_some());
         pictures |= map.layers.iter().any(Layer::has_picture_markers);
         zarr |= map.layers.iter().any(zarr_window);
+        native |= map.layers.iter().any(|layer| held_natively(&layer.dataset));
         legends |= map.tiles.iter().any(|tile| {
             tile.legends.iter().any(|legend| rustgis_data::login_address::inner(&legend.url).len() > rustgis_map::tiles::MAX_LEGEND_URL)
         });
@@ -430,6 +486,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         (zarr, "zarr-window"),
         (offline_area_id, "offline-map-area-id"),
         (paper, "blank-paper"),
+        (native, super::NATIVE_COORDINATES),
     ]
     .into_iter()
     .filter_map(|(used, name)| used.then_some(name))
@@ -961,6 +1018,52 @@ mod tests {
         }
     }
 
+    /// A chart coloured by its layer's classes (#2487 part 3) is required where it is saved, so an
+    /// older reader refuses the project instead of drawing every bar in the chart's colour; so is
+    /// a saved command that colours one. `false` needs nothing, nor is it written.
+    #[test]
+    fn chart_classes_capability_follows_saved_layouts_and_commands() {
+        use rustgis_map::layout::ElementKind;
+        let fixture = Project::from_json(include_str!("../../../schema/fixtures/layout_chart_classes.rgis")).unwrap();
+        let saved = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(saved["requires"], json!(["layout-chart-classes"]));
+        let reread = Project::from_json(&saved.to_string()).unwrap();
+        assert!(matches!(&reread.layouts[0].elements[1].kind, ElementKind::Chart { classes: true, .. }));
+        let mut clean = fixture;
+        for e in &mut clean.layouts[0].elements {
+            if let ElementKind::Chart { classes, .. } = &mut e.kind {
+                *classes = false;
+            }
+        }
+        let base = serde_json::to_value(&clean).unwrap();
+        assert!(base.get("requires").is_none(), "a chart in one colour needs nothing");
+        assert!(!base["layouts"].to_string().contains("\"classes\""), "nor writes classes");
+        let mut document = base.clone();
+        document["tasks"] = json!([{"name": "Task", "steps": [{"title": "Chart", "command": "layout.import", "params": {"text": saved["layouts"][0].to_string()}}]}]);
+        let imported = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+        assert_eq!(imported["requires"], json!(["layout-chart-classes"]));
+        for (id, params, required) in [
+            ("layout.addElement", json!({"kind": "chart", "classes": true}), true),
+            ("layout.addElement", json!({"kind": "chart", "classes": false}), false),
+            ("layout.addElement", json!({"kind": "legend", "classes": true}), false),
+            ("layout.update", json!({"element": 2, "classes": true}), true),
+            ("layout.update", json!({"element": 2, "classes": false}), false),
+            ("layout.import", json!({"text": base["layouts"][0].to_string()}), false),
+        ] {
+            let script = format!("{id}= {params}");
+            for value in [
+                json!([{"name": "Task", "steps": [{"title": "Chart", "command": id, "params": params}]}]),
+                json!([{"name": "Script", "steps": [{"title": "Chart", "command": "script.run", "params": {"script": script}}]}]),
+            ] {
+                let mut document = base.clone();
+                document["tasks"] = value;
+                let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+                let expected = if required { json!(["layout-chart-classes"]) } else { Value::Null };
+                assert_eq!(saved.get("requires").cloned().unwrap_or(Value::Null), expected, "{id} {params}");
+            }
+        }
+    }
+
     #[test]
     fn field_identity_is_preserved_and_required_in_a_plain_saved_project() {
         let project = Project::from_json(include_str!("../../../schema/fixtures/field_origin.rgis")).unwrap();
@@ -1145,6 +1248,65 @@ mod tests {
         let mut unknown = saved;
         unknown["requires"] = json!(["blank-paper", "future-paper"]);
         assert!(Project::from_json(&unknown.to_string()).unwrap_err().contains("future-paper"));
+    }
+
+    /// A map frame's border other than the default (#2557) is required where it is saved, so an
+    /// older reader refuses the project instead of drawing the default line and saving it so. The
+    /// default border is not written and needs nothing.
+    #[test]
+    fn frame_border_capability_follows_saved_layouts_and_commands() {
+        let fixture = Project::from_json(include_str!("../../../schema/fixtures/layout_frame_border.rgis")).unwrap();
+        let saved = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(saved["requires"], json!(["layout-frame-border"]));
+        let frames = &saved["layouts"][0]["elements"];
+        assert!(frames[0]["kind"]["MapFrame"].get("border_color").is_none());
+        assert!(frames[0]["kind"]["MapFrame"].get("border_width").is_none());
+        assert_eq!(frames[1]["kind"]["MapFrame"]["border_width"], json!(0.0));
+        assert_eq!(frames[2]["kind"]["MapFrame"]["border_color"], json!([200, 184, 154, 255]));
+        let reopened = Project::from_json(&saved.to_string()).unwrap();
+        assert_eq!(reopened.layouts, fixture.layouts);
+        let mut clean = fixture;
+        for e in &mut clean.layouts[0].elements {
+            if let rustgis_map::layout::ElementKind::MapFrame { border_color, border_width, .. } = &mut e.kind {
+                *border_color = rustgis_map::layout::FRAME_BORDER_COLOR;
+                *border_width = rustgis_map::layout::FRAME_BORDER_WIDTH;
+            }
+        }
+        let base = serde_json::to_value(&clean).unwrap();
+        assert!(base.get("requires").is_none(), "default borders need nothing");
+        // A saved update that changes a border needs it; null only gives the default back.
+        for (params, required) in [
+            (json!({"element": 1, "border": {"width": 0}}), true),
+            (json!({"element": 1, "border": {"color": "#C8B89A"}}), true),
+            (json!({"element": 1, "border": null}), false),
+            (json!({"element": 1, "name": "Main"}), false),
+        ] {
+            let script = format!("layout.update {params}");
+            for value in [
+                json!([{"name": "Task", "steps": [{"title": "Border", "command": "layout.update", "params": params}]}]),
+                json!([{"name": "Script", "steps": [{"title": "Border", "command": "script.run", "params": {"script": script}}]}]),
+            ] {
+                let mut document = base.clone();
+                document["tasks"] = value;
+                let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+                if required {
+                    assert_eq!(saved["requires"], json!(["layout-frame-border"]), "{params}");
+                } else {
+                    assert!(saved.get("requires").is_none(), "{params}");
+                }
+            }
+        }
+        // An imported layout's text with a changed border needs it; with the default, none.
+        for (layout, required) in [(&saved["layouts"][0], true), (&base["layouts"][0], false)] {
+            let params = json!({"text": layout.to_string()});
+            let mut document = base.clone();
+            document["tasks"] = json!([{"name": "Task", "steps": [{"title": "Import", "command": "layout.import", "params": params}]}]);
+            let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+            assert_eq!(saved.get("requires").is_some(), required, "{layout}");
+        }
+        let mut unknown = saved;
+        unknown["requires"] = json!(["layout-frame-border", "future-border"]);
+        assert!(Project::from_json(&unknown.to_string()).unwrap_err().contains("future-border"));
     }
 
     /// Nondefault relief effects survive project, map and layer files; ordinary relief needs none.
