@@ -593,6 +593,12 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize, mask: Option<&st
         let masked_by = match mask {
             None => None,
             Some(key) => match i.assets.iter().find(|m| m.key.eq_ignore_ascii_case(key)) {
+                // Its codes for a failed retrieval not read whole: they could pass for classes.
+                Some(m) if m.codes_unread => {
+                    codes_unread += 1;
+                    without += 1;
+                    continue;
+                }
                 Some(m) => Some(m),
                 None => {
                     unmasked += 1;
@@ -1003,6 +1009,33 @@ const SHARE_PIXELS: f64 = 1_000_000.0;
 #[cfg(not(target_arch = "wasm32"))]
 type Mask = (String, Vec<f32>);
 
+/// A window of a mask's values (band 1), as [`read_values_counted_blocking`] reads them: refused
+/// when `f32` rounded any (whole numbers past 2^24, in a 32- or 64-bit band), whose classes or
+/// bits can't then be told; `stop` heard within the read.
+///
+/// [`read_values_counted_blocking`]: crate::render::rustgis_tiles::cog::read_values_counted_blocking
+#[cfg(not(target_arch = "wasm32"))]
+fn mask_values(
+    info: &std::sync::Arc<crate::render::rustgis_tiles::cog::Info>,
+    href: &str,
+    level: usize,
+    cols: (u32, u32),
+    rows: (u32, u32),
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<f32>, String> {
+    let (values, rounded, lost) = crate::render::rustgis_tiles::cog::read_values_counted_blocking(info, href, level, 0, cols, rows, stop)?;
+    if rounded > 0 || lost > 0 {
+        return Err(crate::sources::message_with_address(
+            href,
+            &format!(
+                "a mask with {} value(s) past 2^24, which can't be read exactly, so its classes or bits can't be tested",
+                rounded + lost
+            ),
+        ));
+    }
+    Ok(values)
+}
+
 /// The level of a file whose pixels are nearest `size` across, by ratio.
 #[cfg(not(target_arch = "wasm32"))]
 fn level_near(layout: &rustgis_data::raster::cog::Layout, size: f64) -> usize {
@@ -1036,7 +1069,7 @@ impl StacCube {
         let xs = nearest(lt.origin_x, lt.pixel_width, cols, mt.origin_x, mt.pixel_width, lv.width);
         let ys = nearest(lt.origin_y, lt.pixel_height, rows, mt.origin_y, mt.pixel_height, lv.height);
         let (Some(mc), Some(mr)) = (span(&xs), span(&ys)) else { return Ok(vec![None; xs.len() * ys.len()]) };
-        let m = cog::read_values_blocking(&info, href, level, 0, mc, mr)?;
+        let m = mask_values(&info, href, level, mc, mr, &std::sync::atomic::AtomicBool::new(false))?;
         let across = (mc.1 - mc.0) as usize;
         let mut out = Vec::with_capacity(xs.len() * ys.len());
         for y in &ys {
@@ -1115,6 +1148,8 @@ impl super::cube::TimeCube for StacCube {
         let size = (((x1 - x0) * (y1 - y0)).abs() / SHARE_PIXELS).sqrt().max(t.pixel_width.abs());
         let cells = |a: f64, b: f64| ((b - a).abs() / size).ceil().clamp(1.0, 1e5) as u32;
         let (gw, gh) = (cells(x0, x1), cells(y0, y1));
+        // The grid fitted to the area, so every sample's centre is inside it.
+        let (sx, sy) = ((x1 - x0) / f64::from(gw), (y1 - y0).abs() / f64::from(gh));
         let mut clear = vec![false; gw as usize * gh as usize];
         for (href, stored) in files.iter().filter_map(|f| f.3.as_ref()) {
             let info = cog::info_blocking(href)?;
@@ -1124,10 +1159,10 @@ impl super::cube::TimeCube for StacCube {
             let level = level_near(&info.layout, size);
             let Some(lv) = info.layout.levels.get(level) else { continue };
             let mt = info.layout.transform_of(lv);
-            let xs = nearest(x0, size, (0, gw), mt.origin_x, mt.pixel_width, lv.width);
+            let xs = nearest(x0, sx, (0, gw), mt.origin_x, mt.pixel_width, lv.width);
             let Some(mc) = span(&xs) else { continue };
             // A band of grid rows reads about SHARE_PIXELS of the mask's pixels.
-            let per_row = f64::from(mc.1 - mc.0) * (size / mt.pixel_height.abs()).max(1.0);
+            let per_row = f64::from(mc.1 - mc.0) * (sy / mt.pixel_height.abs()).max(1.0);
             let band = (SHARE_PIXELS / per_row).floor().clamp(1.0, f64::from(gh)) as u32;
             let mut r = 0;
             while r < gh {
@@ -1135,11 +1170,10 @@ impl super::cube::TimeCube for StacCube {
                     return Err("cancelled".into());
                 }
                 let next = r.saturating_add(band).min(gh);
-                let ys = nearest(y1, -size, (r, next), mt.origin_y, mt.pixel_height, lv.height);
+                let ys = nearest(y1, -sy, (r, next), mt.origin_y, mt.pixel_height, lv.height);
                 if let Some(mr) = span(&ys) {
-                    let read = cog::read_values_counted_blocking(&info, href, level, 0, mc, mr, cancel);
-                    let m = match read {
-                        Ok((m, ..)) => m,
+                    let m = match mask_values(&info, href, level, mc, mr, cancel) {
+                        Ok(m) => m,
                         Err(_) if cancel.load(Relaxed) => return Err("cancelled".into()),
                         Err(e) => return Err(e),
                     };

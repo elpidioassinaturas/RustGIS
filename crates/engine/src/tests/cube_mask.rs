@@ -222,6 +222,42 @@ fn band_pixels_outside_their_mask_are_said() {
     assert!(!said.iter().any(|t| t.contains("item(s) left out")), "{said:?}");
 }
 
+/// A mask of 32-bit whole numbers past 2^24, which `f32` rounds, is refused rather than tested on
+/// rounded bits.
+#[test]
+fn a_mask_past_2_to_the_24_is_refused() {
+    let band = |k: usize| cog((0..64).map(|c| red(k, c % 8, c / 8)).collect(), 8, None);
+    let wide = || {
+        rustgis_data::raster::cog::example_with(&rustgis_data::raster::cog::Example { size: 8, tile: 16, wide: true, ..Default::default() })
+    };
+    let (files, _) = serve_ranged_files(vec![
+        ("/b0.tif".into(), band(0)),
+        ("/b1.tif".into(), band(1)),
+        ("/m0.tif".into(), wide()),
+        ("/m1.tif".into(), wide()),
+    ]);
+    let features: Vec<String> = ["2024-01-01", "2024-01-17"]
+        .iter()
+        .enumerate()
+        .map(|(k, d)| {
+            format!(
+                r#"{{"type": "Feature", "id": "s{k}", "collection": "s2", "bbox": [10, 45, 11, 46], "geometry": null,
+                   "properties": {{"datetime": "{d}T00:00:00Z", "bdc:tiles": ["t1"]}},
+                   "assets": {{"B04": {{"href": "{files}/b{k}.tif"}}, "QA": {{"href": "{files}/m{k}.tif"}}}}}}"#
+            )
+        })
+        .collect();
+    let search = format!(r#"{{"type": "FeatureCollection", "features": [{}]}}"#, features.join(","));
+    let api = format!("{}/v1", serve_routes(vec![("/v1/search", search)], 8));
+    let mut s = Session::new(Project::default());
+    for order in ["date", "clear"] {
+        let p = json!({"url": api, "collection": "s2", "asset": "B04", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31",
+            "mask": {"asset": "QA", "bits": {"unset": [0]}}, "stat": "first", "order": order});
+        let e = s.run("cube.reduce", &p).unwrap_err();
+        assert!(e.contains("past 2^24") && e.contains("/m"), "{order}: {e}");
+    }
+}
+
 /// The clearest date is the one whose masks let through the most of the area, counting once
 /// what two overlapping tiles both let through: date 0's two tiles are both clear in the west
 /// half only (a share of 0.5, not 1), date 1's one tile in the west three quarters (0.75), so
