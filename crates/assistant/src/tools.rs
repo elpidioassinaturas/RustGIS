@@ -242,9 +242,9 @@ pub fn summary(call: &ToolCall) -> String {
 /// The largest map image `view_map` draws (pixels a side).
 pub(crate) const MAX_VIEW: f64 = 2048.0;
 
-/// The most a `view_map` picture may weigh: Anthropic takes an image of up to 5 MB once
-/// base64-encoded, which is 3.75 MiB of PNG (OpenAI and Gemini take more). A satellite basemap
-/// weighs about 3.9 MB at 2048 × 1229, so some 6.5 MB at 2048 × 2048.
+/// The most a `view_map` picture may weigh: 3.75 MiB of PNG, 5 MiB once base64-encoded, half the
+/// 10 MB an image may be on Anthropic's API (5 MB through Amazon Bedrock) and under OpenAI's and
+/// Gemini's limits. A satellite basemap weighs about 3.9 MB at 2048 × 1229, some 6.5 MB at 2048 × 2048.
 pub(crate) const MAX_PNG_BYTES: usize = 5 * 1024 * 1024 / 4 * 3;
 
 /// Draws at `w` × `h` and, while the picture weighs more than `max` bytes, again smaller (both

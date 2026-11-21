@@ -1123,8 +1123,10 @@ pub fn refuses_reasoning_with_tools(e: &Error) -> bool {
 /// Whether the provider refused a request for the images in it (a model or server that doesn't
 /// read them). Asked only of a request that carried images. The error names images as a word
 /// (not "vision" in "revision") and says they aren't taken: not supported, or no image input
-/// (Ollama's "missing data required for image input", vLLM's "not a multimodal model", OpenAI's
-/// "image_url is only supported by certain models", "Images are not supported by this model").
+/// (Ollama's "missing data required for image input", vLLM's "not a multimodal model" and, for a
+/// server started with `--limit-mm-per-prompt` at 0 images, "At most 0 image(s) may be provided in
+/// one prompt", OpenAI's "image_url is only supported by certain models", "Images are not
+/// supported by this model").
 /// An error about one image, its format, decoding, size or fetching, or one that asks to retry
 /// ("Error processing image_url; please retry", "image decoder does not support WebP") is not
 /// a refusal: the model reads images, and the picture is what failed.
@@ -1141,6 +1143,7 @@ pub fn refuses_images(e: &Error) -> bool {
         "image input",
         "not a multimodal",
         "not multimodal",
+        "at most 0 image",
     ]
     .iter()
     .any(|p| detail.contains(p));

@@ -4972,6 +4972,11 @@ fn a_model_that_refuses_images_is_asked_again_with_captions() {
     assert!(!refuses_images(&other(400, "image is too large: 30 MB, the most is 20 MB; not supported")));
     assert!(refuses_images(&other(400, "Images are not supported by this model.")));
     assert!(refuses_images(&other(400, "image input is not supported - hint: you may need to provide the mmproj")));
+    // vLLM serving a multimodal model for text only (`--limit-mm-per-prompt '{"image": 0}'`).
+    assert!(refuses_images(&other(
+        400,
+        "At most 0 image(s) may be provided in one prompt. Set `--limit-mm-per-prompt` to increase this limit."
+    )));
     assert!(refuses_images(&other(422, "Failed to deserialize: unknown variant `image_url`, expected `text`")));
     assert!(refuses_images(&other(400, "Model does not support images. Please use a model that does.")));
     assert!(refuses_images(&other(500, "model does not support vision")));
