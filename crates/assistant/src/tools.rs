@@ -280,18 +280,25 @@ pub(crate) fn draw_within(
 pub fn view_map(s: &mut Session, call: &ToolCall, scope: Scope, permit: Option<Permit>) -> Result<(String, ToolImage), String> {
     let engine = policy_call(call)?.ok_or("missing view adapter")?;
     let owned = s.defer(scope, &engine, permit)?;
-    s.finish_deferred(owned, |s| draw_view(s, &call.args))?
+    s.finish_deferred(owned, |s| draw_view(s, &call.args, MAX_PNG_BYTES))?
 }
 
-fn draw_view(s: &mut Session, a: &Value) -> Result<(String, ToolImage), String> {
+/// Draws the view for `view_map`, in a picture of at most `max` bytes. A picture drawn smaller
+/// than asked says so in its caption.
+pub(crate) fn draw_view(s: &mut Session, a: &Value, max: usize) -> Result<(String, ToolImage), String> {
     let size =
         |k: &str, default: f64| a.get(k).and_then(Value::as_f64).filter(|v| v.is_finite()).unwrap_or(default).clamp(64.0, MAX_VIEW).round();
-    let (w, h) = (size("width", 1024.0), size("height", 640.0));
-    let (png, w, h) = draw_within(w, h, MAX_PNG_BYTES, |w, h| rustgis_engine::cmd::share::map_png(s, Some(w), Some(h), None))?;
+    let (asked_w, asked_h) = (size("width", 1024.0), size("height", 640.0));
+    let (png, w, h) = draw_within(asked_w, asked_h, max, |w, h| rustgis_engine::cmd::share::map_png(s, Some(w), Some(h), None))?;
     let m = s.map();
     let c = m.center_lonlat();
+    let smaller = if (w, h) != (asked_w, asked_h) {
+        format!(", smaller than the {asked_w:.0} x {asked_h:.0} asked, to fit the {:.2} MB a picture may weigh", max as f64 / 1e6)
+    } else {
+        String::new()
+    };
     let caption = format!(
-        "Map \"{}\", {} layers, centre {:.4}, {:.4} (lon, lat), scale 1:{:.0}, {w:.0} x {h:.0} px.",
+        "Map \"{}\", {} layers, centre {:.4}, {:.4} (lon, lat), scale 1:{:.0}, {w:.0} x {h:.0} px{smaller}.",
         m.name,
         m.layers.len(),
         c.x,

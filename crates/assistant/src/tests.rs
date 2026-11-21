@@ -4934,6 +4934,20 @@ fn a_heavy_map_picture_is_drawn_again_smaller() {
 }
 
 #[test]
+fn a_map_picture_drawn_smaller_than_asked_says_so() {
+    let mut s = sample();
+    let args = json!({"width": 512, "height": 512});
+    let (caption, image) = crate::tools::draw_view(&mut s, &args, 2_000).unwrap();
+    assert!(image.width < 512 && image.width == image.height, "{}", image.width);
+    let drawn = format!("{0} x {0} px, smaller than the 512 x 512 asked, to fit the 0.00 MB a picture may weigh.", image.width);
+    assert!(caption.ends_with(&drawn), "{caption}");
+    // A picture under the limit is drawn at the size asked, and its caption says nothing more.
+    let (caption, image) = crate::tools::draw_view(&mut s, &args, crate::tools::MAX_PNG_BYTES).unwrap();
+    assert_eq!((image.width, image.height), (512, 512));
+    assert!(caption.ends_with(", 512 x 512 px."), "{caption}");
+}
+
+#[test]
 fn a_model_that_refuses_images_is_asked_again_with_captions() {
     let mut s = sample();
     let mut a = Agent::new(cfg("ollama"), &s);
