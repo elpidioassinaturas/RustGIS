@@ -878,9 +878,12 @@ fn unpack(
         let word = (0..8).fold(0u64, |w, i| (w << 8) | u64::from(data.get(byte + i).copied().unwrap_or(0)));
         let x = ((word << (bit % 8)) >> (64 - bits)) as f64;
         bit += u64::from(bits);
-        let sum = two.map_or(f64::INFINITY, |s| r + x * s);
+        // X = 0 is R whatever E is (never 0 × ∞).
+        let sum = if x == 0.0 { r } else { two.map_or(f64::INFINITY, |s| r + x * s) };
         let wide = ten.map_or(f64::INFINITY, |ten| sum / ten);
-        if wide.is_finite() {
+        // A sum that isn't 0 divided down to 0 is made by `scaled_by`, so it is counted as
+        // rounded, never read as an exact 0.
+        if wide.is_finite() && (wide != 0.0 || sum == 0.0) {
             wide
         } else if sum.is_finite() {
             scaled_by(sum, 0, d)
@@ -937,7 +940,8 @@ fn constant(
     uncounted: Uncounted,
 ) -> std::result::Result<(Vec<f32>, u64, u64), Skip> {
     reference(r)?;
-    let v = decimal(d).map_or_else(|| scaled_by(r, 0, d), |ten| r / ten);
+    // As in `unpack`: an `R` that isn't 0 divided down to 0 is counted as rounded.
+    let v = decimal(d).map(|ten| r / ten).filter(|v| *v != 0.0 || r == 0.0).unwrap_or_else(|| scaled_by(r, 0, d));
     field_values(at, mask, count, uncounted, || v)
 }
 

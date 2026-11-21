@@ -730,6 +730,33 @@ fn a_sum_of_0_past_f64s_decimal_scale_is_0() {
 }
 
 #[test]
+fn a_packed_0_past_f64s_binary_scale_is_the_reference_value() {
+    // R = 1, E = 1100, D = 0: X = 0 is 1; X = 1 is 1 + 2^1100, past f32.
+    let mut g = G1::new(2, 1, vec![0, 1]);
+    (g.r, g.e, g.d, g.bits) = (0x4110_0000, 1100, 0, 16);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert_eq!(r.bands[0].data[0], 1.0);
+    assert!(r.bands[0].data[1].is_nan());
+    assert!(r.lost.contains(&"1 value past the range of 32-bit floats (±3.4 × 10^38) has no value".to_string()), "{:?}", r.lost);
+}
+
+#[test]
+fn values_divided_down_past_f64_to_0_are_counted_as_rounded() {
+    // R = 0, E = −1000, D = 300: X = 1 is about 9 × 10^−602, 0 in f32 and counted; X = 0 is 0.
+    let mut g = G1::new(2, 1, vec![1, 0]);
+    (g.e, g.d, g.bits) = (-1000, 300, 16);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert_eq!(r.bands[0].data, vec![0.0, 0.0]);
+    assert_eq!(r.rounded, vec![1]);
+    // A constant field of R = 16^−65 (about 5 × 10^−79) with D = 300: both points counted.
+    let mut g = G1::new(2, 1, vec![]);
+    (g.r, g.d, g.bits) = (0x0010_0000, 300, 0);
+    let r = read_bytes(&g.bytes(), "t").unwrap();
+    assert_eq!(r.bands[0].data, vec![0.0, 0.0]);
+    assert_eq!(r.rounded, vec![2]);
+}
+
+#[test]
 fn header_counts_a_last_constant_field() {
     // A constant field's data section is 5 octets, just before "7777".
     let mut c = F2::new(3, 2, vec![]);
