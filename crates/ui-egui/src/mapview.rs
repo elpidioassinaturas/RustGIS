@@ -5474,11 +5474,11 @@ mod tests {
         assert_eq!((shown(&popup.info), popup.index), (vec!["Countries".to_string()], 0), "hidden, in the pop-up");
     }
 
-    /// A click whose pop-up shows a raster's pixel first, drawn over a polygon, selects nothing
-    /// (#2488): an earlier selection doesn't stay under the pixel; a feature shown first is
-    /// selected.
+    /// A click whose pop-up shows a raster's pixel first, drawn over a polygon, or a tile layer's
+    /// feature first, selects nothing (#2488): an earlier selection doesn't stay under it, as
+    /// browsing the pop-up to either clears it; a feature shown first is selected.
     #[test]
-    fn a_click_showing_a_pixel_first_leaves_nothing_selected() {
+    fn a_click_showing_a_pixel_or_tile_feature_first_leaves_nothing_selected() {
         let s = rustgis_engine::Session::new(rustgis_engine::sample::world_project());
         let mut app = RustGisApp::new(s);
         let countries = app.session.map().layer_by_name("Countries").map(|l| l.id).unwrap();
@@ -5488,6 +5488,13 @@ mod tests {
         let pixel = json!({"layer": "scene", "layerId": 999, "raster": true, "attributes": {"Band 1": "7"},
             "results": [{"layer": "scene", "layerId": 999, "raster": true, "attributes": {"Band 1": "7"}}, feature]});
         select_first_found(&mut app, &pixel);
+        assert_eq!(app.session.map().selection_count(), 0);
+        // A vector tile layer's feature shown first (it has no row in a map layer) clears it too.
+        select_first_found(&mut app, &feature);
+        assert_eq!(app.session.map().selection_count(), 1);
+        let tile = json!({"layer": "Roads", "tileLayer": "Roads", "sourceLayer": "roads", "attributes": {"name": "Main"},
+            "results": [{"layer": "Roads", "tileLayer": "Roads", "sourceLayer": "roads", "attributes": {"name": "Main"}}, feature]});
+        select_first_found(&mut app, &tile);
         assert_eq!(app.session.map().selection_count(), 0);
     }
 
