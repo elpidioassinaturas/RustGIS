@@ -14,6 +14,7 @@ pub mod durable;
 pub mod extensions;
 pub mod geometry_calc;
 pub mod grids;
+pub mod image_grid;
 pub mod model;
 mod notice_text;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1085,6 +1086,9 @@ pub struct Session {
     /// ([`cmd::gp::FilesAhead`]).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) files_ahead: Option<cmd::gp::FilesAhead>,
+    /// Original grids read by a script worker and consumed at landing without file I/O.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) grids_ahead: Option<image_grid::Ahead>,
     /// The zones' spectral means a script read on that copy, which its run here takes
     /// ([`cmd::imagery::ZonesAhead`]).
     #[cfg(not(target_arch = "wasm32"))]
@@ -1130,6 +1134,7 @@ fn strip_windows(p: &mut Project) {
     for l in p.maps.iter_mut().flat_map(|m| m.layers.iter_mut()) {
         if let Some(src) = &mut l.source {
             src.reset();
+            src.hold_read_notes();
             l.dataset.features = Vec::new().into();
             l.selection.clear();
             l.touch_geometry();
@@ -1446,6 +1451,8 @@ impl Session {
             tools_ahead: None,
             #[cfg(not(target_arch = "wasm32"))]
             files_ahead: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            grids_ahead: None,
             #[cfg(not(target_arch = "wasm32"))]
             zones_ahead: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -2175,6 +2182,8 @@ impl Session {
         // The project's generation rolls back with it: a project opened part way (a task's step)
         // and then undone is the one before, still open.
         let opened = self.opened;
+        // The layer chosen before the command comes back with the project when it fails.
+        let open_layer = self.active_layer;
         let files = mutates.then(|| ProjectFiles {
             identity: self.file_identity,
             path: self.path.clone(),
@@ -2280,9 +2289,11 @@ impl Session {
                 // The project as it was before the command, so the layout open then, whatever
                 // the command opened on the way (a task's steps).
                 let committed = std::mem::replace(&mut self.project, snap);
+                self.keep_read_notes(&committed);
                 let sync_changed = self.keep_synced(&committed);
                 (self.trusted_tasks, self.trusted_models, self.trusted_notebooks) = trust;
                 self.active_layout = open_layout;
+                self.active_layer = open_layer;
                 // Replaced during the command: what it held beside itself (its undo history, its
                 // trust, its unsaved state) comes back with it.
                 if self.opened != opened {
@@ -2612,6 +2623,10 @@ impl Session {
                         "{}: some text values written as Null in it show as empty (Load All Features counts them all); so far, {note}",
                         layer.name
                     ));
+                }
+                // What else the map's reads of it lost or assumed, each kind once for its opening.
+                for note in layer.source.as_mut().map(|source| source.take_read_notes()).unwrap_or_default() {
+                    dates.push(format!("{}: {note}", layer.name));
                 }
                 if layer.source.as_mut().is_some_and(|source| source.take_display_window()) {
                     landed.push(&*layer);
@@ -3456,6 +3471,7 @@ impl Session {
         self.keep_time_position(&cur);
         self.keep_tile_pick(&cur);
         self.keep_headers_said(&cur);
+        self.keep_read_notes(&cur);
         self.keep_synced(&cur);
         let allocations = undo_memory::allocations(&cur);
         self.redo.push((
@@ -3495,6 +3511,7 @@ impl Session {
         self.keep_time_position(&cur);
         self.keep_tile_pick(&cur);
         self.keep_headers_said(&cur);
+        self.keep_read_notes(&cur);
         self.keep_synced(&cur);
         let allocations = undo_memory::allocations(&cur);
         self.undo.push((
@@ -3626,6 +3643,20 @@ impl Session {
                         t.headers_shown.push(address.clone());
                     }
                 }
+            }
+        }
+    }
+
+    /// After undo, redo or a rollback swaps the project: a streamed layer still on the same opening
+    /// of its source keeps what its reads have said ([`SourceLayer::keep_read_notes`]), so a note
+    /// isn't said again because a project from before it was said came back.
+    ///
+    /// [`SourceLayer::keep_read_notes`]: rustgis_map::source::SourceLayer::keep_read_notes
+    fn keep_read_notes(&mut self, before: &Project) {
+        for l in self.project.maps.iter_mut().flat_map(|m| m.layers.iter_mut()) {
+            let live = before.maps.iter().flat_map(|m| &m.layers).find(|o| o.instance_id() == l.instance_id());
+            if let (Some(source), Some(live)) = (l.source.as_mut(), live.and_then(|o| o.source.as_ref())) {
+                source.keep_read_notes(live);
             }
         }
     }
