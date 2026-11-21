@@ -352,6 +352,12 @@ pub trait FeatureSource: Send + Sync {
     fn visits_chunks(&self) -> bool {
         self.streams_chunks()
     }
+    /// Whether a complete bounded traversal for a geographic extent is available. This also
+    /// covers readers whose view and whole-export paths still use their existing sample or
+    /// whole-read contracts.
+    fn visits_extent_chunks(&self) -> bool {
+        self.visits_chunks()
+    }
     /// Visits every matching feature in source painter order: the features and ids a complete
     /// [`FeatureSource::read`] of the same extent gives, in the same order and with the same
     /// skipped count when there is no extent (an extent read through an index may order and skip
@@ -366,6 +372,12 @@ pub trait FeatureSource: Send + Sync {
         Err(DataError::Unsupported("a source that can't be read a chunk at a time".into()))
     }
     fn info(&self) -> &SourceInfo;
+    /// The coordinate system of the features it gives: longitude/latitude, which every source
+    /// converts its own to today. Once sources hand over their own coordinates (#2032 C2), a
+    /// source says its system here, and one that wraps another says the other's.
+    fn coord_crs(&self) -> crate::raster::Crs {
+        crate::raster::Crs::LonLat
+    }
     /// Whether features were left out of every read because the coordinate system the source
     /// declares can't place them, so that defining its projection again can't bring them back.
     fn lost_to_crs(&self) -> bool {
@@ -617,6 +629,10 @@ pub struct Fetching(pub std::sync::Arc<dyn FeatureSource>);
 impl FeatureSource for Fetching {
     fn info(&self) -> &SourceInfo {
         self.0.info()
+    }
+
+    fn coord_crs(&self) -> crate::raster::Crs {
+        self.0.coord_crs()
     }
 
     fn lost_to_crs(&self) -> bool {

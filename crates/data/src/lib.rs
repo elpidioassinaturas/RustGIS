@@ -110,6 +110,14 @@ pub enum DataError {
 
 pub type Result<T> = std::result::Result<T, DataError>;
 
+impl DataError {
+    /// A coordinate conversion's error ([`Dataset::in_lonlat`], [`Dataset::hold_in`], …, which
+    /// say it in words): [`DataError::Cancelled`] when it stopped for Cancel, else a format error.
+    pub fn of_conversion(e: String) -> Self {
+        if e == DataError::Cancelled.to_string() { DataError::Cancelled } else { DataError::Format(e) }
+    }
+}
+
 /// An I/O error, or [`DataError::Cancelled`] when it carries one: a write that only returns I/O
 /// errors stops with it for a cancelled run ([`progress`]).
 impl From<std::io::Error> for DataError {
@@ -402,8 +410,9 @@ impl<'de> Deserialize<'de> for Features {
 }
 
 /// A feature class: a named table of features sharing a schema and geometry type.
-/// Geometry coordinates are always WGS 84 longitude/latitude, including datasets created by
-/// tools and plugins. Projected source coordinates must be normalized before insertion.
+/// Its geometry is in the system it holds its coordinates in ([`Dataset::held_in`]): WGS 84
+/// longitude/latitude for every dataset read or made today, including those of tools and
+/// plugins (#2032 C2 lets readers hold a file's own system).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Dataset {
     pub name: String,
@@ -413,8 +422,8 @@ pub struct Dataset {
     /// Where it was read from, if anywhere.
     #[serde(default)]
     pub source: Option<String>,
-    /// The coordinate system it was read in, when that isn't longitude/latitude. Its geometry is
-    /// always longitude/latitude; this is what an export writes by default.
+    /// The coordinate system it was read in, when that isn't longitude/latitude: what an export
+    /// writes by default. Its geometry is in [`Dataset::held_in`], longitude/latitude today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crs: Option<raster::Crs>,
     /// Import lost geometry while interpreting source coordinates. Defining a projection cannot
@@ -429,17 +438,62 @@ pub struct Dataset {
     /// so they aren't saved: the source is read again instead.
     #[serde(skip)]
     pub windowed: bool,
+    /// The system its geometry is in ([`Dataset::coord_crs`]): longitude/latitude unless it was
+    /// put in another with [`Dataset::hold_in`]. A project saves its features in
+    /// longitude/latitude, as older releases read them, so a saved dataset reads back held there.
+    #[serde(skip, default = "held_in_lonlat")]
+    pub held_in: raster::Crs,
+}
+
+/// What a dataset read from a project holds its coordinates in ([`Dataset::held_in`]).
+fn held_in_lonlat() -> raster::Crs {
+    raster::Crs::LonLat
 }
 
 impl Dataset {
-    /// The coordinate system its geometry is in: longitude/latitude (WGS 84), as every dataset's
-    /// is today, whatever system it was read in ([`Dataset::crs`]). Drawing converts geometry from
-    /// it ([`raster::Crs::to`]), so a dataset that keeps the coordinates it was read in can say so
-    /// here without the map changing. Longitude/latitude never fails to convert. The map draws none of
-    /// a layer whose conversion fails (`Layer::projected_in`) and doesn't say so yet: before this
-    /// returns another system, that needs a notice, as AGENTS.md's "Never silent" asks.
+    /// The coordinate system its geometry is in ([`Dataset::held_in`]): longitude/latitude (WGS 84)
+    /// for every dataset read or made today, whatever system it was read in ([`Dataset::crs`]).
+    /// Drawing converts geometry from it ([`raster::Crs::to`]), so a dataset that keeps the
+    /// coordinates it was read in can say so here without the map changing. Longitude/latitude
+    /// never fails to convert, and [`Dataset::hold_in`] only holds a dataset where every place
+    /// converts. A place that can't be converted isn't drawn, and the session says so (the map
+    /// counts them as it draws, `Layer::unplaced`).
     pub fn coord_crs(&self) -> raster::Crs {
-        raster::Crs::LonLat
+        self.held_in
+    }
+
+    /// Converts its geometry into `crs` and holds it there ([`Dataset::held_in`]); a missing
+    /// coordinate (NaN, infinite) stays as it is. Refused, naming the first feature, when its
+    /// system can't be converted to `crs` or one of its places can't be held there (in Web
+    /// Mercator, one past 85.05°, which it would hold at 85.05°); and for a window onto a source
+    /// read in place, whose rows are read again in longitude/latitude. Nothing changes then.
+    pub fn hold_in(&mut self, crs: raster::Crs) -> std::result::Result<(), String> {
+        if self.windowed && crs != self.held_in {
+            return Err(format!("{}: a layer read in place is held as its source is read", self.name));
+        }
+        let to = self.held_in.to(crs)?;
+        if !to.is_identity() {
+            let lonlat = self.lonlat_conversion()?;
+            // Before the rows are copied (by the first change), which a cancelled command needn't.
+            stop_when_asked(0)?;
+            let mut features = self.features.clone();
+            for (i, f) in features.iter_mut().enumerate() {
+                stop_when_asked(i)?;
+                if let Some(g) = &f.geometry {
+                    let mut past = false;
+                    if crs == raster::Crs::WebMercator {
+                        g.for_each_coord(|c| past |= c.is_finite() && lonlat.point(c).is_some_and(|l| l.y.abs() > rustgis_geom::MAX_LAT));
+                    }
+                    let held = (!past).then(|| convert_keeping_missing(&to, g, &HeldPlaces::default())).flatten();
+                    f.geometry = Some(
+                        held.ok_or_else(|| format!("{}: feature {} has a place that can't be held in {}", self.name, f.id, crs.label()))?,
+                    );
+                }
+            }
+            self.features = features;
+        }
+        self.held_in = crs;
+        Ok(())
     }
 
     /// One of its geometries in longitude/latitude, the space edits work in (a vertex dragged to a
@@ -448,13 +502,26 @@ impl Dataset {
     /// coordinate (NaN, infinite) stays as it is, for the edit to judge as it does today; refused,
     /// naming its system, when its system can't be converted or one of its places can't be.
     pub fn geometry_to_lonlat<'a>(&self, g: &'a Geometry) -> std::result::Result<Cow<'a, Geometry>, String> {
-        let to = self.coord_crs().to(raster::Crs::LonLat)?;
-        if to.is_identity() {
-            return Ok(Cow::Borrowed(g));
-        }
-        convert_keeping_missing(&to, g, &HeldPlaces::default())
-            .map(Cow::Owned)
+        Self::geometry_to_lonlat_by(&self.lonlat_conversion()?, g)
+    }
+
+    /// [`Dataset::geometry_to_lonlat`] by `to`, its [`Dataset::lonlat_conversion`] made once for
+    /// many geometries: refused, naming its system, when one of the geometry's places can't be
+    /// converted.
+    pub fn geometry_to_lonlat_by<'a>(to: &raster::Reprojection, g: &'a Geometry) -> std::result::Result<Cow<'a, Geometry>, String> {
+        Self::converted_to_lonlat(to, g)
             .ok_or_else(|| format!("a place of this feature in {} can't be given in longitude/latitude", to.source().label()))
+    }
+
+    /// One of its geometries in longitude/latitude by `to`, its [`Dataset::lonlat_conversion`]
+    /// made once for many geometries (as a frame draws them), as [`Dataset::geometry_to_lonlat`]
+    /// converts it: borrowed when `to` is the identity, a missing coordinate kept, `None` when one
+    /// of its places can't be converted.
+    pub fn converted_to_lonlat<'a>(to: &raster::Reprojection, g: &'a Geometry) -> Option<Cow<'a, Geometry>> {
+        if to.is_identity() {
+            return Some(Cow::Borrowed(g));
+        }
+        convert_keeping_missing(to, g, &HeldPlaces::default()).map(Cow::Owned)
     }
 
     /// An edited geometry in longitude/latitude, written back in its own coordinates
@@ -533,7 +600,11 @@ impl Serialize for Dataset {
         st.serialize_field("geometry_type", &self.geometry_type)?;
         st.serialize_field("fields", &self.fields)?;
         let none: &[Feature] = &[];
-        st.serialize_field("features", if self.windowed { none } else { self.features.as_slice() })?;
+        // In longitude/latitude, as every release reads a saved dataset's features. A place that
+        // can't be given there fails the save, naming its feature, rather than being saved
+        // wrong; `hold_in` only holds a dataset whose places all convert.
+        let lonlat = if self.windowed { None } else { Some(self.in_lonlat().map_err(serde::ser::Error::custom)?) };
+        st.serialize_field("features", lonlat.as_ref().map_or(none, |d| d.features.as_slice()))?;
         st.serialize_field("source", &self.source)?;
         if let Some(crs) = &self.crs {
             st.serialize_field("crs", crs)?;
@@ -748,7 +819,19 @@ fn web_mercator_note(layers: &[(&Dataset, rustgis_geom::Extent)], target: &str) 
         .filter_map(|(ds, e)| {
             let mut moved = 0usize;
             if !ds.windowed {
-                let mut count = |c: Coord| moved += usize::from(c.x.is_finite() && c.y.abs() > MAX_LAT);
+                // By latitude, from the system the layer holds its coordinates in: none counted
+                // when that can't be converted (its export can't be written either).
+                let to = match ds.lonlat_conversion() {
+                    Ok(t) => (!t.is_identity()).then_some(t),
+                    Err(_) => return None,
+                };
+                let mut count = |c: Coord| {
+                    let c = match &to {
+                        Some(t) => t.point(c).unwrap_or(Coord::new(f64::NAN, f64::NAN)),
+                        None => c,
+                    };
+                    moved += usize::from(c.x.is_finite() && c.y.abs() > MAX_LAT)
+                };
                 for g in ds.features.iter().filter_map(|f| f.geometry.as_ref()) {
                     if shapefile {
                         crate::io::shapefile_vertices(g, ds.geometry_type, &mut count);
@@ -832,6 +915,7 @@ impl Dataset {
             crs_incomplete: false,
             zm_dropped: false,
             windowed: false,
+            held_in: raster::Crs::LonLat,
         }
     }
 
@@ -908,16 +992,18 @@ impl Dataset {
     /// The dataset in longitude/latitude, the space analysis tools work in: borrowed while its
     /// coordinates are longitude/latitude ([`Dataset::coord_crs`]), as every dataset's are today;
     /// otherwise a copy with every geometry converted, missing coordinates kept. Refused, naming
-    /// the first feature that can't be, when one of its places can't be converted. Once a dataset
-    /// records its own system (C2 of #2032), the copy is to be recorded as longitude/latitude, so
-    /// that it isn't converted again.
+    /// the first feature that can't be, when one of its places can't be converted. The copy is
+    /// held in longitude/latitude ([`Dataset::held_in`]), so it isn't converted again.
     pub fn in_lonlat(&self) -> std::result::Result<Cow<'_, Dataset>, String> {
         let to = self.lonlat_conversion()?;
         if to.is_identity() {
             return Ok(Cow::Borrowed(self));
         }
+        stop_when_asked(0)?;
         let mut out = self.clone();
-        for f in &mut out.features {
+        out.held_in = raster::Crs::LonLat;
+        for (i, f) in out.features.iter_mut().enumerate() {
+            stop_when_asked(i)?;
             if let Some(g) = &mut f.geometry {
                 *g = convert_keeping_missing(&to, g, &HeldPlaces::default()).ok_or_else(|| {
                     format!(
@@ -949,22 +1035,77 @@ impl Dataset {
     /// `results`, a dataset in longitude/latitude made from this one (a tool's update of it), in
     /// its own coordinates: as it is while they are longitude/latitude, as every dataset's are
     /// today; otherwise each geometry written back as an edit is ([`Dataset::edit_from_lonlat`]),
-    /// its stored places kept as stored. Refused, naming the first feature, when one of its places
-    /// can't be held in its system.
+    /// its stored places kept as stored. Every stored place is read, but only those the results
+    /// read as are held, so what is held is as large as the results, not the layer. Refused, naming
+    /// the first feature, when one of its places can't be held in its system.
     pub fn results_from_lonlat(&self, mut results: Dataset) -> std::result::Result<Dataset, String> {
         if self.edits_in_lonlat() {
             return Ok(results);
         }
         let mut held = HeldPlaces::default();
-        for g in self.features.iter().filter_map(|f| f.geometry.as_ref()) {
-            self.hold_places(g, None, &mut held);
+        let edits: Vec<&Geometry> = results.features.rows().filter_map(|r| r.geometry()).collect();
+        if !edits.is_empty() {
+            held.want_only_checking(&edits, stop_when_asked)?;
+            for (i, g) in self.features.rows().filter_map(|r| r.geometry()).enumerate() {
+                stop_when_asked(i)?;
+                self.hold_places(g, None, &mut held);
+            }
         }
-        for f in &mut results.features {
+        // Before the rows are copied out of what shares them.
+        stop_when_asked(0)?;
+        for (i, f) in results.features.iter_mut().enumerate() {
+            stop_when_asked(i)?;
             if let Some(g) = f.geometry.take() {
                 f.geometry = Some(self.edit_from_lonlat(g, &held).map_err(|e| format!("{}: feature {}: {e}", self.name, f.id))?);
             }
         }
+        results.held_in = self.held_in;
         Ok(results)
+    }
+
+    /// `merged`, its features in longitude/latitude as [`Dataset::in_lonlat`] gives them with some
+    /// updated, added or left out (an offline area's sync), in its own coordinates: a feature whose
+    /// id isn't in `changed` is taken as it holds it, not converted back; a changed one is written
+    /// back as [`Dataset::results_from_lonlat`] writes it, holding only the stored places the
+    /// changes read as. As it is while its coordinates are longitude/latitude, as every dataset's
+    /// are today.
+    pub fn merged_from_lonlat(
+        &self,
+        mut merged: Dataset,
+        changed: &std::collections::HashSet<u64>,
+    ) -> std::result::Result<Dataset, String> {
+        if self.edits_in_lonlat() {
+            return Ok(merged);
+        }
+        let own: std::collections::HashMap<u64, &Feature> = self.features.iter().map(|f| (f.id, f)).collect();
+        let is_changed = |id: u64| changed.contains(&id) || !own.contains_key(&id);
+        let edits: Vec<&Geometry> = merged.features.iter().filter(|f| is_changed(f.id)).filter_map(|f| f.geometry.as_ref()).collect();
+        // Every stored place is read, but only those an edit reads as are kept: what is held is
+        // as large as the changes, and a place is found however far its system's inverse is from
+        // exact (about a metre and a half in places for Robinson), which no box around the
+        // edits would bound.
+        let mut held = HeldPlaces::default();
+        if !edits.is_empty() {
+            held.want_only_checking(&edits, stop_when_asked)?;
+            for (i, g) in self.features.iter().filter_map(|f| f.geometry.as_ref()).enumerate() {
+                stop_when_asked(i)?;
+                self.hold_places(g, None, &mut held);
+            }
+        }
+        // Before the rows are copied out of what shares them.
+        stop_when_asked(0)?;
+        for (i, f) in merged.features.iter_mut().enumerate() {
+            stop_when_asked(i)?;
+            if is_changed(f.id) {
+                if let Some(g) = f.geometry.take() {
+                    f.geometry = Some(self.edit_from_lonlat(g, &held).map_err(|e| format!("{}: feature {}: {e}", self.name, f.id))?);
+                }
+            } else if let Some(o) = own.get(&f.id) {
+                f.geometry = o.geometry.clone();
+            }
+        }
+        merged.held_in = self.held_in;
+        Ok(merged)
     }
 
     /// Pushes a feature with the next id, padding/truncating attributes to the schema.
@@ -1074,8 +1215,19 @@ impl HeldPlaces {
     /// From now on, holds only places that one of `edited`'s (in longitude/latitude) reads as and
     /// that isn't held yet: a search of many stored places keeps only those an edit asks for.
     pub fn want_only(&mut self, edited: &[&Geometry]) {
+        self.want_only_checking(edited, |_| Ok(())).unwrap_or_default();
+    }
+
+    /// [`HeldPlaces::want_only`], stopping when `check` (given each edit's index) says so, the
+    /// places wanted left as they were.
+    fn want_only_checking(
+        &mut self,
+        edited: &[&Geometry],
+        mut check: impl FnMut(usize) -> std::result::Result<(), String>,
+    ) -> std::result::Result<(), String> {
         let mut wanted = std::collections::HashSet::new();
-        for g in edited {
+        for (i, g) in edited.iter().enumerate() {
+            check(i)?;
             g.for_each_coord(|c| {
                 if c.is_finite() && self.get(c).is_none() {
                     wanted.insert(Self::key(c));
@@ -1083,6 +1235,7 @@ impl HeldPlaces {
             });
         }
         self.wanted = Some(wanted);
+        Ok(())
     }
 
     /// The held place that reads exactly as `c` in longitude/latitude.
@@ -1097,6 +1250,17 @@ impl HeldPlaces {
     pub fn is_empty(&self) -> bool {
         self.places.is_empty()
     }
+}
+
+/// Stops a conversion of a whole layer once the command running it was asked to (looked at every
+/// 256 features): a layer's conversion takes as long as the layer is large. A single feature
+/// converts whole between looks, however many vertices it has (a long coastline is not stopped
+/// partway).
+fn stop_when_asked(i: usize) -> std::result::Result<(), String> {
+    if i.is_multiple_of(256) {
+        progress::check().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// An edit `g` in longitude/latitude in the target system, as [`convert_keeping_missing`], a held
@@ -1132,6 +1296,151 @@ fn convert_keeping_missing(to: &raster::Reprojection, g: &Geometry, held: &HeldP
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dataset held in another system converts into it, and back, at the same places; one
+    /// reaching past where Web Mercator ends, or a window onto a source read in place, is refused
+    /// and left as it was.
+    #[test]
+    fn a_dataset_is_held_where_its_places_convert() {
+        let utm = raster::Crs::Epsg(32632);
+        let mut ds = Dataset::new("held", GeometryType::Point, vec![]);
+        ds.push(Some(Geometry::Point(Coord::new(11.5, 48.7))), vec![]);
+        ds.push(Some(Geometry::Point(Coord::new(f64::NAN, 48.7))), vec![]);
+        let plain = ds.clone();
+        ds.hold_in(utm).unwrap();
+        assert_eq!(ds.coord_crs(), utm);
+        let Some(Geometry::Point(p)) = ds.features[0].geometry else { panic!("a point") };
+        assert_eq!(Some(p), utm.transformer().unwrap().from_lonlat(Coord::new(11.5, 48.7)));
+        assert!(matches!(ds.features[1].geometry, Some(Geometry::Point(c)) if c.x.is_nan()));
+        ds.hold_in(raster::Crs::LonLat).unwrap();
+        let Some(Geometry::Point(back)) = ds.features[0].geometry else { panic!("a point") };
+        assert!((back.x - 11.5).abs() < 1e-9 && (back.y - 48.7).abs() < 1e-9, "{back:?}");
+        // Past 85.05°: refused, nothing changed.
+        let mut polar = plain.clone();
+        polar.push(Some(Geometry::Point(Coord::new(0.0, 89.0))), vec![]);
+        let before = polar.clone();
+        let err = polar.hold_in(raster::Crs::WebMercator).unwrap_err();
+        assert!(err.contains("feature 3"), "{err}");
+        assert_eq!(polar, before);
+        // A window onto a source is read again in longitude/latitude.
+        let mut window = plain;
+        window.windowed = true;
+        assert!(window.hold_in(utm).is_err());
+        assert_eq!(window.coord_crs(), raster::Crs::LonLat);
+    }
+
+    /// A whole layer's conversion stops once its command is cancelled, part-way through as well as
+    /// before it starts, leaving the dataset as it was; without a cancel it runs to the end.
+    #[test]
+    fn a_whole_layer_conversion_stops_when_cancelled() {
+        use std::sync::atomic::Ordering;
+        let utm = raster::Crs::Epsg(32632);
+        let mut ds = Dataset::new("held", GeometryType::Point, vec![]);
+        for i in 0..600 {
+            ds.push(Some(Geometry::Point(Coord::new(11.0 + f64::from(i) * 1e-4, 48.7))), vec![]);
+        }
+        let plain = ds.clone();
+        // Cancelled before it starts, or once asked `n` times.
+        let before = || {
+            let probe = std::sync::Arc::new(progress::tests::Counted::default());
+            probe.cancel.store(true, Ordering::Relaxed);
+            progress::install(Some(probe))
+        };
+        let at =
+            |n: u64| progress::install(Some(std::sync::Arc::new(progress::tests::Counted { after_checks: Some(n), ..Default::default() })));
+        // A conversion checks before its loop, then at features 0, 256 and 512: the third check
+        // stops it at feature 256, part-way.
+        let midway = || at(2);
+        // A write-back first looks over its edits (checks at edits 0, 256 and 512 of 600; at the
+        // one edit of a merge changing one feature), reads the held places (checks at features
+        // 0, 256 and 512), then checks before its copy and at features 0 and 256 of it: the copy
+        // stops at feature 256, part-way.
+        let results_midway = || at(8);
+        let merge_midway = || at(6);
+        for cancel in [&before as &dyn Fn() -> progress::Installed, &midway] {
+            let _cancelled = cancel();
+            assert!(ds.hold_in(utm).is_err());
+            assert_eq!(ds, plain, "a cancelled hold leaves the dataset as it was");
+        }
+        ds.hold_in(utm).unwrap();
+        let held = ds.clone();
+        let merged = ds.in_lonlat().unwrap().into_owned();
+        type Cancel<'a> = &'a dyn Fn() -> progress::Installed;
+        for (cancel, results, merge) in
+            [(&before as Cancel, &before as Cancel, &before as Cancel), (&midway, &results_midway, &merge_midway)]
+        {
+            {
+                let _cancelled = cancel();
+                assert!(ds.in_lonlat().is_err());
+            }
+            {
+                let _cancelled = results();
+                assert!(ds.results_from_lonlat(merged.clone()).is_err());
+            }
+            {
+                let _cancelled = merge();
+                assert!(ds.merged_from_lonlat(merged.clone(), &std::collections::HashSet::from([1])).is_err());
+            }
+            assert_eq!(ds, held);
+        }
+        let _cancelled = before();
+        // Said in words, read back as a cancel by those that wrap it.
+        assert!(matches!(ds.in_lonlat().map_err(DataError::of_conversion), Err(DataError::Cancelled)));
+        assert!(matches!(DataError::of_conversion("no such system".into()), DataError::Format(_)));
+    }
+
+    /// A merge in longitude/latitude written back to a held dataset: what it left as it was stays
+    /// as stored, a changed feature keeps the places it didn't move, and only a moved or new place
+    /// is converted.
+    #[test]
+    fn a_merge_converts_back_only_what_it_changed() {
+        // UTM, and Robinson, whose inverse is a metre or so from exact in places.
+        for crs in [raster::Crs::Epsg(32632), raster::Crs::parse("ESRI:54030").unwrap()] {
+            let mut ds = Dataset::new("held", GeometryType::Point, vec![Field::new("NAME", FieldType::Text)]);
+            for (i, x) in [11.1, 11.3, 11.5].into_iter().enumerate() {
+                ds.push(Some(Geometry::Point(Coord::new(x, 48.7 + 0.01 * i as f64))), vec![Value::Text(format!("p{i}"))]);
+            }
+            ds.hold_in(crs).unwrap();
+            let mut merged = ds.in_lonlat().unwrap().into_owned();
+            let mut rows: Vec<Feature> = merged.features.iter().cloned().collect();
+            let ids: Vec<u64> = rows.iter().map(|f| f.id).collect();
+            rows[1].attrs[0] = Value::Text("renamed".into());
+            let Some(Geometry::Point(moved)) = &mut rows[2].geometry else { panic!("a point") };
+            moved.y += 0.001;
+            let moved = *moved;
+            let new = Coord::new(11.4, 48.75);
+            rows.push(Feature { id: 99, geometry: Some(Geometry::Point(new)), ..rows[0].clone() });
+            merged.features = rows.into();
+            let changed = std::collections::HashSet::from([ids[1], ids[2], 99]);
+            let back = ds.merged_from_lonlat(merged, &changed).unwrap();
+            assert_eq!(back.coord_crs(), crs);
+            let to = crs.transformer().unwrap();
+            let stored: Vec<_> = ds.features.iter().map(|f| f.geometry.clone()).collect();
+            let got: Vec<_> = back.features.iter().map(|f| f.geometry.clone()).collect();
+            assert_eq!(got.len(), 4);
+            assert_eq!(got[0], stored[0]);
+            assert_eq!(got[1], stored[1]);
+            assert_eq!(back.features.get(1).unwrap().attrs[0], Value::Text("renamed".into()));
+            assert_eq!(got[2], Some(Geometry::Point(to.from_lonlat(moved).unwrap())));
+            assert_eq!(got[3], Some(Geometry::Point(to.from_lonlat(new).unwrap())));
+        }
+    }
+
+    /// An export in Web Mercator counts the places past where it ends by their latitude, from the
+    /// system the layer holds its coordinates in (UTM 32N here): one at 86° N, not every northing.
+    #[test]
+    fn web_mercators_end_is_counted_by_latitude() {
+        let utm = raster::Crs::Epsg(32632);
+        let mut ds = Dataset::new("held", GeometryType::Point, vec![]);
+        for lat in [48.7, 86.0] {
+            ds.push(Some(Geometry::Point(Coord::new(9.0, lat))), vec![]);
+        }
+        ds.hold_in(utm).unwrap();
+        assert_eq!(ds.coord_crs(), utm);
+        let note = web_mercator_note(&[(&ds, ds.extent())], "out.gpkg").unwrap_or_default();
+        assert_eq!(note, web_mercator_said(&[("held", Some(1))], "out.gpkg").unwrap_or_default());
+        assert!(!note.is_empty());
+    }
 
     /// Analysis and measurement read a longitude/latitude dataset as it is: no copy, and the
     /// measure and the area check of the geometry itself.
