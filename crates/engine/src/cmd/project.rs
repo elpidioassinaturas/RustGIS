@@ -410,30 +410,22 @@ fn reset(s: &mut Session, p: Project) {
         .collect();
     // A block cut to polygons (#2318) whose layer is missing or picks no polygon with an area
     // isn't drawn: said, and kept, so a polygon layer of that name, or an edit, brings it back.
-    let uncut: Vec<String> = s
-        .project
-        .maps
-        .iter()
-        .filter_map(|m| match &m.view.terrain.as_ref()?.block.as_ref()?.shape {
-            rustgis_map::view::BlockShape::Polygon { layer, filter } => {
-                rustgis_render::terrain::Outline::of(m, layer, filter.as_deref()).is_none().then(|| format!("{} ('{layer}')", m.name))
-            }
-            _ => None,
-        })
-        .collect();
-    // A block whose outline was simplified to stay under 65 535 sides: said, as `map.terrain` says it.
-    let simplified: Vec<String> = s
-        .project
-        .maps
-        .iter()
-        .filter_map(|m| match &m.view.terrain.as_ref()?.block.as_ref()?.shape {
-            rustgis_map::view::BlockShape::Polygon { layer, filter } => {
-                let o = rustgis_render::terrain::Outline::of(m, layer, filter.as_deref())?;
-                super::view::outline_simplified(layer, &o).map(|said| format!("{}: {said}", m.name))
-            }
-            _ => None,
-        })
-        .collect();
+    // One whose outline was simplified to stay under 65 535 sides, or whose polygons have holes
+    // (not cut), is said as `map.terrain` says it. Each outline is read once.
+    let (mut uncut, mut simplified, mut holed) = (Vec::new(), Vec::new(), Vec::new());
+    for m in &s.project.maps {
+        let Some(rustgis_map::view::BlockShape::Polygon { layer, filter }) =
+            m.view.terrain.as_ref().and_then(|t| t.block.as_ref()).map(|b| &b.shape)
+        else {
+            continue;
+        };
+        let Some(o) = rustgis_render::terrain::Outline::of(m, layer, filter.as_deref()) else {
+            uncut.push(format!("{} ('{layer}')", m.name));
+            continue;
+        };
+        simplified.extend(super::view::outline_simplified(layer, &o).map(|said| format!("{}: {said}", m.name)));
+        holed.extend(super::view::outline_holes(layer, &o).map(|said| format!("{}: {said}", m.name)));
+    }
     match simplified.as_slice() {
         [] => {}
         [one] => s.notify(one.clone(), false),
@@ -442,19 +434,6 @@ fn reset(s: &mut Session, p: Project) {
             false,
         ),
     }
-    // The holes a block's polygons have, not cut: said, as `map.terrain` says them.
-    let holed: Vec<String> = s
-        .project
-        .maps
-        .iter()
-        .filter_map(|m| match &m.view.terrain.as_ref()?.block.as_ref()?.shape {
-            rustgis_map::view::BlockShape::Polygon { layer, filter } => {
-                let o = rustgis_render::terrain::Outline::of(m, layer, filter.as_deref())?;
-                super::view::outline_holes(layer, &o).map(|said| format!("{}: {said}", m.name))
-            }
-            _ => None,
-        })
-        .collect();
     if !holed.is_empty() {
         s.notify(holed.join("; "), false);
     }

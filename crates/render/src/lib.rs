@@ -2944,7 +2944,8 @@ fn drape_terrain(
         }
         _ => {
             draw_to(pm, f64::NEG_INFINITY, &mut edges);
-            if let Some(b) = walls {
+            // A cancelled frame is thrown away: its walls aren't drawn.
+            if let Some(b) = walls.filter(|_| !stopped) {
                 block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale, env), &water, fog, far, |_, _| {});
             }
         }
