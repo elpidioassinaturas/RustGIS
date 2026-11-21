@@ -442,6 +442,22 @@ fn reset(s: &mut Session, p: Project) {
             false,
         ),
     }
+    // The holes a block's polygons have, not cut: said, as `map.terrain` says them.
+    let holed: Vec<String> = s
+        .project
+        .maps
+        .iter()
+        .filter_map(|m| match &m.view.terrain.as_ref()?.block.as_ref()?.shape {
+            rustgis_map::view::BlockShape::Polygon { layer, filter } => {
+                let o = rustgis_render::terrain::Outline::of(m, layer, filter.as_deref())?;
+                super::view::outline_holes(layer, &o).map(|said| format!("{}: {said}", m.name))
+            }
+            _ => None,
+        })
+        .collect();
+    if !holed.is_empty() {
+        s.notify(holed.join("; "), false);
+    }
     if !uncut.is_empty() {
         s.notify(
             format!(

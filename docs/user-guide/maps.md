@@ -148,8 +148,8 @@ no `"extent"`), and it works over elevation tiles too. The walls stand along the
 it faces you, a concave outline's hidden where nearer ground or walls stand in front of them,
 with everything a box's walls have; a wall's corner is outlined where the outline turns by more
 than 45°. A `"where"` that picks no polygon is refused. Holes are not cut: the ground inside
-them is drawn. Several polygons each stand as their own block on the same base (dissolve
-touching ones first for one outline). The outline follows the polygons to about a third of the
+them is drawn, and a notice says how many. Several polygons each stand as their own block on the
+same base (dissolve touching ones first for one outline). The outline follows the polygons to about a third of the
 finest mesh cell, and is read again when the layer is edited.
 
 With water on the terrain (below), `"block": {"water": {"depth": 12}}` shows it in the walls'

@@ -433,6 +433,13 @@ pub(crate) fn outline_simplified(layer: &str, o: &rustgis_render::terrain::Outli
     ))
 }
 
+/// The holes of a polygon block's polygons, which aren't cut: the ground inside them is drawn
+/// (said when it is set and when a project opens).
+pub(crate) fn outline_holes(layer: &str, o: &rustgis_render::terrain::Outline) -> Option<String> {
+    let n = o.holes();
+    (n > 0).then(|| format!("{n} hole(s) in the polygons of '{layer}' the block is cut to aren't cut: the ground inside them is drawn"))
+}
+
 /// The name of the polygon layer `name` for `what` (water, a block's walls), checked: a polygon
 /// layer (`holds` says of what) holding all its polygons, of a name of its own.
 fn polygon_layer(s: &Session, name: &str, what: &str, holds: &str) -> Result<String, String> {
@@ -698,7 +705,8 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     // A polygon block's outline as drawn: its sides and how near its corners were let lie.
     if let Some((_, o)) = &outline {
         let (spacing, coarsened) = o.spacing();
-        out["block"]["outline"] = json!({"sides": o.side_count(), "spacing": spacing, "coarsened": coarsened, "dropped": o.dropped()});
+        out["block"]["outline"] =
+            json!({"sides": o.side_count(), "spacing": spacing, "coarsened": coarsened, "dropped": o.dropped(), "holes": o.holes()});
     }
     if matches!(t.source, TerrainSource::Layer(_)) && t.block.is_some() && dem_box.is_none() {
         out["block"]["pendingDem"] = json!(true);
@@ -784,7 +792,7 @@ fn terrain(s: &mut Session, p: &Value) -> CmdResult {
     m.view.terrain = Some(t);
     // A polygon block's outline simplified past a third of the finest mesh cell, or short of its
     // smallest rings, to stay under 65 535 sides: said, with how far.
-    if let Some(said) = outline.and_then(|(layer, o)| outline_simplified(&layer, &o)) {
+    for said in outline.iter().flat_map(|(layer, o)| [outline_simplified(layer, o), outline_holes(layer, o)]).flatten() {
         s.notify(format!("Terrain: {said}"), false);
     }
     if block_cut {

@@ -44,6 +44,8 @@ pub struct Outline {
     spacing: f64,
     coarsened: bool,
     dropped: usize,
+    /// How many holes (inner rings with an area) the picked polygons have: not cut, so said.
+    holes: usize,
 }
 
 /// The rows, layer, queries and outline read last ([`Outline::of`]), kept while the layer's rows
@@ -68,15 +70,16 @@ impl Outline {
         let keep = l.query_rows(&l.dataset);
         let pick = rustgis_data::rows::Query::compile(filter, &l.dataset).ok()?;
         let env = rustgis_data::query::Env::default();
-        let mut rings = Vec::new();
+        let (mut rings, mut holes) = (Vec::new(), 0);
         for (row, ft) in l.dataset.features.rows().enumerate() {
             if keep.as_ref().is_some_and(|k| !k.get(row).copied().unwrap_or(false)) || !pick.matches(&l.dataset, row, &env) {
                 continue;
             }
             let Some(Geometry::Polygon(parts)) = ft.geometry() else { continue };
             rings.extend(parts.iter().filter_map(|p| p.first()).map(|r| r.iter().map(|c| lonlat_to_merc(*c)).collect()));
+            holes += parts.iter().flat_map(|p| p.iter().skip(1)).filter(|h| area2(h).abs() > 0.0).count();
         }
-        let o = Outline::from_rings(rings).map(Arc::new);
+        let o = Outline::from_rings(rings).map(|o| Arc::new(Outline { holes, ..o }));
         if let Ok(mut last) = LAST.lock() {
             last.retain(|k| k.0.strong_count() > 0 && !same(k));
             if last.len() >= KEPT {
@@ -162,7 +165,7 @@ impl Outline {
             let (lo, hi) = (row(s.a.y.min(s.z.y)), row(s.a.y.max(s.z.y)));
             rows.iter_mut().take(hi + 1).skip(lo).for_each(|r| r.push(k as u32));
         }
-        Some(Outline { sides, rings: starts, extent: [x0, y0, x1, y1], rows, spacing, coarsened: spacing > first, dropped })
+        Some(Outline { sides, rings: starts, extent: [x0, y0, x1, y1], rows, spacing, coarsened: spacing > first, dropped, holes: 0 })
     }
 
     /// How many sides the outline keeps.
@@ -180,6 +183,11 @@ impl Outline {
     /// 65 535 sides.
     pub fn dropped(&self) -> usize {
         self.dropped
+    }
+
+    /// How many holes the picked polygons have: the ground inside them is kept, not cut.
+    pub fn holes(&self) -> usize {
+        self.holes
     }
 
     /// The box round the outline, `[xmin, ymin, xmax, ymax]` (Web Mercator).
