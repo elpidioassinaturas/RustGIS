@@ -75,6 +75,7 @@ pub const CAPABILITIES: &[&str] = &[
     "terrain-block-shape",
     "terrain-water",
     "terrain-water-shore",
+    "terrain-block-water",
     "shaded-relief-effects",
     "normalized-legend-urls",
     "field-origin",
@@ -89,10 +90,13 @@ pub const CAPABILITIES: &[&str] = &[
     "layout-element-ink",
     "layout-element-wrap",
     "layout-chart-data",
+    "layout-chart-look",
     "field-generation",
     "offline-map-area-id",
     "crs-wkt",
     "zarr-window",
+    "blank-paper",
+    "layout-frame-border",
     "label-guide",
 ];
 /// Independent marker sizes alongside classified point colours (`Layer::size_by`).

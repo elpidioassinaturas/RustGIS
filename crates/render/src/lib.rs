@@ -7,6 +7,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod area_labels;
+mod bands;
 mod block;
 pub mod cancel;
 mod canvas;
@@ -882,7 +883,7 @@ struct Ctx<'a> {
     /// Set when drawing the globe; coordinates are then longitude/latitude, not Web Mercator.
     globe: Option<Globe>,
     /// Point marker sprites drawn so far, by symbol and quarter-pixel offset.
-    sprites: std::cell::RefCell<std::collections::HashMap<SpriteKey, Option<Pixmap>>>,
+    sprites: std::cell::RefCell<std::collections::HashMap<SpriteKey, Option<std::sync::Arc<Pixmap>>>>,
     /// The pixels the frame's shapeburst fills have worked on (`gradient_fill::FRAME_BURST_PX`),
     /// shared by a layer's scaled context (a reference scale's) with the frame's.
     bursts: std::rc::Rc<std::cell::Cell<f32>>,
@@ -1330,12 +1331,12 @@ impl Ctx<'_> {
                 let c = reach as f32 + qx as f32 / 4.0;
                 let d = reach as f32 + qy as f32 / 4.0;
                 draw_marker(&mut sp, c, d, s, 1.0, None, self.ppp);
-                sp.into_pixmap()
+                std::sync::Arc::new(sp.into_pixmap())
             });
             sprites.insert(key, sprite);
         }
         if let Some(Some(sp)) = sprites.get(&key) {
-            blend_over(pm.pixels(), sp, ix - reach, iy - reach);
+            pm.pixel_op(bands::PixelOp::Sprite { pixmap: sp.clone(), x: ix - reach, y: iy - reach });
         }
     }
 
@@ -1398,10 +1399,10 @@ impl Ctx<'_> {
         };
         if let Some(f) = fill {
             let area = if width > 0.0 { inner } else { sx * sy };
-            splat_color(pm.pixels(), cx, cy, f, area);
+            pm.pixel_op(bands::PixelOp::Splat { cx, cy, color: f, coverage: area });
         }
         if width > 0.0 {
-            splat_color(pm.pixels(), cx, cy, stroke, outer - inner);
+            pm.pixel_op(bands::PixelOp::Splat { cx, cy, color: stroke, coverage: outer - inner });
         }
         true
     }
@@ -1495,7 +1496,8 @@ impl Ctx<'_> {
         if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
             return false;
         }
-        small_polygon_pixels(pm.pixels(), [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)], width, s.fill, s.stroke, share as f32);
+        let b = [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)];
+        pm.pixel_op(bands::PixelOp::SmallPolygon { b, width, fill: s.fill, stroke: s.stroke, share: share as f32 });
         true
     }
 
@@ -1839,7 +1841,7 @@ fn contours(path: &tiny_skia::Path) -> Vec<tiny_skia::Path> {
 }
 
 /// Blends `color` at `coverage` (in pixels, spread bilinearly) around (`cx`, `cy`) device pixels.
-fn splat_color(pm: &mut Pixmap, cx: f32, cy: f32, color: Rgba, coverage: f32) {
+fn splat_color(pm: &mut tiny_skia::PixmapMut, cx: f32, cy: f32, color: Rgba, coverage: f32) {
     if color.a() == 0 || coverage.is_nan() || coverage <= 0.0 || !cx.is_finite() || !cy.is_finite() {
         return;
     }
@@ -1868,9 +1870,12 @@ fn splat_color(pm: &mut Pixmap, cx: f32, cy: f32, color: Rgba, coverage: f32) {
     }
 }
 
-/// Coverage of a tiny box and its mitred outline in each touched device pixel.
-fn small_polygon_pixels(pm: &mut Pixmap, b: [f32; 4], width: f32, fill: Rgba, stroke: Rgba, share: f32) {
-    if b[2] + width < 0.0 || b[3] + width < 0.0 || b[0] - width >= pm.width() as f32 || b[1] - width >= pm.height() as f32 {
+/// Coverage of a tiny box and its mitred outline in each touched device pixel, on `pm` whose first
+/// row is the frame's row `top` (a band, [`bands`]). Snapped in the frame's own coordinates, then
+/// moved up: a band's pixels are the whole frame's.
+fn small_polygon_pixels(pm: &mut tiny_skia::PixmapMut, top: u32, b: [f32; 4], width: f32, fill: Rgba, stroke: Rgba, share: f32) {
+    let t = top as f32;
+    if b[2] + width < 0.0 || b[3] + width < t || b[0] - width >= pm.width() as f32 || b[1] - width >= t + pm.height() as f32 {
         return;
     }
     // tiny-skia's path rasterizer samples at quarter-pixel intervals.
@@ -1888,10 +1893,12 @@ fn small_polygon_pixels(pm: &mut Pixmap, b: [f32; 4], width: f32, fill: Rgba, st
         }
         d[3] = (a + (d[3] as u16 * inv + 127) / 255).min(255) as u8;
     }
+    // Quarter pixels, moved by whole rows: exact.
+    let up = |b: [f32; 4]| [b[0], b[1] - t, b[2], b[3] - t];
     let hw = width / 2.0;
-    let outer = snap([b[0] - hw, b[1] - hw, b[2] + hw, b[3] + hw]);
-    let inner = snap([b[0] + hw, b[1] + hw, b[2] - hw, b[3] - hw]);
-    let b = snap(b);
+    let outer = up(snap([b[0] - hw, b[1] - hw, b[2] + hw, b[3] + hw]));
+    let inner = up(snap([b[0] + hw, b[1] + hw, b[2] - hw, b[3] - hw]));
+    let b = up(snap(b));
     let (w, h) = (pm.width() as i64, pm.height() as i64);
     let (x0, y0) = ((outer[0].floor() as i64).clamp(0, w), (outer[1].floor() as i64).clamp(0, h));
     let (x1, y1) = ((outer[2].ceil() as i64).clamp(0, w), (outer[3].ceil() as i64).clamp(0, h));
@@ -2024,7 +2031,7 @@ fn draw_marker(pm: &mut Canvas, x: f32, y: f32, s: &Symbol, opacity: f32, halo: 
 }
 
 /// Composites premultiplied `src` over `dst` with its top left corner at (`x`, `y`).
-fn blend_over(dst: &mut Pixmap, src: &Pixmap, x: i64, y: i64) {
+fn blend_over(dst: &mut tiny_skia::PixmapMut, src: &Pixmap, x: i64, y: i64) {
     let (dw, dh) = (dst.width() as i64, dst.height() as i64);
     let (sw, sh) = (src.width() as i64, src.height() as i64);
     let (x0, x1) = (x.max(0), (x + sw).min(dw));
@@ -2193,7 +2200,7 @@ fn render_any(
     env: &Env,
 ) -> Option<RenderOutput> {
     let revisions = archive_revisions([&*map]);
-    let output = render_pass(map, view, full_res_rasters, backend, record, failed_source, env);
+    let output = held_reads_counted(map, |map| render_pass(map, view, full_res_rasters, backend, record, failed_source, env));
     // A frame stopped part-way (see `cancel`) is no frame.
     if cancel::requested() {
         return None;
@@ -2382,6 +2389,13 @@ fn needs_tilted_snapshot(map: &Map, layer: &rustgis_map::Layer, complete_layers:
 const COMPLETE_SNAPSHOT_BYTES: usize = rustgis_map::source::VIEW_BYTES * 4;
 /// Owned-storage target for a complete traversal; distinct from interaction and depth budgets.
 const COMPLETE_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// The layers meshed on this test thread, in order (`mesh::collect_layer`), and whether each
+    /// came back too dense to mesh.
+    pub(crate) static MESHED: std::cell::RefCell<Vec<(String, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 
 #[cfg(test)]
 thread_local! {
@@ -2869,7 +2883,8 @@ fn drape_terrain(
     // each tile (the frame is drawn again when they arrive, `Ground::pending`).
     if let Some(b) = block.as_ref().filter(|b| b.walls_stand(ground)) {
         let scale = map.ground_res_at(&view.camera) / rustgis_geom::PIXEL_M;
-        block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale, env), fog, far);
+        let water = block::water_runs(map, b, ground, cam.res, scale, env);
+        block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale, env), &water, fog, far);
     }
     true
 }
@@ -3238,7 +3253,7 @@ pub fn gpu_may_turn(map: &Map, view: &View) -> bool {
         || map.view.color_vision != rustgis_map::view::ColorVision::Normal
         || map.tiles.iter().any(|t| t.draws())
         // The GPU draws the ground flat: a view over terrain stays on the CPU.
-        || terrain::Ground::of(map, &view.camera).is_some()
+        || terrain::Ground::has_heights(map, &view.camera)
     {
         return false;
     }
@@ -3268,8 +3283,12 @@ pub fn gpu_may_turn(map: &Map, view: &View) -> bool {
 
 /// The colours of a tilted view's sky (at the top) and of the fog it fades into at the
 /// horizon, from the basemap. A body without the Earth's atmosphere has neither: the ground
-/// fades into the black of space (#223).
+/// fades into the black of space (#223). A blank basemap's paper colour is both, as it is (#2532):
+/// the block stands on the page's own colour.
 pub fn tilt_sky(map: &Map) -> (Rgba, Rgba) {
+    if let Some(paper) = map.blank_paper() {
+        return (paper, paper);
+    }
     if !map.body().is_earth() {
         let space = globe_space(true);
         return (space, space);
@@ -4122,6 +4141,11 @@ fn frame_water(map: &Map, view: &View, labels_to: &Labels) -> Option<(std::sync:
     ground.water().cloned().map(|w| (w, pending))
 }
 
+/// Whether a GPU scene's commands hold a picture drawn on the CPU.
+fn holds_picture(cmds: &[gpu_scene::DrawCmd]) -> bool {
+    cmds.iter().any(|c| matches!(c, gpu_scene::DrawCmd::Image { .. }))
+}
+
 /// Draws one north-up frame. `labels_to` says where its labels go: a turned or tilted view the
 /// frame stands in for places them itself (and draws their icons). `full_res_rasters` marks an
 /// export, which draws everything as it will stay: rasters at full resolution, and labels in
@@ -4218,6 +4242,12 @@ fn render_frame(
     }
     // Set when tiny-skia actually rasterizes into the accumulator.
     let mut cpu_dirty = false;
+    // A GPU frame standing in for a turned or tilted view ([`gpu_turned`]) is of no use with a
+    // picture in it: that view is then drawn on the CPU whole. So it stops at the first layer
+    // that would leave one, rather than draw the rest (#2540).
+    let pictureless = backend.is_gpu() && matches!(labels_to, Labels::Turned(_) | Labels::Tilted(..));
+    // Set when such a frame stops that way.
+    let mut declined = false;
     if map.draws_world_outline() {
         let fill = paint(land, 1.0);
         let stroke = (outline.a() > 0).then(|| (paint(outline, 1.0), 0.6));
@@ -4425,7 +4455,9 @@ fn render_frame(
     // Masks: layers shown only inside another layer's polygons, or left of the swipe divider.
     let masks = layer_masks(map, &ctx, w, h, &flat, &key, scale, failed_source)?;
     // The lines point labels are turned square to (#2263), on the screen.
-    let square_lines = square_lines(map, &ctx, &flat);
+    // Of those held in another system, the ids, noted read once a label is squared to them.
+    let mut square_held = std::collections::HashMap::new();
+    let square_lines = square_lines(map, &ctx, &flat, &mut square_held);
     // And the lines labels are curved along (#2262).
     let guide_lines = guide_lines(map, &ctx, &flat, &key, scale, distance);
     // Bottom first; a higher depth priority draws later (on top) whatever the order.
@@ -4464,6 +4496,11 @@ fn render_frame(
         // A frame no longer wanted stops between layers (see `cancel`).
         if cancel::requested() {
             break;
+        }
+        // What is drawn so far already leaves a picture, waiting or in the scene (see
+        // `pictureless`).
+        if pictureless && (cpu_dirty || holds_picture(&cmds)) {
+            return None;
         }
         if let Some(id) = below.take() {
             draw_tiles!(Some(id));
@@ -4739,7 +4776,7 @@ fn render_frame(
             // The globe draws the lon/lat geometry itself (a layer held in another system, its
             // copy in longitude/latitude); the flat map its Web Mercator copy.
             let geoms: Vec<Option<&Geometry>> = if globe.is_some() && ds_ptr.coord_crs() != rustgis_data::raster::Crs::LonLat {
-                layer.projected_cache().iter().map(Option::as_ref).collect()
+                layer.lonlat_cache().iter().map(Option::as_ref).collect()
             } else if globe.is_some() {
                 ds_ptr.features.iter().map(|f| f.geometry.as_ref()).collect()
             } else if display_only {
@@ -4828,6 +4865,16 @@ fn render_frame(
                     Err(mesh::TessError::Refused | mesh::TessError::Imprecise) => mesh_room,
                 };
                 gpu_done = collected.is_ok();
+                #[cfg(test)]
+                MESHED.with(|m| m.borrow_mut().push((layer.name.clone(), collected == Err(mesh::TessError::TooDense))));
+                // Too dense to mesh, the layer's features in view would be drawn as a picture
+                // (see `pictureless`): not drawn at all.
+                if pictureless && collected == Err(mesh::TessError::TooDense) {
+                    declined = true;
+                    // Only to stop drawing: `declined` turns it into this frame's `None` before
+                    // it is reported or kept as the layer's error.
+                    return Err(rustgis_data::DataError::Cancelled);
+                }
             }
             // The layer's diagram, its fields, and how far a chart reaches past its feature (map
             // units). Graphics take none (`layer.diagram` refuses them).
@@ -4899,6 +4946,9 @@ fn render_frame(
                         draw_diagrams(dest);
                     }
                 } else {
+                    // Drawn in bands on several threads on a large frame (#1067), from here to the
+                    // layer's diagrams.
+                    dest.begin_bands();
                     let mut stroke_paths = stroke_paths::Paths::default();
                     // Symbol levels: lines with stacked strokes wait, and go down a level at a time
                     // after the rest (each batch of a streamed layer on its own).
@@ -5029,6 +5079,7 @@ fn render_frame(
                     if !tilted_extrusion {
                         draw_diagrams(dest);
                     }
+                    dest.end_bands();
                 }
                 cpu_dirty |= drawn_here;
             }
@@ -5526,7 +5577,12 @@ fn render_frame(
                             .and_then(|to| {
                                 // Square to its nearest line, the line's course taken over a text
                                 // height; starting at the point, out by its offset.
-                                let runs = square_lines.get(&to.layer.to_ascii_lowercase())?;
+                                let target = to.layer.to_ascii_lowercase();
+                                // Read, even when it gave no lines (its system can't be converted).
+                                if let Some(&id) = square_held.get(&target) {
+                                    note_held_id(id);
+                                }
+                                let runs = square_lines.get(&target)?;
                                 let reach = text::block_height(&text, size);
                                 let n = square_labels::normal(runs, (x as f32, y as f32), to.within * 1.33, reach, to.side)?;
                                 let start = (marker / 2.0 + 2.0 + class.offset[0] * 1.33) * label_factor;
@@ -5724,6 +5780,10 @@ fn render_frame(
                 chunk.dataset.features = Vec::new().into();
                 Ok(())
             });
+            // Declined (`pictureless`): no frame, whatever the source made of the stop.
+            if declined {
+                return None;
+            }
             if let Err(e) = result {
                 // Stopped, not failed: the source is fine.
                 if cancel::requested() {
@@ -5739,7 +5799,9 @@ fn render_frame(
                 source.clear_error();
             }
         } else if let Err(e) = draw_chunk(layer) {
-            log::warn!("cannot render layer '{}': {e}", layer.name);
+            if !declined {
+                log::warn!("cannot render layer '{}': {e}", layer.name);
+            }
             return None;
         }
         if let (Some(spool), Some(x)) = (&mut extrusions, &layer.extrusion)
@@ -5780,8 +5842,8 @@ fn render_frame(
     }
     pm.layer(None);
     // A frame stopped part-way (see `cancel`) is no frame: its tiles, labels and effects aren't
-    // worth working out.
-    if cancel::requested() {
+    // worth working out. Nor is one the last layer left a picture in (see `pictureless`).
+    if cancel::requested() || (pictureless && (cpu_dirty || holds_picture(&cmds))) {
         return None;
     }
     if let Some(id) = below {
@@ -6040,7 +6102,7 @@ fn layer_masks(
                             if ml.lonlat_in().is_empty() {
                                 ml.dataset.features.iter().filter_map(|f| f.geometry.as_ref()).for_each(&mut add);
                             } else {
-                                ml.projected_cache().iter().flatten().for_each(&mut add);
+                                ml.lonlat_cache().iter().flatten().for_each(&mut add);
                             }
                         } else {
                             ml.projected_in(flat, key).iter().flatten().for_each(&mut add);
@@ -6081,13 +6143,17 @@ struct Space {
     stars: bool,
     /// The glow of an atmosphere around the disc: the Earth's (#223).
     atmosphere: bool,
+    /// A blank basemap's paper colour (#2532), which the light space takes, so a globe frame
+    /// sits on the page's colour.
+    paper: Option<Rgba>,
 }
 
 /// The space around the globe for `view`: the interactive view's starry sky, or for exports a
-/// light space (dark on the Midnight basemap) without stars.
+/// light space (a blank basemap's paper colour; dark on the Midnight basemap) without stars.
 fn space(view: &View, map: &Map) -> Space {
     let dark = view.sky || map.basemap == rustgis_map::Basemap::Midnight;
-    Space { dark, stars: view.sky && map.view.effects.stars, atmosphere: map.body().is_earth() }
+    let paper = map.blank_paper().filter(|_| !dark);
+    Space { dark, stars: view.sky && map.view.effects.stars, atmosphere: map.body().is_earth(), paper }
 }
 
 /// Side of the starfield tile in logical points: the stars repeat this far apart.
@@ -6210,7 +6276,7 @@ fn globe_shading(pm: &mut Pixmap, g: &Globe, water: Rgba, space: Space, ppp: f32
 /// The globe's surroundings and ocean: space (dark or light, starry when it says so), an
 /// atmosphere glow, and the ocean disc.
 fn draw_globe_backdrop(pm: &mut Pixmap, g: &Globe, water: Rgba, space: Space, ppp: f32) {
-    let bg = globe_space(space.dark);
+    let bg = space.paper.unwrap_or_else(|| globe_space(space.dark));
     pm.fill(tiny_skia::Color::from_rgba8(bg.r(), bg.g(), bg.b(), 255));
     if space.stars {
         draw_stars(pm, ppp);
@@ -6332,6 +6398,11 @@ pub struct DrapePatch {
 /// ([`rustgis_map::Globe::drape_mesh`]) while it turns, with no drawing per frame. Labels are
 /// left out (the view hides them while it moves).
 pub fn render_globe_drape(map: &mut Map, view: &View, boxes: &[Extent], max_side: u32) -> Vec<DrapePatch> {
+    held_reads_counted(map, |map| render_globe_drape_drawn(map, view, boxes, max_side))
+}
+
+/// [`render_globe_drape`], the held layers it reads beside drawing them not yet counted.
+fn render_globe_drape_drawn(map: &mut Map, view: &View, boxes: &[Extent], max_side: u32) -> Vec<DrapePatch> {
     let revisions = archive_revisions([&*map]);
     // A coarse drape may have far fewer pixels than points: it shows the map blurrier, but at
     // the view's scale.
@@ -6390,6 +6461,11 @@ pub struct TiltPatch {
 /// band, square, over the circle round the view and without the margin: it is laid over the view
 /// the same way while it turns.
 pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32) -> Vec<TiltPatch> {
+    held_reads_counted(map, |map| render_tilt_drape_drawn(map, view, margin, max_side))
+}
+
+/// [`render_tilt_drape`], the held layers it reads beside drawing them not yet counted.
+fn render_tilt_drape_drawn(map: &mut Map, view: &View, margin: f64, max_side: u32) -> Vec<TiltPatch> {
     let revisions = archive_revisions([&*map]);
     let ppp = if view.pixels_per_point.is_finite() { view.pixels_per_point.clamp(0.25, 4.0) } else { 1.0 };
     let max_side = f64::from(max_side.clamp(64, 8192));
@@ -6524,6 +6600,8 @@ fn guides_of(
 ) -> guide_labels::Guides {
     let mut guides = guide_labels::Guides::default();
     let Some(layer) = map.layer_by_name(name) else { return guides };
+    // Read, even when it gives no lines (its system can't be converted).
+    note_held_read(layer);
     let features = &layer.dataset.features;
     let field = field.as_deref().and_then(|f| layer.dataset.field_index(f));
     let (w, h) = (ctx.view.width as f32, ctx.view.height as f32);
@@ -6567,15 +6645,73 @@ fn guides_of(
     guides
 }
 
+thread_local! {
+    /// The layers held in another system that the drawing on this thread read beside drawing
+    /// them (terrain water, block walls, the lines labels square to), which may be hidden; `None`
+    /// outside a drawing ([`held_reads_counted`]), when a read is noted nowhere.
+    static HELD_READS: std::cell::RefCell<Option<Vec<u32>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Notes that the drawing on this thread read `layer` beside drawing it (a reader calls it where
+/// it reads its layer), for [`held_reads_counted`]. Nothing for a layer in longitude/latitude,
+/// nor outside a drawing (a reader asked for its ground alone, say).
+pub(crate) fn note_held_read(layer: &rustgis_map::Layer) {
+    if layer.dataset.coord_crs() != rustgis_data::raster::Crs::LonLat {
+        note_held_id(layer.id);
+    }
+}
+
+/// [`note_held_read`] of the layer with this id, known to be held in another system.
+fn note_held_id(id: u32) {
+    HELD_READS.with(|r| {
+        // One id a layer: few layers are read, many times a frame (a label each).
+        if let Some(read) = r.borrow_mut().as_mut()
+            && !read.contains(&id)
+        {
+            read.push(id);
+        }
+    });
+}
+
+/// Runs a drawing of `map`, then counts the places of the held layers it read beside drawing them
+/// ([`note_held_read`]) that can't be given in longitude/latitude, once for their version and
+/// without keeping a copy ([`rustgis_map::Layer::count_unplaced`], which marks them used by this
+/// drawing): the session and an export say them as they say those of the layers drawn, and only
+/// when a reader read them. A drawing within it (another map's) keeps its own.
+fn held_reads_counted<T>(map: &mut Map, draw: impl FnOnce(&mut Map) -> T) -> T {
+    /// Puts back what was noted before the drawing, also when it panics (a command's panic is
+    /// caught), so reads outside a drawing aren't noted from then on.
+    struct Restore(Option<Option<Vec<u32>>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(outer) = self.0.take() {
+                HELD_READS.with(|r| *r.borrow_mut() = outer);
+            }
+        }
+    }
+    let restore = Restore(Some(HELD_READS.with(|r| r.borrow_mut().replace(Vec::new()))));
+    let out = draw(map);
+    let read = HELD_READS.with(|r| r.borrow_mut().take()).unwrap_or_default();
+    drop(restore);
+    for id in read {
+        if let Some(l) = map.layer_mut(id) {
+            l.count_unplaced();
+        }
+    }
+    out
+}
+
 /// The lines of the layers point labels are turned square to ([`LabelPlacement::Perpendicular`],
 /// #2263), keyed by layer name in ASCII lower case (as [`Map::layer_by_name`] matches names):
 /// each line's and polygon outline's runs on the screen, a ring closed as it is drawn, broken
 /// where a place doesn't project (on the globe, cut at the horizon as its stroke is). A layer
-/// read in chunks from its source has none to hand.
+/// read in chunks from its source has none to hand. `held` gets the ids of those held in another
+/// system, by the same names, for a label squared to one to note it read ([`note_held_read`]).
 fn square_lines(
     map: &Map,
     ctx: &Ctx<'_>,
     flat: &rustgis_map::projection::Flat,
+    held: &mut std::collections::HashMap<String, u32>,
 ) -> std::collections::HashMap<String, Vec<square_labels::Run>> {
     let mut out = std::collections::HashMap::new();
     let wanted = map.layers.iter().filter(|l| l.visible && l.labels.enabled).flat_map(|l| l.labels.in_order()).filter_map(|c| {
@@ -6586,6 +6722,9 @@ fn square_lines(
             continue;
         }
         let Some(layer) = map.layer_by_name(&name) else { continue };
+        if layer.dataset.coord_crs() != rustgis_data::raster::Crs::LonLat {
+            held.insert(name.clone(), layer.id);
+        }
         let mut runs = Vec::new();
         // Read in longitude/latitude, whatever system the layer holds its coordinates in; a
         // feature that can't be given there squares nothing (nor any, in a system that can't be
@@ -8664,6 +8803,66 @@ mod tests {
         assert!(far.angle.is_none() && far.y < fy as f32, "as auto: {:?} {} {fy}", far.angle, far.y);
     }
 
+    /// A drawing that panics (a command's panic is caught) leaves nothing noted: reads outside a
+    /// drawing are noted nowhere after it, as before it.
+    #[test]
+    fn a_panicking_drawing_leaves_no_reads_noted() {
+        let mut d = Dataset::new("lines", GeometryType::Polyline, vec![]);
+        d.push(Some(Geometry::Line(vec![vec![Coord::new(-1.0, 0.0), Coord::new(1.0, 0.0)]])), vec![]);
+        d.hold_in(rustgis_data::raster::Crs::Epsg(32631)).unwrap();
+        let mut m = Map::new("Map");
+        let id = m.add_dataset(d);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            held_reads_counted(&mut m, |m| {
+                note_held_read(m.layer(id).unwrap());
+                panic!("a drawing's bug");
+            })
+        }));
+        assert!(panicked.is_err());
+        assert!(HELD_READS.with(|r| r.borrow().is_none()));
+        note_held_read(m.layer(id).unwrap());
+        assert!(HELD_READS.with(|r| r.borrow().is_none()));
+    }
+
+    /// A hidden line layer held in another system that point labels square to is counted as read
+    /// by the frame (its place that can't be given in longitude/latitude, for the session and an
+    /// export to say) only when a label is squared to it: not when the labelled layer is out of
+    /// its scale range (#2032 C2).
+    #[test]
+    fn a_held_layer_labels_square_to_is_counted_only_when_read() {
+        let map = |labelled_in_scale: bool| {
+            let mut m = Map::new("Map");
+            m.basemap = rustgis_map::Basemap::Blank;
+            let mut d = Dataset::new("lines", GeometryType::Polyline, vec![]);
+            d.push(Some(Geometry::Line(vec![vec![Coord::new(-1.0, 0.0), Coord::new(1.0, 0.0)]])), vec![]);
+            d.hold_in(rustgis_data::raster::Crs::Epsg(32631)).unwrap();
+            d.push(Some(Geometry::Line(vec![vec![Coord::new(1e12, 1e12), Coord::new(1e12 + 1.0, 1e12)]])), vec![]);
+            let lines = m.add_dataset(d);
+            m.layer_mut(lines).unwrap().visible = false;
+            let mut d = Dataset::new("pts", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+            d.push(Some(Geometry::Point(Coord::new(-0.05, 0.01))), vec![Value::Text("Near".into())]);
+            let pts = m.add_dataset(d);
+            let l = m.layer_mut(pts).unwrap();
+            l.labels.enabled = true;
+            l.labels.default.placement = LabelPlacement::Perpendicular;
+            l.labels.default.square_to =
+                Some(rustgis_map::SquareTo { layer: "lines".into(), within: 20.0, side: rustgis_map::SquareSide::Away });
+            if !labelled_in_scale {
+                l.min_scale = Some(1.0);
+            }
+            (m, lines)
+        };
+        let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.02)), res: 100.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 300.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let (mut m, lines) = map(true);
+        let labels = render(&mut m, &view).unwrap().labels;
+        assert!(labels.iter().find(|l| l.text == "Near").is_some_and(|l| l.angle.is_some()), "squared");
+        assert!(matches!(m.layer(lines).unwrap().unplaced_drawn(), Some(Ok(1))), "{:?}", m.layer(lines).unwrap().unplaced_drawn());
+        let (mut m, lines) = map(false);
+        render(&mut m, &view).unwrap();
+        assert!(m.layer(lines).unwrap().unplaced_drawn().is_none(), "{:?}", m.layer(lines).unwrap().unplaced_drawn());
+    }
+
     /// A label moved by hand into view is drawn whatever its feature's place: a point's, or a
     /// line's labelled along it, out of view, its callout's line reaching back off the screen.
     #[test]
@@ -9238,6 +9437,52 @@ mod tests {
         assert_eq!(h, 0x89e2_f6ec_5589_a46e, "golden pixmap hash changed: {h:#x}");
     }
 
+    /// #1067: a frame large enough to draw its layers in bands comes out the same, byte for byte,
+    /// whatever the user's thread setting: countries, rivers and lakes crossing bands, city
+    /// markers stamped from sprites, and a dense layer of tiny squares drawn as pixels.
+    #[test]
+    fn a_large_frame_is_the_same_on_one_thread_or_many() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = rustgis_data::threads::set_max(None);
+            }
+        }
+        let _restore = Restore;
+        let mut m = sample_world();
+        let mut d = Dataset::new("dense", GeometryType::Polygon, vec![]);
+        for i in 0..20_000 {
+            let (x, y, s) = (-10.0 + f64::from(i % 200) * 0.2, 35.0 + f64::from(i / 200) * 0.2, 0.05 + f64::from(i % 7) * 0.03);
+            d.push(
+                Some(Geometry::Polygon(vec![vec![vec![
+                    Coord::new(x, y),
+                    Coord::new(x + s, y),
+                    Coord::new(x + s, y + s),
+                    Coord::new(x, y + s),
+                    Coord::new(x, y),
+                ]]])),
+                vec![],
+            );
+        }
+        m.add_dataset(d);
+        let europe = lonlat_to_merc(Coord::new(10.0, 48.0));
+        let view = View {
+            width: 1200.0,
+            height: 1000.0,
+            pixels_per_point: 1.0,
+            camera: Camera { center: europe, res: 2500.0, bearing: 0.0, pitch: 0.0 },
+            sky: false,
+        };
+        assert!(bands::applies(1200, 1000));
+        let mut draw = |threads: usize| {
+            rustgis_data::threads::set_max(Some(threads)).unwrap();
+            render(&mut m, &view).expect("render").pixmap
+        };
+        // (On a machine with one core both are one thread; `bands::tests` draws on several anyway.)
+        let one = draw(1);
+        assert!(one.data() == draw(6).data(), "six threads drew other pixels than one");
+    }
+
     fn square_layer(m: &mut Map, name: &str, x: f64, y: f64, s: f64) -> u32 {
         let mut d = Dataset::new(name, GeometryType::Polygon, vec![]);
         d.push(
@@ -9314,6 +9559,74 @@ mod tests {
             if let gpu_scene::DrawCmd::Mesh { vertices, .. } = c {
                 assert!(vertices.len() <= mesh::MAX_LAYER_VERTICES, "{} vertices", vertices.len());
             }
+        }
+    }
+
+    /// A turned or tilted view with a layer too dense to mesh is drawn on the CPU, as the CPU
+    /// backend draws it, and the GPU frame tried first stops at that layer: the one above it is
+    /// never meshed (#2540). Without it, the view stays a GPU scene.
+    #[test]
+    fn a_turned_or_tilted_view_stops_trying_the_gpu_at_a_layer_too_dense_to_mesh() {
+        let mut m = Map::new("Map");
+        let mut d = Dataset::new("dense", GeometryType::Polygon, vec![]);
+        for i in 0..270 {
+            for j in 0..270 {
+                let (x, y) = (i as f64 * 0.01, j as f64 * 0.01);
+                let ring = vec![Coord::new(x, y), Coord::new(x + 0.008, y), Coord::new(x, y + 0.008)];
+                d.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![]);
+            }
+        }
+        let dense = m.add_dataset(d);
+        // Added last, so on top: drawn after the dense layer.
+        square_layer(&mut m, "sparse", 1.0, 0.2, 0.4);
+        let at = lonlat_to_merc(Coord::new(1.35, 0.5));
+        for (bearing, pitch) in [(30.0, 0.0), (0.0, 50.0), (20.0, 60.0)] {
+            let camera = Camera { center: at, res: 1000.0, bearing, pitch };
+            let view = View { width: 400.0, height: 600.0, pixels_per_point: 1.0, camera, sky: false };
+            MESHED.with(|m| m.borrow_mut().clear());
+            let Some(RenderOutput::Cpu(gpu)) = render_backend(&mut m, &view, Backend::Gpu) else {
+                panic!("turned {bearing}°, tilted {pitch}°: drawn on the CPU")
+            };
+            let meshed = MESHED.with(|m| m.borrow().clone());
+            assert!(meshed.contains(&("dense".into(), true)), "turned {bearing}°, tilted {pitch}°: too dense: {meshed:?}");
+            assert!(!meshed.iter().any(|(n, _)| n == "sparse"), "turned {bearing}°, tilted {pitch}°: went on: {meshed:?}");
+            let cpu = render(&mut m, &view).expect("cpu");
+            assert!(gpu.pixmap.data() == cpu.pixmap.data(), "turned {bearing}°, tilted {pitch}°: as the CPU draws it");
+            // Without the dense layer, the view is a GPU scene with the sparse layer meshed.
+            m.layer_mut(dense).expect("dense").visible = false;
+            MESHED.with(|m| m.borrow_mut().clear());
+            assert!(
+                matches!(render_backend(&mut m, &view, Backend::Gpu), Some(RenderOutput::Gpu(_))),
+                "turned {bearing}°, tilted {pitch}°: a GPU scene"
+            );
+            assert!(MESHED.with(|m| m.borrow().iter().any(|(n, _)| n == "sparse")));
+            m.layer_mut(dense).expect("dense").visible = true;
+        }
+    }
+
+    /// So does one with a layer drawn on the CPU for another reason: a polygon reaching too far
+    /// from its origin for f32, zoomed in all the way. The layer above it is never meshed.
+    #[test]
+    fn a_turned_or_tilted_view_stops_trying_the_gpu_after_a_layer_drawn_on_the_cpu() {
+        let mut m = Map::new("Map");
+        // The world's outline is too far for f32 this far in as well: none.
+        m.basemap = rustgis_map::Basemap::Blank;
+        // About 5 km across, over a view of a few centimetres.
+        square_layer(&mut m, "far", 1.0 - 0.025, 0.5 - 0.025, 0.05);
+        square_layer(&mut m, "near", 1.0, 0.5, 1e-7);
+        let at = lonlat_to_merc(Coord::new(1.0, 0.5));
+        for (bearing, pitch) in [(30.0, 0.0), (0.0, 50.0)] {
+            let camera = Camera { center: at, res: rustgis_map::camera::MIN_RES, bearing, pitch };
+            let view = View { width: 400.0, height: 600.0, pixels_per_point: 1.0, camera, sky: false };
+            MESHED.with(|m| m.borrow_mut().clear());
+            let Some(RenderOutput::Cpu(gpu)) = render_backend(&mut m, &view, Backend::Gpu) else {
+                panic!("turned {bearing}°, tilted {pitch}°: drawn on the CPU")
+            };
+            let meshed = MESHED.with(|m| m.borrow().clone());
+            assert!(meshed.contains(&("far".into(), false)), "turned {bearing}°, tilted {pitch}°: tried: {meshed:?}");
+            assert!(!meshed.iter().any(|(n, _)| n == "near"), "turned {bearing}°, tilted {pitch}°: went on: {meshed:?}");
+            let cpu = render(&mut m, &view).expect("cpu");
+            assert!(gpu.pixmap.data() == cpu.pixmap.data(), "turned {bearing}°, tilted {pitch}°: as the CPU draws it");
         }
     }
 
@@ -9452,6 +9765,44 @@ mod tests {
         );
         let (water, ..) = m.basemap.palette();
         assert_eq!(scene.clear, mesh::premul(water), "the clear colour is the basemap's water");
+    }
+
+    /// A blank basemap's paper colour (#2532) is the flat view's canvas on the CPU and the GPU's
+    /// clear colour, a tilted view's sky and fog as it is, and the light space around a globe;
+    /// another basemap leaves it unused.
+    #[test]
+    fn a_blank_paper_colour_is_the_canvas_the_clear_colour_and_the_sky() {
+        let cream = Rgba::rgb(0xF1, 0xEA, 0xDF);
+        let mut m = Map::new("Map");
+        (m.basemap, m.graticule, m.paper) = (rustgis_map::Basemap::Blank, false, Some(cream));
+        let view = View { width: 200.0, height: 120.0, pixels_per_point: 1.0, camera: Camera::world(), sky: false };
+        let pm = render(&mut m, &view).unwrap().pixmap;
+        let p = pm.pixel(5, 5).unwrap();
+        assert_eq!((p.red(), p.green(), p.blue(), p.alpha()), (0xF1, 0xEA, 0xDF, 255));
+        let Some(RenderOutput::Gpu(scene)) = render_backend(&mut m, &view, Backend::Gpu) else { panic!("gpu scene") };
+        assert_eq!(scene.clear, mesh::premul(cream));
+        assert_eq!(tilt_sky(&m), (cream, cream), "no white mixed in");
+        // A globe's light space (exports, a publication's locator) is the paper too; the
+        // interactive view keeps its dark sky.
+        m.projection = rustgis_map::Projection::Globe;
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 200_000.0, bearing: 0.0, pitch: 0.0 };
+        let corner = |m: &mut Map, sky: bool| {
+            let pm = render(m, &View { camera, sky, ..view }).unwrap().pixmap;
+            let p = pm.pixel(2, 2).unwrap();
+            Rgba::rgb(p.red(), p.green(), p.blue())
+        };
+        assert_eq!(corner(&mut m, false), cream, "a globe on the paper");
+        assert_eq!(corner(&mut m, true), globe_space(true), "the view's sky");
+        m.projection = rustgis_map::Projection::default();
+        m.paper = Some(Rgba::new(0xF1, 0xEA, 0xDF, 0));
+        assert_eq!((m.palette().0, tilt_sky(&m).0), (cream, cream), "a file's translucent paper is drawn opaque");
+        m.paper = None;
+        let white = Rgba::rgb(0xFF, 0xFF, 0xFF);
+        assert_eq!(m.palette().0, white, "without a colour, blank stays white");
+        m.paper = Some(cream);
+        m.basemap = rustgis_map::Basemap::Paper;
+        assert_eq!(m.palette(), m.basemap.palette(), "another basemap keeps its own colours");
+        assert_ne!(tilt_sky(&m).0, cream);
     }
 
     #[test]
@@ -10154,6 +10505,7 @@ mod tests {
             depth: Some(1000.0),
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            water: None,
             shape: rustgis_map::view::BlockShape::Box,
         };
         let terrain = |block: Option<rustgis_map::view::TerrainBlock>| {
@@ -10221,6 +10573,7 @@ mod tests {
                     walls: rustgis_map::view::BLOCK_WALLS,
                     walls_layer: None,
                     shape,
+                    water: None,
                 }),
                 water: None,
             });
@@ -10289,6 +10642,7 @@ mod tests {
                 depth: Some(1000.0),
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: Some("geo".into()),
+                water: None,
                 shape: rustgis_map::view::BlockShape::Box,
             }),
             water: None,
@@ -10338,6 +10692,69 @@ mod tests {
         let (blues, reds) = striped(&column(-500.0));
         assert!(blues >= 3 && reds >= 3, "west: {blues} blue, {reds} red");
         assert_eq!(striped(&column(500.0)).0, 0, "east");
+    }
+
+    #[test]
+    fn a_block_diagrams_wall_shows_the_water_its_edge_cuts() {
+        // #2317: the near wall of a 2 km box, seen from the south, crosses a blue lake over its
+        // east half, 300 m deep: blue from the lake's level down to its floor there, the walls'
+        // sandy brown below the floor and beside the lake.
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        use rustgis_data::{Dataset, Geometry, GeometryType};
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 20.0, bearing: 0.0, pitch: 60.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let gt = GeoTransform { origin_x: -5000.0, origin_y: 5000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let dem =
+            Raster::new("dem", 500, 500, vec![vec![500.0; 500 * 500]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
+        let deg = |x: f64, y: f64| rustgis_geom::merc_to_lonlat(Coord::new(x, y));
+        let lake = vec![deg(0.0, -3000.0), deg(3000.0, -3000.0), deg(3000.0, 0.0), deg(0.0, 0.0), deg(0.0, -3000.0)];
+        let mut d = Dataset::new("lagos", GeometryType::Polygon, Vec::new());
+        d.push(Some(Geometry::Polygon(vec![vec![lake]])), Vec::new());
+        m.add_dataset(d);
+        let blue = Rgba::rgb(40, 90, 220);
+        if let Some(l) = m.layers.iter_mut().find(|l| l.name == "lagos") {
+            l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol {
+                fill: blue,
+                ..rustgis_map::Symbol::default_for(GeometryType::Polygon, 0)
+            });
+        }
+        let block = |water| rustgis_map::view::TerrainBlock {
+            extent: Some([-1000.0, -1000.0, 1000.0, 1000.0]),
+            depth: Some(1000.0),
+            walls: rustgis_map::view::BLOCK_WALLS,
+            walls_layer: None,
+            shape: rustgis_map::view::BlockShape::Box,
+            water,
+        };
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 1.0,
+            block: Some(block(Some(rustgis_map::view::BlockWater { depth: Some(300.0), field: None }))),
+            water: Some(rustgis_map::view::TerrainWater { layer: "lagos".into(), level: None, glint: 0.0, shore: 0.35 }),
+        });
+        let frame = render(&mut m, &view).expect("a frame");
+        let g = terrain::Ground::of(&m, &camera).expect("terrain");
+        // On the near wall at `x`, `metres` high.
+        let at = |frame: &Rendered, x: f64, metres: f64| {
+            let edge = Coord::new(x, -1000.0);
+            let (u, v) = camera.ground_px(edge);
+            let (px, py) = camera.project_raised(u, v, metres / g.per_unit(edge) / camera.res, view.width, view.height).expect("in view");
+            frame.pixmap.pixel(px as u32, py as u32).expect("in the frame").demultiply()
+        };
+        let bluish = |c: tiny_skia::ColorU8| c.blue() > c.red() + 60 && c.blue() > c.green() + 30;
+        let water = at(&frame, 500.0, 350.0);
+        assert!(bluish(water), "in the lake's section: {water:?}");
+        for (x, metres) in [(500.0, 0.0), (-500.0, 350.0)] {
+            let c = at(&frame, x, metres);
+            assert!(!bluish(c) && c.red() > c.blue(), "({x}, {metres}): {c:?}");
+        }
+        // Without water in the block the wall is ground there too.
+        m.view.terrain.as_mut().unwrap().block = Some(block(None));
+        let dry = at(&render(&mut m, &view).expect("a frame"), 500.0, 350.0);
+        assert!(!bluish(dry) && dry.red() > dry.blue(), "{dry:?}");
     }
 
     #[test]
