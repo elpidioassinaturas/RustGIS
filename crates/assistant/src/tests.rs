@@ -1496,6 +1496,72 @@ fn mcp_runs_commands_and_shows_the_map() {
     assert_eq!(r["isError"], false);
 }
 
+/// `view_map` through MCP: the picture's size in pixels and its caption, or the error.
+fn look(server: &mcp::Server, s: &mut Session, args: Value) -> Result<((u32, u32), String), String> {
+    let r = rpc(server, s, "tools/call", json!({"name": "view_map", "arguments": args}));
+    if r["isError"] == true {
+        return Err(r["content"][0]["text"].as_str().unwrap_or("").to_string());
+    }
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD.decode(r["content"][0]["data"].as_str().unwrap()).unwrap();
+    let dim = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    Ok(((dim(16), dim(20)), r["content"][1]["text"].as_str().unwrap().to_string()))
+}
+
+#[test]
+fn view_map_draws_a_layout_page_and_a_closer_look_at_it() {
+    let (server, mut s) = (mcp::Server::default(), sample());
+    s.run("layout.new", &json!({"name": "Page", "page": "a4", "orientation": "portrait", "template": "blank"})).unwrap();
+    // The page, fitted to the width, in its shape.
+    let ((w, h), caption) = look(&server, &mut s, json!({"layout": "page", "width": 300})).unwrap();
+    assert!((298..=300).contains(&w) && (422..=425).contains(&h), "{w} x {h}");
+    assert!(caption.starts_with("Layout \"Page\", page 210 x 297 mm,") && !caption.contains("Drawing it said"), "{caption}");
+    // A region is drawn at the dpi that fits it, not cut out of a page drawn small.
+    let ((w, h), caption) = look(&server, &mut s, json!({"layout": "Page", "region": [10, 10, 50, 30], "width": 500})).unwrap();
+    assert!((499..=501).contains(&w) && (299..=301).contains(&h), "{w} x {h}");
+    assert!(caption.contains("region 10.0, 10.0, 50.0, 30.0 mm (x, y, w, h)") && caption.contains("at 25"), "{caption}");
+    assert!(!caption.contains("cut to the page") && !caption.contains("at the 600 dpi"), "{caption}");
+    // ...at 600 dpi at the most, said.
+    let ((w, _), caption) = look(&server, &mut s, json!({"layout": "Page", "region": [0, 0, 10, 10], "width": 2048})).unwrap();
+    assert!((235..=238).contains(&w) && caption.contains("at the 600 dpi a page is drawn at the most"), "{w}: {caption}");
+    // A region past the page's edge is cut to it, said; one off the page is refused.
+    let (_, caption) = look(&server, &mut s, json!({"layout": "Page", "region": [180, 280, 100, 100]})).unwrap();
+    assert!(caption.contains("region 180.0, 280.0, 30.0, 17.0 mm (x, y, w, h), cut to the page"), "{caption}");
+    for (args, says) in [
+        (json!({"layout": "Page", "region": [300, 300, 10, 10]}), "is not on the page"),
+        (json!({"layout": "Page", "region": [0, 0, -5, 10]}), "is not on the page"),
+        (json!({"layout": "Page", "region": [1, 2, 3]}), "region must be four numbers"),
+        (json!({"layout": "Page", "region": [1, 2, 3, "x"]}), "region must be four numbers"),
+        (json!({"layout": "Nope"}), "no layout 'Nope'"),
+    ] {
+        let e = look(&server, &mut s, args.clone()).unwrap_err();
+        assert!(e.contains(says), "{args}: {e}");
+    }
+    // What drawing the page said reaches the model: a text cut off at the page's edge.
+    let text = json!({"layout": "Page", "kind": "text", "text": "A title far too long for the page", "size": 30, "x": 190, "y": 20, "w": 80, "h": 15});
+    s.run("layout.addElement", &text).unwrap();
+    let (_, caption) = look(&server, &mut s, json!({"layout": "Page", "width": 300})).unwrap();
+    assert!(caption.contains("Drawing it said:") && caption.contains("cut off"), "{caption}");
+}
+
+#[test]
+fn view_map_looks_closer_at_a_region_of_the_map_and_leaves_the_view() {
+    let (server, mut s) = (mcp::Server::default(), sample());
+    let (camera, view) = (s.map().camera, s.view_size);
+    // Without a height, the picture takes the region's shape: wider than tall here.
+    let ((w, h), caption) = look(&server, &mut s, json!({"region": [-10, 35, 30, 45], "width": 400})).unwrap();
+    assert!(w == 400 && h < 300, "{w} x {h}");
+    assert!(caption.contains("region -10, 35, 30, 45 (west, south, east, north)"), "{caption}");
+    let ((w, h), _) = look(&server, &mut s, json!({"region": [-10, 35, 30, 45], "width": 400, "height": 400})).unwrap();
+    assert_eq!((w, h), (400, 400));
+    assert!(s.map().camera == camera && s.view_size == view, "the view moved");
+    for args in [json!({"region": [30, 35, -10, 45]}), json!({"region": [-10, 35, 30, 95]})] {
+        let e = look(&server, &mut s, args.clone()).unwrap_err();
+        assert!(e.contains("must be [west, south, east, north]"), "{args}: {e}");
+    }
+    assert!(s.map().camera == camera, "a refused region moved the view");
+}
+
 #[test]
 fn mcp_limits_what_the_agent_may_do() {
     let path = std::env::temp_dir().join(format!("rustgis-mcp-{}.png", std::process::id()));

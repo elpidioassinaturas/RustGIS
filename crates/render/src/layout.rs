@@ -99,7 +99,15 @@ pub fn archive_revisions(layout: &Layout, maps: &[Map]) -> crate::ArchiveRevisio
 /// Renders a layout at `dpi` (dots per inch). `maps` are the project's maps, found by name.
 /// Refuses a linked archive changed while composing the page, including its different map frames.
 pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Result<Pixmap, String> {
-    render_page(layout, maps, dpi, info, true).map(|(pm, _)| pm)
+    render_page(layout, maps, dpi, info, true, None).map(|(pm, _)| pm)
+}
+
+/// [`render`] of the part of the page in `region` (`[x, y, w, h]` in millimetres from its top
+/// left, cut to the page), drawn at `dpi` rather than cut out of a whole page drawn smaller: a
+/// closer look at small text. The page's frames and texts are drawn as on the whole page, so a
+/// frame the region cuts is drawn whole and placed; the caller checks the region meets the page.
+pub fn render_region(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo, region: [f64; 4]) -> Result<Pixmap, String> {
+    render_page(layout, maps, dpi, info, true, Some(region)).map(|(pm, _)| pm)
 }
 
 /// What a page actually drew without, kept separately so legend-only waits redraw only on completion.
@@ -115,18 +123,26 @@ pub struct PagePending {
 /// The Layout view never waits for legend pictures or cast shadows still being worked out.
 /// Its caller redraws once the missing content lands, on desktop as well as in the browser.
 pub fn render_pending(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Result<(Pixmap, PagePending), String> {
-    render_page(layout, maps, dpi, info, false)
+    render_page(layout, maps, dpi, info, false, None)
 }
 
-/// [`render_pending`], its frames waiting for cast shadows when `wait_shadows` (an export).
-fn render_page(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo, wait_shadows: bool) -> Result<(Pixmap, PagePending), String> {
+/// [`render_pending`], its frames waiting for cast shadows when `wait_shadows` (an export), of
+/// the part of the page in `region` alone when one is given ([`render_region`]).
+fn render_page(
+    layout: &Layout,
+    maps: &mut [Map],
+    dpi: f64,
+    info: &PageInfo,
+    wait_shadows: bool,
+    region: Option<[f64; 4]>,
+) -> Result<(Pixmap, PagePending), String> {
     let _budget = legend_budget();
     let revisions = archive_revisions(layout, maps);
     let mut source_error = None;
     let result = if wait_shadows {
-        render_pending_inner(layout, maps, dpi, info, &mut source_error, true)
+        render_pending_inner(layout, maps, dpi, info, &mut source_error, true, region)
     } else {
-        crate::without_shadow_wait(|| render_pending_inner(layout, maps, dpi, info, &mut source_error, false))
+        crate::without_shadow_wait(|| render_pending_inner(layout, maps, dpi, info, &mut source_error, false, region))
     };
     if wait_shadows {
         finish_legends()?;
@@ -141,9 +157,19 @@ fn render_pending_inner(
     info: &PageInfo,
     source_error: &mut Option<String>,
     wait_legends: bool,
+    region: Option<[f64; 4]>,
 ) -> Option<(Pixmap, PagePending)> {
     let (w, h, k) = page_geometry(layout, dpi);
-    let bounds = tiny_skia::IntRect::from_xywh(0, 0, w, h)?;
+    let bounds = match region {
+        None => tiny_skia::IntRect::from_xywh(0, 0, w, h)?,
+        // In whole pixels, cut to the page, as an element's own bounds are.
+        Some([x, y, rw, rh]) => {
+            let (pw, ph) = (f64::from(w), f64::from(h));
+            let (x0, y0) = ((x * k).floor().clamp(0.0, pw), (y * k).floor().clamp(0.0, ph));
+            let (x1, y1) = (((x + rw) * k).ceil().clamp(0.0, pw), ((y + rh) * k).ceil().clamp(0.0, ph));
+            tiny_skia::IntRect::from_xywh(x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32)?
+        }
+    };
     let mut pending = PagePending::default();
     let env = series_env(layout, maps);
     let pm = draw_page(layout, maps, (info, &env), k, bounds, None, None, (&mut pending, wait_legends), source_error)?.into_pixmap();
