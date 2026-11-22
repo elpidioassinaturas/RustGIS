@@ -5213,6 +5213,8 @@ pub fn byte_range(p: &Value, url: &str) -> Result<Option<(u64, u64)>, String> {
     let grib = match p.get("format") {
         None | Some(Value::Null) => false,
         Some(Value::String(f)) if f.trim().eq_ignore_ascii_case("grib") => true,
+        // Without a range, another format is left as before ranges (an unknown key, ignored).
+        Some(_) if p.get("bytes").is_none_or(Value::is_null) => false,
         Some(_) => return Err("\"format\" is \"grib\", the one format a byte range is read as".into()),
     };
     let asked = match p.get("bytes") {
@@ -5315,7 +5317,8 @@ fn add_url_range(s: &mut Session, p: &Value, url: &str, range: (u64, u64), publi
     } else {
         cache::download_blocking_within(&ranged, len, cache::BLOCKING_TIMEOUT)
     };
-    let bytes = bytes.map_err(|e| range_failed(&ranged, e)).map_err(cache::large_file_hint).map_err(named)?;
+    // Without `large_file_hint`: a range timing out isn't helped by downloading the whole file.
+    let bytes = bytes.map_err(|e| range_failed(&ranged, e)).map_err(named)?;
     check_range_answer(&ranged, &bytes).map_err(named)?;
     let name = url_file_name(&ranged, &bytes).map_err(named)?;
     super::raster::add_named_bytes(s, p, name, bytes, b(p, "zoom")).map_err(named)

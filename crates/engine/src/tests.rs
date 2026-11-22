@@ -48902,12 +48902,31 @@ fn a_grib_files_byte_range_is_added_as_the_file() {
     let e = s.run("layer.addUrl", &json!({"url": format!("{base}/PREC.grb"), "bytes": [88, 187]})).unwrap_err();
     assert!(e.contains("answered 88 octets of the 100 asked for"), "{e}");
     // A server that answers the whole file to a range.
-    let (whole, _) = serve_file(file, false);
+    let (whole, _) = serve_file(file.clone(), false);
     let e = s.run("layer.addUrl", &json!({"url": format!("{whole}/PREC.grb"), "bytes": [88, 175]})).unwrap_err();
     assert!(e.contains(crate::render::rustgis_tiles::cache::NO_RANGES), "{e}");
     // From octet 0, refused once its answer is longer than the range, and said so.
     let e = s.run("layer.addUrl", &json!({"url": format!("{whole}/PREC.grb"), "bytes": [0, 87]})).unwrap_err();
     assert!(e.contains("more than the range asked for") && e.contains(crate::render::rustgis_tiles::cache::NO_RANGES), "{e}");
+    // A server answering other octets of the same length (the first record, `Content-Range:
+    // bytes 0-87/176`) for the second record asked for: refused, never read as it.
+    let first = file[..88].to_vec();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let wrong = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for mut c in listener.incoming().flatten() {
+            let _ = c.read(&mut [0u8; 4096]);
+            let head = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-87/176\r\nContent-Length: 88\r\nConnection: close\r\n\r\n";
+            let _ = c.write_all(head.as_bytes()).and_then(|()| c.write_all(&first));
+        }
+    });
+    let e = s.run("layer.addUrl", &json!({"url": format!("{wrong}/PREC.grb"), "bytes": [88, 175]})).unwrap_err();
+    assert!(e.contains("the server answered octets 0-87, not the 88-175 asked for"), "{e}");
+    // Without a range, "format" is left as it was before ranges: not refused.
+    let text = br#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [1, 2]}}]}"#;
+    let (plain, _) = serve_ranges(text.to_vec());
+    s.run("layer.addUrl", &json!({"url": format!("{plain}/points.geojson"), "format": "geojson"})).unwrap();
     // A range that isn't a GRIB message is refused, whatever its octets read as.
     let text = br#"{"type": "FeatureCollection", "features": []}"#.to_vec();
     let last = text.len() as u64 - 1;
