@@ -48908,6 +48908,12 @@ fn a_grib_files_byte_range_is_added_as_the_file() {
     // From octet 0, refused once its answer is longer than the range, and said so.
     let e = s.run("layer.addUrl", &json!({"url": format!("{whole}/PREC.grb"), "bytes": [0, 87]})).unwrap_err();
     assert!(e.contains("more than the range asked for") && e.contains(crate::render::rustgis_tiles::cache::NO_RANGES), "{e}");
+    // A range that isn't a GRIB message is refused, whatever its octets read as.
+    let text = br#"{"type": "FeatureCollection", "features": []}"#.to_vec();
+    let last = text.len() as u64 - 1;
+    let (other, _) = serve_ranges(text);
+    let e = s.run("layer.addUrl", &json!({"url": format!("{other}/record"), "bytes": [0, last], "format": "grib"})).unwrap_err();
+    assert!(e.contains("the range doesn't start a GRIB message"), "{e}");
     // Asked wrongly, or of another format: refused before anything is fetched.
     let grb = format!("{base}/PREC.grb");
     for (p, said) in [
@@ -48926,6 +48932,30 @@ fn a_grib_files_byte_range_is_added_as_the_file() {
         assert!(e.contains(said), "{p}: {e}");
         assert_eq!(sent.load(std::sync::atomic::Ordering::Relaxed), before, "{p}");
     }
+}
+
+/// A plugin's command asking for a GRIB file's range leaves it to the app, which completes the
+/// download with the range's address (the claim's own address with its range): it is added.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_plugin_commands_grib_range_is_added_when_the_app_completes_it() {
+    let mut file = grib1_message(1, 2);
+    file.extend(grib1_message(3, 4));
+    let (base, _) = serve_ranges(file.clone());
+    let mut s = world();
+    plugin("eng-grib-range", &["edit", "network"]);
+    let url = format!("{base}/run/PREC.grb");
+    let p = json!({"op": "layer.addUrl", "params": {"url": url, "bytes": [88, 175], "name": "Rain"}});
+    s.run_leaving_downloads("plugin:eng-grib-range/f", &p).unwrap();
+    let asked = s.take_url_requests();
+    assert_eq!(asked.len(), 1);
+    let id = s.download_started_for(&asked[0]).unwrap();
+    assert!(s.download_landed(id, file[88..].to_vec()));
+    // As the app completes it: the address it downloaded, with the request's name.
+    let add = json!({"id": id, "url": crate::cmd::layer::ranged_address(&url, (88, 175)), "name": "Rain"});
+    s.complete_download(id, &add).unwrap();
+    let layer = s.map().layer_by_name("Rain").filter(|l| l.is_raster()).unwrap();
+    assert_eq!(layer.raster.as_ref().unwrap().data.as_ref().unwrap().bands[0].data, vec![3.0, 4.0]);
 }
 
 /// Each page of a map series is georeferenced with its own view, not the first page's (#1191).

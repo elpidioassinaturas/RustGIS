@@ -5261,8 +5261,9 @@ pub fn ranged_address(url: &str, (first, last): (u64, u64)) -> String {
     format!("{url}{}{first}-{last}", crate::render::rustgis_tiles::cache::RANGE)
 }
 
-/// A range's answer is as long as the range: a server answering fewer octets (a range past the
-/// file's end) is refused, never read as the record. Other addresses pass.
+/// A range's answer is as long as the range and starts a GRIB message: a server answering fewer
+/// octets (a range past the file's end), or a range that isn't a record (whatever its octets read
+/// as, said), is refused, never read as the record. Other addresses pass.
 pub fn check_range_answer(url: &str, bytes: &[u8]) -> Result<(), String> {
     match crate::render::rustgis_tiles::cache::split_range(url) {
         (_, Some((first, last))) if bytes.len() as u64 != (last - first).saturating_add(1) => Err(format!(
@@ -5270,6 +5271,12 @@ pub fn check_range_answer(url: &str, bytes: &[u8]) -> Result<(), String> {
             bytes.len(),
             (last - first).saturating_add(1)
         )),
+        (_, Some(_)) if !bytes.starts_with(b"GRIB") => Err(match rustgis_data::io::sniff_extension(bytes) {
+            Some(ext) => format!(
+                "the range doesn't start a GRIB message: its octets read as a .{ext} file (check the range against the file's inventory)"
+            ),
+            None => "the range doesn't start a GRIB message (check the range against the file's inventory)".to_string(),
+        }),
         _ => Ok(()),
     }
 }
