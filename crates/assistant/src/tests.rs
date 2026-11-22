@@ -1542,6 +1542,48 @@ fn view_map_draws_a_layout_page_and_a_closer_look_at_it() {
     s.run("layout.addElement", &text).unwrap();
     let (_, caption) = look(&server, &mut s, json!({"layout": "Page", "width": 300})).unwrap();
     assert!(caption.contains("Drawing it said:") && caption.contains("cut off"), "{caption}");
+    // A region says it of the texts in it alone.
+    let (_, caption) = look(&server, &mut s, json!({"layout": "Page", "region": [180, 10, 30, 40]})).unwrap();
+    assert!(caption.contains("cut off"), "{caption}");
+    let (_, caption) = look(&server, &mut s, json!({"layout": "Page", "region": [0, 0, 50, 30]})).unwrap();
+    assert!(!caption.contains("Drawing it said"), "{caption}");
+    // Edges rounded outward to whole pixels still fit the 2048 asked.
+    let ((w, _), _) = look(&server, &mut s, json!({"layout": "Page", "region": [10, 10, 100, 50], "width": 2048})).unwrap();
+    assert!((2040..=2048).contains(&w), "{w}");
+    // A region of a large page is drawn at its own dpi, not the whole page's budget.
+    s.run("layout.new", &json!({"name": "Poster", "page": "a0", "template": "blank"})).unwrap();
+    let ((w, _), caption) = look(&server, &mut s, json!({"layout": "Poster", "region": [0, 0, 10, 10], "width": 2048})).unwrap();
+    assert!((235..=238).contains(&w) && caption.contains("at the 600 dpi"), "{w}: {caption}");
+}
+
+/// `view_map` of a layout reaches what its frames' maps do, not the active map.
+#[test]
+fn permission_view_map_of_a_layout_reaches_its_frames_maps() {
+    use rustgis_engine::policy::{AgentAccess, Effect, Effects, Outcome, Revocation, Scope};
+    struct LocalOnly;
+    impl Revocation for LocalOnly {
+        fn allows(&self, effects: Effects) -> bool {
+            !effects.contains(Effect::Network)
+        }
+    }
+    let local = Scope::agent(AgentAccess::Allow, false, "view-layout-local", None, std::sync::Arc::new(LocalOnly));
+    let mut s = Session::new(Project::default());
+    s.map_mut().tiles.push(rustgis_engine::map::TileLayer::new(
+        "Remote image",
+        rustgis_engine::map::TileKind::Raster,
+        "https://view-layout.invalid/{z}/{x}/{y}.png",
+    ));
+    s.run("layout.new", &json!({"name": "Page"})).unwrap();
+    // The active map is now one without tiles; the layout's frame still shows the remote one.
+    s.run("map.new", &json!({"name": "Plain"})).unwrap();
+    let review = |s: &mut Session, args: Value| {
+        let engine = tools::policy_call(&ToolCall { id: "v".into(), name: "view_map".into(), args }).unwrap().unwrap();
+        s.review(&local, &engine)
+    };
+    assert!(matches!(review(&mut s, json!({})), Outcome::Allowed), "the active map stays offline");
+    assert!(matches!(review(&mut s, json!({"layout": "Page"})), Outcome::Refused(_)), "the frame's tiles need the network");
+    // An unknown layout reaches nothing; view_map itself refuses it ("no layout 'Nope'").
+    assert!(matches!(review(&mut s, json!({"layout": "Nope"})), Outcome::Allowed));
 }
 
 #[test]

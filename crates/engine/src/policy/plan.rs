@@ -569,7 +569,8 @@ impl<'a> Builder<'a> {
                             .iter()
                             .filter_map(|id| context.project.maps.iter().find(|m| m.instance_id() == *id))
                             .fold(*effects, |reach, map| reach.union(crate::cmd::tiles::render_reach(map))),
-                        // An unknown layout is refused with the inputs below.
+                        // An unknown layout reaches nothing: a strict plan refuses it with the
+                        // inputs below, and view_map itself otherwise.
                         Some(Err(_)) => *effects,
                         None => effects.union(crate::cmd::tiles::render_reach(context.map())),
                     }

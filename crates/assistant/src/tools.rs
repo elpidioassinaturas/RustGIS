@@ -426,7 +426,9 @@ fn draw_layout(
         }
     };
     let (asked_w, asked_h) = (asked.0.unwrap_or(1024.0), asked.1.unwrap_or(MAX_VIEW));
-    let dpi_for = |w: f64, h: f64| (25.4 * (w / part[2]).min(h / part[3])).min(MAX_LAYOUT_DPI);
+    // A region's edges are rounded outward to whole pixels, up to one more each side.
+    let edge = if region.is_some() { 2.0 } else { 0.0 };
+    let dpi_for = |w: f64, h: f64| (25.4 * ((w - edge) / part[2]).min((h - edge) / part[3])).min(MAX_LAYOUT_DPI);
     let (png, w, h) =
         draw_within(asked_w, asked_h, max, |w, h| rustgis_engine::cmd::layout::layout_png(s, li, dpi_for(w, h), region.map(|_| part)))?;
     let (pxw, pxh) = png_size(&png);

@@ -104,10 +104,24 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> R
 
 /// [`render`] of the part of the page in `region` (`[x, y, w, h]` in millimetres from its top
 /// left, cut to the page), drawn at `dpi` rather than cut out of a whole page drawn smaller: a
-/// closer look at small text. The page's frames and texts are drawn as on the whole page, so a
-/// frame the region cuts is drawn whole and placed; the caller checks the region meets the page.
+/// closer look at small text. Its scale is the region's own, lowered only when the region's
+/// picture passes the page budget ([`MAX_SIDE`], `MAX_PIXELS`), not the whole page's. A frame the
+/// region meets is drawn whole and placed, as on the page; one it doesn't meet isn't drawn (its
+/// view still serves legends and extent indicators). The caller checks the region meets the page.
 pub fn render_region(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo, region: [f64; 4]) -> Result<Pixmap, String> {
-    render_page(layout, maps, dpi, info, true, Some(region)).map(|(pm, _)| pm)
+    let mut part = layout.clone();
+    for e in &mut part.elements {
+        // With room for its border and grid labels.
+        if matches!(e.kind, ElementKind::MapFrame { .. }) && !meets(e, region, 10.0) {
+            e.visible = false;
+        }
+    }
+    render_page(&part, maps, dpi, info, true, Some(region)).map(|(pm, _)| pm)
+}
+
+/// Whether element `e`'s box, grown by `margin` millimetres, meets `region` (`[x, y, w, h]` mm).
+pub fn meets(e: &rustgis_map::layout::Element, [x, y, w, h]: [f64; 4], margin: f64) -> bool {
+    e.x - margin < x + w && x < e.x + e.w + margin && e.y - margin < y + h && y < e.y + e.h + margin
 }
 
 /// What a page actually drew without, kept separately so legend-only waits redraw only on completion.
@@ -160,14 +174,17 @@ fn render_pending_inner(
     region: Option<[f64; 4]>,
 ) -> Option<(Pixmap, PagePending)> {
     let (w, h, k) = page_geometry(layout, dpi);
-    let bounds = match region {
-        None => tiny_skia::IntRect::from_xywh(0, 0, w, h)?,
-        // In whole pixels, cut to the page, as an element's own bounds are.
+    let (bounds, k) = match region {
+        None => (tiny_skia::IntRect::from_xywh(0, 0, w, h)?, k),
+        // In whole pixels, cut to the page, as an element's own bounds are, at the region's own
+        // scale within the budget a page has.
         Some([x, y, rw, rh]) => {
-            let (pw, ph) = (f64::from(w), f64::from(h));
+            let k = PT_PER_MM * (if dpi.is_finite() { dpi } else { 96.0 } / 96.0).clamp(0.25, 8.0);
+            let k = k.min((MAX_PIXELS / (rw * rh).max(1e-6)).sqrt()).min(MAX_SIDE / rw.max(rh).max(1e-6));
+            let (pw, ph) = (layout.width * k, layout.height * k);
             let (x0, y0) = ((x * k).floor().clamp(0.0, pw), (y * k).floor().clamp(0.0, ph));
             let (x1, y1) = (((x + rw) * k).ceil().clamp(0.0, pw), ((y + rh) * k).ceil().clamp(0.0, ph));
-            tiny_skia::IntRect::from_xywh(x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32)?
+            (tiny_skia::IntRect::from_xywh(x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32)?, k)
         }
     };
     let mut pending = PagePending::default();

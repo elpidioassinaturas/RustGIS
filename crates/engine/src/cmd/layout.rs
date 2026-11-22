@@ -5691,7 +5691,11 @@ pub fn layout_png(s: &mut Session, li: usize, dpi: f64, region: Option<[f64; 4]>
         pages: series.as_ref().map_or(1, |i| i.0),
         page_name: series.map(|i| i.1).unwrap_or_default(),
     };
-    let clipped = rustgis_render::layout::clipped_text(&layout, &s.project.maps, dpi, &info);
+    let mut clipped = rustgis_render::layout::clipped_text(&layout, &s.project.maps, dpi, &info);
+    // A region says the texts cut off in it, not those elsewhere on the page it doesn't show.
+    if let Some(r) = region {
+        clipped.retain(|(id, _)| layout.element(*id).is_some_and(|e| rustgis_render::layout::meets(e, r, 0.0)));
+    }
     let img = super::share::saying_shadows(s, "The layout", |s| match region {
         Some(r) => rustgis_render::layout::render_region(&layout, &mut s.project.maps, dpi, &info, r),
         None => rustgis_render::layout::render(&layout, &mut s.project.maps, dpi, &info),
