@@ -1335,7 +1335,8 @@ pub(super) fn read_with_nodata<R: Read + Seek>(r: R, name: &str, sidecar_nodata:
 /// `None` when it isn't packed colour: not one `UInt32` band, or a pixel left visible whose alpha
 /// byte is neither 0 nor 255, or none at 255 (a band of counts or IDs). `grey` tells which files
 /// to decode again; their raw values decide. A rotated or skewed file (read resampled north up),
-/// or one too large to hold four bands of, is an error, for the caller to say. The image is
+/// one without coordinates (a stand-in place), or one too large to hold four bands of, is an
+/// error, for the caller to say. The image is
 /// decoded once more, on one thread: at the peak, `grey`, the packed `u32`s and the four bands,
 /// six times the band. What `grey` lost as it was read (its `lost`) is left for the caller to say.
 pub fn unpack_rgba(grey: &Raster, bytes: &[u8]) -> Result<Option<Raster>> {
@@ -1372,6 +1373,11 @@ pub fn unpack_rgba(grey: &Raster, bytes: &[u8]) -> Result<Option<Raster>> {
     let shown = || packed.iter().enumerate().filter(|(i, p)| !hole(*i, **p)).map(|(_, p)| p >> 24);
     if !shown().all(|a| a == 0 || a == 255) || !shown().any(|a| a == 255) {
         return Ok(None);
+    }
+    // A file with no GeoTIFF tags has only a stand-in place, which the rebuilt raster would
+    // hold, and be written with, as coordinates.
+    if !grey.georeferenced {
+        return Err(err("it has no coordinates, and packed colours are split only with them"));
     }
     let (cols, rows) = (w as usize, h as usize);
     let channel = |shift: u32| super::collected(cols, rows, packed.iter().map(|p| ((p >> shift) & 0xFF) as f32));

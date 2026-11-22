@@ -698,6 +698,16 @@ fn packed_colour_outputs_come_back_as_rgb_bands() {
     let (bytes, _, messages) = returned(&turned);
     assert_eq!(bytes, turned);
     assert!(messages.iter().any(|m| m.contains("couldn't be split") && m.contains("rotated or skewed")), "{messages:?}");
+    // A file with no GeoTIFF tags has only a stand-in place: never written out as coordinates.
+    let tagless = {
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut enc = tiff::encoder::TiffEncoder::new(&mut out).unwrap();
+        enc.write_image::<tiff::encoder::colortype::Gray32>(2, 2, &[0xFF0A_141E; 4]).unwrap();
+        out.into_inner()
+    };
+    let (bytes, _, messages) = returned(&tagless);
+    assert_eq!(bytes, tagless, "kept as written");
+    assert!(messages.iter().any(|m| m.contains("couldn't be split") && m.contains("no coordinates")), "{messages:?}");
 }
 
 /// Options left at the manifest's defaults aren't passed, so the runner uses its own defaults as
