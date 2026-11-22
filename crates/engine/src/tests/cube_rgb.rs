@@ -18,7 +18,8 @@ const RGB: [[f32; 3]; 3] = [[10.0, 50.0, 30.0], [20.0, 10.0, 70.0], [30.0, 40.0,
 
 /// Three dates of B04, B03 and B02 (and B05 at half their cells) with an SCL-like mask (4 clear,
 /// 9 cloud): the first cloudy in column 0, the second clear everywhere, the third cloudy in
-/// column 7. The second's B02 has no value at (3, 3). A fourth item has no B02 and is left out.
+/// column 7. The second's B02 has no value at (3, 3). A fourth item has only B04 and a fifth no
+/// B04: both are left out.
 fn collection() -> String {
     let flat = |v: f32| cog(vec![v; 64], 8, None);
     let mask = |cloudy: Option<usize>| cog((0..64).map(|c| if Some(c % 8) == cloudy { 9.0 } else { 4.0 }).collect(), 8, None);
@@ -37,12 +38,19 @@ fn collection() -> String {
     }
     files.push(("/B04_3.tif".into(), flat(99.0)));
     files.push(("/m3.tif".into(), mask(None)));
+    files.push(("/B03_4.tif".into(), flat(99.0)));
+    files.push(("/B02_4.tif".into(), flat(99.0)));
+    files.push(("/m4.tif".into(), mask(None)));
     let (files, _) = serve_ranged_files(files);
-    let features: Vec<String> = ["2024-01-01", "2024-01-17", "2024-02-02", "2024-02-18"]
+    let features: Vec<String> = ["2024-01-01", "2024-01-17", "2024-02-02", "2024-02-18", "2024-02-20"]
         .iter()
         .enumerate()
         .map(|(k, d)| {
-            let keys: &[&str] = if k < 3 { &["B04", "B03", "B02", "B05"] } else { &["B04"] };
+            let keys: &[&str] = match k {
+                0..3 => &["B04", "B03", "B02", "B05"],
+                3 => &["B04"],
+                _ => &["B03", "B02"],
+            };
             let mut assets: Vec<String> = keys.iter().map(|a| format!(r#""{a}": {{"href": "{files}/{a}_{k}.tif"}}"#)).collect();
             assets.push(format!(r#""SCL": {{"href": "{files}/m{k}.tif"}}"#));
             format!(
@@ -79,6 +87,8 @@ fn several_bands_summarised_as_one_rgb_layer() {
         let names: Vec<&str> = raster.bands.iter().map(|b| b.name.as_str()).collect();
         let assets: Vec<&str> = p["assets"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
         assert_eq!(names, assets);
+        // Three bands are drawn as RGB, other counts not.
+        assert_eq!(matches!(raster.color, rustgis_data::raster::ColorHint::Rgb { alpha: false }), assets.len() == 3, "{p}");
         let said = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
         (raster.bands.iter().map(|b| b.data.clone()).collect(), said)
     };
@@ -105,7 +115,7 @@ fn several_bands_summarised_as_one_rgb_layer() {
     };
     check(&median, &middle, "median");
     assert_eq!(median[0][9], 10.0, "three dates: date 0's, not the band's own middle (20)");
-    assert!(said.iter().any(|t| t.contains("1 item(s) left out") && t.contains("B04, B03, B02")), "{said:?}");
+    assert!(said.iter().any(|t| t.contains("2 item(s) left out") && t.contains("B04, B03, B02")), "{said:?}");
     assert!(said.iter().any(|t| t.contains("1 cell(s) had a value in some of the bands")), "{said:?}");
     // First, the clearest date first (the second, then the first and third, tied, by date).
     let (first, _) = reduce(&mut s, &with(json!({"stat": "first"})));
@@ -136,6 +146,13 @@ fn several_bands_summarised_as_one_rgb_layer() {
     }
     let e = s.run("cube.trend", &with(json!({}))).unwrap_err();
     assert!(e.contains("of one band"), "{e}");
+    // A catalog entry's band gives way to the bands asked for; one asked for alongside it doesn't.
+    let entry = json!({"cube": "bdc-s2-16d-ndvi", "assets": ["B04", "B03"]});
+    let q = crate::cmd::cube_catalog::with_entry(&entry).unwrap();
+    assert_eq!((q["collection"].as_str(), q.get("asset")), (Some("S2-16D-2"), None));
+    let e =
+        crate::cmd::cube_catalog::with_entry(&json!({"cube": "bdc-s2-16d-ndvi", "asset": "B04", "assets": ["B04", "B03"]})).unwrap_err();
+    assert!(e.contains("leave out asset"), "{e}");
 }
 
 /// A stack of layers has no assets to read together: refused.

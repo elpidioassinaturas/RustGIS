@@ -1933,7 +1933,11 @@ impl ReduceRun {
                 .groups
                 .iter()
                 .map(|(name, _)| {
-                    let columns: Vec<Vec<f32>> = slots.by_ref().take(nb).filter_map(|c| c.into_iter().next().map(|(_, b)| b)).collect();
+                    let columns: Vec<Vec<f32>> = slots
+                        .by_ref()
+                        .take(nb)
+                        .map(|c| c.into_iter().next().map(|(_, b)| b).ok_or_else(|| format!("{name}: a band came out with no values")))
+                        .collect::<Result<_, _>>()?;
                     let hint = if nb == 3 { raster::ColorHint::Rgb { alpha: false } } else { raster::ColorHint::Gray };
                     let mut r = Raster::new(name.clone(), grid.width, height, columns, grid.transform, grid.crs, None, hint, "Float32")
                         .map_err(|e| e.to_string())?;

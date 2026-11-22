@@ -607,6 +607,8 @@ pub fn cube_files(s: &mut Session, p: &Value, max_items: usize, mask: Option<&st
             continue;
         };
         let Some(a) = i.assets.iter().find(|a| a.key.eq_ignore_ascii_case(asset)) else {
+            // With several bands asked for, said with the items lacking one of the others.
+            lacking += usize::from(!others.is_empty());
             without += 1;
             continue;
         };
