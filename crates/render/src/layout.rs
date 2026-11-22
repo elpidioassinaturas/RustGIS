@@ -107,12 +107,23 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> R
 /// closer look at small text. Its scale is the region's own, lowered only when the region's
 /// picture passes the page budget ([`MAX_SIDE`], `MAX_PIXELS`), not the whole page's. A frame the
 /// region meets is drawn whole and placed, as on the page; one it doesn't meet isn't drawn (its
-/// view still serves legends and extent indicators). The caller checks the region meets the page.
+/// view still serves legends and extent indicators), unless a table or chart reads it. The caller checks the region meets the page.
 pub fn render_region(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo, region: [f64; 4]) -> Result<Pixmap, String> {
+    // Tables and charts read their frame's features as its drawing reads them (a streamed
+    // layer holds the view drawn last), so the frames they show stay drawn.
+    let read: Vec<u32> = layout
+        .elements
+        .iter()
+        .filter(|e| e.visible)
+        .filter_map(|e| match &e.kind {
+            ElementKind::Table { frame, .. } | ElementKind::Chart { frame, .. } => Some(*frame),
+            _ => None,
+        })
+        .collect();
     let mut part = layout.clone();
     for e in &mut part.elements {
         // With room for its border and grid labels.
-        if matches!(e.kind, ElementKind::MapFrame { .. }) && !meets(e, region, 10.0) {
+        if matches!(e.kind, ElementKind::MapFrame { .. }) && !read.contains(&e.id) && !meets(e, region, 10.0) {
             e.visible = false;
         }
     }
