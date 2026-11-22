@@ -675,9 +675,11 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
 - **Guide lines**: a point's or a polygon's label can be curved along a line of another layer,
   as a range's name follows its ridge (ridge and valley lines from GeoLibre's
   `ridge_and_valley_vectors`, or lines drawn by hand; the guide layer needn't be shown). Each
-  label follows the guide line with the same value in the given field as its feature has; with
-  no field, or no such line, a polygon's goes on the longest guide line in view whose stretch
-  under the text is inside it, and a point's on the nearest guide line within the text's width.
+  label follows the guide line with the same value in the given field as its feature has: a
+  polygon's wherever that line runs in view, a point's only when it is within the text's width.
+  With no field, or no such line the text fits along, a polygon's goes on the longest guide line
+  in view whose stretch under the text is inside it, and a point's on the nearest guide line
+  within the text's width.
   A feature with no guide line its text fits along is labelled as without a guide
   (`labels.placement={"layer": "Serras", "guide": {"layer": "Cumeadas", "field": "nome"}}`;
   `"guide": null` removes it).

@@ -350,6 +350,7 @@ pub(super) fn notices_for_maps(text: &str, project: &Project, maps_only: bool) -
         let mut notices = count(raw, retained, &project.name, "the imported maps");
         notices.extend(refused_reference_scales(file.maps.iter().take(project.maps.len()).flat_map(|m| &m.layers)));
         notices.extend(hidden(project.maps.iter().flat_map(|m| &m.layers)));
+        notices.extend(unfollowed_guides(project.maps.iter()));
         return Ok(notices);
     }
     let raw = file.maps.iter().chain(file.offline_areas.iter().map(|a| &a.data)).flat_map(|m| &m.layers).chain(file.styles.iter());

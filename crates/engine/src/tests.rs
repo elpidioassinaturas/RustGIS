@@ -4765,6 +4765,18 @@ fn a_guide_its_labels_cant_follow_is_said_on_opening() {
     assert!(said.len() == 1 && said[0].contains("1 perpendicular label class(es)"), "{said:?}");
 }
 
+/// A limited project-map import (#2262) audits the guides of the maps it keeps, as a full open does.
+#[test]
+fn a_limited_map_import_says_a_guide_it_cant_follow() {
+    let mut s = world();
+    let lakes = s.map_mut().layers.iter_mut().find(|l| l.name == "Lakes").unwrap();
+    lakes.labels.default.guide = Some(crate::map::LabelGuide { layer: "Nowhere".into(), field: None });
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut read = Project::from_import_maps_json(&text, None, s.project.maps.len()).unwrap();
+    let said: Vec<String> = read.take_read_notices(&crate::project::ALL_PARTS).iter().map(|n| n.english()).collect();
+    assert!(said.iter().any(|n| n.contains("guide") && n.contains("Nowhere")), "{said:?}");
+}
+
 #[test]
 fn rivers_are_labelled_along_their_lines_in_italics() {
     let mut s = world();

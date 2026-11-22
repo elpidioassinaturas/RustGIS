@@ -4249,14 +4249,14 @@ fn holds_picture(cmds: &[gpu_scene::DrawCmd]) -> bool {
 
 /// Whether a frame of `map` for `view` can start from a kept picture and keep its own
 /// ([`frame_cache`]): flat and north-up, with no layer drawing from another (a mask, the swipe,
-/// labels turned square to another layer's lines, terrain water).
+/// labels turned square to another layer's lines or curved along a guide layer, terrain water).
 fn keeps_pictures(map: &Map, view: &View) -> bool {
     view.camera.bearing == 0.0
         && view.camera.pitch == 0.0
         && !map.projection.is_globe()
         && map.swipe.is_none()
         && map.view.terrain.as_ref().is_none_or(|t| t.water.is_none())
-        && map.layers.iter().all(|l| l.mask.is_none() && l.labels.in_order().all(|c| c.square_to.is_none()))
+        && map.layers.iter().all(|l| l.mask.is_none() && l.labels.in_order().all(|c| c.square_to.is_none() && c.guide.is_none()))
 }
 
 /// Draws one north-up frame. `labels_to` says where its labels go: a turned or tilted view the

@@ -98,7 +98,7 @@ pub(crate) enum Near<'a> {
 /// One line of `text`, each character `measure` wide and `gap` apart, curved along a guide line:
 /// the label's centre and its characters. A polygon's tries the lines whose field holds `value`
 /// (the feature's, as text, ignoring case) first, longest first, wherever they run; with none
-/// such, those inside it. A point's takes the nearest line within the text's width, one holding
+/// such that fits, those inside it. A point's takes the nearest line within the text's width, one holding
 /// its value before the others there: a line of its value farther off isn't its own.
 /// Along each line its middle is tried, then places either side ([`line_labels::positions`]).
 /// `None` when the text follows none of them: the label is placed as without a guide.
@@ -160,8 +160,10 @@ fn curved(guides: &Guides, value: Option<&str>, near: Near<'_>, advances: &[f32]
             })
         }
         Near::Polygon(within, rings) => {
-            if let Some(ids) = matched {
-                return longest_first(ids.clone()).iter().filter_map(line).find_map(|l| along(l, &|_| true));
+            if let Some(ids) = matched
+                && let Some(c) = longest_first(ids.clone()).iter().filter_map(line).find_map(|l| along(l, &|_| true))
+            {
+                return Some(c);
             }
             if within.is_some_and(|b| guides.meeting(b).is_empty()) {
                 return None;
@@ -237,6 +239,20 @@ mod tests {
         );
         assert!(curved(&guides, None, far, &advances(), 1.0, 10.0).is_none());
         assert!(!asked.get(), "its outline isn't worked out");
+    }
+
+    /// A polygon's value's line too short for its text falls to the line inside it, not to none.
+    #[test]
+    fn a_polygon_whose_named_line_is_too_short_takes_one_inside_it() {
+        let mut guides = Guides::default();
+        guides.push(&[(500.0, 600.0), (540.0, 600.0)], Some("Serra Grande"));
+        let straight: Vec<(f32, f32)> = (0..=10).map(|i| (480.0 + 44.0 * i as f32, 600.0)).collect();
+        guides.push(&straight, None);
+        let rings = vec![vec![(480.0, 560.0), (920.0, 560.0), (920.0, 640.0), (480.0, 640.0)]];
+        let named = Near::Polygon(None, Box::new(|| Some(rings)));
+        let (c, turns) =
+            curved(&guides, Some("serra grande"), named, &advances(), 1.0, 10.0).expect("inside, its named line being too short");
+        assert!((c.1 - 600.0).abs() < 1.0 && !turns.is_empty(), "{c:?}");
     }
 
     /// A dense stretch keeps a point every half a point at least, and its ends; the grid finds a
