@@ -467,6 +467,47 @@ fn geopackage_provenance_keeps_a_linked_path() {
     assert!(paths.contains(&format!("{}-wal", resolved.display())), "{paths:?}");
 }
 
+/// A retained conversion read after its original changed names the original as it was when the
+/// conversion was opened, not as it is now; a DuckDB database's write-ahead log with it (#2639).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_conversion_names_its_original_as_it_was_when_opened() {
+    use crate::provenance::{Capture, Fingerprint};
+    let folder = tempfile::tempdir().unwrap();
+    let original = folder.path().join("drawing.dwg");
+    std::fs::write(&original, b"first").unwrap();
+    let converted = folder.path().join("cache.fgb");
+    write_fgb(&converted);
+    let source = super::fgb::FgbSource::open_converted_path(&converted, "grid", &original, None).unwrap();
+    let inputs = || {
+        let captured = Capture::start();
+        assert!(!source.read(&Request { extent: None, limit: 1 }).unwrap().features.is_empty());
+        captured.inputs()
+    };
+    let before = inputs();
+    assert!(before.len() == 1 && before[0].size == Some(5) && before[0].path == original.display().to_string(), "{before:?}");
+    std::fs::write(&original, b"changed since").unwrap();
+    assert_eq!(inputs(), before, "the conversion holds the original as it was");
+    // GeoParquet from a DuckDB database: the database and its log as they were.
+    let db = folder.path().join("places.duckdb");
+    std::fs::write(&db, b"db").unwrap();
+    std::fs::write(folder.path().join("places.duckdb.wal"), b"wal").unwrap();
+    let parquet = folder.path().join("cache.parquet");
+    write_parquet(&parquet, true);
+    let source = super::parquet::ParquetSource::open_converted_path(&parquet, "grid", Some(&db), None).unwrap();
+    let inputs = || {
+        let captured = Capture::start();
+        assert!(!source.read(&Request { extent: None, limit: 1 }).unwrap().features.is_empty());
+        captured.inputs()
+    };
+    let before: Vec<Fingerprint> = inputs();
+    assert_eq!(before.len(), 2, "{before:?}");
+    assert!(before.iter().any(|i| i.path.ends_with("places.duckdb.wal") && i.size == Some(3)), "{before:?}");
+    assert!(!before.iter().any(|i| i.path.ends_with("cache.parquet")), "{before:?}");
+    std::fs::write(folder.path().join("places.duckdb.wal"), b"more changes").unwrap();
+    assert_eq!(inputs(), before);
+}
+
 /// 30 × 20 points over the world, named and numbered.
 fn points() -> Vec<(Coord, String, i64)> {
     let mut v = Vec::new();
@@ -3747,7 +3788,7 @@ fn geopackage_export_adds_and_replaces_tables_and_keeps_the_others() {
     }
     let to = |mode, name: Option<&str>| GpkgTable { mode, name: name.map(String::from) };
     let written = write_path_to(&permits, &path, Crs::LonLat, &to(GpkgMode::AddTable, None)).unwrap();
-    assert_eq!(written, (0, Some(GpkgWritten { table: "permits".into(), replaced: false, dependents: vec![] })));
+    assert_eq!(written, (0, Some(GpkgWritten { table: "permits".into(), replaced: false, dependents: vec![] }), Vec::new()));
     rusqlite::Connection::open(&path).unwrap().execute_batch("INSERT INTO gpkg_ogr_contents VALUES ('permits', 3)").unwrap();
     assert_eq!(gpkg_tables(&path), ["owners", "parcels", "permits"]);
     // The file's own trigger on its contents didn't run.
@@ -4051,7 +4092,14 @@ fn native_file_dates_preserve_zone_policy_and_fractional_seconds() {
     let path = temp.path().join("stream.parquet");
     let summary = crate::export::write_source_in(source.as_ref(), &ds, &path, Crs::LonLat).unwrap();
     assert_eq!(summary.written, 2);
-    assert_eq!(summary.date_messages.len(), 2);
+    // Without a label of their own: the export adds its path once.
+    assert_eq!(
+        summary.date_messages,
+        [
+            "2 date-times were written in UTC without their original offsets, in 'instant'",
+            "2 date-times were written as ISO text because their column mixes zoned and unzoned values, in 'mixed'"
+        ]
+    );
     let (streamed, _) = crate::io::read_path(&path).unwrap();
     assert_eq!(streamed.fields, back.fields);
     ds.features[0].attrs[0] = Value::Text("2026-02-30".into());

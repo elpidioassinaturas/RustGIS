@@ -10,6 +10,9 @@ use serde_json::{Map, Value, json};
 
 use crate::sources::{self, Sources};
 
+#[path = "connection_tile_test.rs"]
+pub mod tile_test;
+
 /// The desktop preference saved connections are kept under.
 pub const PREF: &str = "connections";
 /// The version of that preference this RustGIS reads and writes. One from a newer RustGIS isn't
@@ -58,7 +61,6 @@ pub const SERVICE_AUTH: &[&str] = &["none", "basic", "header", "query", "arcgis"
 pub const WEB: &str = "web";
 pub const S3_CREDENTIALS: &[&str] = &["keys", "profile", "environment", "none"];
 pub const DESKTOP_ONLY: &str = "database connections are used by the desktop app";
-pub const XYZ_TEST: &str = "This is an XYZ tile URL template, not a service endpoint. Use Add Tile Layer to add it to the map.";
 
 /// Whether a serialized flag is off (so it is left out).
 fn is_false(value: &bool) -> bool {
@@ -160,39 +162,10 @@ impl Kept {
     /// classified on the original object first, beside the others and `address` (the one a row
     /// keeps apart from them): a bare `key` is a secret beside a web address, and an address
     /// holding a secret doesn't stop being one. Only then are the classified entries removed.
-    fn without_secrets(&mut self, mut o: Map<String, Value>, address: &str) -> Map<String, Value> {
-        // Count address-bearing siblings once; unknown preference fields are not capped.
-        let addresses =
-            o.iter().filter(|(k, v)| !k.eq_ignore_ascii_case("data") && !k.eq_ignore_ascii_case("text") && web_address(v, 0)).count();
-        let beside = web_address(&Value::String(address.into()), 0);
-        let secret: BTreeSet<String> = o
-            .iter()
-            .filter(|(k, v)| {
-                let mut probe = Map::new();
-                probe.insert((*k).clone(), (*v).clone());
-                let own_address = !k.eq_ignore_ascii_case("data") && !k.eq_ignore_ascii_case("text") && web_address(v, 0);
-                if beside || addresses > usize::from(own_address) {
-                    probe.insert("\u{1}beside".into(), "https://a".into());
-                }
-                sources::holds_secret(&Value::Object(probe))
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-        self.secrets += secret.len();
-        o.retain(|k, _| !secret.contains(k));
+    fn without_secrets(&mut self, o: Map<String, Value>, address: &str) -> Map<String, Value> {
+        let (o, secrets) = sources::without_secrets(o, sources::web_address(&Value::String(address.into()), 0));
+        self.secrets += secrets;
         o
-    }
-}
-
-/// Whether `v` is, or holds, a web address (not under a file's `data` or `text`).
-fn web_address(v: &Value, depth: usize) -> bool {
-    match v {
-        Value::String(t) => t.trim_start().get(..4).is_some_and(|p| p.eq_ignore_ascii_case("http")),
-        Value::Object(o) if depth < 4 => {
-            o.iter().any(|(k, v)| !k.eq_ignore_ascii_case("data") && !k.eq_ignore_ascii_case("text") && web_address(v, depth + 1))
-        }
-        Value::Array(a) if depth < 4 => a.iter().any(|v| web_address(v, depth + 1)),
-        _ => false,
     }
 }
 
@@ -509,7 +482,20 @@ pub fn clean(mut c: Connection) -> Result<(Connection, bool), String> {
     let stripped = clean_login(&mut c)? || stripped;
     c.name = name_text(&c.name);
     if c.name.is_empty() {
-        c.name = if c.kind == "s3" && c.address.is_empty() { "AWS S3".into() } else { sources::default_name(&c.address) };
+        c.name = if c.kind == "s3" && c.address.is_empty() {
+            "AWS S3".into()
+        } else if SERVICE_KINDS.contains(&c.kind.as_str()) && tile_test::is_template(&c.address) {
+            login_origin(&c)
+                .or_else(|| {
+                    let (scheme, tail) = c.address.split_once("://")?;
+                    let host = tail.split(['/', '?', '#']).next()?.strip_prefix("{s}.")?;
+                    crate::render::rustgis_tiles::logins::origin(&format!("{scheme}://{host}"))
+                })
+                .and_then(|origin| origin.split_once("://").map(|(_, host)| host.chars().take(80).collect()))
+                .unwrap_or_else(|| "XYZ tiles".into())
+        } else {
+            sources::default_name(&c.address)
+        };
     }
     c.group = name_text(&c.group);
     if c.kind != "s3" {

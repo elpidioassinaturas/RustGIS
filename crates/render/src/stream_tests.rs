@@ -28,6 +28,7 @@ impl FeatureSource for Chunks {
             rounded_dates: Vec::new(),
             null_text: Vec::new(),
             notes: Vec::new(),
+            not_utf8: Vec::new(),
         })
     }
     fn streams_chunks(&self) -> bool {
@@ -111,6 +112,7 @@ fn complete_chunks_preserve_painter_order_filters_transparency_labels_and_select
                 rounded_dates: Vec::new(),
                 null_text: Vec::new(),
                 notes: Vec::new(),
+                not_utf8: Vec::new(),
             })
         }
         fn streams_chunks(&self) -> bool {
@@ -556,6 +558,7 @@ fn layout_export_keeps_all_drawn_legend_classes() {
             columns: 1,
             labels: Default::default(),
             color: None,
+            text_size: rustgis_map::layout::LEGEND_TEXT_PT,
         },
     );
     let expected = layout::render(&page, &mut [base.clone()], 96.0, &layout::PageInfo::default()).unwrap();
@@ -626,7 +629,14 @@ fn legend_sizing_clears_recovered_source_errors_and_reports_a_later_failure() {
             std::fs::rename(&moved, &path).unwrap();
         }
         // Size the legend alone: no frame read, reopen or notice pass can clear the error.
-        let sizes = layout::legend_sizes_with_no_data_mm(&mut map, 300000.0, false, false, false, (&[], &Default::default()));
+        let sizes = layout::legend_sizes_with_no_data_mm(
+            &mut map,
+            300000.0,
+            false,
+            false,
+            (false, rustgis_map::layout::LEGEND_TEXT_PT),
+            (&[], &Default::default()),
+        );
         let source = map.layer_mut(id).unwrap().source.as_mut().unwrap();
         if missing {
             assert!(sizes.is_none());
@@ -865,6 +875,7 @@ fn pitched_mixed_sources_keep_windows_and_pending_on_the_owner() {
                 rounded_dates: Vec::new(),
                 null_text: Vec::new(),
                 notes: Vec::new(),
+                not_utf8: Vec::new(),
             })
         }
     }

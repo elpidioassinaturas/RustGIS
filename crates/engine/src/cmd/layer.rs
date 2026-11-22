@@ -347,12 +347,12 @@ pub fn commands() -> Vec<C> {
         C::new("layer.lineStrokes", "Line Strokes", "Style › Drawing", line_strokes).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(need_lines_or_points)
             .params(
-                r##"{"layer"?, "strokes": [{"color"?: "#RRGGBB"|"#RRGGBBAA"|null (null: the renderer's line colour), "width"?: points|null (null: the renderer's width), "offset"?: points (positive: right of the line's direction, negative: left), "cap"?: "round"|"flat"|"square", "join"?: "round"|"miter"|"bevel", "level"?: 0..255|null (with layer.strokeLevels: the level it draws at; null: its place in the stack), "dash"?: [points, …]|null (dash, gap, … in turn, at most 8; null: solid), "markers"?: {"mark"?: "circle"|"square"|"triangle"|"diamond"|"star"|"character"|"image"|"hash" (a mark across the line), "char"?: text (a character of a font as the marker instead of a shape), "font"?: text (the installed family it is drawn from; none: the label font), "image"?: text (a PNG or JPEG image as base64 of at most 2 MiB, as the marker instead of a shape: as wide as its size, as tall as its proportions make it; the stroke's colour and the outline don't show), "size"?: points (a marker's size, a hash mark's length; default 4), "at"?: "interval"|"vertices"|"innerVertices"|"first"|"last"|"middle"|"segmentMiddles" or a list of them (default "interval"), "interval"?: points (default 12), "offsetAlong"?: points (from the start, back from the end, on from the middle), "rotate"?: bool (turned with the line; default true), "averageAngle"?: points (the stretch of line a marker at an interval turns with; 0: its segment), "angle"?: degrees clockwise (a hash mark at 0 crosses the line square), "outline"?: "#RRGGBB"|"#RRGGBBAA" (the markers' outline, as wide as the stroke)}|null (markers or hash marks along the line in the stroke's colour, instead of a line; cap, join and dash don't apply)}] (drawn bottom first; [] goes back to the single stroke, or for a class to the layer's strokes; on a point layer they are its marks: each stroke's markers drawn at the point in place of the symbol's, "offsetAlong" shifting a mark right and "offset" down, both turned with its "angle", and "rotate" turning it by layer.markerRotation's field), "value"?: text|number (a Unique Values class's own strokes), "index"?: number (a Graduated Colors class's, 0 = the lowest), "other"?: true (Unique Values' <all other values>)}"##,
+                r##"{"layer"?, "strokes": [{"color"?: "#RRGGBB"|"#RRGGBBAA"|null (null: the renderer's line colour), "width"?: points|null (null: the renderer's width), "offset"?: points (positive: right of the line's direction, negative: left), "cap"?: "round"|"flat"|"square", "join"?: "round"|"miter"|"bevel", "level"?: 0..255|null (with layer.strokeLevels: the level it draws at; null: its place in the stack), "dash"?: [points, …]|null (dash, gap, … in turn, at most 8; null: solid), "markers"?: {"mark"?: "circle"|"square"|"triangle"|"diamond"|"star"|"character"|"image"|"hash" (a mark across the line), "char"?: text (a character of a font as the marker instead of a shape), "font"?: text (the installed family it is drawn from; none: the label font), "image"?: text (a PNG or JPEG image as base64 of at most 2 MiB and 2048 × 2048 pixels, as the marker instead of a shape: as wide as its size, as tall as its proportions make it; the stroke's colour and the outline don't show), "size"?: points (a marker's size, a hash mark's length; default 4), "at"?: "interval"|"vertices"|"innerVertices"|"first"|"last"|"middle"|"segmentMiddles" or a list of them (default "interval"), "interval"?: points (default 12), "offsetAlong"?: points (from the start, back from the end, on from the middle), "rotate"?: bool (turned with the line; default true), "averageAngle"?: points (the stretch of line a marker at an interval turns with; 0: its segment), "angle"?: degrees clockwise (a hash mark at 0 crosses the line square), "outline"?: "#RRGGBB"|"#RRGGBBAA" (the markers' outline, as wide as the stroke)}|null (markers or hash marks along the line in the stroke's colour, instead of a line; cap, join and dash don't apply)}] (drawn bottom first; [] goes back to the single stroke, or for a class to the layer's strokes; on a point layer they are its marks: each stroke's markers drawn at the point in place of the symbol's, "offsetAlong" shifting a mark right and "offset" down, both turned with its "angle", and "rotate" turning it by layer.markerRotation's field), "value"?: text|number (a Unique Values class's own strokes), "index"?: number (a Graduated Colors class's, 0 = the lowest), "other"?: true (Unique Values' <all other values>)}"##,
             ),
         C::new("layer.fillLayers", "Fill Layers", "Style › Drawing", fill_layers).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(need_polygon_features)
             .params(
-                r##"{"layer"?, "value"?|"index"?|"other"?: a class of Unique Values (its value, or other: true) or Graduated Colors (its index) to set its own fills (none: the layer's), "fills": [{"color"?: "#RRGGBB"|"#RRGGBBAA"|null (null: the feature's fill colour, so the fills follow the classes), "pattern"?: "solid" (default)|"hatch" (parallel lines)|"dots" (markers on a grid)|"gradient" (from color to color2 across the feature)|"shapeburst" (from color at the edge to color2 inside), "angle"?: degrees anticlockwise from east (hatch), "spacing"?: points between lines (hatch, 1 to 500; default 8) or points across and down between markers, a number or [across, down] (dots), "width"?: a hatch line's width in points (0 to 50; default 1), "offset"?: points across the lines (hatch) or [across, down] (dots), "marker"?: "circle"|"square"|"triangle"|"diamond"|"star"|"image" (dots), "char"?: text (dots: a character of a font as the marker instead of a shape), "font"?: text (the installed family it is drawn from; none: the label font), "image"?: text (dots: a PNG or JPEG image as base64 of at most 2 MiB, as the marker instead of a shape: as wide as its size, as tall as its proportions make it; the colour and the outline don't show), "size"?: a marker's size in points (default 3), "outline"?: a marker's outline colour or null, "outlineWidth"?: points, "displacement"?: [across, down] points every other row and column are shifted by (dots), "color2"?: "#RRGGBB"|"#RRGGBBAA" (gradient, shapeburst: the second colour; default white), "stops"?: [[0..1, "#RRGGBB"|"#RRGGBBAA"], …] (gradient, shapeburst: colours between the two, at most 16), "discrete"?: bool (each colour held until the next stop), "shape"?: "linear" (default)|"radial"|"conical" (gradient), "from"?: [across, down]|"centroid" (gradient: where color is, 0..1 in the feature's box; default [0.5, 0], the top middle), "to"?: [across, down]|"centroid" (where color2 is; default [0.5, 1]), "spread"?: "pad" (default)|"reflect"|"repeat" (gradient: past its points), "angle"?: degrees anticlockwise (gradient: turned round its box's middle), "inView"?: bool (gradient: from and to in the map view's box, not the feature's), "distance"?: points|null (shapeburst: how deep it shades; null or none: to the point deepest inside), "blur"?: 0..17 (shapeburst: pixels), "ignoreRings"?: bool (shapeburst: holes' edges left out)}] (bottom first, at most 8; [] for the symbol's single fill; the outline is drawn over them)}"##,
+                r##"{"layer"?, "value"?|"index"?|"other"?: a class of Unique Values (its value, or other: true) or Graduated Colors (its index) to set its own fills (none: the layer's), "fills": [{"color"?: "#RRGGBB"|"#RRGGBBAA"|null (null: the feature's fill colour, so the fills follow the classes), "pattern"?: "solid" (default)|"hatch" (parallel lines)|"dots" (markers on a grid)|"gradient" (from color to color2 across the feature)|"shapeburst" (from color at the edge to color2 inside), "angle"?: degrees anticlockwise from east (hatch), "spacing"?: points between lines (hatch, 1 to 500; default 8) or points across and down between markers, a number or [across, down] (dots), "width"?: a hatch line's width in points (0 to 50; default 1), "offset"?: points across the lines (hatch) or [across, down] (dots), "marker"?: "circle"|"square"|"triangle"|"diamond"|"star"|"image" (dots), "char"?: text (dots: a character of a font as the marker instead of a shape), "font"?: text (the installed family it is drawn from; none: the label font), "image"?: text (dots: a PNG or JPEG image as base64 of at most 2 MiB and 2048 × 2048 pixels, as the marker instead of a shape: as wide as its size, as tall as its proportions make it; the colour and the outline don't show), "size"?: a marker's size in points (default 3), "outline"?: a marker's outline colour or null, "outlineWidth"?: points, "displacement"?: [across, down] points every other row and column are shifted by (dots), "color2"?: "#RRGGBB"|"#RRGGBBAA" (gradient, shapeburst: the second colour; default white), "stops"?: [[0..1, "#RRGGBB"|"#RRGGBBAA"], …] (gradient, shapeburst: colours between the two, at most 16), "discrete"?: bool (each colour held until the next stop), "shape"?: "linear" (default)|"radial"|"conical" (gradient), "from"?: [across, down]|"centroid" (gradient: where color is, 0..1 in the feature's box; default [0.5, 0], the top middle), "to"?: [across, down]|"centroid" (where color2 is; default [0.5, 1]), "spread"?: "pad" (default)|"reflect"|"repeat" (gradient: past its points), "angle"?: degrees anticlockwise (gradient: turned round its box's middle), "inView"?: bool (gradient: from and to in the map view's box, not the feature's), "distance"?: points|null (shapeburst: how deep it shades; null or none: to the point deepest inside), "blur"?: 0..17 (shapeburst: pixels), "ignoreRings"?: bool (shapeburst: holes' edges left out)}] (bottom first, at most 8; [] for the symbol's single fill; the outline is drawn over them)}"##,
             ),
         C::new("layer.markerRotation", "Marker Rotation", "Style › Drawing", |s, p| {
             let field = match p.get("field") {
@@ -415,7 +415,11 @@ pub fn commands() -> Vec<C> {
             let id = s.layer_id(p)?;
             s.map().layer(id).ok_or("no such layer")?;
             // Decoded here, on the UI thread, as any command runs: at most 2 MiB of base64, whose
-            // declared size is checked before the decoder, capped in memory, runs.
+            // declared pixels are checked before the decoder runs (`render::MARKER_PIXELS` each,
+            // some 80 ms; `render::RUN_MARKER_PIXELS` in all until RustGIS restarts, some 5 s, the
+            // most any number of calls can take). A call refused after the check sets none of its
+            // images on the layer, but their decoding stays charged, and the decoded copies kept:
+            // it took the time it stands for.
             let mut new = Vec::new();
             let mut image = picture(p, &mut new)?;
             keep_pictures(image.iter_mut(), new)?;
@@ -444,7 +448,7 @@ pub fn commands() -> Vec<C> {
             })
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_feature_layer)
-        .params(r#"{"layer"?, "shape"?: "circle"|"square"|"triangle"|"diamond"|"star", "char"?: text (a character of a font as the marker, its first; sized by the font's em), "font"?: text (the installed family the character is drawn from; "" or one not installed: the label font), "image"?: text (a PNG or JPEG image as base64 of at most 2 MiB, as the marker: as wide as the size, as tall as its proportions make it; its fill and outline don't show), "size"?: number}"#),
+        .params(r#"{"layer"?, "shape"?: "circle"|"square"|"triangle"|"diamond"|"star", "char"?: text (a character of a font as the marker, its first; sized by the font's em), "font"?: text (the installed family the character is drawn from; "" or one not installed: the label font), "image"?: text (a PNG or JPEG image as base64 of at most 2 MiB and 2048 × 2048 pixels, as the marker: as wide as the size, as tall as its proportions make it; its fill and outline don't show), "size"?: number}"#),
         C::new("layer.transparency", "Transparency", "Style › Effects", |s, p| {
             let t = f(p, "value").ok_or("value (0–100) is required")?.clamp(0.0, 100.0) as f32;
             with(s, p, |l| l.transparency = t)
@@ -810,6 +814,8 @@ fn size_by(s: &mut Session, p: &Value) -> CmdResult {
     // The mapping's own where it is of the same field, else the field's range.
     let had = l.size_by.as_ref().filter(|h| l.dataset.field_index(&h.field) == Some(fi));
     let (min, max) = (min.or(had.map(|h| h.min)), max.or(had.map(|h| h.max)));
+    // Both bounds from the field's own range: a field with one value has no spread to scale over.
+    let both_from_range = min.is_none() && max.is_none();
     let range = if min.is_none() || max.is_none() {
         // A streamed layer holds the view's features only, so their range would be the view's.
         if l.is_streamed() {
@@ -832,6 +838,9 @@ fn size_by(s: &mut Session, p: &Value) -> CmdResult {
     };
     let min = min.or(range.map(|r| r.0)).ok_or_else(|| format!("'{field}' has no numeric values: give min and max"))?;
     let max = max.or(range.map(|r| r.1)).ok_or_else(|| format!("'{field}' has no numeric values: give min and max"))?;
+    if max <= min && both_from_range {
+        return Err(format!("'{field}' has the same value ({min}) in every row, so give min and max"));
+    }
     if max <= min {
         return Err(format!("max ({max}) must be above min ({min})"));
     }
@@ -1651,11 +1660,12 @@ fn not_empty(image: Option<&Value>) -> Result<(), String> {
 }
 
 /// An `image` (`layer.marker`'s, a line marker's, a dot fill's): a PNG or JPEG image as base64,
-/// which must decode. One kept already is returned; a new one is only checked, its base64 put in
-/// `new` and an empty picture returned in its place, for [`keep_pictures`] to keep once the whole
-/// call is checked: a call refused for a later stroke or fill keeps none of its images.
+/// which must decode. One kept already is returned where it draws; a new one is only checked, its
+/// base64 put in `new` and an empty picture returned in its place, for [`keep_pictures`] to keep
+/// once the whole call is checked: a call refused for a later stroke or fill keeps none of its
+/// images.
 fn picture<'a>(p: &'a Value, new: &mut Vec<&'a str>) -> Result<Option<Picture>, String> {
-    const WHAT: &str = "image is a PNG or JPEG image as base64";
+    const WHAT: &str = "image is a PNG or JPEG image as base64, of at most 2048 × 2048 pixels";
     let b64 = match p.get("image") {
         None | Some(Value::Null) => return Ok(None),
         Some(Value::String(b64)) => b64.trim(),
@@ -1664,14 +1674,20 @@ fn picture<'a>(p: &'a Value, new: &mut Vec<&'a str>) -> Result<Option<Picture>, 
     if b64.len() > rustgis_map::symbology::MAX_PICTURE_BYTES {
         return Err(format!("image is at most {} MiB of base64", rustgis_map::symbology::MAX_PICTURE_BYTES >> 20));
     }
-    // One given again (the editor sends a stroke's or a fill's image with every change, a slider
-    // every frame) is found where it's kept, and decoded once into the drawing's cache.
+    // Checking decodes an image once for the run: one given again (the editor sends a stroke's or
+    // a fill's image with every change, a slider every frame) is found decoded. One met earlier in
+    // the call was checked then.
+    let refused = |why: rustgis_render::MarkerRefusal| format!("{WHAT}: this one {}", why.what());
     if let Some(kept) = Picture::kept(b64) {
-        return if rustgis_render::picture_marker_draws(kept) { Ok(Some(kept)) } else { Err(WHAT.into()) };
+        // One refused only for what the run has spent is kept as it is, drawn as a circle until a
+        // restart, so an edit that sends it again (a script's) isn't refused for it.
+        return match rustgis_render::picture_marker_kept_refusal(kept) {
+            Some(why) => Err(refused(why)),
+            None => Ok(Some(kept)),
+        };
     }
-    // One met earlier in the call was checked then: an image decodes once per call.
-    if !new.contains(&b64) && !rustgis_render::picture_marker_readable(b64) {
-        return Err(WHAT.into());
+    if !new.contains(&b64) {
+        rustgis_render::picture_marker_check(b64).map_err(refused)?;
     }
     new.push(b64);
     Ok(Some(Picture::default()))
@@ -2025,7 +2041,9 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
     if rustgis_data::raster::is_raster_name(path) {
         let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty());
         let page = super::raster::pdf_page(path, p)?;
-        return super::raster::add_path(s, path, name, page.as_deref(), scan);
+        // An SRTM tile or DTED file has no subdataset or coordinate system to choose: said.
+        let ignored = rustgis_data::raster::elevation_ignores(path, ps(p, "layer"), ps(p, "crs"));
+        return super::raster::add_path(s, path, name, page.as_deref(), scan, ignored);
     }
     // A Zarr store's folder: its first variable, or the one "layer" names.
     #[cfg(not(target_arch = "wasm32"))]
@@ -3248,7 +3266,7 @@ fn add_source_read(
         .into_iter()
         .map(|(kind, count)| {
             if kind == "attributes" {
-                format!("{count} attribute-only tables not added: GeoPackage attribute tables are not supported")
+                format!("{count} attribute-only table(s) not added: GeoPackage attribute tables are not supported")
             } else if kind == "features" {
                 format!("{count} feature table(s) not added: no geometry column is registered")
             } else {
@@ -4688,7 +4706,16 @@ fn read_delimited(
 /// which may be a sidecar of the requested file.
 fn whole_read_error(path: &str, error: rustgis_data::DataError) -> String {
     let message = error.to_string();
-    if rustgis_data::io::file_size_error_args(&message).is_some() { message } else { format!("{path}: {message}") }
+    if rustgis_data::io::file_size_error_args(&message).is_some() || message.starts_with(&format!("{path}:")) {
+        return message;
+    }
+    // A reader that names the file by its name alone (the delimited and gzip readers) is named
+    // once, by the path given.
+    let file = Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path);
+    match message.strip_prefix(file).filter(|rest| rest.starts_with(':')) {
+        Some(rest) => format!("{path}{rest}"),
+        None => format!("{path}: {message}"),
+    }
 }
 
 /// Reads local/uploaded delimited bytes with the same options and CRS notices on every path.
@@ -5728,7 +5755,11 @@ pub(crate) fn cog_tile_where(t: &rustgis_map::tiles::TileLayer, address: &str) -
         Some((_, rest)) => rest.split_once('/').map_or("", |(_, path)| path),
         None => address,
     };
-    let file: String = path.rsplit(['/', '\\']).next().unwrap_or_default().chars().take(80).collect();
+    let whole = path.rsplit(['/', '\\']).next().unwrap_or_default();
+    let mut file: String = whole.chars().take(80).collect();
+    if whole.chars().nth(80).is_some() {
+        file.push('…');
+    }
     if file.is_empty() { t.name.clone() } else { format!("{} ({file})", t.name) }
 }
 
@@ -5862,7 +5893,7 @@ const WINDOW_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The bands of a window read together, at most: their tiles asked for at once.
 #[cfg(not(target_arch = "wasm32"))]
-const WINDOW_BATCH: usize = 16;
+pub(crate) const WINDOW_BATCH: usize = 16;
 
 /// How long a window's band may be waited for: a batch of bands has this much a band.
 #[cfg(not(target_arch = "wasm32"))]
@@ -6878,11 +6909,14 @@ fn references_follow_layer(s: &mut Session, old: &str, new: &str) {
     {
         replace(layer);
     }
-    // And the lines point labels are turned square to (#2263).
+    // And the lines point labels are turned square to (#2263), and labels curved along (#2262).
     for layer in &mut s.map_mut().layers {
         for class in std::iter::once(&mut layer.labels.default).chain(layer.labels.classes.iter_mut()) {
             if let Some(to) = &mut class.square_to {
                 replace(&mut to.layer);
+            }
+            if let Some(guide) = &mut class.guide {
+                replace(&mut guide.layer);
             }
         }
     }
@@ -7032,21 +7066,39 @@ pub(crate) fn drop_layers(s: &mut Session, ids: &[u32]) {
     }
 }
 
-/// After layers called `names` are removed: point labels turned square to one of them (#2263)
-/// keep its name, so a layer of that name brings their line back, and are placed as auto
-/// meanwhile: said once a layer, as for the terrain's water.
+/// After layers called `names` are removed: point labels turned square to one of them (#2263),
+/// and labels curved along one (#2262), keep its name, so a layer of that name brings their line
+/// back, and are placed as auto, or as without a guide, meanwhile: said once a kind, naming the
+/// layers, as for the terrain's water.
 fn square_labels_follow_removal(s: &mut Session, names: &[String]) {
-    for n in names {
-        let used = s.map().layers.iter().flat_map(|l| l.labels.in_order()).any(|c| {
+    let (mut squared, mut guided) = (Vec::new(), Vec::new());
+    for n in names.iter().filter(|n| named_layers(s, n) == 0) {
+        let classes = || s.map().layers.iter().flat_map(|l| l.labels.in_order());
+        let squares = |c: &rustgis_map::LabelClass| {
             c.placement == rustgis_map::LabelPlacement::Perpendicular
                 && c.square_to.as_ref().is_some_and(|t| t.layer.eq_ignore_ascii_case(n))
-        });
-        if used && named_layers(s, n) == 0 {
-            s.notify(
-                format!("Labels: the perpendicular labels' line layer '{n}' was removed, so they are placed as auto until a layer of that name comes back"),
-                false,
-            );
+        };
+        if classes().any(squares) {
+            squared.push(format!("'{n}'"));
         }
+        if classes().any(|c| c.guide.as_ref().is_some_and(|g| g.layer.eq_ignore_ascii_case(n))) {
+            guided.push(format!("'{n}'"));
+        }
+    }
+    if !squared.is_empty() {
+        let (count, names) = (squared.len(), squared.join(", "));
+        let layers = if count == 1 { "line layer" } else { "line layers" };
+        s.notify(
+            format!("Labels: {count} perpendicular labels' {layers} {names} removed, so their labels are placed as auto until a layer of that name comes back"),
+            false,
+        );
+    }
+    if !guided.is_empty() {
+        let (count, names) = (guided.len(), guided.join(", "));
+        s.notify(
+            format!("Labels: {count} guide layer(s) {names} removed, so the labels they guided are placed as without them until a layer of that name comes back"),
+            false,
+        );
     }
 }
 
@@ -7207,12 +7259,26 @@ fn move_layer(s: &mut Session, p: &Value, d: i32) -> CmdResult {
 }
 
 /// Moves a layer to a position in the drawing order: 0 is the top, anything past the end the
-/// bottom. One command (and one undo step) however far the layer travels.
+/// bottom. One command (and one undo step) however far the layer travels; none when the layers
+/// are already where they were asked to go, which a script setting the order can't know beforehand.
 fn move_to(s: &mut Session, p: &Value) -> CmdResult {
     let ids = layer_ids(s, p)?;
     let to = uint(p, "to").ok_or("to is required: the position in the drawing order, 0 at the top")?;
+    let before = s.map().layer_mark();
+    move_layers(s, ids, to)?;
+    // The order is compared, not each layer's index: a move within a group can end where it
+    // started, and a layer already in place leaves the order as it was.
+    if s.map().layer_mark() == before {
+        s.request_only = true;
+    }
+    Ok(Value::Null)
+}
+
+fn move_layers(s: &mut Session, ids: Vec<u32>, to: u64) -> Result<(), String> {
     if let [id] = ids[..] {
-        return move_one(s, id, to);
+        let m = s.map_mut();
+        let to = usize::try_from(to).unwrap_or(usize::MAX).min(m.layers.len().saturating_sub(1));
+        return move_to_index(m, id, to);
     }
     // Several: to the top or the bottom, keeping their order among themselves. A layer in a group
     // stays in it, going to the top or the bottom of its group.
@@ -7246,7 +7312,7 @@ fn move_to(s: &mut Session, p: &Value) -> CmdResult {
         let t = if top { lo + k } else { hi.saturating_sub(k) };
         move_to_index(m, id, t)?;
     }
-    Ok(Value::Null)
+    Ok(())
 }
 
 /// Moves a layer to index `t` of the drawing order, if it isn't there already.
@@ -7256,17 +7322,6 @@ fn move_to_index(m: &mut rustgis_map::Map, id: u32, t: usize) -> Result<(), Stri
         m.move_layer(i, t)?;
     }
     Ok(())
-}
-
-fn move_one(s: &mut Session, id: u32, to: u64) -> CmdResult {
-    let m = s.map_mut();
-    let i = m.layer_index(id).ok_or("no such layer")?;
-    let to = usize::try_from(to).unwrap_or(usize::MAX).min(m.layers.len().saturating_sub(1));
-    if to == i {
-        return Err("the layer is already there".into());
-    }
-    m.move_layer(i, to)?;
-    Ok(Value::Null)
 }
 
 fn symbology(s: &mut Session, p: &Value) -> CmdResult {

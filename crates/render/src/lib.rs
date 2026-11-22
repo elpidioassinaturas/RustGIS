@@ -18,6 +18,7 @@ pub mod fonts;
 mod glyphs;
 pub mod gpu_scene;
 mod gradient_fill;
+mod guide_labels;
 mod label_places;
 pub mod layout;
 mod line_labels;
@@ -42,6 +43,7 @@ pub mod terrain;
 mod text;
 pub use text::CALLOUT_WIDTH;
 mod frame_cache;
+mod layer_meshes;
 pub mod tile_mesh;
 mod tiles;
 pub mod vector;
@@ -594,20 +596,36 @@ pub fn picture_size(b64: &str) -> Option<(u32, u32)> {
     picture::size(b64)
 }
 
-/// Whether a base64 PNG or JPEG image decodes, as a picture marker's must.
-pub fn picture_marker_readable(b64: &str) -> bool {
-    picture::readable(b64)
+pub use picture::{MARKER_PIXELS, MARKER_PIXELS_SIDE, MarkerRefusal, RUN_MARKER_BYTES, RUN_MARKER_PIXELS};
+
+/// Base64 `b64` as a picture marker's image (one kept already, or one before it is set): its
+/// height for its width when it draws (a PNG or JPEG within [`MARKER_PIXELS`] and what the run has
+/// left of [`RUN_MARKER_PIXELS`] and [`RUN_MARKER_BYTES`], that decodes), or why it would be drawn
+/// as a circle. Decoded once for the run, where drawing it finds it.
+pub fn picture_marker_check(b64: &str) -> Result<f32, MarkerRefusal> {
+    picture::check(b64)
 }
 
-/// Whether picture marker `p` (one a file gives) decodes, so it draws rather than a circle;
-/// decoded into this thread's cache of markers, where drawing on it finds it.
+/// [`picture_marker_check`] for picture marker `p` (one a file gives).
+pub fn picture_marker_kept_check(p: rustgis_map::Picture) -> Result<f32, MarkerRefusal> {
+    picture::marker_drawn(p)
+}
+
+/// Why kept picture marker `p` can't be given again, by command or by a symbol editor: a refusal
+/// for the image itself. `None` where it draws, or is drawn as a circle only until a restart (past
+/// what the run decodes), and is kept as it is.
+pub fn picture_marker_kept_refusal(p: rustgis_map::Picture) -> Option<MarkerRefusal> {
+    picture::marker_kept_refusal(p)
+}
+
+/// Whether picture marker `p` draws rather than a circle ([`picture_marker_kept_check`]).
 pub fn picture_marker_draws(p: rustgis_map::Picture) -> bool {
-    picture::marker_aspect(p).is_some()
+    picture_marker_kept_check(p).is_ok()
 }
 
 /// Picture marker `p`'s image at most `side` pixels per side (a preview's), and its height for its
-/// width from before it was scaled down; `None` where the map draws a circle. Decoded on every
-/// call: the caller keeps it.
+/// width from before it was scaled down; `None` where the map draws a circle. Scaled from the
+/// run's decoded copy on every call: the caller keeps it.
 pub fn picture_marker_image(p: rustgis_map::Picture, side: u32) -> Option<(Pixmap, f32)> {
     picture::marker_image(p, side)
 }
@@ -889,6 +907,24 @@ type SpriteKey = (Rgba, Rgba, u32, u32, Marker, u8, u8);
 
 /// The marker sprites a frame has drawn ([`Ctx::sprites`]).
 type Sprites = std::collections::HashMap<SpriteKey, Option<std::sync::Arc<Pixmap>>>;
+
+/// The stroke a stacked line's `st` is drawn with, `width` device pixels wide: its cap and join.
+pub(crate) fn line_stroke(st: &LineStroke, width: f32) -> Stroke {
+    Stroke {
+        width,
+        line_cap: match st.cap {
+            rustgis_map::LineCap::Round => LineCap::Round,
+            rustgis_map::LineCap::Butt => LineCap::Butt,
+            rustgis_map::LineCap::Square => LineCap::Square,
+        },
+        line_join: match st.join {
+            rustgis_map::LineJoin::Round => LineJoin::Round,
+            rustgis_map::LineJoin::Miter => LineJoin::Miter,
+            rustgis_map::LineJoin::Bevel => LineJoin::Bevel,
+        },
+        ..Stroke::default()
+    }
+}
 
 impl Ctx<'_> {
     /// Logical screen position of a coordinate, `None` when it is behind the globe.
@@ -1200,20 +1236,7 @@ impl Ctx<'_> {
                 o => shifted.iter().find(|(x, _)| *x == o).and_then(|(_, p)| p.as_ref()),
             };
             let Some(drawn) = drawn else { continue };
-            let stroke = Stroke {
-                width: (w * self.ppp).max(0.5),
-                line_cap: match st.cap {
-                    rustgis_map::LineCap::Round => LineCap::Round,
-                    rustgis_map::LineCap::Butt => LineCap::Butt,
-                    rustgis_map::LineCap::Square => LineCap::Square,
-                },
-                line_join: match st.join {
-                    rustgis_map::LineJoin::Round => LineJoin::Round,
-                    rustgis_map::LineJoin::Miter => LineJoin::Miter,
-                    rustgis_map::LineJoin::Bevel => LineJoin::Bevel,
-                },
-                ..Stroke::default()
-            };
+            let stroke = line_stroke(st, (w * self.ppp).max(0.5));
             let steps = st.dash.and_then(|d| self.dash(&d, drawn));
             let period: f32 = steps.iter().flatten().sum();
             // A dashed line cut into pieces: each piece starts its pattern where its line is. Only
@@ -2164,17 +2187,50 @@ fn render_cpu(
     }
 }
 
+/// How many pictures a GPU scene would hold with its see-through layers composited into the
+/// picture being drawn rather than drawn alone ([`GPU_ALONE`]), as they were before they could
+/// be: what the CPU fallback counts, so the same scenes stay on the GPU.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Runs {
+    pub count: usize,
+    /// A layer drawn alone since the last flush: composited, it would have left the picture
+    /// being drawn something to flush.
+    pub pending: bool,
+}
+
 /// Flushes the GPU pass's CPU accumulator pixmap as an Image draw command and resets it to
 /// transparent. Basemap, tiles, rasters and tiny-skia-only layers draw into the accumulator
-/// between GPU mesh commands, preserving the exact painter's-algorithm order.
-pub(crate) fn flush_acc(pm: &mut Pixmap, cmds: &mut Vec<gpu_scene::DrawCmd>, dirty: &mut bool) -> Option<()> {
+/// between GPU mesh commands, preserving the exact painter's-algorithm order. Counts in `runs`
+/// what the flush would have flushed with the layers alone composited instead.
+pub(crate) fn flush_acc(pm: &mut Pixmap, cmds: &mut Vec<gpu_scene::DrawCmd>, dirty: &mut bool, runs: &mut Runs) -> Option<()> {
+    if *dirty || runs.pending {
+        runs.count += 1;
+        runs.pending = false;
+    }
     if *dirty {
         // Move the pixmap into the command (no full-screen copy) and start a fresh transparent
         // accumulator.
         let old = std::mem::replace(pm, Pixmap::new(pm.width(), pm.height())?);
-        cmds.push(gpu_scene::DrawCmd::Image { pixmap: old });
+        cmds.push(gpu_scene::DrawCmd::Image { pixmap: std::sync::Arc::new(old), opacity: 1.0 });
         *dirty = false;
     }
+    Some(())
+}
+
+/// Places a see-through layer's own picture over what is drawn so far, at its `opacity`
+/// ([`GPU_ALONE`]): the accumulator flushed first, which `runs` doesn't count, as the layer would
+/// have been composited into it.
+fn place_alone(
+    pm: &mut Pixmap,
+    cmds: &mut Vec<gpu_scene::DrawCmd>,
+    dirty: &mut bool,
+    runs: &mut Runs,
+    picture: std::sync::Arc<Pixmap>,
+    opacity: f32,
+) -> Option<()> {
+    flush_acc(pm, cmds, dirty, &mut Runs::default())?;
+    cmds.push(gpu_scene::DrawCmd::Image { pixmap: picture, opacity });
+    runs.pending = true;
     Some(())
 }
 
@@ -3210,8 +3266,8 @@ fn gpu_turned(
         if (k - 1.0).abs() > 1e-6 {
             for c in &mut scene.cmds {
                 match c {
-                    DrawCmd::Mesh { vertices, .. } => vertices.iter_mut().for_each(|v| v.stroke_px *= k),
-                    DrawCmd::Points { instances, .. } => instances.iter_mut().for_each(|p| p.radius_px *= k),
+                    DrawCmd::Mesh { vertices, .. } => std::sync::Arc::make_mut(vertices).iter_mut().for_each(|v| v.stroke_px *= k),
+                    DrawCmd::Points { instances, .. } => std::sync::Arc::make_mut(instances).iter_mut().for_each(|p| p.radius_px *= k),
                     DrawCmd::Image { .. }
                     | DrawCmd::Extrusion { .. }
                     | DrawCmd::Tiles { .. }
@@ -3274,7 +3330,7 @@ fn gpu_turned(
         .flat_map(|m| mesh::marker_instances(m.at, origin, &m.symbol, ppp, m.selected.then_some(SELECTION)))
         .collect();
     if !instances.is_empty() {
-        cmds.push(DrawCmd::Points { origin, instances });
+        cmds.push(DrawCmd::Points { origin, instances: std::sync::Arc::new(instances) });
         clips.push(CmdClip { upright: true, ..CmdClip::ALL });
     }
     let unplaced = if map.label_display.show_unplaced { placed.unplaced } else { Vec::new() };
@@ -4241,6 +4297,34 @@ fn frame_water(map: &Map, view: &View, labels_to: &Labels) -> Option<(std::sync:
     ground.water().cloned().map(|w| (w, pending))
 }
 
+/// The see-through layers a GPU scene draws as pictures of their own, which the GPU places at
+/// the layer's opacity: those of normal blend and no mask, the first this many in the drawing
+/// order, on a map with no layer or tile layer of another blend (which blends with the picture
+/// being drawn under it). The others are composited into the picture being drawn, as a blended
+/// or masked layer is. A layer of its own is drawn once while only its transparency changes (`frame_cache`), but
+/// each is a picture of the whole view to upload and keep on the GPU, and it can split the
+/// picture under and over it in two; so a few, not every one.
+const GPU_ALONE: usize = 2;
+
+/// Gives the pictures among `cmds` at the places `kept` names that hold the same pixels as the
+/// picture kept for that place (a checkpoint's, drawn on by nothing since) that very picture,
+/// shared, and forgets the places `cmds` has reached: a scene started from a checkpoint draws
+/// its picture from the texture uploaded for it, and a scene kept draws the one its checkpoint
+/// holds. The pictures are compared only once each, when the scene's next picture comes.
+fn share_kept_pictures(cmds: &mut [gpu_scene::DrawCmd], kept: &mut Vec<(usize, std::sync::Arc<Pixmap>)>) {
+    kept.retain(|(at, p)| {
+        let Some(c) = cmds.get_mut(*at) else { return true };
+        if let gpu_scene::DrawCmd::Image { pixmap, opacity } = c
+            && *opacity == 1.0
+            && !std::sync::Arc::ptr_eq(pixmap, p)
+            && pixmap.data() == p.data()
+        {
+            *pixmap = std::sync::Arc::clone(p);
+        }
+        false
+    });
+}
+
 /// Whether a GPU scene's commands hold a picture drawn on the CPU.
 fn holds_picture(cmds: &[gpu_scene::DrawCmd]) -> bool {
     cmds.iter().any(|c| matches!(c, gpu_scene::DrawCmd::Image { .. }))
@@ -4248,14 +4332,14 @@ fn holds_picture(cmds: &[gpu_scene::DrawCmd]) -> bool {
 
 /// Whether a frame of `map` for `view` can start from a kept picture and keep its own
 /// ([`frame_cache`]): flat and north-up, with no layer drawing from another (a mask, the swipe,
-/// labels turned square to another layer's lines, terrain water).
+/// labels turned square to another layer's lines or curved along a guide layer, terrain water).
 fn keeps_pictures(map: &Map, view: &View) -> bool {
     view.camera.bearing == 0.0
         && view.camera.pitch == 0.0
         && !map.projection.is_globe()
         && map.swipe.is_none()
         && map.view.terrain.as_ref().is_none_or(|t| t.water.is_none())
-        && map.layers.iter().all(|l| l.mask.is_none() && l.labels.in_order().all(|c| c.square_to.is_none()))
+        && map.layers.iter().all(|l| l.mask.is_none() && l.labels.in_order().all(|c| c.square_to.is_none() && c.guide.is_none()))
 }
 
 /// Draws one north-up frame. `labels_to` says where its labels go: a turned or tilted view the
@@ -4341,22 +4425,34 @@ fn render_frame(
         Some(g) => g.may_see(e),
         None => e.intersects(&mesh_cull),
     };
+    // A screen scene keeps each layer's mesh for the next of the same view, and takes those still
+    // standing (see `layer_meshes`): the map's projection, which the meshes are in, when it does.
+    layer_meshes::let_go();
+    let mesh_projection = (gpu && !full_res_rasters && matches!(labels_to, Labels::Own)).then(|| map.projection.clone());
+    // The meshes this scene takes and keeps stay kept while it is drawn.
+    let _mesh_scene = mesh_projection.is_some().then(layer_meshes::Scene::begin);
     // Bottom first; a higher depth priority draws later (on top) whatever the order.
     let mut order: Vec<usize> = (0..map.layers.len()).rev().collect();
     order.sort_by_key(|i| map.layers.get(*i).map_or(0, |l| l.priority));
     // The worldview read once: the frame's key, the outline and its level must be of the same
     // one, though another thread may switch it mid-frame.
     let worldview = sample_data::view();
+    // Whether see-through layers may be drawn as pictures of their own (see `GPU_ALONE`): not on a
+    // map with a layer or tile layer of another blend, which blends with the picture under it,
+    // which must then hold what a see-through layer drew there.
+    let normal = rustgis_map::effects::Blend::Normal;
+    let alone_allowed = gpu && !map.layers.iter().any(|l| l.blend != normal) && !map.tiles.iter().any(|t| t.blend != normal);
     // A screen frame starts from the picture kept of the last one, under its first changed layer
-    // (see `frame_cache`), and keeps its own.
+    // (see `frame_cache`), and keeps its own: a GPU scene's, with its commands so far.
     let mut cached = (!pm.is_recording()
-        && !gpu
         && !full_res_rasters
         && matches!(labels_to, Labels::Own)
         && frame_cache::fits(w, h)
         && keeps_pictures(map, view))
     .then(|| {
         let frame = frame_cache::Frame {
+            backend,
+            alone: alone_allowed,
             map: rustgis_map::look::MapLook::of(map),
             view: *view,
             style_env: style_env.clone(),
@@ -4389,7 +4485,7 @@ fn render_frame(
     // The layer kept alone (`frame_cache::Alone`): its picture once composited, and the rest once
     // it is done.
     let alone_at = cached.as_ref().and_then(|p| p.alone_at);
-    let mut drawn_alone: Option<(usize, Pixmap)> = None;
+    let mut drawn_alone: Option<(usize, std::sync::Arc<Pixmap>)> = None;
     let mut captured_alone: Option<(usize, frame_cache::Alone)> = None;
     // The label candidates each layer drawn gives the frame, kept for the next (see `frame_cache`).
     let mut layer_labels: frame_cache::LayerLabels = Vec::new();
@@ -4413,6 +4509,11 @@ fn render_frame(
     }
     // Set when tiny-skia actually rasterizes into the accumulator.
     let mut cpu_dirty = false;
+    // The pictures flushed so far, as the CPU fallback counts them (see `Runs`).
+    let mut runs = Runs::default();
+    // The see-through layers drawn as pictures of their own so far (see `GPU_ALONE`); none unless
+    // `alone_allowed`.
+    let mut gpu_alone = if alone_allowed { 0 } else { GPU_ALONE };
     // A GPU frame standing in for a turned or tilted view ([`gpu_turned`]) is of no use with a
     // picture in it: that view is then drawn on the CPU whole. So it stops at the first layer
     // that would leave one, rather than draw the rest (#2540).
@@ -4446,7 +4547,7 @@ fn render_frame(
             // The GPU backend tessellates a country in view whole (its mesh moves with the camera,
             // `GPU_CULL_MARGIN`): the level's fewer vertices help it, the per-part culling doesn't.
             if gpu {
-                flush_acc(pm.pixels(), &mut cmds, &mut cpu_dirty)?;
+                flush_acc(pm.pixels(), &mut cmds, &mut cpu_dirty, &mut runs)?;
                 if mesh::collect_basemap(&mut cmds, polys, &c.extent, land, outline, ctx.ppp, map_per_px).is_ok() {
                     continue;
                 }
@@ -4471,7 +4572,7 @@ fn render_frame(
             {
                 let mut tessellated = false;
                 if gpu {
-                    flush_acc(pm.pixels(), &mut cmds, &mut cpu_dirty)?;
+                    flush_acc(pm.pixels(), &mut cmds, &mut cpu_dirty, &mut runs)?;
                     tessellated = mesh::collect_basemap(&mut cmds, polys, &g.extent(), land, outline, ctx.ppp, map_per_px).is_ok();
                 }
                 if gpu && !tessellated {
@@ -4548,7 +4649,7 @@ fn render_frame(
                                 e.expand(*c);
                             }
                         }
-                        flush_acc(pm.pixels(), &mut cmds, &mut cpu_dirty)?;
+                        flush_acc(pm.pixels(), &mut cmds, &mut cpu_dirty, &mut runs)?;
                         let tessellated =
                             !e.is_empty() && mesh::collect_graticule(&mut cmds, &lines, &e, grat, width, ctx.ppp, map_per_px).is_ok();
                         if !tessellated {
@@ -4591,6 +4692,7 @@ fn render_frame(
                 let tile_gpu = (gpu && shown).then_some(tiles::Gpu {
                     cmds: &mut cmds,
                     dirty: &mut cpu_dirty,
+                    runs: &mut runs,
                     // A tilted view's bands are drawn at their own densities: their tiles as pictures.
                     meshes: !matches!(labels_to, Labels::Tilted(..)),
                     // Only a frame for the view itself (not a turned or tilted view's north-up stand-in).
@@ -4647,8 +4749,24 @@ fn render_frame(
     let distance = viewing_distance(map.ground_res_at(&view.camera), view.height);
     // Graphics text: always drawn, and other labels keep clear of it.
     let mut fixed_labels: Vec<PlacedLabel> = Vec::new();
+    // The pictures a GPU scene was drawing when its checkpoints were taken, by the place among
+    // its commands the next picture comes: when that is the same picture, it is the one kept
+    // (`share_kept_pictures`), whose texture is on the GPU already.
+    let mut kept_pictures: Vec<(usize, std::sync::Arc<Pixmap>)> = Vec::new();
     if let Some(c) = cached.as_ref().and_then(|p| p.restored.as_ref()) {
-        pm = Canvas::from_pixmap(c.pixels.clone());
+        pm = match &c.pixels {
+            Some(p) => Canvas::from_pixmap(Pixmap::clone(p)),
+            None => Canvas::new(w, h)?,
+        };
+        // A GPU scene's commands so far, sharing their data (and so the GPU's textures and
+        // buffers) with the scene kept, and the picture it was drawing then.
+        if let Some(g) = &c.gpu {
+            cmds = g.cmds();
+            gpu_alone = g.alone;
+            runs = g.runs;
+            cpu_dirty = c.pixels.is_some();
+            kept_pictures.extend(c.pixels.iter().map(|p| (cmds.len(), std::sync::Arc::clone(p))));
+        }
         // What the layers below left for those above: the sprites drawn, the shapeburst budget.
         ctx.sprites.borrow_mut().clone_from(&c.sprites);
         ctx.bursts.set(c.bursts);
@@ -4664,6 +4782,8 @@ fn render_frame(
     // Of those held in another system, the ids, noted read once a label is squared to them.
     let mut square_held = std::collections::HashMap::new();
     let square_lines = square_lines(map, &ctx, &flat, &mut square_held);
+    // And the lines labels are curved along (#2262).
+    let guide_lines = guide_lines(map, &ctx, &flat, &key, scale, distance);
     // The view's centre in longitude/latitude from the map's own coordinates (Web Mercator or
     // the map's system); none, so nothing is clipped, where the projection has no place there.
     let clip = map.view.clip_distance.and_then(|d| Some((map.to_lonlat(view.camera.center)?, d)));
@@ -4717,11 +4837,26 @@ fn render_frame(
         if let Some(id) = below.take() {
             draw_tiles!(Some(id));
         }
-        if cached.as_ref().is_some_and(|p| p.capture_at == Some(at)) && complete(&tile_out) {
+        // A GPU scene's commands are kept with the picture it is drawing (none while that holds
+        // nothing), when they can all be shared.
+        if cached.as_ref().is_some_and(|p| p.capture_at == Some(at))
+            && complete(&tile_out)
+            && let Some(gpu_part) = if gpu {
+                share_kept_pictures(&mut cmds, &mut kept_pictures);
+                frame_cache::GpuPart::of(&cmds, gpu_alone, runs).map(Some)
+            } else {
+                Some(None)
+            }
+        {
+            let pixels = (!gpu || cpu_dirty).then(|| std::sync::Arc::new(pm.pixels().clone()));
+            if gpu && let Some(p) = &pixels {
+                kept_pictures.push((cmds.len(), std::sync::Arc::clone(p)));
+            }
             captured = Some((
                 at,
                 frame_cache::Checkpoint {
-                    pixels: pm.pixels().clone(),
+                    pixels,
+                    gpu: gpu_part,
                     sprites: ctx.sprites.borrow().clone(),
                     bursts: ctx.bursts.get(),
                     // Over a restored picture, its tiles are as old as that picture.
@@ -4752,6 +4887,8 @@ fn render_frame(
         let (blend, layer_blend) = (blend_mode(layer.blend), layer.blend);
         // Drawn on its own and composited when it is see-through, masked or blended.
         let offscreen = opacity < 0.999 || mask.is_some() || layer.blend != rustgis_map::effects::Blend::Normal;
+        // On the GPU, a picture of its own placed at its opacity (see `GPU_ALONE`).
+        let gpu_own = gpu && offscreen && mask.is_none() && layer.blend == rustgis_map::effects::Blend::Normal && gpu_alone < GPU_ALONE;
         let composite = |pm: &mut Canvas, target: &Pixmap| {
             // A recording keeps the masked layer as a picture cut by its mask, placed with its
             // opacity and blend over the vectors beneath.
@@ -4779,7 +4916,14 @@ fn render_frame(
             && offscreen
             && let Some(a) = cached.as_ref().and_then(|p| p.recombine.as_ref())
         {
-            composite(&mut pm, &a.pixels);
+            if gpu_own {
+                // The same picture as last time, its texture already on the GPU.
+                place_alone(pm.pixels(), &mut cmds, &mut cpu_dirty, &mut runs, std::sync::Arc::clone(&a.pixels), opacity)?;
+                gpu_alone += 1;
+            } else {
+                composite(&mut pm, &a.pixels);
+                cpu_dirty = true;
+            }
             ctx.sprites.borrow_mut().clone_from(&a.sprites);
             ctx.bursts.set(a.bursts);
             label_candidates.clone_from(&a.candidates);
@@ -4858,14 +5002,21 @@ fn render_frame(
                 if offscreen {
                     let mut target = Pixmap::new(w, h)?;
                     draw_it(&mut target, 1.0);
-                    composite(&mut pm, &target);
+                    let target = std::sync::Arc::new(target);
+                    if gpu_own {
+                        place_alone(pm.pixels(), &mut cmds, &mut cpu_dirty, &mut runs, std::sync::Arc::clone(&target), opacity)?;
+                        gpu_alone += 1;
+                    } else {
+                        composite(&mut pm, &target);
+                        cpu_dirty = true;
+                    }
                     if alone_at == Some(at) {
                         drawn_alone = Some((at, target));
                     }
                 } else {
                     draw_it(pm.pixels(), opacity);
+                    cpu_dirty = true;
                 }
-                cpu_dirty = true;
             }
             continue;
         }
@@ -4985,6 +5136,11 @@ fn render_frame(
         // Copied only while the frame's copies stay within what a view keeps.
         let room = frame_cache::MAX_LABEL_BYTES.saturating_sub(layer_label_bytes);
         let mut gave_labels: Option<Vec<Candidate>> = None;
+        // Whether the picture being drawn held anything before this layer: a layer drawn as a
+        // picture of its own (`gpu_own`) leaves it so.
+        let dirty_before = cpu_dirty;
+        // Whether the layer drew anything (`gpu_own`: a picture of its own only then).
+        let mut layer_drew = false;
         let mut draw_chunk = |layer: &mut rustgis_map::Layer| -> rustgis_data::Result<()> {
             // A stopped frame draws no more of a layer or a streamed chunk (see `cancel`).
             if cancel::requested() {
@@ -5106,20 +5262,52 @@ fn render_frame(
             // just itself.
             let mut gpu_done = false;
             if gpu_layer {
-                flush_acc(pm.pixels(), &mut cmds, &mut cpu_dirty)
+                flush_acc(pm.pixels(), &mut cmds, &mut cpu_dirty, &mut runs)
                     .ok_or_else(|| rustgis_data::DataError::Format("cannot allocate render target".into()))?;
-                let collected = mesh::collect_layer(
-                    &mut cmds,
-                    layer,
-                    &drawn,
-                    extents,
-                    &rows,
-                    &mesh_visible,
-                    ctx.wireframe,
-                    ctx.ppp,
-                    map_per_px,
-                    mesh_room,
-                );
+                // Kept from the last scene of this view when the layer looks as it did (a layer read
+                // from its source has no look, and draws in batches).
+                let keeping = mesh_projection.as_ref().filter(|_| !complete_source).and_then(|projection| {
+                    let level = rustgis_map::lod::level(thin_tol);
+                    let drawn_copy = if display_only {
+                        layer_meshes::Drawn::Display(level)
+                    } else if std::ptr::eq(layer.thinned_cache(thin_tol), layer.projected_cache()) {
+                        layer_meshes::Drawn::Projected
+                    } else {
+                        layer_meshes::Drawn::Thinned(level)
+                    };
+                    let made = layer_meshes::Made {
+                        projection: projection.clone(),
+                        drawn: drawn_copy,
+                        cull: mesh_cull,
+                        map_per_px,
+                        ppp: ctx.ppp,
+                        wireframe: ctx.wireframe,
+                    };
+                    Some((rustgis_map::look::LayerLook::of(layer)?, made))
+                });
+                let before = cmds.len();
+                let collected = match keeping.as_ref().and_then(|(look, made)| layer_meshes::take(&mut cmds, look, made, &rows)) {
+                    Some(used) => Ok(used),
+                    None => {
+                        let collected = mesh::collect_layer(
+                            &mut cmds,
+                            layer,
+                            &drawn,
+                            extents,
+                            &rows,
+                            &mesh_visible,
+                            ctx.wireframe,
+                            ctx.ppp,
+                            map_per_px,
+                            mesh_room,
+                        );
+                        if let (Ok(used), Some((look, made))) = (collected, keeping) {
+                            let kept = cmds.get(before..).unwrap_or_default();
+                            layer_meshes::keep(layer.instance_id(), look, made, &rows, kept, used, layer.selection.len());
+                        }
+                        collected
+                    }
+                };
                 // Once a batch is too dense, the layer's later ones fall back too (they get no
                 // room); one lyon refused leaves the room to the batches after it.
                 mesh_room = match collected {
@@ -5345,6 +5533,7 @@ fn render_frame(
                     dest.end_bands();
                 }
                 cpu_dirty |= drawn_here;
+                layer_drew |= drawn_here;
             }
             if !complete_source {
                 if let (Some(a), Some(base)) = (layer.aggregation, aggregate_symbol) {
@@ -5354,6 +5543,7 @@ fn render_frame(
                 if let Some((water, darkness)) = &shore {
                     terrain::paint_shore(if direct { &mut pm } else { &mut target }, water, view, *darkness);
                     cpu_dirty = true;
+                    layer_drew = true;
                 }
                 if !direct {
                     if target.is_recording() {
@@ -5361,11 +5551,26 @@ fn render_frame(
                             pm.place(std::mem::replace(&mut target, empty), Transform::identity(), opacity, layer_blend, None);
                         }
                     } else {
-                        composite(&mut pm, target.pixmap());
                         // Not with a selection or graphics text, drawn over the composite, nor
                         // with extruded charts, placed after it.
-                        if alone_at == Some(at) && layer.selection.is_empty() && !layer.graphics && layer.extrusion.is_none() {
-                            drawn_alone = Some((at, target.pixmap().clone()));
+                        let keep_alone = alone_at == Some(at) && layer.selection.is_empty() && !layer.graphics && layer.extrusion.is_none();
+                        if gpu_own && !layer_drew {
+                            // Nothing drawn: nothing to place.
+                            cpu_dirty = dirty_before;
+                        } else if gpu_own && let Some(empty) = Canvas::new(1, 1) {
+                            let picture = std::sync::Arc::new(std::mem::replace(&mut target, empty).into_pixmap());
+                            cpu_dirty = dirty_before;
+                            place_alone(pm.pixels(), &mut cmds, &mut cpu_dirty, &mut runs, std::sync::Arc::clone(&picture), opacity)
+                                .ok_or_else(|| rustgis_data::DataError::Format("cannot allocate render target".into()))?;
+                            gpu_alone += 1;
+                            if keep_alone {
+                                drawn_alone = Some((at, picture));
+                            }
+                        } else {
+                            composite(&mut pm, target.pixmap());
+                            if keep_alone {
+                                drawn_alone = Some((at, std::sync::Arc::new(target.pixmap().clone())));
+                            }
                         }
                     }
                 }
@@ -5591,11 +5796,12 @@ fn render_frame(
                             && raw.graphemes(true).nth(line_labels::MAX_CURVED_CHARS).is_none();
                         // A polygon's label curved along its centre line (#2262): its text unwrapped,
                         // kept for that; where it doesn't fit, placed and wrapped as `Auto`.
-                        let mut unwrapped = (class.placement == LabelPlacement::Curved
-                            && matches!(g, Geometry::Polygon(_))
-                            && point.is_some()
-                            && moved.is_none()
-                            && raw.graphemes(true).nth(line_labels::MAX_CURVED_CHARS).is_none())
+                        // So is a point's or a polygon's curved along its guide line (#2262).
+                        let curvable =
+                            point.is_some() && moved.is_none() && raw.graphemes(true).nth(line_labels::MAX_CURVED_CHARS).is_none();
+                        let guided = class.guide.as_ref().filter(|_| curvable && (is_point || matches!(g, Geometry::Polygon(_))));
+                        let mut unwrapped = (curvable
+                            && (guided.is_some() || (class.placement == LabelPlacement::Curved && matches!(g, Geometry::Polygon(_)))))
                         .then(|| raw.clone());
                         let mut text =
                             if curving || (class.wrap_char.is_none() && class.wrap_length == 0) { raw } else { class.wrap(&raw) };
@@ -5872,7 +6078,47 @@ fn render_frame(
                         {
                             squared = true;
                             places.push((0, lx, ly, Some(angle), Vec::new()));
+                        } else if let (Some(line_text), Some(guide)) = (unwrapped.as_deref(), guided)
+                            && let Some(lines) = guide_lines.get(&(guide.layer.to_ascii_lowercase(), guide.field.clone()))
+                            && let Some(((cx, cy), glyphs)) = {
+                                // Its feature's value in the guide's field, matching its line.
+                                let value = guide.field.as_deref().and_then(|f| ds_ptr.field_index(f)).map(|fi| ds_ptr.value(row, fi));
+                                let value = value.filter(|v| !v.is_null()).map(|v| v.to_string());
+                                let near = match g {
+                                    Geometry::Polygon(polys) => {
+                                        // Its projected extent on the screen, cheaper than its
+                                        // outline, to look for a guide line near (on the flat map).
+                                        let within = globe.is_none().then(|| {
+                                            let e = extents.get(row).copied().unwrap_or_else(|| g.extent());
+                                            [(e.min_x, e.min_y), (e.max_x, e.min_y), (e.min_x, e.max_y), (e.max_x, e.max_y)]
+                                                .into_iter()
+                                                .map(|(cx, cy)| ctx.view.to_screen(Coord::new(cx, cy)))
+                                                .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, (sx, sy)| {
+                                                    let (sx, sy) = (sx as f32, sy as f32);
+                                                    [b[0].min(sx), b[1].min(sy), b[2].max(sx), b[3].max(sy)]
+                                                })
+                                        });
+                                        guide_labels::Near::Polygon(within, Box::new(|| area_labels::screen_rings(ctx, polys)))
+                                    }
+                                    _ => guide_labels::Near::Point((x as f32, y as f32)),
+                                };
+                                guide_labels::glyphs(
+                                    lines,
+                                    value.as_deref(),
+                                    near,
+                                    line_text,
+                                    |c| text::measure_in(c, size, face),
+                                    spacing * 1.33,
+                                    size,
+                                )
+                            }
+                        {
+                            // On its line: no other places round its point.
+                            squared = true;
+                            places.push((0, cx, cy, None, glyphs));
+                            text = unwrapped.take().unwrap_or_default();
                         } else if let (Some(line_text), Geometry::Polygon(polys)) = (unwrapped.as_deref(), g)
+                            && class.placement == LabelPlacement::Curved
                             && let Some(((cx, cy), glyphs)) =
                                 area_labels::glyphs(ctx, polys, line_text, |c| text::measure_in(c, size, face), spacing * 1.33, size)
                         {
@@ -6069,10 +6315,18 @@ fn render_frame(
             if let Some((water, darkness)) = &shore {
                 terrain::paint_shore(if direct { &mut pm } else { &mut target }, water, view, *darkness);
                 cpu_dirty = true;
+                layer_drew = true;
             }
             if !direct {
                 if target.is_recording() {
                     pm.place(target, Transform::identity(), opacity, layer_blend, None);
+                } else if gpu_own {
+                    // Nothing drawn (a source that gave no rows): nothing to place.
+                    cpu_dirty = dirty_before;
+                    if layer_drew {
+                        place_alone(pm.pixels(), &mut cmds, &mut cpu_dirty, &mut runs, std::sync::Arc::new(target.into_pixmap()), opacity)?;
+                        gpu_alone += 1;
+                    }
                 } else {
                     composite(&mut pm, target.pixmap());
                 }
@@ -6106,9 +6360,8 @@ fn render_frame(
             return None;
         }
     }
-    if let Some(plan) = cached.take() {
-        frame_cache::keep(plan, captured, captured_alone, layer_labels);
-    }
+    // Kept once the frame is done: not a GPU scene that the CPU draws whole instead.
+    let keep = cached.take().map(|plan| move || frame_cache::keep(plan, captured, captured_alone, layer_labels));
     // A band of a tilted view: the sun's glint on the terrain's water, over the water's own fill.
     if matches!(labels_to, Labels::Tilted(..) | Labels::Shared)
         && let Some(g) = TILT_GLINT.with(|g| g.borrow().clone())
@@ -6268,6 +6521,9 @@ fn render_frame(
     let pending_in_place = tile_out.pending_in_place;
     match backend {
         Backend::Cpu => {
+            if let Some(keep) = keep {
+                keep();
+            }
             let (pixmap, recorded) = if pm.is_recording() { (Pixmap::new(1, 1)?, Some(pm)) } else { (pm.into_pixmap(), None) };
             Some(RenderOutput::Cpu(Rendered {
                 pixmap,
@@ -6284,12 +6540,18 @@ fn render_frame(
             }))
         }
         Backend::Gpu | Backend::GpuLive => {
-            flush_acc(pm.pixels(), &mut cmds, &mut cpu_dirty)?;
+            flush_acc(pm.pixels(), &mut cmds, &mut cpu_dirty, &mut runs)?;
+            share_kept_pictures(&mut cmds, &mut kept_pictures);
             // Pathological CPU/GPU alternation (rasters, masks, blends between every vector
-            // layer) costs more full-screen uploads than a plain CPU rasterization.
-            let images = cmds.iter().filter(|c| matches!(c, gpu_scene::DrawCmd::Image { .. })).count();
-            if images > 4 {
+            // layer) costs more full-screen uploads than a plain CPU rasterization. Counted as
+            // though the see-through layers drawn alone were composited into the pictures around
+            // them, as they were before they could be (`GPU_ALONE`), so the same scenes stay on
+            // the GPU.
+            if runs.count > 4 {
                 return render_frame(map, view, full_res_rasters, Backend::Cpu, labels_to, record, failed_source, env);
+            }
+            if let Some(keep) = keep {
+                keep();
             }
             Some(RenderOutput::Gpu(gpu_scene::GpuScene {
                 clear: mesh::premul(water),
@@ -6857,6 +7119,141 @@ fn longest_on_screen(ctx: &Ctx<'_>, parts: &[Vec<Coord>]) -> Option<Vec<(f32, f3
         .max_by(|a, b| length(a).total_cmp(&length(b)))
 }
 
+/// A line in longitude and latitude on the screen: its runs, broken where a place doesn't project
+/// (on the globe, cut at the horizon as its stroke is).
+fn screen_pieces(ctx: &Ctx<'_>, flat: &rustgis_map::projection::Flat, part: &[Coord]) -> Vec<Vec<(f32, f32)>> {
+    match &ctx.globe {
+        Some(g) => globe_runs(g, part),
+        None => {
+            let points: Vec<Option<(f32, f32)>> =
+                part.iter().map(|c| flat.forward_checked(*c).map(|m| ctx.view.to_screen(m)).map(|(x, y)| (x as f32, y as f32))).collect();
+            points.split(Option::is_none).map(|r| r.iter().flatten().copied().collect()).collect()
+        }
+    }
+}
+
+/// The lines of the guide layers ([`rustgis_map::LabelClass::guide`], #2262) of the label classes
+/// shown at `scale` and `distance`, keyed by layer name in ASCII lower case (as
+/// [`Map::layer_by_name`] matches names) and field, on the screen ([`guides_of`]). Worked out once
+/// a frame, before the layers are drawn (each layer is then borrowed to draw it). On the flat map
+/// a guide layer is read from its copy there as it is drawn (`key` names the projection): the
+/// projected one its drawing keeps, else a display copy of it at this scale, which the layer's
+/// budget for those bounds ([`rustgis_map::Layer::prepare_display`]), else (held in another
+/// system, small, or in a projection those aren't made for) the projected copy its drawing would
+/// keep, about its geometry's size again, as a shown layer's.
+fn guide_lines(
+    map: &mut Map,
+    ctx: &Ctx<'_>,
+    flat: &rustgis_map::projection::Flat,
+    key: &str,
+    scale: f64,
+    distance: f64,
+) -> std::collections::HashMap<(String, Option<String>), guide_labels::Guides> {
+    let shown = map.layers.iter().filter(|l| l.visible && l.labels.enabled).flat_map(|l| l.labels.in_order());
+    let mut wanted: Vec<(String, Option<String>)> = shown
+        .filter(|c| c.visible && c.in_range(scale, distance))
+        .filter_map(|c| c.guide.as_ref().map(|g| (g.layer.to_ascii_lowercase(), g.field.clone())))
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    if ctx.globe.is_none() {
+        for (name, _) in &wanted {
+            if let Some(l) = map.layers.iter_mut().find(|l| l.name.eq_ignore_ascii_case(name))
+                && l.source.is_none()
+                && !l.is_cached(key)
+            {
+                // As its drawing asks for it, so that the two share it (a guide layer isn't
+                // read from a source: see `guides_of`). None is made from a layer held in another
+                // system, nor for a small one or another projection: it gets the projected copy
+                // its drawing would keep, as converting it again each frame costs far more (a
+                // whole view of 2 M vertices held in Polyconic, 0.85 s).
+                let tol = ctx.view.lod_tolerance();
+                if !l.prepare_display(flat, tol, false) {
+                    l.thinned_in(flat, key, tol);
+                }
+            }
+        }
+    }
+    let map = &*map;
+    wanted
+        .into_iter()
+        .map(|k| {
+            let guides = guides_of(map, ctx, flat, key, &k);
+            (k, guides)
+        })
+        .collect()
+}
+
+/// The lines of the guide layer `name` (shown or not) on the screen, their stretches in view
+/// ([`screen_pieces`], thinned as [`guide_labels::Guides`] keeps them), each with its value in
+/// `field`, read only for a line with a stretch in view. On the flat map, read from its copy there
+/// as drawn ([`guide_lines`]), a line whose extent is out of view is passed over by it: a frame
+/// costs a look at each line's extent and a pass over the vertices of those in view. On the globe
+/// each vertex is projected, as for [`square_lines`] (the view's extent, worked out in the layer's
+/// system once to pass over lines unconverted, is the whole world there). What is kept is at most about
+/// 24 bytes a point of the stretches in view, which thinning bounds by their length on the screen,
+/// and dropped with the frame. A layer read in place from its source gives none: only a view's
+/// window of it is at hand (`labels.placement` refuses it, and a file that has one says so).
+fn guides_of(
+    map: &Map,
+    ctx: &Ctx<'_>,
+    flat: &rustgis_map::projection::Flat,
+    key: &str,
+    (name, field): &(String, Option<String>),
+) -> guide_labels::Guides {
+    let mut guides = guide_labels::Guides::default();
+    let Some(layer) = map.layer_by_name(name).filter(|l| l.source.is_none()) else { return guides };
+    // Read, even when it gives no lines (its system can't be converted).
+    note_held_read(layer);
+    let features = &layer.dataset.features;
+    let field = field.as_deref().and_then(|f| layer.dataset.field_index(f));
+    let (w, h) = (ctx.view.width as f32, ctx.view.height as f32);
+    let mut add = |row: usize, pieces: Vec<Vec<(f32, f32)>>| {
+        let mut value: Option<Option<String>> = None;
+        for piece in pieces {
+            for stretch in line_labels::in_view(piece.into_iter().map(Some), w, h) {
+                let v =
+                    value.get_or_insert_with(|| field.map(|fi| features.value(row, fi)).filter(|v| !v.is_null()).map(|v| v.to_string()));
+                guides.push(&stretch, v.as_deref());
+            }
+        }
+    };
+    let drawn = || match layer.is_cached(key) {
+        true => Some((layer.thinned_cache(ctx.view.lod_tolerance()), layer.projected_extents())),
+        false => layer.display_cache(),
+    };
+    if let Some((geoms, extents)) = ctx.globe.is_none().then(drawn).flatten() {
+        // A point the projection can't show is NaN in the copy, and breaks the line there.
+        let screen = |c: &Coord| c.is_finite().then(|| ctx.view.to_screen(*c)).map(|(x, y)| (x as f32, y as f32));
+        for (row, g) in geoms.iter().enumerate() {
+            if !extents.get(row).is_some_and(|e| e.intersects(&ctx.cull)) {
+                continue;
+            }
+            let Some(Geometry::Line(parts)) = g else { continue };
+            let pieces = parts
+                .iter()
+                .flat_map(|part| {
+                    let points: Vec<Option<(f32, f32)>> = part.iter().map(screen).collect();
+                    points.split(Option::is_none).map(|r| r.iter().flatten().copied().collect()).collect::<Vec<_>>()
+                })
+                .collect();
+            add(row, pieces);
+        }
+        return guides;
+    }
+    // Read in longitude/latitude, as the lines labels are square to; those whose extent misses the
+    // view's, in the layer's own system, aren't (the whole world on the globe).
+    let Ok(to) = layer.dataset.lonlat_conversion() else { return guides };
+    let reach = layer.dataset.extent_from_lonlat(&view_lonlat(map, ctx.view)).padded(0.05, 0.0);
+    for (row, r) in features.rows().enumerate() {
+        let Some(g) = r.geometry().filter(|g| g.extent().intersects(&reach)) else { continue };
+        let Some(g) = rustgis_data::Dataset::converted_to_lonlat(&to, g) else { continue };
+        let Geometry::Line(parts) = &*g else { continue };
+        add(row, parts.iter().flat_map(|part| screen_pieces(ctx, flat, part)).collect());
+    }
+    guides
+}
+
 thread_local! {
     /// The layers held in another system that the drawing on this thread read beside drawing
     /// them (terrain water, block walls, the lines labels square to), which may be hidden; `None`
@@ -6958,17 +7355,7 @@ fn square_lines(
                     }
                     _ => part,
                 };
-                let pieces = match &ctx.globe {
-                    Some(g) => globe_runs(g, part),
-                    None => {
-                        let points: Vec<Option<(f32, f32)>> = part
-                            .iter()
-                            .map(|c| flat.forward_checked(*c).map(|m| ctx.view.to_screen(m)).map(|(x, y)| (x as f32, y as f32)))
-                            .collect();
-                        points.split(Option::is_none).map(|r| r.iter().flatten().copied().collect()).collect()
-                    }
-                };
-                runs.extend(pieces.into_iter().filter_map(square_labels::Run::new));
+                runs.extend(screen_pieces(ctx, flat, part).into_iter().filter_map(square_labels::Run::new));
             }
         }
         out.insert(name, runs);
@@ -10058,6 +10445,31 @@ mod tests {
         assert!(!scene.cmds.iter().any(|c| matches!(c, gpu_scene::DrawCmd::Image { .. })), "hidden tiles must not emit an empty image");
     }
 
+    /// The pictures a scene would hold with its see-through layers composited into the picture
+    /// being drawn instead of drawn alone, as `Runs` counts them.
+    #[test]
+    fn runs_count_the_pictures_of_a_scene_without_layers_alone() {
+        let alone = || std::sync::Arc::new(Pixmap::new(1, 1).expect("pixmap"));
+        let (mut pm, mut cmds) = (Pixmap::new(1, 1).expect("pixmap"), Vec::new());
+        // A picture, then two layers alone over it and a picture over them: one, as composited.
+        let (mut dirty, mut runs) = (true, Runs::default());
+        place_alone(&mut pm, &mut cmds, &mut dirty, &mut runs, alone(), 0.5);
+        place_alone(&mut pm, &mut cmds, &mut dirty, &mut runs, alone(), 0.5);
+        dirty = true;
+        flush_acc(&mut pm, &mut cmds, &mut dirty, &mut runs);
+        assert_eq!((cmds.len(), runs.count), (4, 1));
+        // Ended by a layer that adds nothing (a mesh with nothing in view): a layer alone, then a
+        // picture, are two.
+        place_alone(&mut pm, &mut cmds, &mut dirty, &mut runs, alone(), 0.5);
+        flush_acc(&mut pm, &mut cmds, &mut dirty, &mut runs);
+        dirty = true;
+        flush_acc(&mut pm, &mut cmds, &mut dirty, &mut runs);
+        assert_eq!(runs.count, 3);
+        // A flush with nothing drawn since counts nothing.
+        flush_acc(&mut pm, &mut cmds, &mut dirty, &mut runs);
+        assert_eq!(runs.count, 3);
+    }
+
     #[test]
     fn gpu_backend_caps_image_commands_to_a_cpu_frame() {
         // More than four alternating CPU-only layers costs more full-screen uploads than a
@@ -10115,7 +10527,7 @@ mod tests {
         let kinds = cmd_kinds(&scene);
         assert!(!kinds.contains(&"mesh"), "no mesh f32 would misplace: {kinds:?}");
         let Some(pixmap) = scene.cmds.iter().find_map(|c| match c {
-            gpu_scene::DrawCmd::Image { pixmap } => Some(pixmap),
+            gpu_scene::DrawCmd::Image { pixmap, .. } => Some(pixmap),
             _ => None,
         }) else {
             panic!("the square is drawn on the CPU: {kinds:?}")

@@ -1111,7 +1111,9 @@
           "zarr-window",
           "blank-paper",
           "layout-frame-border",
-          "native-coordinates"
+          "native-coordinates",
+          "layout-legend-text",
+          "label-guide"
         ],
         "type": "string"
       },
@@ -1208,7 +1210,9 @@
     "zarr-window",
     "blank-paper",
     "layout-frame-border",
-    "native-coordinates"
+    "native-coordinates",
+    "layout-legend-text",
+    "label-guide"
   ],
   "x-rustgis-reads-format": 2,
   "x-rustgis-writes-format": 2

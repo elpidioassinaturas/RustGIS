@@ -43,8 +43,8 @@ is out of scope.
 - A new background raster command or export, or a tool whose work grows with its input, goes in
   the lists in `long_commands` (`crates/engine/src/tests/cancellation.rs`), which both cancel tests
   run; the raster and export lists must match the background registries. A read-ahead command
-  (`reads::prepare`, such as `service.layers` or `edit.previewShapeConversion`) has no registry:
-  add its call to `long_commands` by hand.
+  goes in `reads::IN_BACKGROUND` (a table edit in `edit::TABLE_EDITS`), and `long_commands`
+  fails until it runs every one there or names why not in its exemptions.
   `long_commands_stop_when_cancelled_while_they_run` fails one that never looks at Cancel;
   `cancelling_at_each_check_leaves_nothing_behind` cancels at every check in turn until the command
   finishes before reaching it, on small fixtures, failing if one needs 256 or more checks. It
@@ -174,6 +174,10 @@ immediately; label-gated build jobs in `ci.yml` start from the next push.
   wait for the **release quality pass**, where maintainers handle them together before each
   release. Reply that it's left for the release quality pass, end the reply with
   `<!-- quality-sweep -->`, and leave it out of the next push.
+- The Claude review ends each inline finding with its category (a last line such as `Category: bug`).
+  CI's `Review deferrals` job fails, on each push and in the merge queue, when the marker answers
+  a `bug`, `security` or `agents-md` finding, or one edited since it was posted. A maintainer
+  overrides it for one finding by ending a reply in its thread with `<!-- deferral-approved -->`.
 
 ## Looking at the app
 - `cargo run --release -p rustgis` (opens the World Atlas sample).

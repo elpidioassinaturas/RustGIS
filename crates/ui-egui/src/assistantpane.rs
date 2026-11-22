@@ -25,6 +25,8 @@ const SUGGESTIONS: &[&str] = &[
 pub struct AssistantState {
     pub(crate) agent: Option<Agent>,
     pub input: String,
+    /// The pictures attached to the message being written.
+    pub(crate) pictures: crate::assistantpictures::Pictures,
     /// The input box's height, set by dragging the grip above it (0 until dragged: two lines).
     input_height: f32,
     /// A message to send on the next frame (`ui.pane.assistant {"ask": …}`).
@@ -316,7 +318,7 @@ fn saved_accounts(app: &mut RustGisApp) -> Vec<chatgpt::Credentials> {
 #[cfg(not(target_arch = "wasm32"))]
 fn poll_sign_in(app: &mut RustGisApp, ctx: &egui::Context) {
     let Some((checking, slot)) = app.assistant.sign_in_read.as_ref() else { return };
-    let Some(read) = slot.lock().ok().and_then(|mut s| s.take()) else { return };
+    let Some(read) = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() else { return };
     let checking = checking.clone();
     app.assistant.sign_in_read = None;
     let Some(cfg) = app.assistant.agent.as_ref().map(|a| a.config.clone()).filter(Config::login) else { return };
@@ -559,7 +561,7 @@ fn sync_sign_in(app: &mut RustGisApp, ctx: &egui::Context) {
 }
 
 fn take(slot: &Reply) -> Option<Result<HttpResponse, rustgis_assistant::Error>> {
-    slot.lock().ok().and_then(|mut s| s.take())
+    slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
 }
 
 /// Ends the agent threads on this computer (with every process they started), and the relay if
@@ -718,7 +720,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(r) = app.assistant.signout.as_ref().and_then(|s| s.lock().ok().and_then(|mut s| s.take())) {
+    if let Some(r) = app.assistant.signout.as_ref().and_then(|s| s.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()) {
         app.assistant.signout = None;
         if r.is_err() {
             app.assistant.login_error = Some(
@@ -730,20 +732,25 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
 
 /// Starts a user request with the selected provider's current session configuration.
 fn send(app: &mut RustGisApp, text: String, ctx: &egui::Context) {
-    if key_loading(app) {
+    // A message waits for the key, and for a picture still being read, which goes with it (a
+    // suggestion clicked meanwhile, say).
+    if key_loading(app) || app.assistant.pictures.reading() {
         app.assistant.queued = Some(text);
         return;
     }
     let text = text.trim().to_string();
-    if text.is_empty() {
+    if text.is_empty() && !app.assistant.pictures.any() {
         return;
     }
-    app.assistant.history.retain(|h| *h != text);
-    app.assistant.history.push(text.clone());
+    if !text.is_empty() {
+        app.assistant.history.retain(|h| *h != text);
+        app.assistant.history.push(text.clone());
+    }
     app.assistant.history_pos = None;
     app.assistant.always = false;
     let session = &app.session;
-    let Some(step) = app.assistant.agent.as_mut().map(|a| a.ask(&text, session)) else { return };
+    let Some(agent) = app.assistant.agent.as_mut() else { return };
+    let step = agent.ask_with(&text, app.assistant.pictures.take(), session);
     app.assistant.input.clear();
     follow(app, step, ctx);
 }
@@ -1569,6 +1576,7 @@ fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egu
     let id = egui::Id::unique("assistant_input");
     // Enter sends; Shift+Enter starts a new line.
     let focused = ui.memory(|m| m.has_focus(id));
+    crate::assistantpictures::poll(app, ui, focused);
     let mut submit = false;
     if focused && !busy {
         submit = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
@@ -1588,6 +1596,7 @@ fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egu
             }
         }
     }
+    crate::assistantpictures::chips(app, ui, t);
     // A grip above the box: dragging it up makes the box taller, up to half the window.
     let most = (ui.ctx().content_rect().height() * 0.5).max(INPUT_HEIGHT);
     let (grip, drag) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), egui::Sense::drag());
@@ -1612,7 +1621,7 @@ fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egu
     });
     ui.horizontal(|ui| {
         // Room for the button; the hint gives way in long languages.
-        let w = (ui.available_width() - 84.0).max(0.0);
+        let w = (ui.available_width() - 116.0).max(0.0);
         ui.allocate_ui(vec2(w, 20.0), |ui| {
             ui.add(egui::Label::new(RichText::new(tl!("Enter to send, Shift+Enter for a new line")).small().color(t.text_dim)).truncate());
         });
@@ -1627,14 +1636,18 @@ fn composer(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, busy: bool, ctx: &egu
                     app.assistant.chunks = None;
                 }
             } else {
-                let can = !app.assistant.input.trim().is_empty();
+                // A message is its text, its pictures or both, once its pictures are read.
+                let pictures = &app.assistant.pictures;
+                let can = (!app.assistant.input.trim().is_empty() || pictures.any()) && !pictures.reading();
                 if crate::widgets::primary_button(ui, tl!("Send"), can, vec2(64.0, 26.0)).clicked() {
                     submit = true;
                 }
+                crate::assistantpictures::button(app, ui);
             }
         });
     });
-    if submit && !busy {
+    // Enter waits for a picture still being read.
+    if submit && !busy && !app.assistant.pictures.reading() {
         let text = app.assistant.input.clone();
         send(app, text, ctx);
         ui.memory_mut(|m| m.request_focus(id));
@@ -1660,6 +1673,8 @@ fn transcript(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, ctx: &egui::Context
     }
     for e in &agent.transcript {
         match e {
+            // A message of pictures alone: its notes say them.
+            Entry::User(text) if text.is_empty() => {}
             Entry::User(text) => {
                 ui.add_space(6.0);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -1694,8 +1709,7 @@ fn transcript(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, ctx: &egui::Context
                 show_error(ui, e, t);
             }
             Entry::Note(n) => {
-                let args: Vec<(&str, &str)> = n.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
-                ui.label(RichText::new(crate::i18n::fmt(n.template, &args)).small().italics().color(t.text_dim));
+                ui.label(RichText::new(crate::i18n::note(n)).small().italics().color(t.text_dim));
             }
         }
     }

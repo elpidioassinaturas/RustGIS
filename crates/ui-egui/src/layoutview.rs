@@ -6,10 +6,10 @@
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use rustgis_engine::map::layout::{
-    Arrange, ArrowStyle, Background, ChartOrder, CoordFormat, Element, ElementKind, Grid, GridKind, GridStyle, INK, Layout, LineHead,
-    MAX_BACKGROUND_PADDING, MAX_BACKGROUND_RADIUS, MAX_BACKGROUND_WIDTH, MAX_CHART_BARS, MAX_CHART_DECIMALS, MAX_COLORBAR_TICKS,
-    MAX_FRAME_SCALE, MAX_GRID_WIDTH, MAX_LEGEND_COLUMNS, MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_FRAME_SCALE, Orientation, PT_PER_MM,
-    ScaleBarStyle, ScaleUnits, TextAlign, TickSide, chart_stack_refusal, frame_camera, line_angle, line_length,
+    Arrange, ArrowStyle, Background, ChartOrder, CoordFormat, Element, ElementKind, Grid, GridKind, GridStyle, INK, LEGEND_TEXT_SIZE,
+    Layout, LineHead, MAX_BACKGROUND_PADDING, MAX_BACKGROUND_RADIUS, MAX_BACKGROUND_WIDTH, MAX_CHART_BARS, MAX_CHART_DECIMALS,
+    MAX_COLORBAR_TICKS, MAX_FRAME_SCALE, MAX_GRID_WIDTH, MAX_LEGEND_COLUMNS, MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_FRAME_SCALE,
+    Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TextAlign, TickSide, chart_stack_refusal, frame_camera, line_angle, line_length,
 };
 use rustgis_engine::map::report::StatKind;
 use rustgis_engine::map::symbology::Dash;
@@ -1398,7 +1398,6 @@ fn text_field(
     None
 }
 
-/// A map frame's grid options; `set` sends the changed ones (`false` removes the grid).
 /// An outline in a map frame's properties (its extent indicator, its border): the command key its
 /// changes go under, its width's drag id, and its colour and width (points) within `range`.
 struct Outline {
@@ -1445,6 +1444,7 @@ fn outline_rows(
     });
 }
 
+/// A map frame's grid options; `set` sends the changed ones (`false` removes the grid).
 fn grid_properties(app: &mut RustGisApp, ui: &mut Ui, grid: Option<&Grid>, id: u32, set: &dyn Fn(&mut RustGisApp, Value)) {
     let mut on = grid.is_some();
     if ui.checkbox(&mut on, tl!("Show grid")).changed() {
@@ -1807,7 +1807,7 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                         });
                         ui.end_row();
                     }
-                    ElementKind::Legend { title, all_classes, hide_other, show_no_data, columns, .. } => {
+                    ElementKind::Legend { title, all_classes, hide_other, show_no_data, columns, text_size, .. } => {
                         let input_label = ui.label(tl!("Title"));
                         if let Some(tt) = text_field(app, ui, (li, id, "title"), title, false, input_label.id) {
                             update(app, json!({"title": tt}));
@@ -1840,6 +1840,24 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
                             .labelled_by(input_label.id);
                         if drag.settled(ui, &r, &mut n) && n as usize != *columns {
                             update(app, json!({"columns": n}));
+                        }
+                        ui.end_row();
+                        // Its names' and labels' points; the title, rows and swatches follow (#2581).
+                        let input_label = ui.label(tl!("Text size"));
+                        let mut pt = *text_size;
+                        let drag = Dragged::lend(ui, drag_key("textSize"), &mut pt);
+                        let r = ui
+                            .add(
+                                egui::DragValue::new(&mut pt)
+                                    .update_while_editing(false)
+                                    .range(LEGEND_TEXT_SIZE)
+                                    .speed(0.1)
+                                    .max_decimals(1)
+                                    .suffix(" pt"),
+                            )
+                            .labelled_by(input_label.id);
+                        if drag.settled(ui, &r, &mut pt) && (pt - text_size).abs() > 1e-6 {
+                            update(app, json!({"textSize": pt}));
                         }
                         ui.end_row();
                     }

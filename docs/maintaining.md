@@ -147,6 +147,11 @@ Projects, map files and layer files with a window of a Zarr variable that follow
 reader refuses them instead of reading the whole map at each step. A saved `layer.addZarr` command
 with both needs nothing: an older RustGIS refuses it when it runs.
 
+Projects, map files and layer files with a label class curved along a guide line layer
+(`labels.placement` with a `guide`) require `label-guide`, so an older reader refuses them instead
+of placing those labels as without it and saving them again without the guide. A saved
+`labels.placement` command with a guide needs nothing: an older RustGIS refuses the key when it runs.
+
 Projects with an ink on a legend, colorbar, table or chart (`color` on those elements) require
 `layout-element-ink`, so an older reader refuses them instead of drawing those elements in dark
 grey and saving them again without it. Saved `layout.addElement` and `layout.update` commands
@@ -207,6 +212,13 @@ without its own (#2557). A saved `layout.update` that gives a frame a `border` o
 too, since an older reader warns that it ignores the key; `"border": null` only gives the default
 back and needs nothing. A saved `layout.import` whose `text` has such a frame requires it as well.
 Layout files are not covered, as for backgrounds (#2277).
+
+Projects with a legend whose text isn't the default 9 points (`text_size` on a legend) require
+`layout-legend-text`, so an older reader refuses them instead of drawing the legend at 9 points
+and saving it again without its size (#2581). A saved `layout.addElement` for a legend or
+`layout.update` that gives `textSize` another size requires it too; `null` or 9 only give the
+default and need nothing. A saved `layout.import` whose `text` has such a legend requires it as
+well. Layout files are not covered, as for backgrounds (#2277).
 
 Projects, map files and layer files with a layer or table held in a coordinate system of its own
 (`Dataset::held_in`: a file's system, kept since #2580) save its features in that system, exactly,

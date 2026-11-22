@@ -303,8 +303,9 @@ impl Features {
         }
     }
 
-    /// Appends a row with the id one past the largest. `max_id` stays right only because every
-    /// other change to `rows` goes through `DerefMut`, which clears it.
+    /// Appends a row with the id one past the largest. `max_id` stays right because every change
+    /// that removes or reorders rows clears it (`DerefMut`, `remove_row`, `retain_rows`,
+    /// `truncate_rows`), and the pushes keep it.
     fn push_with_new_id(&mut self, geometry: Option<Geometry>, attrs: Vec<Value>) {
         let max = self.max_id.unwrap_or_else(|| self.rows.iter().map(|f| f.id).max().unwrap_or(0));
         let id = max.saturating_add(1);
@@ -839,8 +840,7 @@ pub fn export_notes<'a>(
             layer_list(&many.iter().map(|ds| ds.name.as_str()).collect::<Vec<_>>())
         )),
     }
-    let outside = |e: &rustgis_geom::Extent| !e.is_empty() && (e.min_x < -180.5 || e.max_x > 180.5 || e.min_y < -90.5 || e.max_y > 90.5);
-    let names: Vec<&str> = layers.iter().filter(|(_, e)| outside(e)).map(|(ds, _)| ds.name.as_str()).collect();
+    let names: Vec<&str> = layers.iter().filter(|(_, e)| e.beyond_lonlat()).map(|(ds, _)| ds.name.as_str()).collect();
     match names.as_slice() {
         [] => {}
         [one] => notes.push(format!(
@@ -1075,7 +1075,7 @@ impl Dataset {
         }
     }
 
-    /// The dataset in longitude/latitude, the space analysis tools work in: borrowed while its
+    /// The dataset in longitude/latitude, the space most analysis tools work in: borrowed while its
     /// coordinates are longitude/latitude ([`Dataset::coord_crs`]); otherwise a copy with every
     /// geometry converted, missing coordinates kept. Refused, naming the first feature that can't
     /// be, when one of its places can't be converted. The copy is held in longitude/latitude
@@ -1101,6 +1101,26 @@ impl Dataset {
                 })?;
             }
         }
+        Ok(Cow::Owned(out))
+    }
+
+    /// The dataset in `crs`, the system a tool works in when it works in its first input's own
+    /// ([`Dataset::in_lonlat`] for longitude/latitude): borrowed while its coordinates are already
+    /// there; otherwise a copy held there ([`Dataset::hold_in`]), missing coordinates kept.
+    /// Refused as [`Dataset::hold_in`] refuses, naming the first feature with a place `crs` can't
+    /// hold.
+    pub fn in_crs(&self, crs: raster::Crs) -> std::result::Result<Cow<'_, Dataset>, String> {
+        if crs == raster::Crs::LonLat {
+            return self.in_lonlat();
+        }
+        if self.coord_crs().to(crs)?.is_identity() {
+            return Ok(Cow::Borrowed(self));
+        }
+        let mut out = self.clone();
+        // A copy for one run, not the layer: a window's rows are converted as they are.
+        let windowed = std::mem::take(&mut out.windowed);
+        out.hold_in(crs)?;
+        out.windowed = windowed;
         Ok(Cow::Owned(out))
     }
 

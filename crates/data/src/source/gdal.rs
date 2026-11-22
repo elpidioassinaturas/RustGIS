@@ -454,14 +454,10 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
         }
         Err(error) => converted.notes.push(format!("{}: couldn't check how many features GDAL's conversion kept ({error})", info.name)),
     }
-    let mut zm_dropped = info.has_zm && !converted.empty;
-    if zm_dropped {
-        let count = info.count.filter(|n| *n >= 0).map_or_else(|| "an unknown number of".into(), |n| n.to_string());
-        converted.notes.push(format!(
-            "GDAL: '{layer}' declares Z or M coordinates on {count} source feature(s); conversion keeps only XY coordinates"
-        ));
-    }
-    if !info.has_zm && info.family.is_none() && !converted.empty {
+    let mut zm_dropped = false;
+    // A layer declaring Z or M may still hold features with only XY: those that carry them are
+    // counted, as for a layer of several types.
+    if (info.has_zm || info.family.is_none()) && !converted.empty {
         match count_zm_features(src, info, family) {
             Ok(0) => {}
             Ok(count) => {
@@ -470,9 +466,13 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
                     "GDAL: '{layer}' contains Z or M coordinates on {count} source feature(s); conversion keeps only XY coordinates"
                 ));
             }
-            Err(_) => converted.notes.push(format!(
-                "GDAL: '{layer}': an unknown number of source feature(s) may have had Z or M coordinates dropped; conversion keeps only XY coordinates"
-            )),
+            Err(_) => {
+                // A layer that declares them had them dropped, though how many is unknown.
+                zm_dropped = info.has_zm;
+                converted.notes.push(format!(
+                    "GDAL: '{layer}': an unknown number of source feature(s) may have had Z or M coordinates dropped; conversion keeps only XY coordinates"
+                ));
+            }
         }
     }
     Ok(FreshConverted { path: converted.path, notes: converted.notes, empty: converted.empty, zm_dropped, workspace })
@@ -725,6 +725,15 @@ fn ours(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::GeometryType;
+
+    /// A GDAL program is told the drivers it may open its input with, each as `-if`: without them a
+    /// VRT renamed `.tab` would open whatever files it names. Needs no GDAL, so CI runs it.
+    #[test]
+    fn a_gdal_program_gets_its_drivers_as_if() {
+        let c = command(PathBuf::from("ogrinfo"), &["MapInfo File", "CSV"]);
+        let args: Vec<&std::ffi::OsStr> = c.get_args().collect();
+        assert_eq!(args, ["-if", "MapInfo File", "-if", "CSV"]);
+    }
 
     #[test]
     fn where_programs_cant_run_the_message_says_so_instead_of_asking_for_an_install() {
@@ -1055,6 +1064,16 @@ mod tests {
             let batch = source.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
             assert_eq!(batch.features[0].geometry.as_ref().unwrap().extent().center().x, if lossy { 2.0 } else { 8.0 });
         }
+        // A layer of points with Z, two of its three features with only XY: the one with Z is
+        // counted, not the layer.
+        let mixed = ["[2,48]", "[3,48,100]", "[4,48]"]
+            .map(|c| format!(r#"{{"type":"Feature","properties":{{"rank":1}},"geometry":{{"type":"Point","coordinates":{c}}}}}"#));
+        std::fs::write(&path, mixed.join("\n")).unwrap();
+        let fresh = convert_one_fresh_in(&dir.join("cache"), &path, "points", None, None).unwrap();
+        let said: Vec<_> = fresh.notes.iter().filter(|n| n.contains("Z or M")).collect();
+        assert_eq!(said.len(), 1, "{:?}", fresh.notes);
+        assert!(said[0].contains("Z or M coordinates on 1 source feature(s)"), "{said:?}");
+        assert!(fresh.zm_dropped);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

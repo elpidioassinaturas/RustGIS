@@ -130,7 +130,10 @@ fn image_grid_tags<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<Vec<u16>> {
         if matches!(key, 2048 | 3072) && (location != 0 || count != 1) {
             return Err(err("image grid has an invalid coordinate system GeoKey"));
         }
-        if matches!(key, 1024 | 1025) && (location != 0 || count != 1 || !matches!(value, 1 | 2)) {
+        if key == 1024 && (location != 0 || count != 1 || !matches!(value, 1 | 2)) {
+            return Err(err("image grid requires a projected or geographic coordinate system (GTModelTypeGeoKey 1 or 2)"));
+        }
+        if key == 1025 && (location != 0 || count != 1 || !matches!(value, 1 | 2)) {
             return Err(err("image grid requires two-dimensional area or point GeoTIFF georeferencing"));
         }
     }
@@ -752,9 +755,12 @@ fn samples<R: Read + Seek>(dec: &mut Decoder<R>) -> usize {
 /// undone, corrupting the colours (https://github.com/image-rs/image-tiff/issues/425); as grey,
 /// every sample is decoded. The only change is the PhotometricInterpretation value (→ 1) in each
 /// such image's IFD, in memory.
+///
+/// It also shows a SampleFormat of 4 ("undefined", which CBERS-4 scenes have) as 1, unsigned, as
+/// libtiff and GDAL read it: the `tiff` crate refuses to decode it (#2593).
 pub(crate) struct Unpaletted<R> {
     inner: R,
-    /// Where each patched image's PhotometricInterpretation value is, and what to show there.
+    /// Where each patched PhotometricInterpretation or SampleFormat value is, and what to show there.
     patches: Vec<(u64, [u8; 2])>,
     /// Whether the first image (the full one) is a palette image.
     first_palette: bool,
@@ -764,15 +770,16 @@ pub(crate) struct Unpaletted<R> {
     pos: u64,
 }
 
-/// Most images and IFD entries looked at for palette images.
+/// Most images and IFD entries looked at for palette images, and SampleFormat values in an image.
 const MAX_IFDS: usize = 64;
 const MAX_ENTRIES: u64 = 4096;
 
 /// Where the palette images' PhotometricInterpretation values are, and those of RGB images with
 /// samples past the colour ones (which the decoder would leave out, or refuse), walking the IFD
 /// chain (classic and BigTIFF). A file it can't walk has none: the decoder reports what's wrong.
-/// Returns the patches, whether the first image is a palette image, and whether it is such an RGB
-/// image.
+/// Each SampleFormat value of 4 (undefined) is patched to 1 too, in the entry or in the array it
+/// points to (#2593). Returns the patches, whether the first image is a palette image, and whether
+/// it is such an RGB image.
 fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, bool, bool) {
     use std::io::SeekFrom;
     let mut patches = Vec::new();
@@ -825,31 +832,44 @@ fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, bool, boo
             let mut entries = vec![0u8; usize::try_from(n * entry_len).ok()?];
             r.read_exact(&mut entries).ok()?;
             let value_at = if big { 12 } else { 8 };
-            let grey = if little { [1, 0] } else { [0, 1] };
+            // The SHORT 1: grey as a PhotometricInterpretation, unsigned as a SampleFormat.
+            let one = if little { [1, 0] } else { [0, 1] };
             // PhotometricInterpretation (262): where its value is, and the value; SamplesPerPixel
-            // (277); the first ExtraSamples (338) value, when it is inline. Each a SHORT, as the
-            // decoder itself requires of them.
-            let (mut photometric, mut samples, mut extra) = (None, 1u16, None);
+            // (277); the first ExtraSamples (338) value, when it is inline; SampleFormat (339):
+            // where its values are (in the entry when they fit there, else where it points) and
+            // how many. Each a SHORT, as the decoder itself requires of them.
+            let (mut photometric, mut samples, mut extra, mut format) = (None, 1u16, None, None);
             for (i, e) in entries.chunks(entry_len as usize).enumerate() {
                 let short = u16_(e.get(2..)?)? == 3;
+                let entry_value = ifd + count_len + i as u64 * entry_len + value_at as u64;
                 match u16_(e)? {
-                    262 if short => {
-                        photometric = Some((ifd + count_len + i as u64 * entry_len + value_at as u64, u16_(e.get(value_at..)?)?))
-                    }
+                    262 if short => photometric = Some((entry_value, u16_(e.get(value_at..)?)?)),
                     277 if short => samples = u16_(e.get(value_at..)?)?,
                     338 if short => extra = u16_(e.get(value_at..)?),
+                    339 if short => {
+                        let count = if big { u64_(e.get(4..)?)? } else { u64::from(u32_(e.get(4..)?)?) };
+                        // Two bytes a value: four fit in a BigTIFF entry, two in a classic one.
+                        let at = if count <= if big { 4 } else { 2 } {
+                            entry_value
+                        } else if big {
+                            u64_(e.get(value_at..)?)?
+                        } else {
+                            u64::from(u32_(e.get(value_at..)?)?)
+                        };
+                        format = (count <= MAX_ENTRIES).then_some((at, count));
+                    }
                     _ => {}
                 }
             }
             match photometric {
                 Some((at, 3)) => {
-                    patches.push((at, grey));
+                    patches.push((at, one));
                     first |= k == 0;
                 }
                 // An RGB image whose fourth sample isn't alpha, or with five or more: RGBI
                 // orthophotos, multispectral images.
                 Some((at, 2)) if samples > 4 || (samples == 4 && !matches!(extra, Some(1 | 2))) => {
-                    patches.push((at, grey));
+                    patches.push((at, one));
                     first_wide |= k == 0;
                 }
                 _ => {}
@@ -857,6 +877,18 @@ fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, bool, boo
             let mut next = [0u8; 8];
             r.read_exact(&mut next[..next_len]).ok()?;
             ifd = if big { u64_(&next)? } else { u64::from(u32_(&next)?) };
+            // Each SampleFormat value of 4 (undefined) is shown as 1, unsigned, as libtiff and GDAL
+            // read it (#2593). Values that can't be read are left to the decoder.
+            if let Some((at, count)) = format {
+                let mut values = vec![0u8; count as usize * 2];
+                if r.seek(SeekFrom::Start(at)).is_ok() && r.read_exact(&mut values).is_ok() {
+                    for (j, v) in values.as_chunks::<2>().0.iter().enumerate() {
+                        if u16_(v.as_slice()) == Some(4) {
+                            patches.push((at + 2 * j as u64, one));
+                        }
+                    }
+                }
+            }
         }
         Some(())
     };
@@ -1434,6 +1466,7 @@ pub(super) fn read_limited_with_nodata(
         Err(e) => (None, Some(format!("its Copyright tag: it can't be read ({e}), so it is left out"))),
     };
     let spp = samples(&mut dec);
+    let full_alpha = extra_alpha(&mut dec);
     let bytes = sample_bytes(&mut dec);
     // The decoded image is held at its own pixel size before conversion to f32, so bound bytes
     // as well as samples.
@@ -1463,9 +1496,14 @@ pub(super) fn read_limited_with_nodata(
             }
             let Ok((ow, oh)) = dec.dimensions() else { continue };
             let (ospp, obytes) = (samples(&mut dec), sample_bytes(&mut dec));
-            // An overview with another sample count (three of an RGBI image's four) would read
-            // as another kind of image: the full image is read sparsely instead.
-            if ospp == spp && fits(ow, oh, ospp, obytes) && best.is_none_or(|(_, bw, bh)| ow as u64 * oh as u64 > bw as u64 * bh as u64) {
+            // An overview with another sample count (three of an RGBI image's four), or another
+            // alpha role for the sample past the colour ones (an RGBA overview of an RGBI image),
+            // would read as another kind of image: the full image is read sparsely instead.
+            if ospp == spp
+                && extra_alpha(&mut dec) == full_alpha
+                && fits(ow, oh, ospp, obytes)
+                && best.is_none_or(|(_, bw, bh)| ow as u64 * oh as u64 > bw as u64 * bh as u64)
+            {
                 best = Some((index, ow, oh));
             }
         }
@@ -1896,8 +1934,10 @@ pub fn write(r: &Raster, band: usize) -> Result<Vec<u8>> {
 }
 
 /// Writes every band of a raster, for a layer whose pixels the project keeps: as [`write`] does
-/// when that keeps them all, otherwise as 32-bit float samples (RGB first for a colour raster,
-/// and alpha after them when it has one), which [`read`] reads back as the same bands.
+/// when that keeps them all. Otherwise: 8-bit samples when the raster is `UInt8` and every valid
+/// value is a whole number in 0–255 (an empty cell only where no-data can mark it), else 32-bit
+/// float samples (RGB first for a colour raster, and alpha after them when it has one). [`read`]
+/// reads them back as the same bands.
 pub fn write_all(r: &Raster) -> Result<Vec<u8>> {
     encode(r, 0, true)
 }
@@ -3396,6 +3436,150 @@ mod tests {
         }
     }
 
+    /// A SampleFormat of 4 (undefined) is shown to the decoder as 1, unsigned (#2593): in the
+    /// entry when its values fit there, else in the array it points to, in both byte orders and
+    /// both TIFF sizes. The file itself is unchanged.
+    #[test]
+    fn void_sample_format_patches_handle_both_byte_orders_and_tiff_sizes() {
+        for big in [false, true] {
+            for little in [false, true] {
+                for samples in [1u16, 3, 5] {
+                    let short = |v: u16| if little { v.to_le_bytes() } else { v.to_be_bytes() };
+                    let long = |v: u32| if little { v.to_le_bytes() } else { v.to_be_bytes() };
+                    let wide = |v: u64| if little { v.to_le_bytes() } else { v.to_be_bytes() };
+                    let count = |v: usize| if big { wide(v as u64).to_vec() } else { long(v as u32).to_vec() };
+                    let mut bytes = if little { b"II".to_vec() } else { b"MM".to_vec() };
+                    bytes.extend(short(if big { 43 } else { 42 }));
+                    let at = if big { 16 } else { 8 };
+                    if big {
+                        bytes.extend(short(8));
+                        bytes.extend(short(0));
+                        bytes.extend(wide(at));
+                        bytes.extend(wide(3));
+                    } else {
+                        bytes.extend(long(at as u32));
+                        bytes.extend(short(3));
+                    }
+                    let (entry_len, field) = if big { (20, 8) } else { (12, 4) };
+                    let entries_at = bytes.len();
+                    for (tag, value) in [(262, 1), (277, samples)] {
+                        bytes.extend(short(tag));
+                        bytes.extend(short(3));
+                        bytes.extend(count(1));
+                        bytes.extend(short(value));
+                        bytes.extend(vec![0; field - 2]);
+                    }
+                    // SampleFormat: 4 for each sample, in the entry or after the IFD.
+                    let n = usize::from(samples);
+                    let values: Vec<u8> = (0..n).flat_map(|_| short(4)).collect();
+                    let inline = 2 * n <= field;
+                    let array_at = entries_at + 3 * entry_len + field;
+                    bytes.extend(short(339));
+                    bytes.extend(short(3));
+                    bytes.extend(count(n));
+                    if inline {
+                        bytes.extend(&values);
+                        bytes.extend(vec![0; field - values.len()]);
+                    } else {
+                        bytes.extend(count(array_at));
+                    }
+                    bytes.extend(vec![0; field]);
+                    if !inline {
+                        bytes.extend(&values);
+                    }
+                    let original = bytes.clone();
+                    let mut r = Unpaletted::new(std::io::Cursor::new(bytes)).unwrap();
+                    assert!(!r.first_is_wide_rgb() && !r.first_is_palette());
+                    let mut patched = Vec::new();
+                    // Reading a byte at a time exercises patches split between reads.
+                    let mut byte = [0u8; 1];
+                    while r.read(&mut byte).unwrap() != 0 {
+                        patched.push(byte[0]);
+                    }
+                    let mut want = original.clone();
+                    let first = if inline { entries_at + 2 * entry_len + if big { 12 } else { 8 } } else { array_at };
+                    for j in 0..n {
+                        want[first + 2 * j..first + 2 * j + 2].copy_from_slice(&short(1));
+                    }
+                    assert_eq!(patched, want, "big {big}, little {little}, {samples} samples");
+                    assert_eq!(r.inner.into_inner(), original);
+                }
+            }
+        }
+    }
+
+    /// Sets every SampleFormat value in a little-endian classic TIFF to `format`, in the entry or in
+    /// the array it points to, each image's; returns how many it set.
+    fn set_sample_format(file: &mut [u8], format: u16) -> usize {
+        let short = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]);
+        let long = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]) as usize;
+        let (mut ifd, mut set) = (long(file, 4), 0);
+        while ifd != 0 {
+            let n = usize::from(short(file, ifd));
+            let entries: Vec<usize> = (0..n).map(|i| ifd + 2 + 12 * i).filter(|e| short(file, *e) == 339).collect();
+            for e in entries {
+                let count = long(file, e + 4);
+                let at = if count <= 2 { e + 8 } else { long(file, e + 8) };
+                for j in 0..count {
+                    file[at + 2 * j..at + 2 * j + 2].copy_from_slice(&format.to_le_bytes());
+                    set += 1;
+                }
+            }
+            ifd = long(file, ifd + 2 + 12 * n);
+        }
+        set
+    }
+
+    /// A GeoTIFF whose SampleFormat is 4, undefined (the CBERS-4 scenes of the Brazil Data Cube),
+    /// reads as unsigned whole numbers, as libtiff and GDAL read it (#2593): the same type and
+    /// values as the file with 1. A one-band 8-bit Deflate image in strips; a tiled three-band one
+    /// with overviews, whose SampleFormat values are arrays apart from their entries, whole and a
+    /// tile at a time as a COG window reads it.
+    #[test]
+    fn a_void_sample_format_reads_as_unsigned() {
+        use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
+        let mut strips = Vec::new();
+        TiffEncoder::new(std::io::Cursor::new(&mut strips))
+            .unwrap()
+            .with_compression(Compression::Deflate(DeflateLevel::Balanced))
+            .write_image::<colortype::Gray8>(2, 2, &[3, 70, 140, 255])
+            .unwrap();
+        let (w, h) = (600u32, 600u32);
+        let bands = (0..3).map(|b| (0..w * h).map(|i| ((i + 40 * b) % 256) as f32).collect()).collect();
+        let gt = GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: 0.001, pixel_height: -0.001 };
+        let rgb = Raster::new("rgb", w, h, bands, gt, Crs::LonLat, None, ColorHint::Rgb { alpha: false }, "Byte").unwrap();
+        let tiled = crate::raster::cogwrite::write(&rgb, 0).unwrap();
+        for (name, file, values) in [("strips", strips, 1), ("tiled", tiled, 6)] {
+            let mut void = file.clone();
+            assert!(set_sample_format(&mut void, 4) >= values, "{name}: SampleFormat set");
+            let want = read(std::io::Cursor::new(&file), name).unwrap();
+            let got = read(std::io::Cursor::new(&void), name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!((got.data_type.as_str(), got.band_count()), (want.data_type.as_str(), want.band_count()), "{name}");
+            assert!(got.bands.iter().zip(&want.bands).all(|(a, b)| a.data == b.data), "{name}: the values");
+            if name == "strips" {
+                continue;
+            }
+            // A tile at a time, each level, as a COG window reads it. Compared bit for bit: an
+            // overview's tile past its image's edge is NaN.
+            let layout = |file: &[u8]| match super::super::cog::layout(&Sparse::default().with(0, file.to_vec())).unwrap() {
+                super::super::cog::Parse::Done(l) => l,
+                _ => panic!("{name}: not read a tile at a time"),
+            };
+            let (l, lv) = (layout(&void), layout(&file));
+            assert!(l.levels.len() > 1, "{name}: overviews");
+            for level in 0..l.levels.len() {
+                let (at, n) = (l.levels[level].offsets[0] as usize, l.levels[level].counts[0] as usize);
+                let tile = |file: &[u8], l: &super::super::cog::Layout| {
+                    let bands =
+                        super::super::cog::decode_tile(&Sparse::default().with(0, file.to_vec()), l, level, 0, file[at..at + n].to_vec())
+                            .unwrap_or_else(|e| panic!("level {level}: {e}"));
+                    bands.into_iter().map(|b| b.into_iter().map(f32::to_bits).collect::<Vec<u32>>()).collect::<Vec<_>>()
+                };
+                assert_eq!(tile(&void, &l), tile(&file, &lv), "level {level}");
+            }
+        }
+    }
+
     #[test]
     fn rgbi_strips_preserve_samples_and_real_alpha_is_unchanged() {
         use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
@@ -3438,6 +3622,58 @@ mod tests {
         }
     }
 
+    /// Sets the ExtraSamples value of each image with one, in turn, of a file
+    /// [`rgb_tiled_samples`] wrote.
+    fn set_extra_samples(bytes: &mut [u8], values: &[u16]) {
+        // The tag's entry: 338, type 3 (short), count 1, the value 0 as written.
+        let entry = [0x52, 0x01, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+        let at: Vec<usize> = (0..bytes.len().saturating_sub(12)).filter(|i| bytes[*i..*i + 12] == entry).collect();
+        assert_eq!(at.len(), values.len());
+        for (at, value) in at.iter().zip(values) {
+            bytes[at + 8..at + 10].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    /// An overview with the full image's sample count but another alpha role (an RGBA overview of
+    /// an RGBI image, or the reverse) is left out and said, not decoded with the full image's
+    /// colour layout; one with the same role is a level, with nothing said.
+    #[test]
+    fn cog_overviews_require_a_matching_alpha_sample() {
+        use super::super::cog::{self, Parse, Sparse};
+        for (full, overview) in [(0, 0), (2, 2), (0, 2), (2, 0)] {
+            let mut bytes = rgb_tiled_samples(&[(40, 16, 4), (20, 16, 4)], 8, 1, |b, x, y| (b * 10 + x + y) as u16);
+            set_extra_samples(&mut bytes, &[full, overview]);
+            let whole = Sparse::default().with_len(bytes.len() as u64).with(0, bytes);
+            let Parse::Done(layout) = cog::layout(&whole).unwrap() else { panic!("not a COG") };
+            let said: Vec<_> = layout.lost.iter().filter(|n| n.contains("overview(s)")).collect();
+            if full == overview {
+                assert_eq!(layout.levels.len(), 2);
+                assert!(said.is_empty(), "{:?}", layout.lost);
+            } else {
+                assert_eq!(layout.levels.len(), 1);
+                let role = if overview == 2 { "image 1 (4, with alpha)" } else { "image 1 (4, without alpha)" };
+                assert!(said.len() == 1 && said[0].contains("an alpha sample") && said[0].contains(role), "{:?}", layout.lost);
+            }
+        }
+    }
+
+    /// The scan stops at its most levels, and says so when the file holds more images; a file
+    /// with fewer says nothing of it.
+    #[test]
+    fn cog_says_when_it_stops_at_its_most_levels() {
+        use super::super::cog::{self, Parse, Sparse};
+        const STOPPED: &str = "the scan for overviews stopped at 32 levels";
+        for (images, cut) in [(32u32, false), (33, true)] {
+            // The full image 64 wide, its overviews 63, 62, … wide, smallest last.
+            let sizes: Vec<(u32, u32, u16)> = (0..images).map(|k| (64 - k, 16, 3)).collect();
+            let bytes = rgb_tiled_samples(&sizes, 8, 1, |b, x, y| (b + x + y) as u16);
+            let whole = Sparse::default().with_len(bytes.len() as u64).with(0, bytes);
+            let Parse::Done(layout) = cog::layout(&whole).unwrap() else { panic!("not a COG") };
+            assert_eq!(layout.levels.len(), 32.min(images as usize));
+            assert_eq!(layout.lost.iter().any(|n| n.contains(STOPPED)), cut, "{:?}", layout.lost);
+        }
+    }
+
     #[test]
     fn cog_overviews_require_matching_sample_counts() {
         use super::super::cog::{self, Parse, Sparse};
@@ -3455,11 +3691,9 @@ mod tests {
                     let Parse::Done(layout) = cog::layout(&whole).unwrap() else { panic!("not a COG") };
                     assert_eq!((layout.levels.len(), layout.bands), (1, usize::from(full)));
                     assert!(
-                        layout
-                            .lost
-                            .iter()
-                            .any(|n| n.contains(&format!("1 overview(s) with samples per pixel other than the full image's {full}"))
-                                && n.contains(&format!("image 1 ({overview})"))),
+                        layout.lost.iter().any(|n| n.contains(&format!(
+                            "1 overview(s) with samples per pixel or an alpha sample other than the full image's ({full})"
+                        )) && n.contains(&format!("image 1 ({overview})"))),
                         "{:?}",
                         layout.lost
                     );
@@ -3476,7 +3710,8 @@ mod tests {
             layout
                 .lost
                 .iter()
-                .any(|n| n.contains("1 overview(s) with samples per pixel other than the full image's 4") && n.contains("image 2 (3)")),
+                .any(|n| n.contains("1 overview(s) with samples per pixel or an alpha sample other than the full image's (4)")
+                    && n.contains("image 2 (3)")),
             "{:?}",
             layout.lost
         );

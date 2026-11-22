@@ -154,7 +154,7 @@ isn't itself an entry in the log, as a saved file is). **Clear Log** empties it 
   entry, even when the next command answers it. New entries also carry
   `rustgis_version`, the version that executed the command, and `inputs`, the local files actually
   opened by its readers (including sidecars and a script's child commands). SQLite journal/WAL
-  companions present at read time are included too. Each fingerprint has
+  companions and a DuckDB database's `.wal` present at read time are included too. Each fingerprint has
   an absolute `path`, `size` in bytes, `modified_ns` (nanoseconds since 1970 UTC, as text), and
   `sha256` when cheaply available. RustGIS reuses existing digests or hashes buffers already in
   memory up to 8 MiB; it never rereads a large input just for the log. Streamed, random-access
@@ -167,11 +167,16 @@ isn't itself an entry in the log, as a saved file is). **Clear Log** empties it 
   also stops fingerprint collection on background jobs started while it is off. The log captures local reads RustGIS makes; it cannot enumerate files
   opened internally by another program or include metadata the browser's upload did not supply.
   GDAL conversions name the original local file, including cache hits; DuckDB conversions name
-  the explicitly supplied local database, when there is one. Conversion caches and
-  temporary GeoPackage copies and reloads of files just exported are excluded. ER Mapper headers
-  include plainly named `DataFile` companions beside the header when cheaply identifiable;
-  observing them never adds a validation requirement to conversion. Files inside a database folder
-  opened by another program are not enumerated.
+  the explicitly supplied local database, when there is one. A later read of a conversion names
+  the original as it was when the conversion was opened, not as it is by then. Conversion caches
+  and temporary GeoPackage copies and reloads of files just exported are excluded. ER Mapper
+  headers include their `DataFile` beside the header, or, when they name none, GDAL's default
+  (the header's name without `.ers`) when it is there; observing them never adds a validation
+  requirement to conversion. A folder another program opens (a File Geodatabase read through GDAL)
+  lists the files inside it, up to 1,000 files 8 folders deep and 10,000 files and folders looked at. Where a list can't be complete (a
+  larger folder, a header that couldn't be read, a data file elsewhere or missing, a linked ER Mapper
+  dataset), a fingerprint of that path carries `incomplete`, saying why, and has no size, time or
+  digest; these marks are kept when an entry's list is cut to 100.
   Older exported entries lack these optional fields, so their version and inputs are unknown.
 - **For the session only:** the log is kept in memory, across the projects opened or made in the
   session, until RustGIS closes or the log is cleared. A saved project, its recovery copy, a
@@ -408,12 +413,19 @@ before, the rest (functions, arithmetic, `CASE`, `@map_scale`) as they are, for 
 [expression language](expressions.md), QGIS's map scale (`@map_scale`, `$scale`) read as RustGIS's
 (see below), in filters and in data-defined symbol and label settings. One it can't read on the layer (a function or variable it
 lacks, a field the layer hasn't) is noted and left out, as is one measuring with `$area`,
-`$perimeter` or `$length`, which QGIS gives in the project's units. What RustGIS doesn't draw as QGIS does is drawn as
+`$perimeter` or `$length`, which QGIS gives in the project's units. RustGIS matches text ignoring
+letter case (`=`, `IN`, `LIKE`, `<`, `>`, `BETWEEN`), where QGIS's rules, and `=`, `IN`, `<`, `>` and
+`BETWEEN` in a GeoPackage's or virtual layer's filter, tell case apart (GDAL's `LIKE` ignores case in
+a GeoPackage's filter too, SQLite's in a virtual layer's ignores it for ASCII letters). A Shapefile's
+filter, read by OGR SQL, ignores ASCII case in `=`, `IN`, `<`, `>` and `BETWEEN` too, and tells it
+apart in `LIKE`. A layer whose filter or rules compare text that way is noted, as is a `NOT IN` list
+holding `NULL`, which QGIS takes as unknown and RustGIS skips. What RustGIS doesn't draw as QGIS does is drawn as
 near as it can, or left out, and said: the import's notes list, layer by layer, what was
-approximated (vector tile styles, a memory layer's fields of kinds RustGIS hasn't as text, gradient and shapeburst fills' offsets left out and colour ramps other than gradients drawn from their first colour to their last, SVG, raster and random fills and dense brushes as a tint of their colour, SVG markers as circles,
+approximated (vector tile styles, text matched ignoring letter case, a memory layer's fields of kinds RustGIS hasn't as text, gradient and shapeburst fills' offsets left out and colour ramps other than gradients drawn from their first colour to their last, SVG, raster and random fills and dense brushes as a tint of their colour, SVG markers as circles,
 raster image markers whose image RustGIS can't use as circles (one at a web address, which it
 doesn't fetch, or kept inside a `.qgz`; a file that doesn't open or isn't a PNG or JPEG; one past
-2 MiB of base64 or the images it keeps), those of a fixed aspect ratio in their image's own,
+2 MiB of base64, 2048 × 2048 pixels, the images it keeps or the pixels or memory of marker images it decodes
+until it restarts), those of a fixed aspect ratio in their image's own,
 see-through ones opaque and those anchored off their centre along lines centred,
 dashed polygon outlines solid, label halos with sharp corners drawn round and blended ones drawn
 over the map, label backgrounds of other shapes drawn as rectangles, label distances from lines
@@ -466,7 +478,9 @@ Right-click a map or layout tab (or its entry in Browser) to **Rename**, **Dupli
 Click **Command Search** at the right of the title bar or on the Help tab, or press ++ctrl+k++
 (++cmd+k++ on macOS). Search by command name, ID or ribbon location; analysis tools, workflow
 names, plugin commands and plugin panels are searchable too. Click a result, or press Enter to
-choose the first available one. Commands that need inputs open their dialog, pane or workflow when one
+run the highlighted one: the first available result, until ++up++ and ++down++ move the highlight.
+The first ten available results show a number: ++ctrl+1++ to ++ctrl+9++ and ++ctrl+0++ (++cmd+1++ …
+++cmd+0++ on macOS) run them directly. Commands that need inputs open their dialog, pane or workflow when one
 is available; unavailable commands stay visible but disabled, with the reason on hover.
 Use scripts or the assistant for parameterized commands without an interactive entry point.
 

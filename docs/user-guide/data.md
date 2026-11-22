@@ -15,7 +15,7 @@ Formats](data-formats.md).
 | FlatGeobuf (`.fgb`) | Yes | Yes (`share.exportLayer`) |
 | KML/KMZ (with their styles), GPX | Yes | Yes |
 | Spreadsheets (`.xlsx`, `.xls`, `.ods`), GeoRSS feeds, LandXML, encoded polylines | Yes | No |
-| GML, MapInfo MIF/MID, OpenStreetMap PBF, TopoJSON, CityJSON (footprints with heights), AutoCAD DXF (ASCII) | Yes | No |
+| GML, MapInfo MIF/MID, OpenStreetMap PBF, TopoJSON, CityJSON and CityGML (footprints with heights), AutoCAD DXF (ASCII) | Yes | No |
 | LiDAR point clouds: LAS, LAZ, COPC (an evenly spread sample) | Yes | No |
 | Geotagged photos (JPEG with EXIF GPS): points with their thumbnails | Yes | No |
 | Esri File Geodatabase (`.gdb` folder; 3D multipatches as footprints) | Yes (desktop) | No |
@@ -27,9 +27,10 @@ Formats](data-formats.md).
 | GeoTIFF and cloud-optimised GeoTIFF (`.tif`, `.tiff`) | Yes | Yes |
 | ASCII grid (`.asc`, with an optional `.prj`) | Yes | No |
 | GRIB editions 1 and 2, simple packing on latitude/longitude grids (`.grb`, `.grib`, `.grb2`, `.grib2`) | Yes | No |
+| SRTM height tiles (`.hgt`) and DTED (`.dt0`–`.dt2`) | Yes | No |
 | Unreferenced TIFF and PNG scans; JPEG with `"as": "scan"` | Yes | GeoTIFF after georeferencing |
 | PDF pages: GeoPDFs placed by their coordinates, other pages as scans | Yes (desktop, command line and Python) | GeoTIFF after georeferencing |
-| Through GDAL: JPEG 2000, ERDAS Imagine, SRTM HGT, DTED, NetCDF, HDF, ENVI, SAGA… | Yes (desktop, when GDAL is installed) | No |
+| Through GDAL: JPEG 2000, ERDAS Imagine, NetCDF, HDF, ENVI, SAGA… | Yes (desktop, when GDAL is installed) | No |
 | Web tiles: XYZ/TMS/WMS rasters, Mapbox Vector Tiles, MapLibre styles, PMTiles and MBTiles archives | Yes | Yes (Imagery › Create Hosted Imagery) |
 | RustGIS project (`.rgis`; older `.rgisx` files open too) | Yes | Yes |
 
@@ -1072,11 +1073,11 @@ server must also allow browser requests (CORS).
 
 In the pane, **New Connection ▾** and **Edit…** let you set the name, group and address;
 **Home › Add › Add Data › New Connection** opens the same form for a chosen kind. Leave a new
-connection's name blank to derive it from the address. **Test** checks the form without saving
-it: web-service, catalogue, STAC and S3 requests run in the background on both desktop and web;
-database tests run synchronously on desktop. The web app doesn't offer database kinds for new
-connections; saved database rows remain visible but cannot be opened or tested there. Earth
-Search and Planetary Computer remain available under **Library**.
+connection's name blank to derive it from the address (the host for an XYZ template). **Test**
+checks the form without saving it. Web-service, catalogue, STAC and S3 requests run in the
+background on both desktop and web; database tests run synchronously on desktop. The web app
+doesn't offer database kinds for new connections; saved database rows remain visible but cannot
+be opened or tested there. Earth Search and Planetary Computer remain available under **Library**.
 
 For a new web-service connection, enter its Basic password or header/query API key to test it before
 saving. The test uses only the entered login, not a saved service login or an S3 session login
@@ -1130,13 +1131,22 @@ Database connections are used on the desktop only. S3 options are `region`, `buc
 `connection.test` lists the endpoint's tables, layers, records, collections or buckets.
 It also accepts an unsaved definition (`kind`, `address`, `name`, `group`, `options`) instead
 of `id`. With `probe: true`, it returns the secret-free address to fetch (`fetch: null` for
-databases). For non-database kinds, pass that response text as `answer` with the same definition
-to parse it without a network request. Database kinds ignore `answer` and test through their
-driver. An anonymous S3 test needs at least one named bucket.
+databases). For text responses, including S3 listing XML, pass the response as `answer` with the
+same definition to parse it without a network request. Do not pass `answer` for an XYZ tile;
+database kinds ignore it and test through their driver. An anonymous S3 test needs at least
+one named bucket.
 
-**Test** does not send service requests to XYZ URL templates with tile coordinates
-(`{z}/{x}/{y}`, also `{zoom}` or `{-y}`). To add one to the map, use
-**Home › Add › Basemap › Add Tile Layer…** (`map.addTiles`) instead.
+**Test** recognises XYZ coordinates (`{z}/{x}/{y}`, also `{zoom}` and `{-y}`) and quadkeys
+(`{q}` or `{quadkey}`) in the address. It fills in the URL (including `{s}` when present) and
+fetches one tile instead of requesting capabilities: `0/0/0`, or `1/0/0` for a quadkey because
+the root tile has an empty key. A missing tile (HTTP 404 or an empty response) is not a pass:
+check the URL and the layer's zoom range. A direct `connection.test` returns
+`result: {kind: "xyz", tile: [z,x,y], status: "received"|"missing"}`; a probe returns `fetch`
+and the sample's `tile: {zoom, vector}`. **Test** does not add a layer. Use
+**Home › Add › Basemap › Add Tile Layer…** (`map.addTiles`) to add the template to the map.
+An API key embedded in a `;key=…` path component is saved as typed, not in the credential
+store. If the provider supports a query or header login, keep the key out of the address and
+use the connection's login instead.
 
 `connection.browse` lists what a connection offers, a level at a time: database roots list the
 schemas returned by their provider; opening a schema lists its spatial tables. Services list their

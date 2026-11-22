@@ -104,6 +104,8 @@ pub const CAPABILITIES: &[&str] = &[
     "blank-paper",
     "layout-frame-border",
     NATIVE_COORDINATES,
+    "layout-legend-text",
+    "label-guide",
 ];
 /// A layer or table saved in a coordinate system of its own, not longitude/latitude
 /// (`Dataset::held_in`, #2032 C2d): an older reader would read its coordinates as degrees.
@@ -1300,7 +1302,13 @@ impl Project {
 
     /// The same repairs with deferred translation for session-owned interface notices.
     pub(crate) fn normalize_text(&mut self) -> Vec<NoticeText> {
-        self.repair(false).into_iter().map(|(_, n)| n).collect()
+        self.normalize_after("while checking the project")
+    }
+
+    /// [`Project::normalize_text`] after something was added to the project, its notices saying
+    /// `when` the repairs were made ("while importing the map").
+    pub(crate) fn normalize_after(&mut self, when: &'static str) -> Vec<NoticeText> {
+        self.repair(false, when).into_iter().map(|(_, n)| n).collect()
     }
 
     /// [`Project::normalize`] for a project read from its file, which also opens its plain COG
@@ -1310,12 +1318,13 @@ impl Project {
     /// as it is. Returns a notice for each kind of change that removed, cut or renamed
     /// something, with the part of the project it is about.
     pub(crate) fn normalize_opened(&mut self) -> Vec<(ReadPart, NoticeText)> {
-        self.repair(true)
+        self.repair(true, "while opening the project")
     }
 
     /// Reports removed or shortened content, renamed items and repaired group display settings
-    /// with their affected part. Table ids absent from older formats are filled in for compatibility.
-    fn repair(&mut self, opened: bool) -> Vec<(ReadPart, NoticeText)> {
+    /// with their affected part, each saying `when` it was made. Table ids absent from older
+    /// formats are filled in for compatibility.
+    fn repair(&mut self, opened: bool, when: &'static str) -> Vec<(ReadPart, NoticeText)> {
         if self.maps.is_empty() {
             self.maps.push(Map::new("Map"));
         }
@@ -1348,7 +1357,6 @@ impl Project {
                 repairs.push((l.name.clone(), r));
             }
         }
-        let when = if opened { "while opening the project" } else { "while checking the project" };
         let mut notices: Vec<(ReadPart, NoticeText)> =
             layout_notices(&self.name, when, layouts_dropped, &repairs).into_iter().map(|n| (ReadPart::Layouts, n.into())).collect();
         let mut done = Repaired::default();
@@ -1759,7 +1767,12 @@ impl Project {
         if let Some(limit) = map_limit {
             p.maps.truncate(limit);
         }
-        let repair_notices = if normalize { p.normalize_opened() } else { Vec::new() };
+        // Maps imported from a project are read as it opens, and said as imported.
+        let repair_notices = match (normalize, map_limit) {
+            (false, _) => Vec::new(),
+            (true, None) => p.normalize_opened(),
+            (true, Some(_)) => p.repair(true, "while importing the maps"),
+        };
         p.read_notices =
             label_losses::notices_for_maps(text, &p, map_limit.is_some())?.into_iter().map(|(part, text)| (part, text.into())).collect();
         p.read_notices.extend(repair_notices);
@@ -1925,24 +1938,57 @@ fn empty_map() -> &'static Map {
 pub const MAX_ITEMS: usize = 1000;
 
 /// What a read made of the image markers of `layers` and saved `styles` (by name): those not
-/// kept, which saving loses, and those that aren't a PNG or JPEG image that decodes (each image
-/// decoded once); both are drawn as circles.
+/// kept, which saving loses, and those the renderer draws as circles, by why (not a PNG or JPEG
+/// that decodes, past `render::MARKER_PIXELS`, or past what the run has left of
+/// `render::RUN_MARKER_PIXELS`; each image checked once); both are drawn as circles. Checking
+/// decodes each new image, on the UI thread: at most what the run decodes, once.
 pub(crate) fn picture_notices<'a>(
     layers: impl IntoIterator<Item = &'a rustgis_map::Layer>,
     styles: impl IntoIterator<Item = (&'a str, &'a rustgis_map::Renderer)>,
 ) -> Vec<NoticeText> {
+    picture_notices_by(layers, styles, &|p| rustgis_render::picture_marker_kept_check(p).err())
+}
+
+/// [`picture_notices`], each kept image's refusal given by `check` (the renderer's; a test's own,
+/// to say what a run past its budget says without spending the process's).
+pub(crate) fn picture_notices_by<'a>(
+    layers: impl IntoIterator<Item = &'a rustgis_map::Layer>,
+    styles: impl IntoIterator<Item = (&'a str, &'a rustgis_map::Renderer)>,
+    check: &dyn Fn(rustgis_map::Picture) -> Option<rustgis_render::MarkerRefusal>,
+) -> Vec<NoticeText> {
     use rustgis_map::Picture;
     use rustgis_map::symbology::{MAX_PICTURE_BYTES, MAX_PICTURES, MAX_PICTURES_BYTES};
+    use rustgis_render::MarkerRefusal;
     let seen = std::cell::RefCell::new(std::collections::HashMap::new());
-    let unreadable =
-        |p: Picture| !p.is_default() && !*seen.borrow_mut().entry(p).or_insert_with(|| rustgis_render::picture_marker_draws(p));
-    let (mut dropped, mut bad) = (Vec::new(), Vec::new());
+    let refused = |p: Picture| {
+        if p.is_default() {
+            return None;
+        }
+        *seen.borrow_mut().entry(p).or_insert_with(|| check(p))
+    };
+    // The names with an image refused so, by each refusal in `WHY`, in the order their notices go.
+    const WHY: [MarkerRefusal; 3] = [MarkerRefusal::NotAnImage, MarkerRefusal::TooManyPixels, MarkerRefusal::PastRunPixels];
+    let (mut dropped, mut bad) = (Vec::new(), [Vec::new(), Vec::new(), Vec::new()]);
     let mut note = |name: &'a str, any: &dyn Fn(&dyn Fn(Picture) -> bool) -> bool| {
         if any(&Picture::is_dropped) {
             dropped.push(name);
         }
-        if any(&unreadable) {
-            bad.push(name);
+        // One walk of the symbols (answering no to see them all), noting each refusal met.
+        let met = std::cell::Cell::new([false; 3]);
+        any(&|p| {
+            if let Some(why) = refused(p)
+                && let Some(i) = WHY.iter().position(|w| *w == why)
+            {
+                let mut seen = met.get();
+                seen[i] = true;
+                met.set(seen);
+            }
+            false
+        });
+        for (names, met) in bad.iter_mut().zip(met.get()) {
+            if met {
+                names.push(name);
+            }
         }
     };
     for l in layers {
@@ -1963,10 +2009,27 @@ pub(crate) fn picture_notices<'a>(
             ],
         ));
     }
-    if !bad.is_empty() {
+    let [not_images, too_large, past_run] = &bad;
+    if !not_images.is_empty() {
         notices.push(NoticeText::format(
             "Image markers in {names} aren't PNG or JPEG images and are drawn as circles",
-            [("names", picture_names(&bad))],
+            [("names", picture_names(not_images))],
+        ));
+    }
+    if !too_large.is_empty() {
+        notices.push(NoticeText::format(
+            "Image markers in {names} have more pixels than {side} × {side} and are drawn as circles",
+            [("names", picture_names(too_large)), ("side", rustgis_render::MARKER_PIXELS_SIDE.to_string().into())],
+        ));
+    }
+    if !past_run.is_empty() {
+        notices.push(NoticeText::format(
+            "Image markers in {names} are past what RustGIS decodes of marker images until it restarts ({mpx} megapixels, {mib} MiB) and are drawn as circles",
+            [
+                ("names", picture_names(past_run)),
+                ("mpx", (rustgis_render::RUN_MARKER_PIXELS / 1_000_000).to_string().into()),
+                ("mib", (rustgis_render::RUN_MARKER_BYTES >> 20).to_string().into()),
+            ],
         ));
     }
     notices
@@ -2011,7 +2074,6 @@ pub(crate) const ALL_PARTS: [ReadPart; 7] = [
 /// The most layouts a project keeps (`layout.*` commands refuse to make more).
 pub(crate) const MAX_LAYOUTS: usize = 200;
 
-/// The layouts named in a notice, the first few of them.
 /// A name cut to 100 characters for a notice, so a long one can't crowd out the count (a
 /// notice too long is withheld whole).
 pub(crate) fn short_name(name: &str) -> String {
@@ -2021,6 +2083,7 @@ pub(crate) fn short_name(name: &str) -> String {
     }
 }
 
+/// The layouts named in a notice, the first few of them.
 fn layout_names(
     repairs: &[(String, rustgis_map::layout::LayoutRepairs)],
     of: impl Fn(&rustgis_map::layout::LayoutRepairs) -> usize,

@@ -173,9 +173,16 @@ pub struct ToolResult {
 
 /// Access to the map's layers by name.
 pub trait Inputs {
-    /// A vector layer or table by name, in longitude/latitude: the space every tool reads its
-    /// inputs in and writes its outputs in.
+    /// A vector layer or table by name, in the system the tool works in: longitude/latitude, or
+    /// for a tool that works in its first input's own system ([`ToolSpec::works_in_own_system`]),
+    /// that system when it is a projected one. Its outputs are made in the same system.
     fn dataset(&self, layer: &str) -> Option<&Dataset>;
+    /// The system the run works in: the one [`Inputs::dataset`] gives layers in, and its outputs
+    /// are made in. Longitude/latitude unless the tool works in its first input's own projected
+    /// system ([`ToolSpec::works_in_own_system`]); the run's plane follows it ([`convert::Plane`]).
+    fn work_crs(&self) -> rustgis_data::raster::Crs {
+        rustgis_data::raster::Crs::LonLat
+    }
     /// A standalone table by its id: an input given as a number, which no name is taken for.
     fn table(&self, _id: u32) -> Option<&Dataset> {
         None
@@ -227,6 +234,84 @@ pub struct ToolSpec {
     pub summary: &'static str,
     pub params: &'static [ParamSpec],
     pub run: fn(&dyn Inputs, &Value) -> Result<ToolResult, String>,
+}
+
+/// The built-in tools that work in their first input's own coordinate system when it is a
+/// projected one, rather than in longitude/latitude ([`ToolSpec::works_in_own_system`]): those
+/// whose results don't depend on the system's units or shape beyond what the input's own
+/// coordinates give (attributes, vertices, envelopes, validity), and the overlays and spatial
+/// relations, worked on in its plane rather than the analysis plane. Areas they report are
+/// still measured on the ground.
+const OWN_SYSTEM_TOOLS: &[&str] = &[
+    "summaryStatistics",
+    "pivotTable",
+    "joinField",
+    "selectByAttributes",
+    "exportFeatures",
+    "polygonToLine",
+    "splitLineAtVertices",
+    "featureEnvelopeToPolygon",
+    "unsplitLine",
+    "featureVerticesToPoints",
+    "merge",
+    "checkGeometry",
+    "repairGeometry",
+    // Overlays and spatial relations, worked on in the system's plane (#2032 C2e-2).
+    "clip",
+    "erase",
+    "intersect",
+    "identity",
+    "union",
+    "symmetricalDifference",
+    "update",
+    "split",
+    "dissolve",
+    "convexHull",
+    "featureToPoint",
+    "countPoints",
+    "selectByLocation",
+    "spatialJoin",
+];
+
+impl ToolSpec {
+    /// Whether the tool works in its first input's own coordinate system when that is a projected
+    /// one: its inputs are given to it in that system ([`Inputs::dataset`]), the others converted
+    /// into it, and its outputs are held there. Every other tool, and every external one, works in
+    /// longitude/latitude.
+    ///
+    /// For some it depends on `params`: Select Layer By Location and Spatial Join measure no
+    /// distance only without a search distance, or with a match that measures none.
+    pub fn works_in_own_system(&self, params: &Value) -> bool {
+        OWN_SYSTEM_TOOLS.contains(&self.id) && TOOLS.iter().any(|t| std::ptr::eq(t, self)) && !tools::measures_distance(self.id, params)
+    }
+
+    /// Whether the tool crosses its inputs' edges with each other's (overlays and spatial
+    /// relations), where how an edge runs between its vertices decides the result, not only where
+    /// they are: a run in its first input's own system then says when another input's edges,
+    /// converted into it, run far from where a run in longitude/latitude takes them.
+    pub fn reads_edges(&self) -> bool {
+        matches!(
+            self.id,
+            "clip"
+                | "erase"
+                | "intersect"
+                | "identity"
+                | "union"
+                | "symmetricalDifference"
+                | "update"
+                | "split"
+                | "countPoints"
+                | "selectByLocation"
+                | "spatialJoin"
+        )
+    }
+
+    /// Whether the tool reads the geometry of the layer its parameter `param` names, rather than
+    /// only its attributes (Join Field's join table): one whose geometry it doesn't read needn't
+    /// be converted into the system it works in.
+    pub fn reads_geometry_of(&self, param: &str) -> bool {
+        !(self.id == "joinField" && param == "joinTable")
+    }
 }
 
 /// Runs an external tool (the spec says which).
@@ -457,6 +542,37 @@ pub fn resolve_params(spec: &ToolSpec, params: &Value) -> Result<Value, String> 
     params_for(spec, params, source_of(spec).is_none())
 }
 
+/// The keys of `params` that `spec` doesn't read, for an error that a required parameter is
+/// missing (#2307): a misspelled key is the likely reason, and a failed run's warnings are taken
+/// back, so the error says it: " (given 'clips', which Clip doesn't read)". Empty when there are
+/// none. Bounded as [`quoted_keys`] bounds them. A caller adding it to an error the tool gave
+/// checks for this exact text, so it isn't said twice.
+pub fn unread(spec: &ToolSpec, params: &Value) -> String {
+    let Some(given) = params.as_object() else { return String::new() };
+    let unknown: Vec<&str> = given.keys().map(String::as_str).filter(|k| !is_expected_key(spec, params, k)).collect();
+    if unknown.is_empty() {
+        return String::new();
+    }
+    format!(" (given {}, which {} doesn't read)", quoted_keys(unknown), spec.name)
+}
+
+/// Parameter keys a command or tool was given but doesn't read, quoted for a notice or an error
+/// (#194, #2307): `'a', 'b', 'c', 'd', 'e', 2 more`. Bounded, since the keys come from the caller:
+/// the first five, sorted, each cut to 40 characters, then how many more.
+pub fn quoted_keys(mut unknown: Vec<&str>) -> String {
+    unknown.sort_unstable();
+    // A control character (a newline, an escape) would reach a terminal as it is: shown as `?`.
+    let clip = |k: &str| {
+        let safe = k.chars().map(|c| if c.is_control() { '?' } else { c });
+        if k.chars().count() > 40 { safe.take(40).chain(['…']).collect() } else { safe.collect::<String>() }
+    };
+    let mut said: Vec<String> = unknown.iter().take(5).map(|k| format!("'{}'", clip(k))).collect();
+    if unknown.len() > 5 {
+        said.push(format!("{} more", unknown.len() - 5));
+    }
+    said.join(", ")
+}
+
 /// Applies the captured schema without looking its suite up again after a reload.
 fn params_for(spec: &ToolSpec, params: &Value, built_in: bool) -> Result<Value, String> {
     let mut p = params.as_object().cloned().unwrap_or_default();
@@ -471,22 +587,23 @@ fn params_for(spec: &ToolSpec, params: &Value, built_in: bool) -> Result<Value, 
             p.insert(ps.name.to_string(), v);
         }
         if ps.required && p.get(ps.name).is_none_or(|v| v.is_null() || v.as_str() == Some("")) {
-            return Err(format!("{}: '{}' is required", spec.name, ps.label));
+            return Err(format!("{}: '{}' is required{}", spec.name, ps.label, unread(spec, params)));
         }
         // The built-in tools' choices are the whole list. An external tool's (GeoLibre's, a
         // plugin's) can be looser, such as GeoLibre's comma-separated lists of options: its own
         // runner checks them.
+        // A refused value's error names the keys it doesn't read too, as a missing one's does.
         if let ParamKind::Choice(choices) = ps.kind
             && built_in
             && let Some(v) = p.get_mut(ps.name)
         {
-            *v = choice(spec, ps, choices, v)?;
+            *v = choice(spec, ps, choices, v).map_err(|e| format!("{e}{}", unread(spec, params)))?;
         }
         if ps.kind == ParamKind::Bool
             && built_in
             && let Some(v) = p.get_mut(ps.name)
         {
-            *v = boolean(spec, ps, v)?;
+            *v = boolean(spec, ps, v).map_err(|e| format!("{e}{}", unread(spec, params)))?;
         }
     }
     Ok(Value::Object(p))
@@ -496,10 +613,24 @@ pub use tools::JOIN_FIELD_ALIASES;
 
 /// Whether a parameter key is declared by `spec` or accepted as a valid parameter alias.
 pub fn is_accepted_param(spec: &ToolSpec, key: &str) -> bool {
-    if spec.params.iter().any(|p| p.name == key) {
-        return true;
-    }
-    if spec.id == "joinField" { JOIN_FIELD_ALIASES.contains(&key) } else { false }
+    spec.params.iter().any(|p| p.name == key) || (spec.id == "joinField" && JOIN_FIELD_ALIASES.contains(&key))
+}
+
+/// Whether a key given with a run isn't one to warn of (#2307): one [`is_accepted_param`] accepts,
+/// or the name the app's tool dialog puts beside a table's id for the run's history: `<name>_name`
+/// beside a layer parameter `<name>` that holds a table id (a number, or its digits as text for a
+/// tool that isn't built in, read as a table id is read). No tool reads it, so it isn't a
+/// parameter to run over either; given without the id, it's taken for a stray.
+pub fn is_expected_key(spec: &ToolSpec, params: &Value, key: &str) -> bool {
+    // A built-in tool reads digit text as a name, not a table id.
+    let table_id = |id: &Value| {
+        id.as_u64().is_some_and(|n| u32::try_from(n).is_ok())
+            || (source_of(spec).is_some() && id.as_str().is_some_and(|t| t.trim().parse::<u32>().is_ok()))
+    };
+    is_accepted_param(spec, key)
+        || key.strip_suffix("_name").is_some_and(|base| {
+            spec.params.iter().any(|p| p.name == base && matches!(p.kind, ParamKind::Layer)) && params.get(base).is_some_and(table_id)
+        })
 }
 
 /// The names a tool reads one of its parameters under, `key` among them, or none when it has no
@@ -596,14 +727,25 @@ pub fn run(id: &str, inputs: &dyn Inputs, params: &Value) -> Result<ToolResult, 
     let p = resolve_params(spec, params)?;
     // A bug in a tool must not take the app down.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        validate_pole_inputs(spec, inputs, &p)?;
-        let result = match source_of(spec) {
-            Some((_, runner)) => runner(spec, inputs, &p),
-            None => (spec.run)(inputs, &p),
-        };
-        with_pole_loop_notes(result, spec, inputs, &p)
+        in_plane(inputs, || {
+            validate_pole_inputs(spec, inputs, &p)?;
+            let result = match source_of(spec) {
+                Some((_, runner)) => runner(spec, inputs, &p),
+                None => (spec.run)(inputs, &p),
+            };
+            with_pole_loop_notes(result, spec, inputs, &p)
+        })
     }))
     .unwrap_or_else(|_| Err(format!("{} failed unexpectedly", spec.name)))
+}
+
+/// `work` in the plane of the system `inputs` are given in ([`Inputs::work_crs`]): the analysis
+/// plane for longitude/latitude, a projected system's own coordinates otherwise
+/// ([`convert::Plane::Own`]).
+fn in_plane<T>(inputs: &dyn Inputs, work: impl FnOnce() -> T) -> T {
+    let plane = if inputs.work_crs() == rustgis_data::raster::Crs::LonLat { convert::Plane::Analysis } else { convert::Plane::Own };
+    let _plane = convert::install_plane(plane);
+    work()
 }
 
 /// A tool's result with [`pole_loop_note`] added: to its messages, or to a refusal of polygons
@@ -613,6 +755,9 @@ pub fn run(id: &str, inputs: &dyn Inputs, params: &Value) -> Result<ToolResult, 
 /// as it is.
 fn with_pole_loop_notes(result: Result<ToolResult, String>, spec: &ToolSpec, inputs: &dyn Inputs, p: &Value) -> Result<ToolResult, String> {
     match result {
+        // No pole in a projected system's own plane for a ring to loop around.
+        Ok(r) if convert::plane() == convert::Plane::Own => Ok(r),
+        Err(e) if convert::plane() == convert::Plane::Own => Err(e),
         Ok(mut r) => {
             r.messages.extend(pole_loop_note(spec, inputs, p, |_| true));
             Ok(r)
@@ -718,6 +863,10 @@ fn pole_loop_note(spec: &ToolSpec, inputs: &dyn Inputs, p: &Value, read: impl Fn
 
 /// Validates the rows a pole-aware tool reads, on either execution path.
 fn validate_pole_inputs(spec: &ToolSpec, inputs: &dyn Inputs, p: &Value) -> Result<(), String> {
+    // A projected system's y is no latitude, and its plane has no poles.
+    if convert::plane() == convert::Plane::Own {
+        return Ok(());
+    }
     if matches!(
         spec.id,
         "clip"
@@ -794,12 +943,14 @@ pub fn run_resolved(
     run_under(tool.spec.name, control, || {
         let params = tool.resolve_params(params)?;
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            validate_pole_inputs(tool.spec, inputs, &params)?;
-            let result = match tool.runner {
-                Some(runner) => runner(tool.spec, inputs, &params),
-                None => (tool.spec.run)(inputs, &params),
-            };
-            with_pole_loop_notes(result, tool.spec, inputs, &params)
+            in_plane(inputs, || {
+                validate_pole_inputs(tool.spec, inputs, &params)?;
+                let result = match tool.runner {
+                    Some(runner) => runner(tool.spec, inputs, &params),
+                    None => (tool.spec.run)(inputs, &params),
+                };
+                with_pole_loop_notes(result, tool.spec, inputs, &params)
+            })
         }))
         .unwrap_or_else(|_| Err(format!("{} failed unexpectedly", tool.spec.name)))
     })

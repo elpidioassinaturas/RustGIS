@@ -241,6 +241,24 @@ pub fn validate(s: &Session, g: &ModelGraph) -> Vec<Problem> {
     out
 }
 
+/// What a graph does that it may not mean, without keeping it from running (#2307): a tool's
+/// parameter the tool doesn't read, so the step runs with the tool's default (a misspelled `unit`
+/// for `units`). Each step's run says it again. A graph past the size bound has none listed:
+/// [`validate`] refuses it.
+pub fn warnings(g: &ModelGraph) -> Vec<Problem> {
+    if g.nodes.len() > MAX_NODES || g.edges.len() > MAX_EDGES {
+        return Vec::new();
+    }
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == ModelNodeKind::Tool)
+        .filter_map(|n| {
+            let said = crate::cmd::gp::ignored_params(tool_of(n)?, &n.params)?;
+            Some(problem("unknown-param", Some(&n.id), said))
+        })
+        .collect()
+}
+
 impl PortKind {
     /// The more specific of a node's known kind and its port's.
     fn max_kind(self, port: PortKind) -> PortKind {
@@ -337,12 +355,19 @@ pub fn new_id(g: &ModelGraph, prefix: &str) -> String {
     (1..).map(|i| format!("{prefix}{i}")).find(|id| !g.nodes.iter().any(|n| &n.id == id)).unwrap_or_else(|| prefix.to_string())
 }
 
+/// The parts of a step's input-port value: for a port that takes many layers, each name between
+/// `;`s, trimmed, blanks left out; for one that takes one, the whole value, trimmed.
+fn port_parts(value: &str, many: bool) -> impl Iterator<Item = &str> {
+    value.split(move |c| many && c == ';').map(str::trim).filter(move |part| !many || !part.is_empty())
+}
+
 /// A graph from steps run in order (`%n` for step n's output): an input node for each layer
-/// the steps read, a tool node per step, laid out.
-pub fn steps_to_graph(steps: &[ModelStep]) -> ModelGraph {
+/// the steps read, a tool node per step, laid out. Only [`checked_steps_to_graph`] calls it, which
+/// refuses steps past the graph's limits first.
+pub(crate) fn steps_to_graph(steps: &[ModelStep]) -> ModelGraph {
     let mut g = ModelGraph::default();
     let mut inputs: HashMap<String, String> = HashMap::new();
-    for (i, st) in steps.iter().take(MAX_NODES / 2).enumerate() {
+    for (i, st) in steps.iter().enumerate() {
         let id = format!("t{}", i + 1);
         let mut params = match &st.params {
             Value::Object(o) => o.clone(),
@@ -351,8 +376,7 @@ pub fn steps_to_graph(steps: &[ModelStep]) -> ModelGraph {
         let node = ModelNode { id: id.clone(), kind: ModelNodeKind::Tool, tool: Some(st.tool.clone()), ..Default::default() };
         for port in input_ports(&node) {
             let Some(v) = params.get(port.id).and_then(Value::as_str).map(str::to_string) else { continue };
-            let parts: Vec<&str> = if port.many { v.split(';').map(str::trim).filter(|x| !x.is_empty()).collect() } else { vec![v.trim()] };
-            for part in parts {
+            for part in port_parts(&v, port.many) {
                 let from = match part.strip_prefix('%').and_then(|n| n.parse::<usize>().ok()) {
                     Some(n) if (1..=i).contains(&n) => format!("t{n}"),
                     Some(_) => continue,
@@ -399,10 +423,7 @@ pub fn checked_steps_to_graph(steps: &[ModelStep]) -> Result<ModelGraph, String>
         let node = ModelNode { tool: Some(step.tool.clone()), kind: ModelNodeKind::Tool, ..Default::default() };
         for port in input_ports(&node) {
             let Some(value) = step.params.get(port.id).and_then(Value::as_str) else { continue };
-            for part in value.split(|c| port.many && c == ';').map(str::trim) {
-                if port.many && part.is_empty() {
-                    continue;
-                }
+            for part in port_parts(value, port.many) {
                 match part.strip_prefix('%').and_then(|n| n.parse::<usize>().ok()) {
                     Some(n) if !(1..=index).contains(&n) => {
                         return Err(format!(
@@ -612,6 +633,9 @@ pub struct RunReport {
     /// Correlates browser acknowledgements with this run only, never a newer report.
     #[serde(skip)]
     pending_files: HashMap<u64, String>,
+    /// What each step's tool ignores, one line per step (#2307): [`run`] says them once per kind.
+    #[serde(skip)]
+    ignored: Vec<String>,
 }
 
 impl RunReport {
@@ -638,6 +662,18 @@ pub(crate) fn run(s: &mut Session, op: crate::policy::Authorized<crate::policy::
     let crate::policy::ModelOp { name, graph: g } = op.op();
     let mut report = RunReport { model: name.to_string(), ..Default::default() };
     let res = run_into(s, g, &mut report);
+    // The parameters the steps ignore are said once for the run. A failed run's notices go back
+    // with its changes, so its error carries them instead.
+    let ignored = ignored_summary(&std::mem::take(&mut report.ignored));
+    let res = match res {
+        Err(e) if !ignored.is_empty() => Err(format!("{e}; {ignored}")),
+        res => {
+            if !ignored.is_empty() {
+                s.warn(ignored);
+            }
+            res
+        }
+    };
     if res.is_err() {
         for node in report.nodes.iter_mut().filter(|node| node.status == "pending") {
             node.status = "error";
@@ -650,6 +686,29 @@ pub(crate) fn run(s: &mut Session, op: crate::policy::Authorized<crate::policy::
     let out = res.map(|ran| json!({"model": name, "ran": ran, "outputs": report.outputs}));
     s.model_run = Some(report);
     out
+}
+
+/// The most kinds of parameter warning a run lists (the rest counted), so a model of many steps
+/// that each ignore something stays within what a notice keeps.
+const IGNORED_KINDS_SAID: usize = 5;
+
+/// The parameter warnings of a run's steps, one per kind with how many steps give it: "Buffer
+/// ignores 'unit' (…) (in 3 steps)". Empty when no step ignores any.
+pub(crate) fn ignored_summary(said: &[String]) -> String {
+    let mut kinds: Vec<(&str, usize)> = Vec::new();
+    for text in said {
+        let text = text.as_str();
+        match kinds.iter_mut().find(|(k, _)| *k == text) {
+            Some((_, n)) => *n += 1,
+            None => kinds.push((text, 1)),
+        }
+    }
+    let parts: Vec<String> =
+        kinds.iter().take(IGNORED_KINDS_SAID).map(|&(k, n)| if n > 1 { format!("{k} (in {n} steps)") } else { k.to_string() }).collect();
+    match kinds.len().saturating_sub(IGNORED_KINDS_SAID) {
+        0 => parts.join("; "),
+        more => format!("{}; {more} more kinds", parts.join("; ")),
+    }
 }
 
 /// Validate the graph and reject an imported graph's external tools before executing any node.
@@ -699,8 +758,13 @@ fn run_into(s: &mut Session, g: &ModelGraph, report: &mut RunReport) -> Result<V
                 let params = Value::Object(params);
                 let before: HashSet<u32> = s.map().layers.iter().map(|l| l.id).collect();
                 let history = s.project.gp_history.len();
-                match crate::cmd::gp::run_tool(s, tool, &params) {
+                match crate::cmd::gp::run_step(s, tool, &params) {
                     Ok(r) => {
+                        // Which of its parameters the tool ignores is said by `run`, once for the
+                        // model (#2307). A failing step's error names its own keys already.
+                        if let Some(said) = tool_of(n).and_then(|spec| crate::cmd::gp::ignored_params(spec, &params)) {
+                            report.ignored.push(said);
+                        }
                         let ids: Vec<u32> = s.map().layers.iter().filter(|l| !before.contains(&l.id)).map(|l| l.id).collect();
                         // The first layer it added (else the first output it recorded: a table).
                         let first_id = ids.iter().rev().copied().find(|id| s.map().layer(*id).is_some());
@@ -823,6 +887,9 @@ struct ImportItem<T> {
     extra: HashMap<String, Value>,
 }
 
+/// What a file that is no model or web tool is refused with.
+pub(crate) const NOT_A_MODEL: &str = "not a RustGIS model or web tool (no graph or steps)";
+
 /// Check declared versions, required capabilities (`requires`, as a project's; see
 /// [`crate::project::CAPABILITIES`]) and model contents before import can discard data. Missing
 /// versions are legacy files. The stricter field checks apply only to file import.
@@ -834,7 +901,7 @@ pub(crate) fn check_file(v: &Value) -> Result<(), String> {
     let tool = v.get("steps").is_some() || v.get("format").and_then(Value::as_str) == Some("RustGIS web tool");
     // Some other file (GeoJSON, a project) is said to be one, not told to update RustGIS.
     if !model && !tool {
-        return Err("not a RustGIS model or web tool (no graph or steps)".into());
+        return Err(NOT_A_MODEL.into());
     }
     if let Some(version) = v.get("version") {
         let supported = if model { version.as_str() == Some(FILE_VERSION) } else { version.as_u64() == Some(WEB_TOOL_VERSION) };
@@ -844,7 +911,8 @@ pub(crate) fn check_file(v: &Value) -> Result<(), String> {
     }
     crate::project::check_requires(v.get("requires"), "model or web tool", "import")?;
     if graph.is_none() && v.get("steps").is_none() {
-        return Err("not a RustGIS model or web tool (no graph or steps)".into());
+        // Identified as one by its schema or format above, but holding neither.
+        return Err("a RustGIS model or web tool with neither graph nor steps".into());
     }
     if graph.is_some() && v.get("steps").is_some() {
         return Err("a model file cannot contain both a graph and steps. Choose one representation before importing it.".into());
@@ -999,6 +1067,19 @@ pub(crate) fn to_web_tool_file(name: &str, steps: &[ModelStep]) -> Value {
 mod tests {
     use super::*;
     use crate::Project;
+
+    /// A run's ignored-parameter warning lists at most five kinds, and counts the rest, so a long
+    /// model's warning still fits a notice; a kind given by several steps says how many.
+    #[test]
+    fn ignored_summary_lists_five_kinds_and_counts_the_rest() {
+        assert_eq!(ignored_summary(&[]), "");
+        let mut said: Vec<String> = (0..7).map(|i| format!("Tool{i} ignores 'x'")).collect();
+        said.push("Tool0 ignores 'x'".to_string());
+        let text = ignored_summary(&said);
+        assert!(text.starts_with("Tool0 ignores 'x' (in 2 steps); Tool1 ignores 'x'; "), "{text}");
+        assert!(text.ends_with("Tool4 ignores 'x'; 2 more kinds"), "{text}");
+        assert!(!text.contains("Tool5"), "{text}");
+    }
 
     /// Graph and web-tool envelopes reflect only their saved executable payload, and default
     /// km² remains readable without the capability even if the omitted representation needs it.

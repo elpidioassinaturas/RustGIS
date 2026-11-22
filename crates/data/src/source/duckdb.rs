@@ -550,7 +550,7 @@ fn prelude(dir: &Path, database: Option<&Database>, confined: bool) -> Result<St
             if !full.is_file() {
                 return Err(DataError::Format(format!("{}: no such database", db.display())));
             }
-            crate::provenance::path(&full);
+            crate::provenance::duckdb(&full);
             s.push_str(&format!(" ATTACH {} AS src (READ_ONLY); USE src;", literal(&full.display().to_string())));
         }
         // PostGIS geometry columns come through as DuckDB geometries with their coordinate system.
@@ -1101,7 +1101,7 @@ fn convert_table_fresh_in(dir: &Path, database: &Path, table: &Table, family: Fa
 fn convert_table_in(dir: &Path, database: &Path, table: &Table, crs: Option<&str>) -> Result<Output> {
     let full = std::path::absolute(database).unwrap_or_else(|_| database.to_path_buf());
     let (len, modified) = stamp(&full)?;
-    crate::provenance::path(&full);
+    crate::provenance::duckdb(&full);
     // Changes not yet checkpointed are in the write-ahead log beside the file.
     let mut wal = full.clone().into_os_string();
     wal.push(".wal");
@@ -1219,15 +1219,16 @@ mod tests {
     fn a_querys_credentials_stay_out_of_duckdbs_arguments() {
         let dir = tempfile::tempdir().unwrap();
         let exe = recording_duckdb(dir.path());
-        let secret = "X-Amz-Signature=0123456789abcdef-synthetic";
+        let secret = "dummy";
         let sql = format!("SELECT * FROM read_parquet('https://bucket.example/data.parquet?{secret}')\nWHERE 'line;\n.shell no' <> ''");
         let script =
             format!("{} CREATE TEMP TABLE r AS SELECT * FROM query({});", prelude(dir.path(), None, false).unwrap(), literal(&sql));
         run_with_stand_in(&exe, dir.path(), &script).unwrap();
         let args = std::fs::read_to_string(dir.path().join("args.txt")).unwrap();
         let input = std::fs::read_to_string(dir.path().join("input.txt")).unwrap();
-        assert!(!args.contains(secret) && !args.contains("read_parquet"), "{args}");
-        assert!(args.lines().any(|a| a == "-bail") && !args.lines().any(|a| a == "-c"), "{args}");
+        // A path may contain the dummy value too. Only these arguments are allowed; all SQL,
+        // including its test credential, must arrive on standard input instead.
+        assert_eq!(args.lines().collect::<Vec<_>>(), ["-init", dir.path().join("init.sql").to_str().unwrap(), "-bail"]);
         assert_eq!(input, script, "the whole script, as it was");
     }
 

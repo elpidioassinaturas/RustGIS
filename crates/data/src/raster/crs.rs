@@ -330,7 +330,9 @@ impl TryFrom<SavedCrs> for Crs {
         Ok(match s {
             SavedCrs::LonLat => Crs::LonLat,
             SavedCrs::WebMercator => Crs::WebMercator,
-            SavedCrs::Epsg(e) => Crs::Epsg(e),
+            // A code another variant stands for (4326, 3857 and its aliases), as a file written
+            // by hand or by another program may give it, is that variant, as `from_epsg` gives it.
+            SavedCrs::Epsg(e) => Crs::from_epsg(u32::from(e)).unwrap_or(Crs::Epsg(e)),
             SavedCrs::Proj { proj4, label, wkt } => Crs::custom(CustomCrs { proj4, label, wkt, ..CustomCrs::default() })?,
         })
     }
@@ -600,6 +602,95 @@ impl Crs {
             Crs::Epsg(c) => epsg_proj4(c).is_some_and(geographic_def),
             Crs::Custom(_) => self.custom_def().is_some_and(|d| geographic_def(&d.proj4)),
         }
+    }
+
+    /// Whether it is a projection of the whole world whose plane has the antimeridian as a seam
+    /// across it and the poles as lines (cylindrical and pseudocylindrical maps: World Mercator,
+    /// Plate Carrée, Robinson, Equal Earth, Mollweide and the like), by its PROJ method. A place
+    /// there may be a seam's width from its neighbour on the ground, so it isn't one tools work in
+    /// as a plane. Web Mercator is one too.
+    pub fn is_world_projection(self) -> bool {
+        const WORLD: &[&str] = &[
+            "merc",
+            "webmerc",
+            "eqc",
+            "cea",
+            "mill",
+            "gall",
+            "robin",
+            "eqearth",
+            "moll",
+            "eck1",
+            "eck2",
+            "eck3",
+            "eck4",
+            "eck5",
+            "eck6",
+            "wintri",
+            "natearth",
+            "natearth2",
+            "sinu",
+            "hammer",
+            "aitoff",
+            "kav5",
+            "kav7",
+            "wag1",
+            "wag2",
+            "wag3",
+            "wag4",
+            "wag5",
+            "wag6",
+            "wag7",
+            "loxim",
+            "mbtfps",
+            "mbt_s",
+            "goode",
+            "igh",
+            "vandg",
+            "vandg2",
+            "vandg3",
+            "vandg4",
+            "times",
+            "patterson",
+            "putp1",
+            "putp2",
+            "putp3",
+            "putp4p",
+            "putp5",
+            "putp6",
+            "quau",
+            "gins8",
+            "collg",
+            "crast",
+            "denoy",
+            "fahey",
+            "fouc",
+            "gn_sinu",
+            "hatano",
+            "larr",
+            "lask",
+            "nell",
+            "nell_h",
+            "urmfps",
+            "weren",
+            "boggs",
+            "bonne",
+            "comill",
+            "mbtfpq",
+            "fouc_s",
+            "wink1",
+            "wink2",
+        ];
+        let proj4 = match self {
+            Crs::LonLat => return false,
+            Crs::WebMercator => return true,
+            Crs::Epsg(c) => epsg_proj4(c).map(|d| d.to_string()),
+            Crs::Custom(_) => self.custom_def().map(|d| d.proj4.clone()),
+        };
+        // (A method may be written quoted, as PROJ reads it.)
+        proj4.is_some_and(|d| {
+            d.split_whitespace().filter_map(|t| t.strip_prefix("+proj=")).map(|m| m.trim_matches('"')).any(|m| WORLD.contains(&m))
+        })
     }
 
     /// Whether its coordinates are geocentric (X, Y and Z from the Earth's centre), not a map's.
@@ -2461,6 +2552,32 @@ impl Transformer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// World projections, whose planes have the antimeridian as a seam, are told apart from regional
+    /// ones by their method.
+    #[test]
+    fn world_projections_are_told_apart() {
+        for c in [3395, 4087, 32662, 54030, 8857, 54009] {
+            let crs = Crs::parse(&format!("{c}")).or_else(|_| Crs::parse(&format!("ESRI:{c}"))).unwrap();
+            assert!(crs.is_world_projection(), "{c}");
+        }
+        for c in [32632, 2056, 25832, 3035, 31467, 3413] {
+            assert!(!Crs::from_epsg(c).unwrap().is_world_projection(), "{c}");
+        }
+        assert!(Crs::WebMercator.is_world_projection() && !Crs::LonLat.is_world_projection());
+        // PROJ's own spelling of Web Mercator, as a file may give it.
+        assert!(Crs::parse("+proj=webmerc +datum=WGS84 +units=m +no_defs").unwrap().is_world_projection());
+        assert!(Crs::parse("+proj=\"eqc\" +datum=WGS84 +units=m").unwrap().is_world_projection());
+    }
+
+    /// A saved code another variant stands for reads as that variant, so Web Mercator saved as
+    /// `{"Epsg": 3857}` isn't taken for a projected system of its own.
+    #[test]
+    fn a_saved_code_another_variant_stands_for_reads_as_it() {
+        for (code, crs) in [(3857, Crs::WebMercator), (3785, Crs::WebMercator), (4326, Crs::LonLat), (32632, Crs::Epsg(32632))] {
+            assert_eq!(Crs::try_from(SavedCrs::Epsg(code)), Ok(crs), "EPSG:{code}");
+        }
+    }
 
     /// An ESRI code reads as the system the picker offers for it (`ESRI:102033`, as a `.prj` and
     /// the coordinate system boxes name it); one the catalog lacks is refused with its name.

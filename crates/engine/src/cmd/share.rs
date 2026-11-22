@@ -112,7 +112,7 @@ fn table_write_notes(path: &str, gpkg: &GpkgTable, default: &str, table: &GpkgWr
 fn report_table(s: &mut Session, path: &str, gpkg: &GpkgTable, default: &str, table: Option<GpkgWritten>, out: &mut Value) {
     let Some(table) = table else { return };
     for note in table_write_notes(path, gpkg, default, &table) {
-        s.notify_written(note, false);
+        s.notify_written(note);
     }
     if gpkg.mode != GpkgMode::NewFile {
         let (reread, failed) =
@@ -641,7 +641,7 @@ pub(crate) fn layer_work(s: &Session, p: &Value) -> Result<Work, String> {
 /// ([`rustgis_map::Unreadable`]). Every export of a layer read in place says them, the browser's
 /// download too.
 pub fn read_date_notes(file: &str, layer: &str, lost: &rustgis_map::Unreadable) -> Vec<String> {
-    let empty = lost.dates.iter().map(|n| format!("{file}: {layer}: {n}, so they're empty in the export"));
+    let empty = lost.dates.iter().map(|n| format!("{file}: {layer}: {n} (empty in the export)"));
     empty.chain(lost.rounded.iter().map(|n| format!("{file}: {layer}: {n} when read for the export"))).collect()
 }
 
@@ -722,7 +722,7 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
             let unfit = rustgis_data::source::parquet::unfit_note(&layer.fields, &e.unfit, path);
             let moved = rustgis_data::web_mercator_moved_note(path, &layer.name, e.beyond_web_mercator);
             let mut dates: Vec<String> = rustgis_data::source::unread_dates_note(&layer.fields, &e.unread_dates)
-                .map(|n| format!("{path}: {}: {n}, so they're empty in the export", layer.name))
+                .map(|n| format!("{path}: {}: {n} (empty in the export)", layer.name))
                 .into_iter()
                 .collect();
             dates.extend(
@@ -731,8 +731,9 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
             );
             dates.extend(
                 rustgis_data::source::null_text_note(&layer.fields, &e.null_text)
-                    .map(|n| format!("{path}: {}: {n}, so they're empty in the export", layer.name)),
+                    .map(|n| format!("{path}: {}: {n} (empty in the export)", layer.name)),
             );
+            dates.extend(rustgis_data::source::not_utf8_note(&layer.fields, &e.not_utf8).map(|n| format!("{path}: {}: {n}", layer.name)));
             dates.extend(rustgis_data::io::utc_dates_note(&layer.fields, &e.utc_dates, path));
             dates.extend(rustgis_data::io::fine_dates_note(&layer.fields, &e.fine_dates, path));
             if ext == "fgb" {
@@ -742,12 +743,17 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
             dates.extend(e.read_notes.iter().map(|n| format!("{path}: {}: {n} when read for the export", layer.name)));
             let mut format_notes = e.csv.notes(&ds.fields, path);
             format_notes.extend(e.csv.coordinates_note(&ds.fields, path));
+            // Text that reading the file back changes: CSV reads a blank cell as null; KML and GPX trim
+            // their values.
+            format_notes.extend(e.text.notes(&ds.fields, path));
             (e.written, e.left_out, e.skipped, table, unfit, e.null_numbers, moved, format_notes, dates)
         }
         None => {
-            let format_notes =
+            let mut format_notes =
                 rustgis_data::io::export_losses_notes(ds, &ext, rustgis_data::io::name_field(ds), path).map_err(|e| e.to_string())?;
-            let (left_out, table) = rustgis_data::io::write_path_to(ds, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
+            let (left_out, table, placed) = rustgis_data::io::write_path_to(ds, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
+            // Old parts of a Shapefile written over that couldn't be removed.
+            format_notes.extend(placed);
             let unfit = if parquet { rustgis_data::source::parquet::values_note(ds, path) } else { None };
             let null_numbers = rustgis_data::export::numbers_written_as_null(&ds.features, &ds.fields, &ext);
             let mut dates = read_notes(path, &ds.name, &unreadable);

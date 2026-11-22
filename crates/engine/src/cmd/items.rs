@@ -312,7 +312,9 @@ pub fn commands() -> Vec<C> {
             }
             let kept = name.chars().count() - if i > 1 { format!(" {i}").chars().count() } else { 0 };
             if kept < base.chars().count() {
-                s.notify(format!("New Task: a task has that name already, so the name given is cut to {kept} characters to fit \" {i}\""), false);
+                // `task.import` adds its task through this command, and is named as itself.
+                let title = if b(p, "imported").unwrap_or(false) { "Import Task" } else { "New Task" };
+                s.notify(format!("{title}: a task has that name already, so the name given is cut to {kept} characters to fit \" {i}\""), false);
             }
             s.project.tasks.push(Task { name: name.clone(), description, steps });
             Ok(json!({"task": name}))
@@ -324,8 +326,8 @@ pub fn commands() -> Vec<C> {
                 return Err(format!("'{}' can't be a task step", step.command));
             }
             let t = task_mut(s, p)?;
-            if t.steps.len() >= 200 {
-                return Err("a task has at most 200 steps".into());
+            if t.steps.len() >= MAX_TASK_STEPS {
+                return Err(format!("a task has at most {MAX_TASK_STEPS} steps"));
             }
             t.steps.push(step);
             Ok(json!({"steps": t.steps.len()}))
@@ -580,7 +582,8 @@ fn import_maps(s: &mut Session, p: &Value) -> CmdResult {
     }
     // Repair what was read (rasters reopen, cameras clamp); the sources that read S3 wait for
     // the saved connection that is to read them.
-    for notice in s.project.normalize_text() {
+    let when = if s.project.maps.len().saturating_sub(first_map) == 1 { "while importing the map" } else { "while importing the maps" };
+    for notice in s.project.normalize_after(when) {
         s.notify_text(notice, false);
     }
     super::connections::restore_active(s);
@@ -1000,8 +1003,6 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
         None => t.steps.iter().cloned().enumerate().collect(),
     };
     let mut done = Vec::new();
-    let mut edited = false;
-    let mut requested = false;
     for (i, st) in steps {
         if st.command.starts_with("task.") {
             return Err(format!("step {} would run another task", i + 1));
@@ -1015,7 +1016,6 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
             ));
         }
         let spec = *s.registry.get(&st.command).ok_or_else(|| format!("step {} runs an unknown command '{}'", i + 1, st.command))?;
-        let mutates = spec.mutates;
         // As when run directly, a step naming a layer is checked against that layer.
         if st.params.get("layer").is_some()
             && let Ok(id) = s.layer_id(&st.params)
@@ -1027,9 +1027,6 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
         if let Some(why) = blocked {
             return Err(format!("step {} ({}): {why}", i + 1, st.title));
         }
-        // These handlers share the task's one outer transaction. A final request must not
-        // erase the undo step for earlier edits.
-        s.request_only = false;
         // A step that panics fails the task instead of the app (the whole task is one undo step).
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let op = s.authorize(&st.command, &st.params)?;
@@ -1037,11 +1034,11 @@ fn run_task_steps(s: &mut Session, p: &Value) -> CmdResult {
         }))
         .unwrap_or_else(|_| Err("failed unexpectedly".into()))
         .map_err(|e| format!("step {} ({}): {e}", i + 1, st.title))?;
-        requested |= s.request_only;
-        edited |= mutates && !s.request_only;
         done.push(json!({"step": i, "title": st.title, "result": r}));
     }
-    s.request_only = requested && !edited;
+    // An undo step only when a step edited ([`Session::shared_step`]); run inside a script, the
+    // script's account, earlier steps included, decides.
+    s.request_only = !s.shared_steps.edited;
     Ok(json!({"task": t.name, "ran": done}))
 }
 
@@ -1141,7 +1138,7 @@ fn export_3d(s: &mut Session, p: &Value) -> CmdResult {
             s.notify(note, false);
         }
         s.retain_written_notices(written);
-        s.notify_written(format!("Exported {path}"), false);
+        s.notify_written(format!("Exported {path}"));
         return Ok(json!({
             "path": path, "bytes": bytes.len(), "triangles": report.triangles,
             "skippedDegenerate": report.degenerate, "linesDropped": report.lines, "capsFanned": report.fanned,
@@ -1153,7 +1150,7 @@ fn export_3d(s: &mut Session, p: &Value) -> CmdResult {
         s.notify(note, false);
     }
     s.retain_written_notices(written);
-    s.notify_written(format!("Exported {path}"), false);
+    s.notify_written(format!("Exported {path}"));
     Ok(json!({"path": path, "bytes": obj.len()}))
 }
 

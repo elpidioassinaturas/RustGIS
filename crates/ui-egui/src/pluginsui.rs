@@ -278,7 +278,7 @@ pub(crate) fn fetch(app: &RustGisApp, url: &str, limit: usize, ctx: Option<egui:
 }
 
 pub(crate) fn take(slot: &Download) -> Option<Result<Vec<u8>, String>> {
-    slot.lock().ok().and_then(|mut s| s.take())
+    slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
 }
 
 /// Whether the web app keeps installed plugins in its preferences (the desktop keeps them in
@@ -723,11 +723,12 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
                         ));
                         Vec::new()
                     });
-                    for name in pulled {
-                        app.session.notify(
-                            crate::i18n::fmt("{name} was withdrawn from the plugin registry and has been turned off.", &[("name", &name)]),
-                            true,
-                        );
+                    // One warning for them all, with a count: the withdrawal was applied as asked.
+                    if !pulled.is_empty() {
+                        app.session.warn(crate::i18n::fmt(
+                            "{n} plugin(s) were withdrawn from the plugin registry and turned off: {names}",
+                            &[("n", &pulled.len().to_string()), ("names", &pulled.join(", "))],
+                        ));
                     }
                 }
                 // Another registry may have no blocklist (it blocks nothing); the hosted one always

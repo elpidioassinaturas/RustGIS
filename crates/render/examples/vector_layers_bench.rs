@@ -2,14 +2,22 @@
 //! layer of a GeoPackage, and its heaviest layers alone, at 1× and 2× pixel scale, each frame the
 //! exact frame drawn once the map rests.
 //!
-//! `cargo run --release -p rustgis-render --example vector_layers_bench -- map.gpkg`
+//! `cargo run --release -p rustgis-render --example vector_layers_bench -- map.gpkg [more files]`
 //!
 //! - **whole:** the whole map, four times (the first builds its level of detail);
 //! - **zoom:** from the whole map to about a metre a point over its centre, 1.5× a step, and back
 //!   out (the way out finds the levels of detail built on the way in, those still kept);
 //! - **pan 10 m / pan 3 m:** west to east across it at 10 and 3 Web Mercator metres a point, a
 //!   quarter of the view a step, so every frame brings new features in;
-//! - **tilt 10 m:** the same pan at 10 m, tilted 60°.
+//! - **tilt 10 m:** the same pan at 10 m, tilted 60°;
+//! - **restyle:** the top layer's fill colour changed in each of 8 frames of one view, over the
+//!   whole map and at 10 m a point (#1057), then its transparency instead, then the fill with
+//!   every layer renamed in each frame too, so that none looks as it did: what each frame drew
+//!   before a frame kept what still stands (the picture under the changed layer, and the layer
+//!   alone while only its transparency changes; on the GPU each layer's mesh too).
+//!
+//! `BENCH_RASTER=dem.tif` reads a raster into memory and draws it under the layers, as a basemap
+//! (the views are still fitted to the layers).
 //!
 //! `BENCH_BACKEND=gpu` times the GPU scene instead (`Backend::Gpu`): what the CPU does for a GPU
 //! frame, tessellating the layers the GPU draws and drawing the rest into pictures, not the
@@ -20,7 +28,8 @@
 //!
 //! Made for swisstopo's swiss-map-vector25 (`SMV25_CHLV95LN02.gpkg`, 336,000 features in LV95,
 //! from data.geo.admin.ch, one map sheet). For a profiler, `BENCH_ONLY=2,zoom` (a pixel scale and a sequence) runs
-//! that sequence three times on the whole map and nothing else; `BENCH_THREADS=1` draws on one thread.
+//! that sequence three times on the whole map and nothing else, `BENCH_ONLY=restyle` the restyle
+//! sequences alone; `BENCH_THREADS=1` draws on one thread.
 use rustgis_geom::{Coord, lonlat_to_merc};
 use rustgis_map::{Basemap, Camera, Map};
 use rustgis_render::gpu_scene::DrawCmd;
@@ -47,7 +56,7 @@ impl Drawn {
         let mut d = Drawn::default();
         for c in &scene.cmds {
             match c {
-                DrawCmd::Image { pixmap } => {
+                DrawCmd::Image { pixmap, .. } => {
                     d.images += 1;
                     d.image_px += u64::from(pixmap.width()) * u64::from(pixmap.height());
                 }
@@ -68,10 +77,11 @@ fn fail(why: impl std::fmt::Display) -> ! {
 }
 
 fn main() {
-    let Some(path) = std::env::args().nth(1) else {
-        eprintln!("usage: vector_layers_bench map.gpkg");
+    let paths: Vec<String> = std::env::args().skip(1).collect();
+    if paths.is_empty() {
+        eprintln!("usage: vector_layers_bench map.gpkg [more files]");
         return;
-    };
+    }
     // `BENCH_THREADS=1` draws on one thread (the user's thread setting), to compare.
     if let Some(n) = std::env::var("BENCH_THREADS").ok().and_then(|n| n.parse().ok())
         && let Err(e) = rustgis_data::threads::set_max(Some(n))
@@ -89,20 +99,29 @@ fn main() {
     }
     println!("{} threads, {} backend", rustgis_data::threads::max(), if backend.is_gpu() { "GPU" } else { "CPU" });
     let t = std::time::Instant::now();
-    let file = std::path::Path::new(&path);
-    let names = match rustgis_data::source::layers(file) {
-        Ok(n) => n,
-        Err(e) => fail(format!("{path}: {e}")),
-    };
-    // Every table, or no run: "all layers" would time fewer.
+    // Every table of every file, or no run: "all layers" would time fewer.
     let mut read = Vec::new();
-    for name in names {
-        match rustgis_data::source::open_path(file, Some(&name)).and_then(|src| rustgis_data::source::materialize(src.as_ref())) {
-            Ok((d, _)) => read.push(d),
-            Err(e) => fail(format!("{name}: {e}")),
+    for path in &paths {
+        let file = std::path::Path::new(path);
+        let names = match rustgis_data::source::layers(file) {
+            Ok(n) => n,
+            Err(e) => fail(format!("{path}: {e}")),
+        };
+        for name in names {
+            match rustgis_data::source::open_path(file, Some(&name)).and_then(|src| rustgis_data::source::materialize(src.as_ref())) {
+                Ok((d, _)) => read.push(d),
+                Err(e) => fail(format!("{name}: {e}")),
+            }
         }
     }
     println!("read {} layers in {:.1} s", read.len(), t.elapsed().as_secs_f64());
+    let raster = std::env::var_os("BENCH_RASTER").map(|path| {
+        let path = std::path::PathBuf::from(path);
+        match rustgis_data::raster::read_path(&path) {
+            Ok(r) => (r, path.display().to_string()),
+            Err(e) => fail(format!("{}: {e}", path.display())),
+        }
+    });
     // The highest-numbered tables (land cover) at the bottom, as a topographic map stacks them.
     let mut datasets: Vec<_> = read.into_iter().filter(|d| !d.features.is_empty()).collect();
     datasets.sort_by(|a, b| b.name.cmp(&a.name));
@@ -117,12 +136,19 @@ fn main() {
         let (name, rows) = (d.name.clone(), d.features.len());
         layers.push((m.add_dataset(d), name, rows, vertices));
     }
+    if let Some((r, path)) = raster {
+        println!("under them, the raster {path} ({} × {})", r.width, r.height);
+        m.add_raster("raster", rustgis_map::RasterLayer::from_path(r, path));
+        // Added on top; drawn at the bottom.
+        let r = m.layers.remove(0);
+        m.layers.push(r);
+    }
     let total: (usize, usize) = layers.iter().fold((0, 0), |(r, v), l| (r + l.2, v + l.3));
     println!("{} layers, {} features, {} vertices", layers.len(), total.0, total.1);
     if !(extent.min_x.is_finite() && extent.max_x.is_finite() && extent.min_y.is_finite() && extent.max_y.is_finite())
         || (extent.max_x <= extent.min_x && extent.max_y <= extent.min_y)
     {
-        fail(format!("{path}: no features with an extent to fit the views to"));
+        fail("no features with an extent to fit the views to");
     }
 
     let (lo, hi) = (lonlat_to_merc(Coord::new(extent.min_x, extent.min_y)), lonlat_to_merc(Coord::new(extent.max_x, extent.max_y)));
@@ -130,7 +156,7 @@ fn main() {
     // Web Mercator units a pixel showing all of it across 1920 points (a 2× screen shows the same).
     let whole = ((hi.x - lo.x) / 1920.0).max((hi.y - lo.y) / 1080.0);
     if !(whole.is_finite() && whole > 0.0) {
-        fail(format!("{path}: an extent that doesn't project to Web Mercator (not longitude/latitude?)"));
+        fail("an extent that doesn't project to Web Mercator (not longitude/latitude?)");
     }
     println!(
         "extent {:.3},{:.3} to {:.3},{:.3}; whole map at {whole:.1} Mercator m a point",
@@ -164,11 +190,10 @@ fn main() {
         ("tilt 10 m", tilt),
     ];
     let ids: Vec<u32> = layers.iter().map(|l| l.0).collect();
+    // One layer alone hides the raster too.
     let show = |m: &mut Map, only: Option<u32>| {
-        for id in &ids {
-            if let Some(l) = m.layer_mut(*id) {
-                l.visible = only.is_none_or(|o| o == *id);
-            }
+        for l in &mut m.layers {
+            l.visible = only.is_none_or(|o| o == l.id);
         }
     };
     let view = |camera: Camera, ppp: f64| View { width: 1920.0, height: 1080.0, pixels_per_point: ppp, camera, sky: false };
@@ -219,9 +244,37 @@ fn main() {
         let max = s.last().copied().unwrap_or(0.0);
         format!("{:>3} frames, median {median:6.0} ms, slowest {max:6.0} ms, total {:7.0} ms", s.len(), s.iter().sum::<f64>())
     };
+    // The top layer's fill changed in each frame, or its transparency (`see_through`); with
+    // `all`, every layer renamed too.
+    let restyle = |m: &mut Map, cam: Camera, ppp: f64, see_through: bool, all: bool| -> Vec<(f64, Drawn)> {
+        let Some(top) = ids.last().copied() else { return Vec::new() };
+        (0..8u8)
+            .map(|i| {
+                if let Some(l) = m.layer_mut(top) {
+                    if see_through {
+                        l.transparency = 20.0 + f32::from(i) * 5.0;
+                    } else {
+                        let fill = rustgis_map::Rgba::rgb(40 + i * 20, 120, 200 - i * 20);
+                        l.renderer = rustgis_map::Renderer::Single(rustgis_map::Symbol { fill, ..l.symbol(0) });
+                    }
+                }
+                // The raster too, when there is one.
+                if all {
+                    for l in &mut m.layers {
+                        l.name = format!("{} {i}", l.name.trim_end_matches(|c: char| c.is_ascii_digit() || c == ' '));
+                    }
+                }
+                run_drawn(m, &[cam], ppp).remove(0)
+            })
+            .collect()
+    };
     show(&mut m, None);
+    // `BENCH_ONLY=restyle` runs the restyle sequences alone.
+    let restyle_only = std::env::var("BENCH_ONLY").is_ok_and(|o| o == "restyle");
     // `BENCH_ONLY` that names no pixel scale and sequence stops the run, not runs everything.
-    if let Ok(only) = std::env::var("BENCH_ONLY") {
+    if let Ok(only) = std::env::var("BENCH_ONLY")
+        && !restyle_only
+    {
         let Some((ppp, name, cams)) = only.split_once(',').and_then(|(p, n)| {
             let cams = &sequences.iter().find(|s| s.0 == n)?.1;
             Some((p.parse::<f64>().ok().filter(|p| p.is_finite() && *p > 0.0)?, n, cams))
@@ -239,7 +292,7 @@ fn main() {
     // The first frame projects every layer and builds the whole map's level of detail.
     let first = run(&mut m, &[camera(centre, whole)], 1.0);
     println!("first frame (projects every layer): {:.0} ms", first.first().copied().unwrap_or(0.0));
-    for ppp in [1.0f64, 2.0] {
+    for ppp in [1.0f64, 2.0].into_iter().filter(|_| !restyle_only) {
         for (name, cams) in &sequences {
             show(&mut m, None);
             let drawn = run_drawn(&mut m, cams, ppp);
@@ -263,9 +316,25 @@ fn main() {
             }
         }
     }
+    show(&mut m, None);
+    for ppp in [1.0f64, 2.0] {
+        for res in [whole, 10.0] {
+            for (see_through, all, what) in
+                [(false, false, "the top layer restyled"), (true, false, "its transparency"), (false, true, "every layer changed")]
+            {
+                let drawn = restyle(&mut m, camera(centre, res), ppp, see_through, all);
+                // The first frame of a view keeps; the next seven take what still stands.
+                let times: Vec<f64> = drawn.iter().skip(1).map(|d| d.0).collect();
+                println!("{ppp}x restyle at {res:.1} m, {what}: {}{}", summary(&times), scenes(&drawn));
+                if let Some(l) = ids.last().and_then(|top| m.layer_mut(*top)) {
+                    l.transparency = 0.0;
+                }
+            }
+        }
+    }
     // The layers a GPU scene draws on the CPU: each alone, over the whole map and at 3 m, flat;
     // after the sequences, so it warms no cache they time.
-    if backend.is_gpu() {
+    if backend.is_gpu() && !restyle_only {
         let mut on_cpu = Vec::new();
         for (id, name, rows, v) in &layers {
             show(&mut m, Some(*id));

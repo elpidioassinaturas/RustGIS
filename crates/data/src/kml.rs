@@ -278,7 +278,7 @@ fn coords(s: &str, zm: &Cell<bool>) -> Vec<Coord> {
             let x = it.next()?.trim().parse::<f64>().ok()?;
             let y = it.next()?.trim().parse::<f64>().ok()?;
             // Longitude/latitude, as KML always is.
-            if !((-180.0..=180.0).contains(&x) && (-90.0..=90.0).contains(&y)) {
+            if !crate::io::lon_lat_in_range(x, y) {
                 return None;
             }
             if it.next().and_then(|z| z.trim().parse::<f64>().ok()).is_some_and(|z| z != 0.0) {
@@ -287,6 +287,43 @@ fn coords(s: &str, zm: &Cell<bool>) -> Vec<Coord> {
             Some(Coord::new(x, y))
         })
         .collect()
+}
+
+/// Whether reading keeps a placemark that [`crate::interop::to_kml`] writes with geometry `g`:
+/// one with a point in range ([`coords`]), a line part of two such points, or a polygon whose
+/// outer ring has three ([`geometry`]). It is read into the layer of `g`'s kind.
+pub(crate) fn keeps(g: &Geometry) -> bool {
+    let kept = |c: &&Coord| crate::io::lon_lat_in_range(c.x, c.y);
+    match g {
+        Geometry::Point(c) => kept(&c),
+        Geometry::MultiPoint(v) => v.iter().any(|c| kept(&c)),
+        Geometry::Line(parts) => parts.iter().any(|p| p.iter().filter(kept).count() >= 2),
+        Geometry::Polygon(polys) => polys.iter().any(|rings| rings.first().is_some_and(|r| r.iter().filter(kept).count() >= 3)),
+    }
+}
+
+/// The vertices of a placemark reading keeps ([`keeps`]) that don't read back with it: those
+/// outside longitude/latitude ([`coords`]), and every vertex of a line part left with fewer than
+/// two, a ring with fewer than three, or a polygon whose outer ring is dropped ([`geometry`]).
+pub(crate) fn lost_vertices(g: &Geometry) -> usize {
+    let in_range = |p: &[Coord]| p.iter().filter(|c| crate::io::lon_lat_in_range(c.x, c.y)).count();
+    // A part reading keeps loses its vertices out of range; one it drops, all of them.
+    let part = |p: &[Coord], min: usize| {
+        let n = in_range(p);
+        if n >= min { p.len().saturating_sub(n) } else { p.len() }
+    };
+    match g {
+        Geometry::Point(_) => 0,
+        Geometry::MultiPoint(v) => v.len().saturating_sub(in_range(v)),
+        Geometry::Line(parts) => parts.iter().map(|p| part(p, 2)).sum(),
+        Geometry::Polygon(polys) => polys
+            .iter()
+            .map(|rings| match rings.split_first() {
+                Some((outer, inner)) if in_range(outer) >= 3 => part(outer, 3) + inner.iter().map(|r| part(r, 3)).sum::<usize>(),
+                _ => rings.iter().map(Vec::len).sum(),
+            })
+            .sum(),
+    }
 }
 
 /// The parts of a geometry element: (points, lines, polygons), MultiGeometry flattened.
@@ -852,6 +889,35 @@ mod tests {
                 ds = back.clone();
             }
         }
+    }
+
+    /// Names, field names and values are held as they are or refused with a count, like a
+    /// description: never cleaned without a word, and never written as XML that can't be read.
+    #[test]
+    fn unrepresentable_characters_elsewhere_are_refused_and_legal_ones_kept() {
+        let layer = |name: &str, value: &str| {
+            let mut ds =
+                Dataset::new("places", GeometryType::Point, vec![Field::new("name", FieldType::Text), Field::new("note", FieldType::Text)]);
+            ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Text(name.into()), Value::Text(value.into())]);
+            ds
+        };
+        let error = crate::interop::to_kml(&layer("ok", "a\u{1}b\u{ffff}c"), Some(0)).unwrap_err().to_string();
+        assert!(error.contains("field 'note': 2 character(s)") && error.contains("U+0001"), "{error}");
+        let error = crate::interop::to_kml(&layer("a\u{fffe}", "ok"), Some(0)).unwrap_err().to_string();
+        assert!(error.contains("'name': 1 character(s)") && error.contains("U+FFFE"), "{error}");
+        let error = crate::interop::to_gpx(&layer("a\u{1}", "ok"), Some(0)).unwrap_err().to_string();
+        assert!(error.starts_with("GPX: places") && error.contains("name: 1 character(s)"), "{error}");
+        let mut bad_field = layer("ok", "ok");
+        bad_field.fields[1].name = "n\u{2}".into();
+        assert!(crate::interop::to_kml(&bad_field, Some(0)).unwrap_err().to_string().contains("field name"));
+        // Characters XML 1.0 holds (DEL, C1 controls) are kept, and the file reads back.
+        let legal = "a\u{7f}b\u{85}c";
+        let xml = crate::interop::to_kml(&layer(legal, legal), Some(0)).unwrap();
+        roxmltree::Document::parse(&xml).unwrap();
+        let back = read("places.kml", xml.as_bytes()).unwrap();
+        let ds = &back[0].dataset;
+        assert_eq!(ds.value(0, ds.field_index("note").unwrap()), &Value::Text(legal.into()));
+        roxmltree::Document::parse(&crate::interop::to_gpx(&layer(legal, legal), Some(0)).unwrap()).unwrap();
     }
 
     #[test]

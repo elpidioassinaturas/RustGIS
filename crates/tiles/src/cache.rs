@@ -158,6 +158,13 @@ type ImageDecoder = Box<dyn Fn(Vec<u8>, Decoded) + Send + Sync>;
 const BUDGET: usize = if cfg!(target_arch = "wasm32") { 160 << 20 } else { 384 << 20 };
 /// A failed address is tried again after this long.
 pub const RETRY: Duration = Duration::from_secs(60);
+/// How long a read of more than 1 MiB (a big tile of a slow server, #2570) may take in all, where
+/// a map tile has 30 seconds. The longest any caller waits for one: a COG window's first batch of
+/// four bands or more waits 420 seconds (the engine's `batch_wait`: `WINDOW_WAIT` and `BAND_WAIT`;
+/// an engine test holds the two together). The others give up at or before that: two minutes for a
+/// header, one band, a raster in place or a remote file, five minutes for a Tessera read, and a
+/// map's tile layer has nobody waiting. Keep it no less than the longest wait, no more.
+pub const LONG_READ: Duration = Duration::from_secs(420);
 /// The largest tile or document fetched.
 pub const MAX_BYTES: usize = 16 << 20;
 /// The error a fetcher gives a request it dropped unfetched (the view moved on): the address is
@@ -250,7 +257,9 @@ static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static SIGNED_OUT: AtomicU64 = AtomicU64::new(0);
 
 /// Source revisions are locked before any retained cache. Publication and reload share this
-/// lock; callbacks and I/O must always run after releasing it.
+/// lock. [`if_archive_current`] runs its `f` while holding it (`land`, `keep` and
+/// `remember_info` run there), so such a callback must not do I/O or call back into code that
+/// takes this lock; any other I/O runs after releasing it.
 fn archive_epochs() -> &'static Mutex<HashMap<String, u64>> {
     static E: std::sync::LazyLock<Mutex<HashMap<String, u64>>> = std::sync::LazyLock::new(Mutex::default);
     &E
@@ -1530,6 +1539,8 @@ pub fn split_tail(url: &str) -> (&str, Option<u64>) {
 /// it: those pass `address::check`, which takes only `http(s)://` ones.
 pub const DOWNLOAD: &str = "rustgis-download:";
 const LIMITED_DOWNLOAD: &str = "rustgis-download-limit:";
+// A bounded Test Connection read, not a long user download, even at local reach.
+const TILE_SAMPLE: &str = "rustgis-tile-sample:";
 
 /// The most bytes a data download may have.
 pub const MAX_DOWNLOAD: usize = if cfg!(target_arch = "wasm32") { 256 << 20 } else { 512 << 20 };
@@ -1543,6 +1554,9 @@ pub fn split_download(url: &str) -> (&str, bool) {
 /// Splits a download marker, including a caller's smaller byte budget. Fetchers must enforce
 /// this limit while reading, before allocating the whole response.
 pub fn split_download_limit(url: &str) -> (&str, Option<usize>) {
+    if let Some(url) = url.strip_prefix(TILE_SAMPLE) {
+        return (url, Some(MAX_BYTES));
+    }
     if let Some(marked) = url.strip_prefix(LIMITED_DOWNLOAD)
         && let Some((limit, url)) = marked.split_once(':')
         && let Ok(limit) = limit.parse::<usize>()
@@ -1560,7 +1574,7 @@ pub fn split_download_limit(url: &str) -> (&str, Option<usize>) {
 /// ([`download_public_limited`]): its address comes from data, like a picture for the pop-up.
 /// A download the user named is not given up.
 pub fn gives_up_when_stalled(url: &str, ceiling: crate::address::Reach) -> bool {
-    split_download_limit(url).1.is_none() || ceiling == crate::address::Reach::Public
+    url.starts_with(TILE_SAMPLE) || split_download_limit(url).1.is_none() || ceiling == crate::address::Reach::Public
 }
 
 pub(crate) fn download_address(url: &str, max: usize) -> String {
@@ -2131,6 +2145,16 @@ pub fn prepare_get(url: &str) -> Result<crate::s3::Prepared, String> {
     crate::s3::prepare(url)
 }
 
+/// Fetches one uncached test tile with the tile byte limit and browser stall timeout.
+/// The address can be local when entered by the user, like other connection tests.
+pub fn fetch_tile_sample(url: &str, done: Done) {
+    if let Err(e) = crate::address::check_reach(url, ceiling_for(url)) {
+        done(Err(e));
+        return;
+    }
+    fetch_bytes(format!("{TILE_SAMPLE}{url}"), done, &[404]);
+}
+
 /// Fetches an address's bytes, uncached (through the browser's fetcher, or the worker threads).
 /// A status in `omit` is an expected answer: its failure isn't recorded, only noted once per
 /// server (a tile past a map's edge).
@@ -2500,6 +2524,7 @@ mod native {
     /// The server an address is fetched from (`host[:port]`, lowercase), or `""` for a local
     /// read, which no server limits.
     pub(super) fn host(url: &str) -> String {
+        let (url, _) = super::split_download_limit(url);
         if crate::mbtiles::is_tile(url) || url.starts_with(LOCAL) {
             return String::new();
         }
@@ -2577,7 +2602,12 @@ mod native {
 
     /// Workers share this agent's checked connections and bounded idle pool.
     pub(super) fn agent() -> ureq::Agent {
-        let config = config_builder(std::time::Duration::from_secs(30))
+        agent_with(std::time::Duration::from_secs(30))
+    }
+
+    /// An agent of the workers' kind with `timeout` for a whole request.
+    fn agent_with(timeout: std::time::Duration) -> ureq::Agent {
+        let config = config_builder(timeout)
             // The workers share the agent: keep a connection open for each fetch a server
             // may have under way, so the next tile doesn't connect again.
             .max_idle_connections_per_host(PER_HOST)
@@ -2590,6 +2620,26 @@ mod native {
     fn shared_agent() -> &'static ureq::Agent {
         static A: OnceLock<ureq::Agent> = OnceLock::new();
         A.get_or_init(agent)
+    }
+
+    /// A range read of more than this many bytes is a big tile (a cloud-optimised GeoTIFF's are
+    /// often 2 to 8 MB), which a slow server needs longer than a map tile's 30 seconds for.
+    const LONG_RANGE: u64 = 1 << 20;
+
+    /// The agent the workers read `url` with: the shared one, or for a range of more than
+    /// [`LONG_RANGE`] bytes the one with [`super::LONG_READ`] to spend, as a window waits for it. A
+    /// server that sends nothing is still given up on then (ureq 3 has no idle timeout). Each agent
+    /// has its own connections, as `download_agent`'s do.
+    pub(super) fn worker_agent(url: &str, ceiling: Reach) -> &'static ureq::Agent {
+        static LONG: OnceLock<ureq::Agent> = OnceLock::new();
+        static LONG_PUBLIC: OnceLock<ureq::Agent> = OnceLock::new();
+        let long = super::split_range(url).1.is_some_and(|(a, b)| b.saturating_sub(a) >= LONG_RANGE);
+        match (ceiling == Reach::Public, long) {
+            (false, false) => shared_agent(),
+            (true, false) => shared_public_agent(),
+            (false, true) => LONG.get_or_init(|| agent_with(super::LONG_READ)),
+            (true, true) => LONG_PUBLIC.get_or_init(|| public_agent(super::LONG_READ)),
+        }
     }
 
     /// An agent for downloads, which may take minutes.
@@ -3199,7 +3249,6 @@ mod native {
 
     /// Dispatches each queued read through the pool matching its inherited IP ceiling.
     fn work() {
-        let agent = shared_agent();
         let q = queue();
         loop {
             let (url, done, host, capture, omit, still, ceiling) = {
@@ -3217,8 +3266,7 @@ mod native {
             let _scope = capture.enter();
             let result = super::with_optional_still(still.clone(), || {
                 super::check_current()?;
-                fetch_answer(if ceiling == Reach::Public { shared_public_agent() } else { agent }, &url, ceiling, false, omit)
-                    .map_err(|f| f.message)
+                fetch_answer(worker_agent(&url, ceiling), &url, ceiling, false, omit).map_err(|f| f.message)
             });
             {
                 let mut jobs = q.jobs.lock().unwrap_or_else(|e| e.into_inner());
@@ -4058,6 +4106,84 @@ mod tests {
         history.records().into_iter().filter(|record| record.network.as_ref().is_some_and(|network| network.url == url)).collect()
     }
 
+    /// A range of more than 1 MiB is a big tile, which a slow server needs longer than a map
+    /// tile's 30 seconds for (#2570): the workers read it with the agent that has the long wait.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_range_of_more_than_1_mib_is_read_with_the_long_timeout() {
+        use crate::address::Reach;
+        use std::time::Duration;
+        let _turn = turn();
+        let (short, long) = (Some(Duration::from_secs(30)), Some(super::LONG_READ));
+        let wait = |url: &str, ceiling| native::worker_agent(url, ceiling).config().timeouts().global;
+        for ceiling in [Reach::Local, Reach::Public] {
+            for small in [
+                "https://example.org/a.tif",
+                "https://example.org/a.tif#rustgis-range=0-99",
+                "https://example.org/a.tif#rustgis-range=0-1048575",
+                "https://example.org/a.tif#rustgis-tail=2000000",
+                "https://example.org/a.tif#rustgis-range=9-1",
+                "https://example.org/a.tif#rustgis-range=x-y",
+            ] {
+                assert_eq!(wait(small, ceiling), short, "{small}");
+            }
+            for big in [
+                "https://example.org/a.tif#rustgis-range=0-1048576",
+                "https://example.org/a.tif#rustgis-range=5000000000-5003750013",
+                "https://example.org/a.tif#rustgis-range=0-18446744073709551615",
+            ] {
+                assert_eq!(wait(big, ceiling), long, "{big}");
+            }
+        }
+        let (local, public) = (
+            native::worker_agent("https://example.org/a.tif", Reach::Local),
+            native::worker_agent("https://example.org/a.tif", Reach::Public),
+        );
+        let (long_local, long_public) = (
+            native::worker_agent("https://example.org/a.tif#rustgis-range=0-2097151", Reach::Local),
+            native::worker_agent("https://example.org/a.tif#rustgis-range=0-2097151", Reach::Public),
+        );
+        let agents = [local, public, long_local, long_public];
+        for (i, a) in agents.iter().enumerate() {
+            for b in agents.iter().skip(i + 1) {
+                assert!(!std::ptr::eq(*a, *b), "each pool has its own agent");
+            }
+        }
+        assert!(std::ptr::eq(long_local, native::worker_agent("https://example.org/b.tif#rustgis-range=0-4194303", Reach::Local)));
+    }
+
+    /// A big range comes back through the real worker and the long agent, a small one through the
+    /// short agent, from a server that sends its body in two pieces.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_big_range_from_a_server_that_sends_it_in_pieces_is_read() {
+        use std::io::Write;
+        let _turn = turn();
+        for len in [1usize << 21, 20_000] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream);
+                assert!(request.to_ascii_lowercase().contains(&format!("range: bytes=0-{}", len - 1)), "{request}");
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/9999999\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
+                    len - 1
+                );
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(&vec![7u8; len / 2]).unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200)); // test-wait: a server sending its body in pieces
+                stream.write_all(&vec![7u8; len - len / 2]).unwrap();
+            });
+            let (tx, rx) = std::sync::mpsc::channel();
+            native::fetch(format!("{base}/big.tif#rustgis-range=0-{}", len - 1), Box::new(move |result| tx.send(result).unwrap()), &[]);
+            let bytes = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
+            assert_eq!(bytes.len(), len);
+            server.join().unwrap();
+        }
+    }
+
     /// Exercise the worker used for tiles, styles, services and remote data ranges, without
     /// replacing the process-wide browser fetcher (other tests may be using it).
     #[cfg(not(target_arch = "wasm32"))]
@@ -4508,11 +4634,12 @@ mod tests {
     /// download the user named, with or without a smaller budget, is not.
     #[test]
     fn only_downloads_the_user_named_wait_out_a_stall() {
+        use crate::address::Reach;
         let _turn = turn();
         let handed = Arc::new(Mutex::new(Vec::new()));
         let sent = handed.clone();
-        set_fetcher_with_origin(move |url, ceiling, done, _| {
-            sent.lock().unwrap().push(gives_up_when_stalled(&url, ceiling));
+        set_fetcher_with_origin(move |url, ceiling, done, omit| {
+            sent.lock().unwrap().push((gives_up_when_stalled(&url, ceiling), split_download_limit(&url).1, ceiling, omit));
             done(Err("not fetched".into()));
         });
         let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -4526,10 +4653,19 @@ mod tests {
         download_public_limited(url, 1024, answered());
         download_limited(url, 1024, answered());
         download(url, answered());
-        for _ in 0..3 {
+        fetch_tile_sample(url, answered());
+        for _ in 0..4 {
             rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
         }
-        assert_eq!(*handed.lock().unwrap(), [true, false, false]);
+        assert_eq!(
+            *handed.lock().unwrap(),
+            [
+                (true, Some(1024), Reach::Public, &[][..]),
+                (false, Some(1024), Reach::Local, &[][..]),
+                (false, Some(MAX_DOWNLOAD), Reach::Local, &[][..]),
+                (true, Some(MAX_BYTES), Reach::Local, &[404][..]),
+            ]
+        );
         assert!(gives_up_when_stalled("https://tiles.example/1/2/3.png", crate::address::Reach::Local));
     }
 
@@ -6783,6 +6919,10 @@ Connection: close
         assert_eq!(native::host("http://127.0.0.1:8080/a?b#c"), "127.0.0.1:8080");
         assert_eq!(native::host("https://user:pw@example.org"), "example.org");
         assert_eq!(native::host(&format!("{DOWNLOAD}https://example.org/x")), "example.org");
+        let origin = "https://tile.openstreetmap.org";
+        let tile = format!("{origin}/0/0/0.png");
+        let bound = rustgis_data::login_address::bind("0123456789abcdef", origin, &tile).unwrap();
+        assert_eq!(native::host(&format!("{TILE_SAMPLE}{bound}")), "tile.openstreetmap.org");
         assert_eq!(native::host("https://example.org/a.pmtiles#rustgis-range=0-9"), "example.org");
         assert_eq!(native::host("mbtiles:/data/a.mbtiles/1/2/3"), "");
         assert_eq!(native::host("not an address"), "");

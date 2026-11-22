@@ -63,12 +63,17 @@ impl<'de> Deserialize<'de> for MoveCount {
 
 #[derive(Default, Deserialize)]
 struct Class {
+    /// The class's name as written (a missing one is "Default", as the reader takes it).
+    #[serde(default)]
+    name: Option<serde_json::Value>,
     #[serde(default)]
     moved: MoveCount,
     #[serde(default)]
     callout: Option<serde_json::Value>,
     #[serde(default)]
     square_to: Option<serde_json::Value>,
+    #[serde(default)]
+    guide: Option<serde_json::Value>,
     #[serde(default)]
     line_offset: Option<serde_json::Value>,
     #[serde(default)]
@@ -79,6 +84,9 @@ struct Class {
 
 #[derive(Default, Deserialize)]
 struct Labels {
+    /// The Default class's name as written.
+    #[serde(default)]
+    name: Option<serde_json::Value>,
     #[serde(default)]
     moved: MoveCount,
     #[serde(default)]
@@ -89,6 +97,8 @@ struct Labels {
     show_all: Option<serde_json::Value>,
     #[serde(default)]
     square_to: Option<serde_json::Value>,
+    #[serde(default)]
+    guide: Option<serde_json::Value>,
     #[serde(default)]
     stretch: Option<serde_json::Value>,
     #[serde(default)]
@@ -161,9 +171,68 @@ fn adjusted_square_to(value: Option<&serde_json::Value>) -> bool {
     })
 }
 
+/// A label guide (#2262) that doesn't read, names no layer or gives a field that isn't a name:
+/// dropped, its labels placed as without one; null is none.
+fn dropped_guide(value: Option<&serde_json::Value>) -> bool {
+    value.is_some_and(|v| {
+        !v.is_null()
+            && (v.get("layer").and_then(serde_json::Value::as_str).is_none_or(|n| n.trim().is_empty())
+                || v.get("field").is_some_and(|f| !f.is_null() && !f.is_string()))
+    })
+}
+
 /// Whether a "Show all labels" setting is something other than true or false (null is none).
 fn damaged_flag(value: Option<&serde_json::Value>) -> bool {
     value.is_some_and(|v| !v.is_boolean() && !v.is_null())
+}
+
+/// What reading a layer's label classes drops or cuts (see `From<LabelingFile> for Labeling`).
+#[derive(Default)]
+struct ClassLosses {
+    /// Class names longer than [`rustgis_map::symbology::MAX_LABEL_CLASS_NAME`], cut to it.
+    cut: usize,
+    /// Classes past [`rustgis_map::symbology::MAX_LABEL_CLASSES`], dropped.
+    excess: usize,
+    /// Classes with no name, or the name of an earlier class or of Default, dropped.
+    unnamed_or_repeated: usize,
+}
+
+impl ClassLosses {
+    /// Replays the reader's class rules on one layer's raw labels and adds what they drop or cut.
+    fn add(&mut self, labels: &Labels) {
+        use rustgis_map::symbology::{DEFAULT_LABEL_CLASS, MAX_LABEL_CLASS_NAME, MAX_LABEL_CLASSES, label_class_name};
+        let raw_name = |n: &Option<serde_json::Value>| match n {
+            None => DEFAULT_LABEL_CLASS.to_string(),
+            Some(v) => v.as_str().unwrap_or_default().to_string(),
+        };
+        let mut cut = |raw: &str| {
+            if raw.trim().chars().count() > MAX_LABEL_CLASS_NAME {
+                self.cut = self.cut.saturating_add(1);
+            }
+        };
+        let raw_default = raw_name(&labels.name);
+        cut(&raw_default);
+        let mut default = label_class_name(&raw_default);
+        if default.is_empty() {
+            default = DEFAULT_LABEL_CLASS.into();
+        }
+        let mut kept: Vec<String> = Vec::new();
+        for class in &labels.classes {
+            if kept.len() >= MAX_LABEL_CLASSES {
+                self.excess = self.excess.saturating_add(1);
+                continue;
+            }
+            let raw = raw_name(&class.name);
+            cut(&raw);
+            let name = label_class_name(&raw);
+            let same = |n: &str| n.eq_ignore_ascii_case(&name);
+            if name.is_empty() || same(&default) || kept.iter().any(|o| same(o)) {
+                self.unnamed_or_repeated = self.unnamed_or_repeated.saturating_add(1);
+            } else {
+                kept.push(name);
+            }
+        }
+    }
 }
 
 /// Count what the raw layers hold against what the read labels kept; one notice per kind, each
@@ -174,16 +243,21 @@ fn count<'a>(
     name: &str,
     what: &str,
 ) -> Vec<(ReadPart, String)> {
+    let name = crate::project::short_name(name);
+    let mut classes = ClassLosses::default();
     let (mut moves, mut callouts, mut offsets, mut flags, mut squares, mut stretches) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut guides = 0usize;
     let mut diagrams = rustgis_map::diagram::DiagramAudit::default();
     for layer in raw {
         diagrams = diagrams.plus(layer.diagram);
         let labels = &layer.labels;
+        classes.add(labels);
         moves = moves.saturating_add(labels.moved.0);
         callouts = callouts.saturating_add(usize::from(adjusted_callout(labels.callout.as_ref())));
         offsets = offsets.saturating_add(usize::from(adjusted_line_offset(labels.line_offset.as_ref())));
         flags = flags.saturating_add(usize::from(damaged_flag(labels.show_all.as_ref())));
         squares = squares.saturating_add(usize::from(adjusted_square_to(labels.square_to.as_ref())));
+        guides = guides.saturating_add(usize::from(dropped_guide(labels.guide.as_ref())));
         stretches = stretches.saturating_add(usize::from(adjusted_stretch(labels.stretch.as_ref())));
         for class in &labels.classes {
             moves = moves.saturating_add(class.moved.0);
@@ -191,6 +265,7 @@ fn count<'a>(
             offsets = offsets.saturating_add(usize::from(adjusted_line_offset(class.line_offset.as_ref())));
             flags = flags.saturating_add(usize::from(damaged_flag(class.show_all.as_ref())));
             squares = squares.saturating_add(usize::from(adjusted_square_to(class.square_to.as_ref())));
+            guides = guides.saturating_add(usize::from(dropped_guide(class.guide.as_ref())));
             stretches = stretches.saturating_add(usize::from(adjusted_stretch(class.stretch.as_ref())));
         }
     }
@@ -216,12 +291,35 @@ fn count<'a>(
             "{name}: {squares} perpendicular label line setting(s) dropped (labelled as auto) or adjusted while opening {what}"
         ));
     }
+    if guides > 0 {
+        messages.push(format!("{name}: {guides} label guide setting(s) that didn't read dropped while opening {what}"));
+    }
     if stretches > 0 {
         messages.push(format!("{name}: {stretches} label stretch setting(s) out of range or not a number adjusted while opening {what}"));
     }
+    if classes.cut > 0 {
+        messages.push(format!(
+            "{name}: {} label class name(s) longer than {} characters cut to that length while opening {what}",
+            classes.cut,
+            rustgis_map::symbology::MAX_LABEL_CLASS_NAME
+        ));
+    }
+    if classes.excess > 0 {
+        messages.push(format!(
+            "{name}: {} label class(es) past the {} a layer holds dropped while opening {what}",
+            classes.excess,
+            rustgis_map::symbology::MAX_LABEL_CLASSES
+        ));
+    }
+    if classes.unnamed_or_repeated > 0 {
+        messages.push(format!(
+            "{name}: {} label class(es) with no name, or the name of an earlier class or of Default, dropped while opening {what}",
+            classes.unnamed_or_repeated
+        ));
+    }
     let mut messages: Vec<(ReadPart, String)> = messages.into_iter().map(|m| (ReadPart::Labels, m)).collect();
     let mut found = Vec::new();
-    diagram_messages(diagrams, name, what, &mut found);
+    diagram_messages(diagrams, &name, what, &mut found);
     messages.extend(found.into_iter().map(|m| (ReadPart::Diagrams, m)));
     messages
 }
@@ -330,6 +428,7 @@ pub(super) fn notices_for_maps(text: &str, project: &Project, maps_only: bool) -
         let mut notices = count(raw, retained, &project.name, "the imported maps");
         notices.extend(refused_reference_scales(file.maps.iter().take(project.maps.len()).flat_map(|m| &m.layers)));
         notices.extend(hidden(project.maps.iter().flat_map(|m| &m.layers)));
+        notices.extend(unfollowed_guides(project.maps.iter()));
         return Ok(notices);
     }
     let raw = file.maps.iter().chain(file.offline_areas.iter().map(|a| &a.data)).flat_map(|m| &m.layers).chain(file.styles.iter());
@@ -344,6 +443,7 @@ pub(super) fn notices_for_maps(text: &str, project: &Project, maps_only: bool) -
     notices.extend(refused_reference_scales(file.maps.iter().chain(file.offline_areas.iter().map(|a| &a.data)).flat_map(|m| &m.layers)));
     // Offline snapshots say so when `offline.open` opens them as maps.
     notices.extend(hidden(project.maps.iter().flat_map(|m| &m.layers)));
+    notices.extend(unfollowed_guides(project.maps.iter()));
     Ok(notices)
 }
 
@@ -358,7 +458,64 @@ pub(crate) fn map_notices(text: &str, map: &rustgis_map::Map, diagrams: bool) ->
         notices.extend(refused_reference_scales(raw.layers.iter()));
     }
     notices.extend(hidden(map.layers.iter()));
+    notices.extend(unfollowed_guides(std::iter::once(map)));
     only(notices, diagrams)
+}
+
+/// One notice a kind, with a count and the first few names, for the label guides (#2262) of a file
+/// that its labels can't follow as written, which `labels.placement` refuses when they are set:
+/// along a layer read in place from its file (only a view's window of it at hand), or one that
+/// isn't there or has no lines (placed as without it), by a field one of the two layers lacks
+/// (matched by place, not by value), or on a perpendicular label (square to its line where one is
+/// near).
+fn unfollowed_guides<'a>(maps: impl Iterator<Item = &'a rustgis_map::Map>) -> Vec<(ReadPart, String)> {
+    use rustgis_data::GeometryType;
+    let (mut streamed, mut missing, mut fields, mut square) = (Vec::new(), Vec::new(), Vec::new(), 0usize);
+    for map in maps {
+        for labelled in &map.layers {
+            for (c, g) in labelled.labels.in_order().filter_map(|c| Some((c, c.guide.as_ref()?))) {
+                match map.layer_by_name(&g.layer) {
+                    Some(l) if l.source.is_some() => streamed.push(&g.layer),
+                    Some(l) if l.has_geometry(GeometryType::Polyline) => {
+                        if let Some(f) = g.field.as_ref().filter(|f| [l, labelled].iter().any(|l| l.dataset.field_index(f).is_none())) {
+                            fields.push(f);
+                        }
+                    }
+                    _ => missing.push(&g.layer),
+                }
+                square += usize::from(c.placement == rustgis_map::LabelPlacement::Perpendicular);
+            }
+        }
+    }
+    let named = |mut v: Vec<&String>| {
+        let n = v.len();
+        v.sort_unstable();
+        v.dedup();
+        (n, names(&v))
+    };
+    let mut notices = Vec::new();
+    if !streamed.is_empty() {
+        let (n, names) = named(streamed);
+        notices.push(format!(
+            "{n} label guide(s) along {names}, read in place from its file, are placed as without it: Load All Features (layer.loadAll) to guide them"
+        ));
+    }
+    if !missing.is_empty() {
+        let (n, names) = named(missing);
+        notices.push(format!("{n} label guide(s) along {names}, not a line layer of the map, are placed as without it"));
+    }
+    if !fields.is_empty() {
+        let (n, names) = named(fields);
+        notices.push(format!(
+            "{n} label guide field(s) {names} that aren't a field of both layers: matched to guide lines by place, not by value"
+        ));
+    }
+    if square > 0 {
+        notices.push(format!(
+            "{square} perpendicular label class(es) with a guide: square to their line where one is near, guided only where none is"
+        ));
+    }
+    notices.into_iter().map(|m| (ReadPart::Labels, m)).collect()
 }
 
 /// The same audit for a layer file read on its own.
