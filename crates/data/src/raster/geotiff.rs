@@ -1330,41 +1330,53 @@ pub(super) fn read_with_nodata<R: Read + Seek>(r: R, name: &str, sidecar_nodata:
 /// A single-band `UInt32` GeoTIFF of packed colour, each pixel `0xAABBGGRR` (alpha, blue, green
 /// and red bytes, as GeoLibre's colour tools write a composite), as four `UInt8` bands, red,
 /// green, blue and alpha, exact: read as one band (`grey`, [`read`] of `bytes`) its values are
-/// held as `f32`, whose 24 bits drop the red byte (#2594). A pixel whose alpha is 0, or that is
-/// the file's no-data value, is see-through. `None` when it isn't packed colour: not one
-/// `UInt32` band, or a value whose alpha byte is neither 0 nor 255, or none at 255 (a band of
-/// counts or IDs). `grey` tells which files to decode again; their raw values decide. What
-/// `grey` lost as it was read (its `lost`) is left for the caller to say.
+/// held as `f32`, whose 24 bits drop the red byte (#2594). A pixel whose alpha is 0, that is the
+/// file's no-data value (compared exactly), or that its transparency mask hides is see-through.
+/// `None` when it isn't packed colour: not one `UInt32` band, or a pixel left visible whose alpha
+/// byte is neither 0 nor 255, or none at 255 (a band of counts or IDs). `grey` tells which files
+/// to decode again; their raw values decide. A rotated or skewed file (read resampled north up),
+/// or one too large to hold four bands of, is an error, for the caller to say. The image is
+/// decoded once more, on one thread: at the peak, `grey`, the packed `u32`s and the four bands,
+/// six times the band. What `grey` lost as it was read (its `lost`) is left for the caller to say.
 pub fn unpack_rgba(grey: &Raster, bytes: &[u8]) -> Result<Option<Raster>> {
     let [band] = &grey.bands[..] else { return Ok(None) };
-    if grey.data_type != "UInt32" || !grey.georeferenced {
+    if grey.data_type != "UInt32" {
         return Ok(None);
     }
     // As `f32`, values under 2^24 are exact and only 0xFEFFFF80–0xFEFFFFFF round up to
-    // 0xFF000000: the raw values below settle those.
-    let alpha = |v: f32| if v < 16_777_216.0 { Some(false) } else { (v >= 4_278_190_080.0).then_some(true) };
-    let opaque = band.data.iter().filter(|v| grey.is_valid(**v)).try_fold(false, |any, v| alpha(*v).map(|a| any || a));
-    if opaque != Some(true) {
+    // 0xFF000000: the raw values below settle those, and no-data. A value in between is no
+    // colour unless it is no-data; any value at 0xFF000000 or past may be an opaque one.
+    let between = |v: f32| (16_777_216.0..4_278_190_080.0).contains(&v);
+    let may_be_packed = !band.data.iter().any(|v| between(*v) && grey.is_valid(*v)) && band.data.iter().any(|v| *v >= 4_278_190_080.0);
+    if !may_be_packed {
         return Ok(None);
     }
     let mut dec = Decoder::new(reader(std::io::Cursor::new(bytes)).map_err(err)?).map_err(err)?.with_limits(limits());
     let (w, h) = dec.dimensions().map_err(err)?;
+    if geo_tags(&mut dec)?.affine.is_some() {
+        return Err(err("it is rotated or skewed, which packed colours aren't split for"));
+    }
     let n = (w as usize).saturating_mul(h as usize);
     // An overview's pixels aren't the image's: its colours come from the whole image, as four bands.
-    if grey.overview.is_some() || n.saturating_mul(4) > max_samples() {
-        return Err(err(format!("its {w} × {h} pixels are too many to hold as four bands")));
+    if grey.overview.is_some() || (grey.width, grey.height) != (w, h) || n.saturating_mul(4) > max_samples() {
+        return Err(err(format!(
+            "its {w} × {h} pixels are too many to hold as four bands: clip the tool's inputs to a smaller area first"
+        )));
     }
     let DecodingResult::U32(packed) = dec.read_image().map_err(err)? else { return Ok(None) };
-    if packed.len() != n {
+    if packed.len() != n || band.data.len() != n {
         return Err(err(format!("its image holds {} values, not {w} × {h}", packed.len())));
     }
-    let hole = |p: u32| grey.nodata == Some(f64::from(p));
-    if !packed.iter().all(|&p| hole(p) || matches!(p >> 24, 0 | 255)) {
+    // No-data, exactly, or hidden by the file's transparency mask (NaN as read).
+    let hole = |i: usize, p: u32| grey.nodata == Some(f64::from(p)) || band.data.get(i).is_some_and(|v| v.is_nan());
+    let shown = || packed.iter().enumerate().filter(|(i, p)| !hole(*i, **p)).map(|(_, p)| p >> 24);
+    if !shown().all(|a| a == 0 || a == 255) || !shown().any(|a| a == 255) {
         return Ok(None);
     }
     let (cols, rows) = (w as usize, h as usize);
     let channel = |shift: u32| super::collected(cols, rows, packed.iter().map(|p| ((p >> shift) & 0xFF) as f32));
-    let alpha = super::collected(cols, rows, packed.iter().map(|&p| if hole(p) { 0.0 } else { (p >> 24) as f32 }))?;
+    let opacity = packed.iter().enumerate().map(|(i, &p)| if hole(i, p) { 0.0 } else { (p >> 24) as f32 });
+    let alpha = super::collected(cols, rows, opacity)?;
     let bands = vec![channel(0)?, channel(8)?, channel(16)?, alpha];
     let mut rgba = Raster::new(grey.name.clone(), w, h, bands, grey.transform, grey.crs, None, ColorHint::Rgb { alpha: true }, "UInt8")?;
     for (b, name) in rgba.bands.iter_mut().zip(["Red", "Green", "Blue", "Alpha"]) {
