@@ -1167,6 +1167,12 @@ impl SourceLayer {
         self.handle.as_ref().map_or(rustgis_data::raster::Crs::LonLat, |h| h.coord_crs())
     }
 
+    /// A numeric field's range across the whole source, when it states one ([`FeatureSource::field_range`]);
+    /// `None` until it is open.
+    pub fn field_range(&self, field: &str) -> Option<(f64, f64)> {
+        self.handle.as_ref()?.field_range(field)
+    }
+
     /// A source that can be read whole a chunk at a time, for an export.
     pub fn visit_source(&self) -> Option<Arc<dyn FeatureSource>> {
         self.handle.as_ref().filter(|h| h.visits_chunks()).cloned()

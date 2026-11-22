@@ -425,6 +425,12 @@ pub trait FeatureSource: Send + Sync {
     fn skipped_at_open(&self) -> usize {
         0
     }
+    /// The smallest and largest value of a numeric field across the whole source, when the source
+    /// states them without being read (GeoParquet column statistics); `None` when any part of it
+    /// doesn't, or the field has no value.
+    fn field_range(&self, _field: &str) -> Option<(f64, f64)> {
+        None
+    }
     /// Reads the features a request asks for. A source read by its web address fails with
     /// [`remote::NEED`] until the bytes the read needs are fetched: run it with
     /// [`remote::drive`] (see [`FeatureSource::remote`]).
@@ -682,6 +688,10 @@ impl FeatureSource for Fetching {
 
     fn skipped_at_open(&self) -> usize {
         self.0.skipped_at_open()
+    }
+
+    fn field_range(&self, field: &str) -> Option<(f64, f64)> {
+        self.0.field_range(field)
     }
 
     fn read(&self, req: &Request) -> Result<Batch> {

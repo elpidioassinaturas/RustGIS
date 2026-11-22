@@ -46177,6 +46177,66 @@ fn manual_breaks_on_a_layer_read_in_place_are_open_at_both_ends() {
     assert_eq!(opened.renderer, saved);
 }
 
+/// On a GeoParquet read in place, manual classes close at the field's range from the column
+/// statistics, and classes worked out from the view say so (#2497).
+#[test]
+fn classes_on_a_geoparquet_read_in_place_close_at_its_statistics_and_say_what_comes_from_the_view() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_map::Renderer;
+    let mut ds = Dataset::new("buildings", GeometryType::Point, vec![Field::new("height", FieldType::Double)]);
+    for h in 1..=40 {
+        ds.push(Some(Geometry::Point(Coord::new(f64::from(h), 0.0))), vec![V::Float(f64::from(h))]);
+    }
+    let dir = std::env::temp_dir().join(format!("rustgis-classes-in-view-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("buildings.parquet");
+    rustgis_data::io::write_path(&ds, &path).unwrap();
+    let mut s = Session::new(Project::default());
+    let id =
+        s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+    assert!(s.map().layer(id).unwrap().is_streamed());
+    let classes = |s: &Session| match &s.map().layer(id).unwrap().renderer {
+        Renderer::Graduated { breaks, min, .. } => (breaks.clone(), *min),
+        r => panic!("{r:?}"),
+    };
+    // What a run said about the view.
+    let run = |s: &mut Session, mut p: Value| {
+        (p["layer"], p["field"]) = (json!(id), json!("height"));
+        let mark = s.notice_mark();
+        s.run("layer.symbology", &p).unwrap();
+        s.notices_since(mark).iter().filter(|n| n.text.contains("of the view read so far")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    // Manual breaks close at the file's smallest and largest values, before any view is read.
+    assert!(run(&mut s, json!({"type": "graduated", "breaks": [4, 7, 10, 15, 25]})).is_empty());
+    assert_eq!(classes(&s), (vec![4.0, 7.0, 10.0, 15.0, 25.0, 40.0], 1.0));
+    // Kept, they stay as they are; a bound past the largest value is one of its own.
+    run(&mut s, json!({"type": "graduated", "method": "manual"}));
+    assert_eq!(classes(&s).0, [4.0, 7.0, 10.0, 15.0, 25.0, 40.0]);
+    run(&mut s, json!({"type": "graduated", "breaks": [5, 50]}));
+    run(&mut s, json!({"type": "graduated", "method": "manual"}));
+    assert_eq!(classes(&s).0, [5.0, 50.0]);
+    // A view of low heights is read: quantiles and unique values come from it, and say so.
+    let v = view_of(&mut s, rustgis_geom::Extent::new(0.5, -1.0, 3.5, 1.0));
+    crate::render::render_png(s.map_mut(), &v).unwrap();
+    let n = s.map().layer(id).unwrap().dataset.features.len();
+    assert!(n > 0 && n < 40, "{n}");
+    let said = run(&mut s, json!({"type": "graduated", "method": "quantile", "classes": 2}));
+    assert_eq!(
+        said,
+        [format!(
+            "buildings: its symbology is worked out from the {n} features of the view read so far, not the whole layer read in place; values below or above them are drawn in the first or last class"
+        )]
+    );
+    assert!(run(&mut s, json!({"type": "unique"}))[0].ends_with("values not among them are drawn as <all other values>"));
+    // Manual from the view's classes: its inner bounds come from the view, its ends from the file.
+    run(&mut s, json!({"type": "single"}));
+    let said = run(&mut s, json!({"type": "graduated", "method": "manual", "classes": 2}));
+    assert!(said[0].ends_with("the file's smallest and largest values close the first and last classes"), "{said:?}");
+    let (breaks, min) = classes(&s);
+    assert_eq!((breaks.len(), breaks.last(), min), (2, Some(&40.0), 1.0));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Raster-side projection failures retain good multipart coverage and reach both command results.
 #[test]
 fn raster_projection_failures_are_reported_for_zonal_statistics_and_clipping() {

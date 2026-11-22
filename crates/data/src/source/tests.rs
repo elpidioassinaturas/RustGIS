@@ -4881,3 +4881,29 @@ fn write_projected_parquet_fixture(ds: &Dataset, path: &Path, rows: usize, dicti
     writer.write(&batch).unwrap();
     writer.close().unwrap();
 }
+
+/// A GeoParquet field's range comes from its column statistics; text, missing and all-null
+/// fields have none (#2497).
+#[test]
+fn geoparquet_field_range_comes_from_column_statistics() {
+    let fields = vec![
+        Field::new("height", FieldType::Double),
+        Field::new("floors", FieldType::Integer),
+        Field::new("name", FieldType::Text),
+        Field::new("empty", FieldType::Double),
+    ];
+    let mut ds = Dataset::new("b", crate::GeometryType::Point, fields);
+    for (i, h) in [3.5, -2.0, 41.25].into_iter().enumerate() {
+        let floors = if i == 1 { Value::Null } else { Value::Int(i as i64 * 7 - 3) };
+        ds.push(Some(Geometry::Point(Coord::new(i as f64, 0.0))), vec![Value::Float(h), floors, Value::Text("x".into()), Value::Null]);
+    }
+    let source = parquet::ParquetSource::open_bytes(parquet::write(&ds).unwrap(), "b").unwrap();
+    assert_eq!(source.field_range("height"), Some((-2.0, 41.25)));
+    assert_eq!(source.field_range("floors"), Some((-3.0, 11.0)));
+    for none in ["name", "empty", "nope"] {
+        assert_eq!(source.field_range(none), None, "{none}");
+    }
+    // A wrapper says the same.
+    #[cfg(not(target_arch = "wasm32"))]
+    assert_eq!(Fetching(Arc::new(source)).field_range("height"), Some((-2.0, 41.25)));
+}

@@ -1343,6 +1343,31 @@ impl Renderer {
         Ok(Self::graduated_on(ds, fi, ClassMethod::Manual, ramp, base, breaks, OPEN_BELOW))
     }
 
+    /// [`Renderer::graduated_manual_open`] for a layer whose field's range `(lo, hi)` the file
+    /// states (GeoParquet column statistics): the classes close at it, as with the values at hand
+    /// ([`Renderer::graduated_manual`]). An open last bound among `breaks` (the layer's current
+    /// classes) gives way to `hi`.
+    pub fn graduated_manual_within(
+        ds: &Dataset,
+        field: &str,
+        breaks: &[f64],
+        (lo, hi): (f64, f64),
+        ramp: Ramp,
+        base: Symbol,
+    ) -> Result<Renderer, String> {
+        let fi = numeric_field(ds, field)?;
+        if breaks.contains(&OPEN_BELOW) {
+            return Err(format!("manual breaks must be above {OPEN_BELOW:e}"));
+        }
+        // The open class alone is one class of every value.
+        let breaks = if !breaks.is_empty() && breaks.iter().all(|v| *v >= OPEN_ABOVE) {
+            vec![hi]
+        } else {
+            manual_bounds(breaks, |v| v.is_finite() && v < OPEN_ABOVE, Some(hi))?
+        };
+        Ok(Self::graduated_on(ds, fi, ClassMethod::Manual, ramp, base, breaks, lo))
+    }
+
     /// Closed Graduated Colors classes made open, as [`Renderer::graduated_manual_open`] makes
     /// them: the open class takes the place of the bound that closed them, so every feature keeps
     /// its class. `None` for other renderers and for classes already open.
@@ -4582,6 +4607,28 @@ mod tests {
         // No values is still refused.
         assert_eq!(manual(&heights(&[None]), &[4.0]).unwrap_err(), "'height' has no numeric values");
         assert_eq!(manual(&heights(&[]), &[4.0]).unwrap_err(), "'height' has no numeric values");
+    }
+
+    #[test]
+    fn manual_classes_within_the_file_range_close_at_it() {
+        let base = Symbol::default_for(GeometryType::Polygon, 0);
+        // No value at hand: the file's range closes the classes, the view's values set nothing.
+        let d = heights(&[Some(100.0)]);
+        let within = |b: &[f64]| Renderer::graduated_manual_within(&d, "height", b, (0.5, 60.0), Ramp::Ember, base);
+        let ends = |r: Renderer| match r {
+            Renderer::Graduated { breaks, min, .. } => (breaks, min),
+            r => panic!("{r:?}"),
+        };
+        assert_eq!(ends(within(&[25.0, 4.0, 7.0, 10.0, 15.0]).unwrap()), (vec![4.0, 7.0, 10.0, 15.0, 25.0, 60.0], 0.5));
+        let r = within(&[4.0, 25.0]).unwrap();
+        assert_eq!(labels_of(&r), ["0.50 – 4", "4 – 25", "25 – 60"]);
+        // A bound past the largest closes the classes itself; the open class gives way to it.
+        assert_eq!(ends(within(&[4.0, 80.0]).unwrap()).0, [4.0, 80.0]);
+        assert_eq!(ends(within(&[4.0, OPEN_ABOVE]).unwrap()).0, [4.0, 60.0]);
+        assert_eq!(ends(within(&[OPEN_ABOVE]).unwrap()).0, [60.0]);
+        // Hostile bounds are refused as with no range.
+        assert!(within(&[]).is_err() && within(&[f64::NAN]).is_err() && within(&[OPEN_BELOW, 4.0]).is_err());
+        assert!(Renderer::graduated_manual_within(&d, "name", &[1.0], (0.0, 1.0), Ramp::Ember, base).is_err());
     }
 
     #[test]
