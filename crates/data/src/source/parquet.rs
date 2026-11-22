@@ -487,7 +487,9 @@ impl FeatureSource for ParquetSource {
     }
 
     /// From every row group's statistics of the field's column, which the footer holds: no byte of
-    /// the data is read. A row group without them (and not all nulls) leaves the range unknown.
+    /// the data is read. A row group without a statistics object, or whose statistics give no
+    /// bounds while it has values, leaves the range unknown (`None`); one whose statistics count
+    /// only nulls adds nothing. The field is named exactly as the source lists it.
     fn field_range(&self, field: &str) -> Option<(f64, f64)> {
         let i = self.info.fields.iter().position(|f| f.name == field && f.ty.is_numeric())?;
         let col = *self.field_cols.get(i)?;

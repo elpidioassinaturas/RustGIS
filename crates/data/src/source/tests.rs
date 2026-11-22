@@ -4907,3 +4907,48 @@ fn geoparquet_field_range_comes_from_column_statistics() {
     #[cfg(not(target_arch = "wasm32"))]
     assert_eq!(Fetching(Arc::new(source)).field_range("height"), Some((-2.0, 41.25)));
 }
+
+/// The column statistics that can't give a field's range, and the ones scaled or rounded to
+/// hold every value: unsigned integers, a column without statistics, decimals, and Int64 past
+/// 2^53 (#2497).
+#[test]
+fn geoparquet_field_range_refuses_unsigned_and_missing_statistics() {
+    use ::parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int32Type, Int64Type};
+    use ::parquet::file::properties::{EnabledStatistics, WriterProperties};
+    use ::parquet::file::writer::SerializedFileWriter;
+    use ::parquet::schema::types::ColumnPath;
+    let schema = ::parquet::schema::parser::parse_message_type(
+        "message m { REQUIRED BINARY geometry; OPTIONAL INT32 count (UINT_32); OPTIONAL INT64 price (DECIMAL(10,2));          OPTIONAL INT64 big; OPTIONAL DOUBLE bare; }",
+    )
+    .unwrap();
+    let props = WriterProperties::builder().set_column_statistics_enabled(ColumnPath::from("bare"), EnabledStatistics::None).build();
+    let mut bytes = Vec::new();
+    let mut w = SerializedFileWriter::new(&mut bytes, Arc::new(schema), Arc::new(props)).unwrap();
+    let mut rg = w.next_row_group().unwrap();
+    let geom = ByteArray::from(wkb::encode(&Geometry::Point(Coord::new(0.0, 0.0))));
+    let mut col = rg.next_column().unwrap().unwrap();
+    col.typed::<ByteArrayType>().write_batch(&[geom.clone(), geom], None, None).unwrap();
+    col.close().unwrap();
+    let mut col = rg.next_column().unwrap().unwrap();
+    col.typed::<Int32Type>().write_batch(&[1, -1], Some(&[1, 1]), None).unwrap();
+    col.close().unwrap();
+    let big = (1i64 << 53) + 1;
+    for values in [[12_345, -50], [-big, big]] {
+        let mut col = rg.next_column().unwrap().unwrap();
+        col.typed::<Int64Type>().write_batch(&values, Some(&[1, 1]), None).unwrap();
+        col.close().unwrap();
+    }
+    let mut col = rg.next_column().unwrap().unwrap();
+    col.typed::<DoubleType>().write_batch(&[1.0, 2.0], Some(&[1, 1]), None).unwrap();
+    col.close().unwrap();
+    rg.close().unwrap();
+    w.close().unwrap();
+    let source = parquet::ParquetSource::open_bytes(bytes, "m").unwrap();
+    let kinds: Vec<_> = source.info().fields.iter().map(|f| (f.name.as_str(), f.ty)).collect();
+    assert!(kinds.contains(&("count", FieldType::Integer)) && kinds.contains(&("bare", FieldType::Double)), "{kinds:?}");
+    assert_eq!(source.field_range("count"), None);
+    assert_eq!(source.field_range("bare"), None);
+    assert_eq!(source.field_range("price"), Some((-50.0 * 10f64.powi(-2), 12_345.0 * 10f64.powi(-2))));
+    let (lo, hi) = source.field_range("big").unwrap();
+    assert!(i128::from(big) <= hi as i128 && lo as i128 <= -i128::from(big), "{lo} {hi}");
+}

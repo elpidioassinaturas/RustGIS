@@ -1346,7 +1346,8 @@ impl Renderer {
     /// [`Renderer::graduated_manual_open`] for a layer whose field's range `(lo, hi)` the file
     /// states (GeoParquet column statistics): the classes close at it, as with the values at hand
     /// ([`Renderer::graduated_manual`]). An open last bound among `breaks` (the layer's current
-    /// classes) gives way to `hi`.
+    /// classes) gives way to `hi`; a first bound below `lo` keeps the first class open ("up to"),
+    /// so its range never reads backwards.
     pub fn graduated_manual_within(
         ds: &Dataset,
         field: &str,
@@ -1365,7 +1366,8 @@ impl Renderer {
         } else {
             manual_bounds(breaks, |v| v.is_finite() && v < OPEN_ABOVE, Some(hi))?
         };
-        Ok(Self::graduated_on(ds, fi, ClassMethod::Manual, ramp, base, breaks, lo))
+        let min = if breaks.first().is_some_and(|b| *b < lo) { OPEN_BELOW } else { lo };
+        Ok(Self::graduated_on(ds, fi, ClassMethod::Manual, ramp, base, breaks, min))
     }
 
     /// Closed Graduated Colors classes made open, as [`Renderer::graduated_manual_open`] makes
@@ -4626,6 +4628,10 @@ mod tests {
         assert_eq!(ends(within(&[4.0, 80.0]).unwrap()).0, [4.0, 80.0]);
         assert_eq!(ends(within(&[4.0, OPEN_ABOVE]).unwrap()).0, [4.0, 60.0]);
         assert_eq!(ends(within(&[OPEN_ABOVE]).unwrap()).0, [60.0]);
+        // A first bound below the file's smallest value: the first class stays open.
+        let low = within(&[0.25, 4.0]).unwrap();
+        assert_eq!(ends(low.clone()), (vec![0.25, 4.0, 60.0], OPEN_BELOW));
+        assert_eq!(labels_of(&low), ["up to 0.25", "0.25 – 4", "4 – 60"]);
         // Hostile bounds are refused as with no range.
         assert!(within(&[]).is_err() && within(&[f64::NAN]).is_err() && within(&[OPEN_BELOW, 4.0]).is_err());
         assert!(Renderer::graduated_manual_within(&d, "name", &[1.0], (0.0, 1.0), Ramp::Ember, base).is_err());

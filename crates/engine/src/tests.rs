@@ -46201,7 +46201,10 @@ fn classes_on_a_geoparquet_read_in_place_close_at_its_statistics_and_say_what_co
     };
     // What a run said about the view.
     let run = |s: &mut Session, mut p: Value| {
-        (p["layer"], p["field"]) = (json!(id), json!("height"));
+        p["layer"] = json!(id);
+        if p.get("field").is_none() {
+            p["field"] = json!("height");
+        }
         let mark = s.notice_mark();
         s.run("layer.symbology", &p).unwrap();
         s.notices_since(mark).iter().filter(|n| n.text.contains("of the view read so far")).map(|n| n.text.clone()).collect::<Vec<_>>()
@@ -46220,20 +46223,23 @@ fn classes_on_a_geoparquet_read_in_place_close_at_its_statistics_and_say_what_co
     crate::render::render_png(s.map_mut(), &v).unwrap();
     let n = s.map().layer(id).unwrap().dataset.features.len();
     assert!(n > 0 && n < 40, "{n}");
-    let said = run(&mut s, json!({"type": "graduated", "method": "quantile", "classes": 2}));
-    assert_eq!(
-        said,
-        [format!(
-            "buildings: its symbology is worked out from the {n} features of the view read so far, not the whole layer read in place; values below or above them are drawn in the first or last class"
-        )]
-    );
-    assert!(run(&mut s, json!({"type": "unique"}))[0].ends_with("values not among them are drawn as <all other values>"));
+    // One notice: the layer, the count of features read, and where values elsewhere go.
+    let says = |said: &[String], then: &str| {
+        let [one] = said else { panic!("{said:?}") };
+        assert!(one.starts_with("buildings: ") && one.contains(&format!(" {n} features of the view read so far")), "{one}");
+        assert!(one.contains(then), "{one}");
+    };
+    says(&run(&mut s, json!({"type": "graduated", "method": "quantile", "classes": 2})), "first or last class");
+    says(&run(&mut s, json!({"type": "unique"})), "<all other values>");
     // Manual from the view's classes: its inner bounds come from the view, its ends from the file.
     run(&mut s, json!({"type": "single"}));
-    let said = run(&mut s, json!({"type": "graduated", "method": "manual", "classes": 2}));
-    assert!(said[0].ends_with("the file's smallest and largest values close the first and last classes"), "{said:?}");
+    says(&run(&mut s, json!({"type": "graduated", "method": "manual", "classes": 2})), "file's smallest and largest values");
     let (breaks, min) = classes(&s);
     assert_eq!((breaks.len(), breaks.last(), min), (2, Some(&40.0), 1.0));
+    // The field named in another case finds the file's range too; a bound below it keeps the
+    // first class open.
+    run(&mut s, json!({"type": "graduated", "field": "HEIGHT", "breaks": [0.5, 4]}));
+    assert_eq!(classes(&s), (vec![0.5, 4.0, 40.0], rustgis_map::symbology::OPEN_BELOW));
     let _ = std::fs::remove_dir_all(dir);
 }
 

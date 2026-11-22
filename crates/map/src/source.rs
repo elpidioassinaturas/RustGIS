@@ -1168,7 +1168,7 @@ impl SourceLayer {
     }
 
     /// A numeric field's range across the whole source, when it states one ([`FeatureSource::field_range`]);
-    /// `None` until it is open.
+    /// `None` while the source isn't open (before a project's reopen finishes, say).
     pub fn field_range(&self, field: &str) -> Option<(f64, f64)> {
         self.handle.as_ref()?.field_range(field)
     }

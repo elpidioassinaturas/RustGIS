@@ -150,7 +150,7 @@ pub fn commands() -> Vec<C> {
         .when(need_layer),
         C::new("layer.symbology", "Symbology", "Style › Drawing", symbology).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(need_feature_layer)
-            .params(r#"{"layer"?, "type": "single"|"unique"|"graduated"|"proportional", "field"?, "expression"?: expression|null (unique: class by this expression's values instead of a field; blank or null: by a field; with neither key, Unique Values keep the layer's expression), "classes"?: 1..12, "method"?: "naturalBreaks"|"equalInterval"|"quantile"|"geometricInterval"|"standardDeviation"|"arithmeticProgression"|"headTailBreaks"|"manual", "breaks"?: [numbers] (manual: the classes' upper bounds, closed by the field's largest value; on a layer read in place, closed by the file's smallest and largest values when it states them (GeoParquet column statistics), else the first class takes every value up to its bound and one more class every value past the last; other methods and unique values on a layer read in place class the features of the view read so far, and say so), "ramp"?: string}"#),
+            .params(r#"{"layer"?, "type": "single"|"unique"|"graduated"|"proportional", "field"?, "expression"?: expression|null (unique: class by this expression's values instead of a field; blank or null: by a field; with neither key, Unique Values keep the layer's expression), "classes"?: 1..12, "method"?: "naturalBreaks"|"equalInterval"|"quantile"|"geometricInterval"|"standardDeviation"|"arithmeticProgression"|"headTailBreaks"|"manual", "breaks"?: [numbers] (manual: the classes' upper bounds, closed by the field's largest value; on a layer read in place, closed by the whole file's smallest and largest values when it states them (GeoParquet column statistics; a definition query doesn't narrow them), else the first class takes every value up to its bound and one more class every value past the last; other methods and unique values on a layer read in place class the features of the view read so far, and say so), "ramp"?: string}"#),
         C::new("layer.ramp", "Color Scheme", "Style › Drawing", |s, p| {
             let r = s.ramp(s_req(p, "ramp")?)?;
             let mut dropped = None;
@@ -7527,7 +7527,9 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
             let (field, ramp) = (field(true)?, ramp.unwrap_or(Ramp::Ember));
             // The field's range across the whole layer, when its file states it (GeoParquet
             // column statistics): it closes manual classes on a layer read in place.
-            let range = l.source.as_ref().and_then(|src| src.field_range(&field));
+            // The field as the layer spells it, which a name in another case finds.
+            let range =
+                l.dataset.field_index(&field).and_then(|i| l.dataset.fields.get(i)).and_then(|f| l.source.as_ref()?.field_range(&f.name));
             // Manual with no bounds keeps the layer's current ones on the same field, so switching
             // to it changes nothing.
             let kept = match &l.renderer {

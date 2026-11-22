@@ -49,7 +49,8 @@ Select a layer in Layers and open **Style › Symbology** (or the Symbology pane
   asked. Manual keeps the bounds you type: each class's upper bound is a number to edit or take out, **Split the widest
   class** adds one, and the field's largest value closes the last class. On a layer read in
   place, whose values aren't all at hand, a GeoParquet file's column statistics give the field's
-  smallest and largest values, which close the classes; without them the range is unknown: the
+  smallest and largest values, which close the classes (the whole file's, even when a definition
+  query keeps fewer rows); without them the range is unknown: the
   first class takes every value up to its bound, and one more class takes every value past the
   last bound, shown as "up to 4" and "more than 25" in the legend. The other methods and Unique
   Values on a layer read in place class the features of the view read so far, and the status bar
