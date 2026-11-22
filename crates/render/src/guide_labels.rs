@@ -108,7 +108,7 @@ pub(crate) enum Near<'a> {
 /// Per frame, for each label with a guide and its label point in view; it looks at no Cancel: it
 /// reads the stretches listed in the grid cells round its point or polygon, and tries at most
 /// [`MOST_TRIED`] lines, a polygon's inside tested against its outline thinned as for its centre
-/// line (#2295): at most 3 points a position tried, each against every edge of the outline.
+/// line (#2295): its characters and middle (at most [`line_labels::MAX_CURVED_CHARS`] + 1 points) a position tried, each against every edge of the outline.
 pub(super) fn glyphs(
     guides: &Guides,
     value: Option<&str>,
@@ -169,7 +169,10 @@ fn curved(guides: &Guides, value: Option<&str>, near: Near<'_>, advances: &[f32]
                 let l = line(&i)?;
                 gaps(l).find_map(|g| {
                     let len = line_labels::curved_len(advances, g);
-                    (l.length() >= len).then(|| l.curved(advances, g, size, 0.0, Some(at.clamp(len / 2.0, l.length() - len / 2.0))))?
+                    if l.length() < len {
+                        return None;
+                    }
+                    l.curved(advances, g, size, 0.0, Some(at.clamp(len / 2.0, l.length() - len / 2.0)))
                 })
             })
         }
@@ -187,10 +190,9 @@ fn curved(guides: &Guides, value: Option<&str>, near: Near<'_>, advances: &[f32]
                 .iter()
                 .flatten()
                 .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| [b[0].min(p.0), b[1].min(p.1), b[2].max(p.0), b[3].max(p.1)]);
-            // Its middle and both ends inside the polygon.
-            let inside = |(c, turns): &Curved| {
-                [turns.first(), turns.last()].into_iter().flatten().map(|t| (c.0 + t.0, c.1 + t.1)).chain([*c]).all(|p| inside(&rings, p))
-            };
+            // Its middle and every character inside the polygon (a stretched one's may straddle a
+            // hole its ends and middle miss).
+            let inside = |(c, turns): &Curved| turns.iter().map(|t| (c.0 + t.0, c.1 + t.1)).chain([*c]).all(|p| inside(&rings, p));
             longest_first(guides.meeting(b)).iter().filter_map(line).find_map(|l| along(l, &inside))
         }
     }
@@ -272,6 +274,18 @@ mod tests {
         // Without one, at its own spacing.
         let own = curved(&guides, None, Near::Point((700.0, 590.0)), &advances(), (1.0, None), 10.0).expect("nearest");
         assert!((covered(&own) - line_labels::curved_len(&advances(), 1.0)).abs() < 0.5);
+        // Inside a polygon with a hole the stretched text would straddle: every character is
+        // checked, so it falls back to its own spacing, clear of the hole.
+        let mut unnamed = Guides::default();
+        unnamed.push(&straight, None);
+        let rings = vec![
+            vec![(480.0, 560.0), (920.0, 560.0), (920.0, 640.0), (480.0, 640.0)],
+            vec![(600.0, 580.0), (625.0, 580.0), (625.0, 620.0), (600.0, 620.0)],
+        ];
+        let holed = Near::Polygon(None, Box::new(|| Some(rings)));
+        let (c, turns) = curved(&unnamed, None, holed, &advances(), (1.0, stretch), 10.0).expect("beside the hole");
+        assert!(turns.iter().all(|t| !(596.0..629.0).contains(&(c.0 + t.0))), "{c:?} {turns:?}");
+        assert!((covered(&(c, turns)) - line_labels::curved_len(&advances(), 1.0)).abs() < 0.5, "at its own spacing");
     }
 
     /// A polygon's value's line too short for its text falls to the line inside it, not to none.
