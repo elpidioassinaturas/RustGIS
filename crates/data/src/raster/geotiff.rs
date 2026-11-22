@@ -1127,6 +1127,15 @@ fn decoding_limit() -> usize {
     max_samples().saturating_mul(4)
 }
 
+/// The tiff crate's limits for reading a whole file's image: [`decoding_limit`] decoded.
+fn limits() -> Limits {
+    let mut l = Limits::default();
+    l.decoding_buffer_size = decoding_limit();
+    l.intermediate_buffer_size = 256 << 20;
+    l.ifd_value_size = 64 << 20;
+    l
+}
+
 /// Fewest chunks worth decoding on more than one thread.
 #[cfg(not(target_arch = "wasm32"))]
 const PARALLEL_CHUNKS: u64 = 16;
@@ -1318,6 +1327,53 @@ pub(super) fn read_with_nodata<R: Read + Seek>(r: R, name: &str, sidecar_nodata:
     read_limited_with_nodata(reader(r).map_err(err)?, name, max_samples(), None, sidecar_nodata)
 }
 
+/// A single-band `UInt32` GeoTIFF of packed colour, each pixel `0xAABBGGRR` (alpha, blue, green
+/// and red bytes, as GeoLibre's colour tools write a composite), as four `UInt8` bands, red,
+/// green, blue and alpha, exact: read as one band (`grey`, [`read`] of `bytes`) its values are
+/// held as `f32`, whose 24 bits drop the red byte (#2594). A pixel whose alpha is 0, or that is
+/// the file's no-data value, is see-through. `None` when it isn't packed colour: not one
+/// `UInt32` band, or a value whose alpha byte is neither 0 nor 255, or none at 255 (a band of
+/// counts or IDs). `grey` tells which files to decode again; their raw values decide. What
+/// `grey` lost as it was read (its `lost`) is left for the caller to say.
+pub fn unpack_rgba(grey: &Raster, bytes: &[u8]) -> Result<Option<Raster>> {
+    let [band] = &grey.bands[..] else { return Ok(None) };
+    if grey.data_type != "UInt32" || !grey.georeferenced {
+        return Ok(None);
+    }
+    // As `f32`, values under 2^24 are exact and only 0xFEFFFF80–0xFEFFFFFF round up to
+    // 0xFF000000: the raw values below settle those.
+    let alpha = |v: f32| if v < 16_777_216.0 { Some(false) } else { (v >= 4_278_190_080.0).then_some(true) };
+    let opaque = band.data.iter().filter(|v| grey.is_valid(**v)).try_fold(false, |any, v| alpha(*v).map(|a| any || a));
+    if opaque != Some(true) {
+        return Ok(None);
+    }
+    let mut dec = Decoder::new(reader(std::io::Cursor::new(bytes)).map_err(err)?).map_err(err)?.with_limits(limits());
+    let (w, h) = dec.dimensions().map_err(err)?;
+    let n = (w as usize).saturating_mul(h as usize);
+    // An overview's pixels aren't the image's: its colours come from the whole image, as four bands.
+    if grey.overview.is_some() || n.saturating_mul(4) > max_samples() {
+        return Err(err(format!("its {w} × {h} pixels are too many to hold as four bands")));
+    }
+    let DecodingResult::U32(packed) = dec.read_image().map_err(err)? else { return Ok(None) };
+    if packed.len() != n {
+        return Err(err(format!("its image holds {} values, not {w} × {h}", packed.len())));
+    }
+    let hole = |p: u32| grey.nodata == Some(f64::from(p));
+    if !packed.iter().all(|&p| hole(p) || matches!(p >> 24, 0 | 255)) {
+        return Ok(None);
+    }
+    let (cols, rows) = (w as usize, h as usize);
+    let channel = |shift: u32| super::collected(cols, rows, packed.iter().map(|p| ((p >> shift) & 0xFF) as f32));
+    let alpha = super::collected(cols, rows, packed.iter().map(|&p| if hole(p) { 0.0 } else { (p >> 24) as f32 }))?;
+    let bands = vec![channel(0)?, channel(8)?, channel(16)?, alpha];
+    let mut rgba = Raster::new(grey.name.clone(), w, h, bands, grey.transform, grey.crs, None, ColorHint::Rgb { alpha: true }, "UInt8")?;
+    for (b, name) in rgba.bands.iter_mut().zip(["Red", "Green", "Blue", "Alpha"]) {
+        b.name = name.into();
+    }
+    rgba.copyright.clone_from(&grey.copyright);
+    Ok(Some(rgba))
+}
+
 /// What reading a GeoTIFF from the parts of it read so far came to.
 #[derive(Debug)]
 pub enum Partial {
@@ -1434,13 +1490,7 @@ pub(super) fn read_limited_with_nodata(
     // overviews of it.
     let palette = r.first_is_palette();
     let wide_rgb = r.first_is_wide_rgb();
-    let limits = {
-        let mut l = Limits::default();
-        l.decoding_buffer_size = decoding_limit();
-        l.intermediate_buffer_size = 256 << 20;
-        l.ifd_value_size = 64 << 20;
-        l
-    };
+    let limits = limits();
     let mut dec = Decoder::new(r).map_err(err)?.with_limits(limits.clone());
     let (full_w, full_h) = dec.dimensions().map_err(err)?;
     let geo = geo_tags(&mut dec)?;
