@@ -58,6 +58,8 @@ pub struct State {
     pub found: Vec<Tile>,
     /// Each tile found's file a year, by `found`'s order, when the search was over the years.
     years: Vec<BTreeMap<i32, String>>,
+    /// The rows that search left out, without a date that can be read (handed over as `undated`).
+    years_undated: usize,
     /// Whether the search over the years read the index whole (handed over as `complete`).
     years_whole: bool,
     /// The footprints layer of the last search, and its project (`Session::opened`): layer ids
@@ -81,6 +83,7 @@ impl Default for State {
             searched: None,
             found: Vec::new(),
             years: Vec::new(),
+            years_undated: 0,
             years_whole: true,
             footprints: None,
             error: None,
@@ -201,6 +204,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
                 st.found = tiles;
                 st.years = years;
                 st.years_whole = complete;
+                st.years_undated = undated;
                 show_footprints(app);
             }
             Err(e) => app.ui.embeddings.error = Some(e),
@@ -324,7 +328,7 @@ fn add(app: &mut RustGisApp, i: usize) {
                     (
                         "embeddings.addCube",
                         json!({
-                            "dataset": "alphaearth", "found": found, "complete": st.years_whole,
+                            "dataset": "alphaearth", "found": found, "complete": st.years_whole, "undated": st.years_undated,
                             "start": first, "end": last, "bands": bands, "stretch": stretch,
                         }),
                     )
@@ -713,16 +717,19 @@ mod tests {
         let mut said = |read: Read| {
             app.ui.embeddings.reading = Some(read);
             poll(&mut app, &ctx);
-            app.ui.embeddings.info.take().unwrap()
+            let st = &mut app.ui.embeddings;
+            (st.info.take().unwrap(), st.years_undated)
         };
         for (undated, left) in [(0, false), (4, true)] {
             let one = Found { complete: true, undated, ..Default::default() };
             let years = SeriesFound { complete: true, undated, ..Default::default() };
-            for info in [
+            for (info, handed) in [
                 said(Read::Search(std::sync::Arc::new(std::sync::Mutex::new(Some(Ok(one)))))),
                 said(Read::Series(std::sync::Arc::new(std::sync::Mutex::new(Some(Ok(years)))))),
             ] {
                 assert_eq!(info.ends_with("left out, as their date can't be read: 4"), left, "{info}");
+                // What embeddings.addCube is handed with a tile found.
+                assert_eq!(handed, undated);
             }
         }
     }

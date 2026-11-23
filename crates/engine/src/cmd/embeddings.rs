@@ -32,7 +32,7 @@ pub fn commands() -> Vec<C> {
             r#"{"dataset": "alphaearth" | "earth-index" | "tessera" | "olmoearth", "url"?: "AlphaEarth's tile or Earth Index's file, as embeddings.search lists it (Earth Index: default the MGRS tile at the view's centre)", "year"?: number (Tessera and OlmoEarth, default 2024), "bands"?: [red, green, blue] (bands from 1; AlphaEarth default [2, 17, 10], Tessera and OlmoEarth [1, 2, 3]), "stretch"?: number (AlphaEarth: dequantised values shown over ±stretch, default 0.3), "dimension"?: number (Earth Index: a vector value kept as each point's `value`, from 1), "bbox"?: [west, south, east, north] | "view" (Earth Index, Tessera and OlmoEarth: the area read, default the map's extent), "name"?: text, "ran"?: (internal: what the app read)}"#,
         ),
         C::new("embeddings.addCube", "Add Satellite Embeddings over Time", "Home › Add › Web Data", add_cube).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
-            r#"{"dataset": "alphaearth", "bbox"?: [west, south, east, north] | "view" (the area searched, default the map's extent), "start"?: year (default 2017), "end"?: year (default 2025), "bands"?: [red, green, blue] (bands from 1, default [2, 17, 10]), "stretch"?: number (dequantised values shown over ±stretch, default 0.3), "name"?: text, "found"?: (internal: the tiles the app found, each {years: {year: address}}), "complete"?: (internal: false when the app's search read only part of the index)} → a tile layer per AlphaEarth tile, a file per year, following the time slider (turned on over the years when it is off)"#,
+            r#"{"dataset": "alphaearth", "bbox"?: [west, south, east, north] | "view" (the area searched, default the map's extent), "start"?: year (default 2017), "end"?: year (default 2025), "bands"?: [red, green, blue] (bands from 1, default [2, 17, 10]), "stretch"?: number (dequantised values shown over ±stretch, default 0.3), "name"?: text, "found"?: (internal: the tiles the app found, each {years: {year: address}}), "complete"?: (internal: false when the app's search read only part of the index), "undated"?: (internal: the rows of the index the app's search left out, without a date that can be read)} → a tile layer per AlphaEarth tile, a file per year, following the time slider (turned on over the years when it is off)"#,
         ),
         // Each makes a raster; on another thread from the app (workflows::IN_BACKGROUND).
         C::new("embeddings.similarity", "Satellite Embedding Similarity", "Home › Add › Web Data", similarity).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Network)).params(
@@ -230,24 +230,28 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
     let given = p.get("found").filter(|v| !v.is_null());
     // Whether the index was read whole: a tile-year with no file is then the index's gap, not
     // the read's. The files handed over outside the years asked for, left out. And what the
-    // search left out, said once the cube is added (a refused one adds nothing to speak of).
-    let (series, complete, outside, notes) = match given {
+    // search left out, said once the cube is added (a refused one adds nothing to speak of), or
+    // with the error when there is no tile; the rows without a date, of which one may be a file.
+    let (series, complete, outside, undated, notes) = match given {
         Some(v) => {
             let (series, outside) = found(v, start, end)?;
             let complete = super::b(p, "complete") != Some(false);
             // A part read: said even when every year of the tiles handed over is there.
-            let notes = if complete { Vec::new() } else { vec![PART_READ.to_string()] };
-            (series, complete, outside, notes)
+            let undated = p.get("undated").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).unwrap_or(0);
+            let left = emb::SeriesFound { complete, undated, ..Default::default() };
+            (series, complete, outside, undated, series_notes(&left))
         }
         None => {
-            let (series, complete, notes) = search_series(s, p, (start, end))?;
-            (series, complete, 0, notes)
+            let f = search_series(s, p, (start, end))?;
+            let notes = series_notes(&f);
+            (f.series.into_iter().map(|x| x.years).collect(), f.complete, 0, f.undated, notes)
         }
     };
     let listed = series.len();
     let series: Vec<BTreeMap<i32, String>> = series.into_iter().filter(|y| !y.is_empty()).collect();
     if series.is_empty() {
-        return Err(format!("AlphaEarth has no tiles there for {start}–{end}"));
+        let left = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
+        return Err(format!("AlphaEarth has no tiles there for {start}–{end}{left}"));
     }
     let room = rustgis_map::tiles::MAX_TILE_LAYERS.saturating_sub(s.map().tiles.len());
     if series.len() > room {
@@ -340,14 +344,16 @@ fn add_cube(s: &mut Session, p: &Value) -> CmdResult {
     }
     if missing > 0 {
         let total = series.len() * span;
+        let (index, zoom) = if complete {
+            ("AlphaEarth's index", "")
+        } else {
+            ("the part of AlphaEarth's index that was read", " (zoom in to read it whole)")
+        };
+        let dated = if undated > 0 { ", among its rows with a date that can be read" } else { "" };
         s.notify(
-            if complete {
-                format!("{base}: {missing} of the {total} tile-years have no file in AlphaEarth's index; in those years the tile shows nothing")
-            } else {
-                format!(
-                    "{base}: {missing} of the {total} tile-years have no file in the part of AlphaEarth's index that was read (zoom in to read it whole); in those years the tile shows nothing"
-                )
-            },
+            format!(
+                "{base}: {missing} of the {total} tile-years have no file in {index}{dated}{zoom}; in those years the tile shows nothing"
+            ),
             false,
         );
     }
@@ -387,9 +393,8 @@ fn found(v: &Value, start: i32, end: i32) -> Result<(Vec<BTreeMap<i32, String>>,
 }
 
 /// AlphaEarth's tiles over the years where the command says, from one read of the index, waiting
-/// for it (the command line); whether it read the index whole for the area; and what the read
-/// left out, to be said.
-fn search_series(s: &mut Session, p: &Value, years: (i32, i32)) -> Result<(Vec<BTreeMap<i32, String>>, bool, Vec<String>), String> {
+/// for it (the command line), with what the read left out.
+fn search_series(s: &mut Session, p: &Value, years: (i32, i32)) -> Result<emb::SeriesFound, String> {
     let area = bbox(s, p)?;
     #[cfg(target_arch = "wasm32")]
     {
@@ -404,9 +409,7 @@ fn search_series(s: &mut Session, p: &Value, years: (i32, i32)) -> Result<(Vec<B
                 "AlphaEarth's index is read off the frame here: add its years from Home › Add › Web Data › Satellite Embeddings".into()
             );
         }
-        let f = emb::search_aef_series_blocking(area, years)?;
-        let notes = series_notes(&f);
-        Ok((f.series.into_iter().map(|x| x.years).collect(), f.complete, notes))
+        emb::search_aef_series_blocking(area, years)
     }
 }
 
@@ -415,7 +418,6 @@ const PART_READ: &str = "AlphaEarth: the area holds more tiles than one search r
 
 /// What a search over the years left out: rows past one read, tiles past a search's list, a
 /// tile's second file for a year, and rows without a date that can be read.
-#[cfg(not(target_arch = "wasm32"))]
 fn series_notes(f: &emb::SeriesFound) -> Vec<String> {
     let mut notes = Vec::new();
     if !f.complete {
@@ -1057,6 +1059,31 @@ mod tests {
         let whole = json!([{"years": {"2024": file(2024, "7-8"), "2025": file(2025, "7-8")}}]);
         v.run("embeddings.addCube", &json!({"dataset": "alphaearth", "start": 2024, "found": whole, "complete": false})).unwrap();
         assert!(v.notices.iter().any(|n| n.text.contains("more tiles than one search reads")), "a part read is said");
+        // Rows the search left out without a date, one of which may be the file: said, with a
+        // missing year's notice that doesn't call it the index's gap, and in the error of no tiles.
+        let mut x = Session::new(Project::default());
+        let some = json!([{"years": {"2025": file(2025, "9-1")}}]);
+        let gap = |end: &str| format!("1 of the 2 tile-years have no file in {end}; in those years the tile shows nothing");
+        let dated = "among its rows with a date that can be read";
+        for (complete, end) in [
+            (true, format!("AlphaEarth's index, {dated}")),
+            (false, format!("the part of AlphaEarth's index that was read, {dated} (zoom in to read it whole)")),
+        ] {
+            let p = json!({"dataset": "alphaearth", "start": 2024, "found": some, "complete": complete, "undated": 4});
+            x.run("embeddings.addCube", &p).unwrap();
+            let said: Vec<&str> = x.notices.iter().map(|n| n.text.as_str()).collect();
+            assert!(said.iter().any(|n| n.ends_with("left out, as their date can't be read: 4")), "{said:?}");
+            assert!(said.iter().any(|n| n.ends_with(&gap(&end))), "{said:?}");
+            x.notices.clear();
+        }
+        let none = json!([{"years": {"2016": file(2016, "9-1")}}]);
+        let empty = |x: &mut Session, undated: u64| {
+            let p = json!({"dataset": "alphaearth", "start": 2024, "found": none, "undated": undated});
+            x.run("embeddings.addCube", &p).unwrap_err()
+        };
+        let e = empty(&mut x, 4);
+        assert!(e.ends_with("(AlphaEarth: rows of AlphaEarth's index left out, as their date can't be read: 4)"), "{e}");
+        assert_eq!(empty(&mut x, 0), "AlphaEarth has no tiles there for 2024–2025");
         // An hourly slider widened over the years would be more steps than it lists: refused,
         // the slider and the map as they were.
         let mut h = Session::new(Project::default());
