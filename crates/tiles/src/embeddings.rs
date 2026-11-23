@@ -282,6 +282,34 @@ fn year_of(t: i64) -> i32 {
     i32::try_from(y).unwrap_or(0)
 }
 
+/// The year of an index row, from its `datetime`: a timestamp column, read as date-times since
+/// native dates (#1894), and before them as a number since 1970 or as text.
+fn aef_year(v: &Value) -> Option<i32> {
+    match v {
+        Value::DateTime(t) => i32::try_from(t.date().ymd().0).ok(),
+        Value::Date(d) => i32::try_from(d.ymd().0).ok(),
+        Value::Int(t) => Some(year_of(*t)),
+        Value::Text(t) => t.get(..4).and_then(|y| y.parse().ok()),
+        _ => None,
+    }
+}
+
+/// [`aef_year`] of a row, whose `datetime` is column `date`.
+fn row_year(f: &Feature, date: Option<usize>) -> Option<i32> {
+    aef_year(f.attrs.get(date?)?)
+}
+
+/// Refuses an index whose rows there are all without a year that can be read: every one would be
+/// left out, and the search would answer that there are no tiles.
+fn check_dates(fields: &[Field], batch: &Batch) -> Result<(), String> {
+    let date = fields.iter().position(|f| f.name == "datetime");
+    let rows = batch.features.len();
+    if rows == 0 || batch.features.iter().any(|f| row_year(f, date).is_some()) {
+        return Ok(());
+    }
+    Err(format!("AlphaEarth's index has rows there ({rows}), but none whose date can be read, so its tiles can't be listed"))
+}
+
 /// The tiles of a year in what the index read, nearest the box's centre first (at most
 /// [`MAX_TILES`]).
 pub fn aef_tiles(fields: &[Field], batch: &Batch, year: i32, bbox: [f64; 4]) -> Vec<Tile> {
@@ -301,11 +329,7 @@ fn aef_rows(fields: &[Field], batch: &Batch, bbox: [f64; 4], keep: impl Fn(i32) 
         .features
         .iter()
         .filter_map(|f| {
-            let year = date.and_then(|c| f.attrs.get(c)).and_then(|v| match v {
-                Value::Int(t) => Some(year_of(*t)),
-                Value::Text(t) => t.get(..4).and_then(|y| y.parse().ok()),
-                _ => None,
-            })?;
+            let year = row_year(f, date)?;
             if !keep(year) {
                 return None;
             }
@@ -453,6 +477,18 @@ pub fn aef_place(url: &str) -> Option<String> {
 /// holding more rows than one search reads is read in part, and the map should be zoomed in).
 pub type Found = (Vec<Tile>, bool);
 
+/// [`Found`], from what the index read.
+fn found(fields: &[Field], batch: &Batch, year: i32, bbox: [f64; 4]) -> Result<Found, String> {
+    check_dates(fields, batch)?;
+    Ok((aef_tiles(fields, batch, year, bbox), batch.complete))
+}
+
+/// [`SeriesFound`], from what the index read.
+fn series_found(fields: &[Field], batch: &Batch, years: (i32, i32), bbox: [f64; 4]) -> Result<SeriesFound, String> {
+    check_dates(fields, batch)?;
+    Ok(aef_series(fields, batch, years, bbox))
+}
+
 fn aef_request(bbox: [f64; 4]) -> Request {
     Request { extent: Some(Extent::new(bbox[0], bbox[1], bbox[2], bbox[3])), limit: MAX_INDEX_ROWS, own: None }
 }
@@ -467,9 +503,7 @@ pub fn search_aef(bbox: [f64; 4], year: i32, done: Box<dyn FnOnce(Result<Found, 
         AEF_INDEX,
         vec![AEF_HREF.into()],
         aef_request(bbox),
-        Box::new(move |r| {
-            done(r.map(|(fields, batch)| (aef_tiles(&fields, &batch, year, bbox), batch.complete)).map_err(|e| e.to_string()))
-        }),
+        Box::new(move |r| done(r.map_err(|e| e.to_string()).and_then(|(fields, batch)| found(&fields, &batch, year, bbox)))),
     );
 }
 
@@ -479,7 +513,7 @@ pub fn search_aef_blocking(bbox: [f64; 4], year: i32) -> Result<Found, String> {
     let bbox = check_bbox(bbox)?;
     let (fields, batch) =
         rustgis_data::source::query_url_blocking(AEF_INDEX, vec![AEF_HREF.into()], aef_request(bbox)).map_err(|e| e.to_string())?;
-    Ok((aef_tiles(&fields, &batch, year, bbox), batch.complete))
+    found(&fields, &batch, year, bbox)
 }
 
 /// Finds AlphaEarth's tiles in a box over the years `first` to `last`, each with its file a year:
@@ -493,7 +527,7 @@ pub fn search_aef_series(bbox: [f64; 4], years: (i32, i32), done: Box<dyn FnOnce
         AEF_INDEX,
         vec![AEF_HREF.into()],
         aef_request(bbox),
-        Box::new(move |r| done(r.map(|(fields, batch)| aef_series(&fields, &batch, years, bbox)).map_err(|e| e.to_string()))),
+        Box::new(move |r| done(r.map_err(|e| e.to_string()).and_then(|(fields, batch)| series_found(&fields, &batch, years, bbox)))),
     );
 }
 
@@ -503,7 +537,7 @@ pub fn search_aef_series_blocking(bbox: [f64; 4], years: (i32, i32)) -> Result<S
     let bbox = check_bbox(bbox)?;
     let (fields, batch) =
         rustgis_data::source::query_url_blocking(AEF_INDEX, vec![AEF_HREF.into()], aef_request(bbox)).map_err(|e| e.to_string())?;
-    Ok(aef_series(&fields, &batch, years, bbox))
+    series_found(&fields, &batch, years, bbox)
 }
 
 // Earth Index.
@@ -1013,6 +1047,56 @@ mod tests {
         assert_eq!(year_start_ms(2024), 1_704_067_200_000.0);
         assert_eq!(year_of(year_start_ms(2000) as i64), 2000);
         assert_eq!(aef_series(&[], &batch, (2017, 2025), [0.0, 0.0, 1.0, 1.0]).series, Vec::new());
+    }
+
+    /// The index as its reader gives it: a Parquet timestamp column, read as date-times.
+    #[test]
+    fn index_rows_read_from_parquet_have_their_years() {
+        use rustgis_data::DateTime;
+        use rustgis_data::source::{FeatureSource, parquet};
+        let file = |date: &dyn Fn(i32) -> Value| {
+            let fields = vec![
+                Field::new("id", FieldType::Text),
+                Field::new("datetime", FieldType::DateTime),
+                Field::new(AEF_HREF, FieldType::Text),
+                Field::new("proj:epsg", FieldType::Text),
+            ];
+            let mut ds = Dataset::new("index", GeometryType::Polygon, fields);
+            for year in [2017, 2024, 2025] {
+                let ring = [(-43.4, -21.0), (-42.6, -21.0), (-42.6, -20.7), (-43.4, -20.7), (-43.4, -21.0)];
+                let ring = ring.iter().map(|(x, y)| Coord::new(*x, *y)).collect();
+                let href = format!("s3://us-west-2.opendata.source.coop/a/{year}/23S/x{year}-0-0.tiff");
+                let attrs = vec![Value::Text("1".into()), date(year), Value::Text(href), Value::Text("EPSG:32723".into())];
+                ds.push(Some(Geometry::Polygon(vec![vec![ring]])), attrs);
+            }
+            let src = parquet::ParquetSource::open_bytes(parquet::write(&ds).unwrap(), "index").unwrap().exact();
+            (src.info().fields.clone(), src.read(&Request::all()).unwrap())
+        };
+        let bbox = [-42.89, -20.76, -42.87, -20.74];
+        // 1 January in UTC, as the index has it, and without a zone.
+        let micros = |year: i32| year_start_ms(year) as i64 * 1000;
+        for utc in [true, false] {
+            let at = |y: i32| if utc { DateTime::with_offset(micros(y), 0) } else { DateTime::local(micros(y)) };
+            let (fields, batch) = file(&|y| Value::DateTime(at(y).unwrap()));
+            assert!(matches!(batch.features.first().and_then(|f| f.attrs.get(1)), Some(Value::DateTime(_))));
+            let (tiles, complete) = found(&fields, &batch, 2024, bbox).unwrap();
+            assert_eq!((tiles.len(), complete), (1, true));
+            assert_eq!(tiles[0].url, "https://data.source.coop/a/2024/23S/x2024-0-0.tiff");
+            let f = series_found(&fields, &batch, (2017, 2025), bbox).unwrap();
+            let years: Vec<Vec<i32>> = f.series.iter().map(|s| s.years.keys().copied().collect()).collect();
+            assert_eq!(years, [[2017, 2024, 2025]]);
+            // A year with no file is no tiles, while the dates are read.
+            assert_eq!(found(&fields, &batch, 2020, bbox), Ok((Vec::new(), true)));
+        }
+        // Rows whose dates can't be read are said, not taken for no tiles; no rows are no tiles.
+        let (fields, mut batch) = file(&|_| Value::Null);
+        let e = found(&fields, &batch, 2024, bbox).unwrap_err();
+        assert!(e.contains("rows there (3), but none whose date can be read"), "{e}");
+        assert_eq!(series_found(&fields, &batch, (2017, 2025), bbox).unwrap_err(), e);
+        batch.features.clear();
+        assert_eq!(found(&fields, &batch, 2024, bbox), Ok((Vec::new(), true)));
+        assert_eq!(aef_year(&Value::Date(rustgis_data::Date::from_ymd(2024, 1, 1).unwrap())), Some(2024));
+        assert_eq!(aef_year(&Value::Text("2024-01-01T00:00:00Z".into())), Some(2024));
     }
 
     #[test]
