@@ -993,17 +993,20 @@ fn closing(pattern: FillPattern, around: f64) -> f64 {
 /// centre, and its lattice runs from the map's origin and the ground's zero, so neighbouring
 /// stretches share it. `across` and `up` bound the stretch; `at` puts a point of the plane on
 /// screen (physical px; `None` behind the eye), so each line or marker stands in perspective.
-/// `scale` is the physical px a point spans on screen there, for line widths and marker sizes.
+/// `scale` is the physical px a point spans on screen there, for line widths and marker sizes;
+/// `squash` scales what is drawn up and down after that (1: not at all), for a picture squeezed
+/// so (`flat_walls`), its lines and markers squeezed as their places are.
 fn draw_patterns(
     pm: &mut Pixmap,
     mask: &Mask,
     patterns: &[(FillPattern, Rgba)],
     (across, up): ((f64, f64), (f64, f64)),
-    scale: f64,
+    (scale, squash): (f64, f32),
     tone: impl Fn(Rgba) -> Rgba,
     at: impl Fn(f64, f64) -> Option<(f64, f64)>,
 ) {
     let pt = |p: (f64, f64)| (p.0 as f32, p.1 as f32);
+    let squashed = Transform::from_scale(1.0, squash);
     for &(pattern, c) in patterns {
         let c = tone(c);
         // Too many lines or markers: the pattern's ink over the stretch as one colour.
@@ -1093,7 +1096,7 @@ fn draw_patterns(
                 }
                 if let Some(path) = pb.finish() {
                     let stroke = Stroke { width: (f64::from(width) * scale) as f32, ..Stroke::default() };
-                    pm.stroke_path(&path, &paint(c, 1.0), &stroke, Transform::identity(), Some(mask));
+                    pm.stroke_path(&path, &paint(c, 1.0), &stroke, squashed, Some(mask));
                 }
             }
             FillPattern::Dots { marker, size, outline, outline_width, spacing, displacement, offset } => {
@@ -1137,11 +1140,11 @@ fn draw_patterns(
                 if c.a() > 0
                     && let Some(path) = fill.finish()
                 {
-                    pm.fill_path(&path, &paint(c, 1.0), FillRule::Winding, Transform::identity(), Some(mask));
+                    pm.fill_path(&path, &paint(c, 1.0), FillRule::Winding, squashed, Some(mask));
                 }
                 if let (Some(o), Some(path)) = (ink, edge.finish()) {
                     let stroke = Stroke { width: (f64::from(outline_width) * scale) as f32, ..Stroke::default() };
-                    pm.stroke_path(&path, &paint(o, 1.0), &stroke, Transform::identity(), Some(mask));
+                    pm.stroke_path(&path, &paint(o, 1.0), &stroke, squashed, Some(mask));
                 }
             }
             _ => {}
@@ -1414,7 +1417,7 @@ pub(crate) fn draw_walls(
                 for p in &run.patterns {
                     let f = around.map_or(1.0, |c| closing(p.0, c));
                     let span = ((x0.min(x1) * f, x0.max(x1) * f), up_range);
-                    draw_patterns(pm, cut, std::slice::from_ref(p), span, scale, tone, |x, up| at(x / f, up));
+                    draw_patterns(pm, cut, std::slice::from_ref(p), span, (scale, 1.0), tone, |x, up| at(x / f, up));
                 }
             }
         }
@@ -1639,7 +1642,10 @@ pub struct FlatWalls {
 /// as big as on the ground's texture drawn at `res`, and its lattice is the map view's. Contacts
 /// between colours are drawn straight down in the walls' outline colour.
 ///
-/// A box only: the caller turns a round block or one cut to polygons into its box first.
+/// A box only: the caller turns a round block or one cut to polygons into its box first. It
+/// makes no Cancel check: it fills at most `FLAT_WALL_PIXELS` pixels (64 MiB as RGBA) a few
+/// times over (each run's colour, then its patterns cut to its band); the caller checks before
+/// and after.
 pub fn flat_walls(map: &Map, ground: &Ground, b: &Block, res: f64, per_unit: f64, tops: [f64; 4]) -> FlatWalls {
     let res = res.max(1e-9);
     let env = rustgis_data::query::Env::default();
@@ -1672,9 +1678,12 @@ pub fn flat_walls(map: &Map, ground: &Ground, b: &Block, res: f64, per_unit: f64
         let (w, h) = (wide(s), (high(s).min(max_side) * budget).round().max(1.0));
         // Squeezed to fit the budget, or a side taller than a picture can be.
         out.squeeze = out.squeeze.min(h / high(s).round().max(1.0));
-        // (Both sides are 1 to `MAX_SIDE` pixels, which a pixmap and a mask always take.)
-        let Some(mut pm) = Pixmap::new(w as u32, h as u32) else { return out };
-        let Some(mut mask) = Mask::new(pm.width(), pm.height()) else { return out };
+        // Both sides are 1 to `MAX_SIDE` pixels, which a pixmap and a mask take, unless the
+        // box's geometry is broken (NaN): then the walls stay plain, said.
+        let (Some(mut pm), Some(mut mask)) = (Pixmap::new(w as u32, h as u32), Mask::new(w as u32, h as u32)) else {
+            out.gaps.push(format!("the walls' {w} by {h} pixel pictures can't be drawn, so they are their plain colour"));
+            return out;
+        };
         // Across as the view lays a pattern out: Web Mercator along the side over `res`, left to
         // right seen from outside; up from the ground's zero, `up_px`.
         let (lo, hi) = (b.along(key, a), b.along(key, z));
@@ -1682,7 +1691,11 @@ pub fn flat_walls(map: &Map, ground: &Ground, b: &Block, res: f64, per_unit: f64
         let left = lo * dir / res;
         let (sx, sy) = (w / ((hi - lo).abs() / res).max(1e-9), h / high(s));
         let top = up_px(tops[s]);
-        let at = |x: f64, up: f64| Some(((x - left) * sx, (top - up) * sy));
+        // Patterns are laid out at `sx` both ways and squeezed by `sy / sx` up and down as drawn,
+        // so their dots and lines keep their shape on the wall the picture is stretched back on.
+        let at = |x: f64, up: f64| Some(((x - left) * sx, (top - up) * sx));
+        // The part of the mask the last patterned run filled, cleared before the next.
+        let mut dirty: Option<tiny_skia::Rect> = None;
         for run in side_runs {
             let (p, q) = ((run.lo * dir / res - left) * sx, (run.hi * dir / res - left) * sx);
             let Some(rect) = tiny_skia::Rect::from_ltrb(p.min(q) as f32, 0.0, p.max(q) as f32, h as f32) else { continue };
@@ -1690,11 +1703,13 @@ pub fn flat_walls(map: &Map, ground: &Ground, b: &Block, res: f64, per_unit: f64
             if run.patterns.is_empty() {
                 continue;
             }
-            mask.data_mut().fill(0);
+            if let Some(r) = dirty.replace(rect) {
+                clear_mask(&mut mask, r);
+            }
             mask.fill_path(&PathBuilder::from_rect(rect), FillRule::Winding, false, Transform::identity());
             let (x0, x1) = (run.lo * dir / res, run.hi * dir / res);
             let span = ((x0.min(x1), x0.max(x1)), (up_px(b.base), top));
-            draw_patterns(&mut pm, &mask, &run.patterns, span, (sx * sy).sqrt(), |c| c, at);
+            draw_patterns(&mut pm, &mask, &run.patterns, span, (sx, (sy / sx) as f32), |c| c, at);
         }
         let mut contacts = PathBuilder::new();
         for c in side_runs.windows(2).map(|r| r[0].hi) {
@@ -1703,7 +1718,7 @@ pub fn flat_walls(map: &Map, ground: &Ground, b: &Block, res: f64, per_unit: f64
             contacts.line_to(x, h as f32);
         }
         if let Some(path) = contacts.finish() {
-            let stroke = Stroke { width: (0.7 * (sx * sy).sqrt()) as f32, line_cap: LineCap::Butt, ..Stroke::default() };
+            let stroke = Stroke { width: (0.7 * sx) as f32, line_cap: LineCap::Butt, ..Stroke::default() };
             pm.stroke_path(&path, &paint(b.walls.shade(0.45), 1.0), &stroke, Transform::identity(), None);
         }
         pictures.push(pm);
@@ -2199,13 +2214,13 @@ mod tests {
         // A line 10 px wide centred at x 0, outside the stretch at 1–4 across: its stroke still
         // covers the stretch.
         let wide = FillPattern::Hatch { angle: 90.0, spacing: 20.0, width: 10.0, offset: 0.0 };
-        draw_patterns(&mut pm, &mask, &[(wide, blue)], ((1.0, 4.0), (0.0, 20.0)), 1.0, |c| c, at);
+        draw_patterns(&mut pm, &mask, &[(wide, blue)], ((1.0, 4.0), (0.0, 20.0)), (1.0, 1.0), |c| c, at);
         assert!(ink(&pm, 2) > 200 && ink(&pm, 8) == 0);
         // Lines 1 px apart over a stretch a million wide: too many; the ink as one colour, a
         // quarter of blue for lines a quarter as wide as their spacing.
         let mut pm = Pixmap::new(20, 20).unwrap();
         let fine = FillPattern::Hatch { angle: 0.0, spacing: 1.0, width: 0.25, offset: 0.0 };
-        draw_patterns(&mut pm, &mask, &[(fine, blue)], ((0.0, 1e6), (0.0, 1e6)), 1.0, |c| c, at);
+        draw_patterns(&mut pm, &mask, &[(fine, blue)], ((0.0, 1e6), (0.0, 1e6)), (1.0, 1.0), |c| c, at);
         assert!((i32::from(ink(&pm, 10)) - 64).abs() <= 2, "{}", ink(&pm, 10));
         // So does an outline-only dot pattern, its outline toned as its fill is: in full fog
         // (grey), no blue left.
@@ -2220,7 +2235,7 @@ mod tests {
             offset: [0.0, 0.0],
         };
         let fogged = |c: Rgba| Rgba::rgb(128, 128, 128).with_alpha(c.a());
-        draw_patterns(&mut pm, &mask, &[(hollow, Rgba::new(0, 0, 0, 0))], ((0.0, 1e6), (0.0, 1e6)), 1.0, fogged, at);
+        draw_patterns(&mut pm, &mask, &[(hollow, Rgba::new(0, 0, 0, 0))], ((0.0, 1e6), (0.0, 1e6)), (1.0, 1.0), fogged, at);
         let p = pm.pixel(10, 10).unwrap().demultiply();
         assert!(p.alpha() > 0 && p.blue() == p.red(), "{p:?}");
         // A vertical line whose top is behind the eye (here, above 15 up) is drawn up to where it
@@ -2228,7 +2243,7 @@ mod tests {
         let mut pm = Pixmap::new(20, 20).unwrap();
         let near = |x: f64, up: f64| (up <= 15.0).then_some((x, 20.0 - up));
         let upright = FillPattern::Hatch { angle: 90.0, spacing: 20.0, width: 2.0, offset: 10.0 };
-        draw_patterns(&mut pm, &mask, &[(upright, blue)], ((0.0, 20.0), (0.0, 20.0)), 1.0, |c| c, near);
+        draw_patterns(&mut pm, &mask, &[(upright, blue)], ((0.0, 20.0), (0.0, 20.0)), (1.0, 1.0), |c| c, near);
         assert!(ink(&pm, 10) > 200, "drawn");
         assert_eq!(pm.pixel(10, 2).unwrap().alpha(), 0, "not past the view");
     }

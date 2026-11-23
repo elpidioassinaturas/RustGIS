@@ -343,6 +343,11 @@ fn walls_cutting_through_water_are_said_to_leave_its_section_out() {
 #[test]
 fn walls_too_tall_for_their_pictures_are_said_to_be_squeezed() {
     let mut s = by_units(false);
+    // Unit B's black dots, 12 points wide and 48 apart (fewer than the walls' most marks down
+    // the tall wall), on its blue.
+    let dots = json!([{"color": "#0000FF", "pattern": "solid"}, {"color": "#000000", "pattern": "dots", "marker": "circle", "size": 12, "spacing": 48}]);
+    let geo = s.map().layers.iter().find(|l| l.name.starts_with("units")).map(|l| l.name.clone()).unwrap();
+    s.run("layer.fillLayers", &json!({"layer": geo, "value": "B", "fills": dots})).unwrap();
     s.run("map.terrain", &json!({"exaggeration": 20, "block": {"depth": 20000}})).unwrap();
     let path = out("tall.glb");
     let mark = s.notice_mark();
@@ -351,4 +356,15 @@ fn walls_too_tall_for_their_pictures_are_said_to_be_squeezed() {
     assert_eq!(said, 1, "{:?}", s.notices_since(mark));
     let (doc, bin) = read_glb(&std::fs::read(&path).unwrap());
     assert_eq!(wall_side(&doc, &bin, 0).1.height(), rustgis_render::MAX_SIDE, "no picture taller than a picture can be");
+    // The dots are squeezed as their places are, so they stay round on the wall the picture is
+    // stretched back on: in the east side's picture (all unit B) wide and flat, not round and
+    // run together down the squeezed rows.
+    let (_, east) = wall_side(&doc, &bin, 1);
+    let dark = |x: u32, y: u32| east.pixel(x, y).is_some_and(|c| c.blue() < 128);
+    let longest = |n: u32, at: &dyn Fn(u32) -> bool| {
+        (0..n).fold((0, 0), |(run, best), i| if at(i) { (run + 1, best.max(run + 1)) } else { (0, best) }).1
+    };
+    let across = (0..east.height()).map(|y| longest(east.width(), &|x| dark(x, y))).max().unwrap_or(0);
+    let down = (0..east.width()).map(|x| longest(east.height(), &|y| dark(x, y))).max().unwrap_or(0);
+    assert!(across >= 8 && across >= 3 * down, "dots {across} px across, {down} down");
 }

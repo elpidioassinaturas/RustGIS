@@ -120,9 +120,10 @@ pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work
             let k = ground.per_unit(Coord::new((x0 + x1) / 2.0, (y0 + y1) / 2.0));
             // The walls a polygon layer colours (#1914), each side a picture of its classes and
             // patterns at the ground texture's pixel size; plain walls keep their colour.
-            let flat = rustgis_render::flat_walls(&map, &ground, &block, res, k, model.tops);
+            let mut flat = rustgis_render::flat_walls(&map, &ground, &block, res, k, model.tops);
             let Model { ground: ground_mesh, walls, base, grid: (nx, ny), missing, pending, .. } = model;
-            let (walls, sides) = match &flat.pictures {
+            // The pictures are let go once encoded, before the ground's texture is drawn.
+            let (walls, sides) = match flat.pictures.take() {
                 Some(pictures) => {
                     let pngs = pictures.iter().map(|p| p.encode_png().map_err(|e| e.to_string())).collect::<Result<Vec<_>, _>>()?;
                     (walls.into(), pngs)
