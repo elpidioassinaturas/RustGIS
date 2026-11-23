@@ -409,3 +409,309 @@ fn a_raster_waiting_when_a_system_is_chosen_or_the_option_turned_off_gives_none_
         assert_eq!(s.project.coordinate_system, None, "{settle}");
     }
 }
+
+/// Points around Bern in longitude/latitude, with no system of their own (as a layer drawn in a
+/// project without one is), and a number for interpolating.
+fn bern_points(name: &str) -> rustgis_data::Dataset {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as Cell};
+    let mut ds = Dataset::new(name, GeometryType::Point, vec![Field::new("v", FieldType::Double)]);
+    for i in 0..3 {
+        for j in 0..3 {
+            let at = Coord::new(7.43 + 0.01 * f64::from(i), 46.94 + 0.01 * f64::from(j));
+            ds.push(Some(Geometry::Point(at)), vec![Cell::Float(f64::from(i * 3 + j))]);
+        }
+    }
+    assert_eq!((ds.coord_crs(), ds.crs), (Crs::LonLat, None));
+    ds
+}
+
+/// Runs `cmd` and gives back what it said.
+fn said(s: &mut Session, cmd: &str, p: &Value) -> Vec<String> {
+    let mark = s.notice_mark();
+    s.run(cmd, p).unwrap_or_else(|e| panic!("{cmd}: {e}"));
+    s.notices_since(mark).iter().map(|n| n.text.clone()).collect()
+}
+
+#[test]
+fn a_tool_output_made_in_longitude_latitude_is_held_in_the_project_system() {
+    let mut s = Session::new(Project::default());
+    s.map_mut().add_dataset(bern_points("Wells"));
+    let buffer = |s: &mut Session, out: &str| {
+        s.run("gp.run", &json!({"tool": "buffer", "params": {"input": "Wells", "distance": 50, "units": "Meters", "output": out}})).unwrap()
+    };
+    buffer(&mut s, "Plain");
+    let plain = s.map().layer_by_name("Plain").unwrap().dataset.clone();
+    assert_eq!((plain.coord_crs(), plain.crs), (Crs::LonLat, None), "without one, as before");
+    s.run("project.coordinateSystem", &json!({"crs": "EPSG:2056"})).unwrap();
+    buffer(&mut s, "Swiss");
+    let swiss = &s.map().layer_by_name("Swiss").unwrap().dataset;
+    assert_eq!((swiss.coord_crs(), swiss.crs), (LV95, Some(LV95)));
+    // The same rings, converted: each vertex reads back where the lon/lat run put it (within a
+    // centimetre, the inverse's).
+    let back = swiss.in_lonlat().unwrap();
+    for (a, b) in plain.features.iter().zip(&back.features) {
+        let (Some(rustgis_data::Geometry::Polygon(a)), Some(rustgis_data::Geometry::Polygon(b))) = (&a.geometry, &b.geometry) else {
+            panic!("not polygons")
+        };
+        for (p, q) in a.iter().flatten().flatten().zip(b.iter().flatten().flatten()) {
+            assert!((p.x - q.x).abs() < 1e-7 && (p.y - q.y).abs() < 1e-7, "{p:?} {q:?}");
+        }
+    }
+    let first = swiss.features[0].geometry.as_ref().unwrap().extent();
+    assert!((first.min_x - 2_599_250.0).abs() < 1_000.0 && (first.min_y - 1_198_900.0).abs() < 1_000.0, "{first:?}");
+}
+
+#[test]
+fn a_tool_working_in_a_layers_own_system_keeps_it_in_a_project_of_another() {
+    let mut s = Session::new(Project::default());
+    let utm = Crs::Epsg(32632);
+    let mut wells = bern_points("Wells");
+    wells.hold_as(utm, Some(utm)).unwrap();
+    s.map_mut().add_dataset(wells);
+    s.run("project.coordinateSystem", &json!({"crs": "EPSG:2056"})).unwrap();
+    s.run("gp.run", &json!({"tool": "buffer", "params": {"input": "Wells", "distance": 50, "units": "Meters", "output": "Out"}})).unwrap();
+    let out = &s.map().layer_by_name("Out").unwrap().dataset;
+    assert_eq!(out.coord_crs(), utm, "made in UTM and kept there, as its input");
+}
+
+#[test]
+fn a_tool_output_the_project_system_cant_hold_stays_in_longitude_latitude_said() {
+    use rustgis_data::{Coord, Dataset, Geometry, GeometryType};
+    let mut s = Session::new(Project::default());
+    let mut ds = Dataset::new("Arctic", GeometryType::Point, vec![]);
+    ds.push(Some(Geometry::Point(Coord::new(10.0, 88.0))), vec![]);
+    s.map_mut().add_dataset(ds);
+    s.run("project.coordinateSystem", &json!({"crs": "EPSG:3857"})).unwrap();
+    let out = said(&mut s, "gp.run", &json!({"tool": "featureToPoint", "params": {"input": "Arctic", "output": "Out"}}));
+    let l = &s.map().layer_by_name("Out").unwrap().dataset;
+    assert_eq!((l.coord_crs(), l.crs), (Crs::LonLat, None));
+    // Exported, it is written in the project's system as an export into it is: at 85.05°, said.
+    let path = std::env::temp_dir().join(format!("rustgis-project-crs-{}-arctic.gpkg", std::process::id()));
+    let note = said(&mut s, "share.exportLayer", &json!({"layer": "Arctic", "path": path}));
+    assert_eq!(rustgis_data::io::read_path(&path).unwrap().0.crs, Some(Crs::WebMercator));
+    assert!(note.iter().any(|m| m.contains("written at 85.05°, where Web Mercator ends")), "{note:?}");
+    assert!(note.iter().any(|m| m.contains("written in EPSG:3857, the project's coordinate system")), "{note:?}");
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        out.iter().any(|m| m
+            == "Out is kept in longitude/latitude, not the project's EPSG:3857: feature 1 has a place that can't be held in EPSG:3857"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_geocentric_project_system_leaves_outputs_in_longitude_latitude() {
+    let mut s = Session::new(Project::default());
+    s.map_mut().add_dataset(bern_points("Wells"));
+    s.run("project.coordinateSystem", &json!({"crs": "EPSG:4978"})).unwrap();
+    let out = said(&mut s, "gp.run", &json!({"tool": "featureToPoint", "params": {"input": "Wells", "output": "Out"}}));
+    assert_eq!(s.map().layer_by_name("Out").unwrap().dataset.coord_crs(), Crs::LonLat);
+    assert!(!out.iter().any(|m| m.contains("project's")), "{out:?}");
+}
+
+#[test]
+fn a_grid_from_points_in_degrees_is_made_in_the_project_system() {
+    let mut s = Session::new(Project::default());
+    s.map_mut().add_dataset(bern_points("Samples"));
+    let kde = json!({"tool": "kernelDensity", "params": {"input": "Samples", "radius": 500, "pixelSize": 50, "output": "Kde"}});
+    // Without a system, Kernel Density asks for one; IDW makes its grid in degrees.
+    assert!(s.run("gp.run", &kde).unwrap_err().contains("has no coordinate system"));
+    s.run("gp.run", &json!({"tool": "idwInterpolation", "params": {"input": "Samples", "field": "v", "output": "Deg"}})).unwrap();
+    assert_eq!(s.map().layer_by_name("Deg").unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().crs, Crs::LonLat);
+    s.run("project.coordinateSystem", &json!({"crs": "EPSG:2056"})).unwrap();
+    let grid = |s: &Session, name: &str| s.map().layer_by_name(name).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    let out = said(&mut s, "gp.run", &kde);
+    assert_eq!(grid(&s, "Kde").crs, LV95);
+    assert!(
+        out.iter().any(|m| m.contains("the project's coordinate system") && m.contains("'Samples' has no coordinate system")),
+        "{out:?}"
+    );
+    for (tool, name) in [("idwInterpolation", "Idw"), ("kriging", "Krig")] {
+        let out =
+            said(&mut s, "gp.run", &json!({"tool": tool, "params": {"input": "Samples", "field": "v", "pixelSize": 100, "output": name}}));
+        let g = grid(&s, name);
+        assert_eq!(g.crs, LV95, "{tool}");
+        assert!((g.transform.origin_x - 2_599_000.0).abs() < 2_000.0, "{tool}: {:?}", g.transform);
+        assert!(out.iter().any(|m| m.contains("the project's coordinate system")), "{tool}: {out:?}");
+        // Asked for degrees by name, it is made in degrees.
+        let deg = format!("{name}Deg");
+        s.run("gp.run", &json!({"tool": tool, "params": {"input": "Samples", "field": "v", "crs": "EPSG:4326", "output": deg}})).unwrap();
+        assert_eq!(grid(&s, &deg).crs, Crs::LonLat, "{tool}");
+    }
+    // The Geostatistical Wizard too, when Environments sets no system.
+    let out = said(&mut s, "analysis.interpolate", &json!({"layer": "Samples", "field": "v", "cellSize": 100, "name": "Surface"}));
+    assert_eq!(grid(&s, "Surface").crs, LV95);
+    assert!(out.iter().any(|m| m.contains("the project's coordinate system")), "{out:?}");
+}
+
+#[test]
+fn an_export_of_a_layer_with_no_system_takes_the_projects() {
+    let dir = std::env::temp_dir().join(format!("rustgis-project-crs-{}-export", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = Session::new(Project::default());
+    s.map_mut().add_dataset(bern_points("Wells"));
+    let export = |s: &mut Session, file: &str| {
+        let path = dir.join(file);
+        let out = said(s, "share.exportLayer", &json!({"layer": "Wells", "path": path})).join("\n");
+        (path, out)
+    };
+    let read = |path: &std::path::Path| rustgis_data::io::read_path(path).unwrap().0;
+    let (plain, out) = export(&mut s, "plain.gpkg");
+    assert_ne!(read(&plain).crs, Some(LV95), "without one, in WGS 84 as before");
+    assert!(!out.contains("project's"), "{out}");
+    s.run("project.coordinateSystem", &json!({"crs": "EPSG:2056"})).unwrap();
+    let (swiss, out) = export(&mut s, "swiss.gpkg");
+    let back = read(&swiss);
+    assert_eq!(back.crs, Some(LV95));
+    let Some(rustgis_data::Geometry::Point(c)) = back.in_lonlat().unwrap().features[0].geometry.clone() else { panic!("no point") };
+    assert!((c.x - 7.43).abs() < 1e-7 && (c.y - 46.94).abs() < 1e-7, "{c:?}");
+    assert!(out.contains("written in EPSG:2056, the project's coordinate system, as Wells has none of its own"), "{out}");
+    // GeoJSON is longitude/latitude whatever the project's system, and says nothing of it.
+    let (json_path, out) = export(&mut s, "wells.geojson");
+    assert!(!out.contains("project's"), "{out}");
+    assert_eq!(read(&json_path).coord_crs(), Crs::LonLat);
+    // A layer with a system of its own keeps it.
+    let id = s.map().layer_by_name("Wells").unwrap().id;
+    s.map_mut().layer_mut(id).unwrap().dataset.crs = Some(Crs::LonLat);
+    let (own, out) = export(&mut s, "own.gpkg");
+    assert_ne!(read(&own).crs, Some(LV95));
+    assert!(!out.contains("project's"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Cancel while a tool's output is converted into the project's system stops the run, which
+/// adds nothing: stopped at each of its looks in turn, the last of which is the conversion's.
+#[test]
+fn a_cancel_while_an_output_is_converted_adds_nothing() {
+    use rustgis_analysis::control::Control;
+    let in_system = |crs: &str| {
+        let mut s = Session::new(Project::default());
+        s.map_mut().add_dataset(bern_points("Wells"));
+        s.run("project.coordinateSystem", &json!({"crs": crs})).unwrap();
+        s
+    };
+    let session = || in_system("EPSG:2056");
+    let p = json!({"input": "Wells", "output": "Out"});
+    let looked = |mut s: Session| {
+        let counted = Control::cancelled_at_look(u64::MAX);
+        crate::cmd::gp::run_tool_with(&mut s, "featureToPoint", &p, &counted).unwrap();
+        (counted.looked(), s.map().layer_by_name("Out").unwrap().dataset.coord_crs())
+    };
+    let (looks, held) = looked(session());
+    assert_eq!(held, LV95);
+    // The conversion looks at Cancel too, on the run's own control.
+    let (plain, _) = looked(in_system(""));
+    assert!(looks > plain, "{looks} looks with the project's system, {plain} without");
+    for n in 1..=looks {
+        let mut t = session();
+        let out = crate::cmd::gp::run_tool_with(&mut t, "featureToPoint", &p, &Control::cancelled_at_look(n));
+        assert!(out.as_ref().is_err_and(|e| e.contains("cancelled")), "cancelled at look {n} of {looks}: {out:?}");
+        assert!(t.map().layer_by_name("Out").is_none(), "look {n} of {looks}");
+    }
+}
+
+/// Roads (a line) and Parcels (two named squares) around Bern in longitude/latitude.
+fn bern_roads_and_parcels() -> [rustgis_data::Dataset; 2] {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as Cell};
+    let mut roads = Dataset::new("Roads", GeometryType::Polyline, vec![]);
+    let line = vec![Coord::new(7.43, 46.94), Coord::new(7.44, 46.945), Coord::new(7.45, 46.95)];
+    roads.push(Some(Geometry::Line(vec![line])), vec![]);
+    let mut parcels = Dataset::new("Parcels", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+    for (i, x) in [7.43, 7.45].into_iter().enumerate() {
+        let ring = vec![
+            Coord::new(x, 46.94),
+            Coord::new(x + 0.01, 46.94),
+            Coord::new(x + 0.01, 46.95),
+            Coord::new(x, 46.95),
+            Coord::new(x, 46.94),
+        ];
+        parcels.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Cell::Text(format!("p{i}"))]);
+    }
+    [roads, parcels]
+}
+
+/// Shortest Route, Simulation and Convert Labels to Annotation make their layer from another in
+/// longitude/latitude: in a project with a system, it is held in that system, as a tool's output
+/// is; from a layer held in a projected system, in that one, as before.
+#[test]
+fn layers_made_from_another_in_longitude_latitude_take_the_project_system() {
+    let made = |s: &Session, v: &Value| s.map().layer(v["layer"].as_u64().unwrap() as u32).unwrap().dataset.clone();
+    let run = |s: &mut Session| {
+        s.run("labels.enable", &json!({"layer": "Parcels", "on": true})).unwrap();
+        let route = s
+            .run("analysis.route", &json!({"layer": "Roads", "from": [7.4301, 46.9401], "to": [7.4499, 46.9499], "snapDistance": 100}))
+            .unwrap();
+        let simulated = s.run("analysis.simulate", &json!({"layer": "Parcels", "count": 3, "seed": 3})).unwrap();
+        let annotation = s.run("labels.convert", &json!({"layer": "Parcels"})).unwrap();
+        [made(s, &route), made(s, &simulated), made(s, &annotation)]
+    };
+    let session = |hold: Option<Crs>| {
+        let mut s = Session::new(Project::default());
+        for mut ds in bern_roads_and_parcels() {
+            if let Some(c) = hold {
+                ds.hold_as(c, Some(c)).unwrap();
+            }
+            s.map_mut().add_dataset(ds);
+        }
+        s
+    };
+    let plain = run(&mut session(None));
+    for ds in &plain {
+        assert_eq!((ds.coord_crs(), ds.crs), (Crs::LonLat, None), "{}: without a project system, as before", ds.name);
+    }
+    let mut s = session(None);
+    s.run("project.coordinateSystem", &json!({"crs": "EPSG:2056"})).unwrap();
+    let swiss = run(&mut s);
+    for (ds, before) in swiss.iter().zip(&plain) {
+        assert_eq!((ds.coord_crs(), ds.crs), (LV95, Some(LV95)), "{}", ds.name);
+        // The same places, converted.
+        let back = ds.in_lonlat().unwrap();
+        assert_eq!(back.features.len(), before.features.len(), "{}", ds.name);
+        for (a, b) in back.features.iter().zip(&before.features) {
+            let (mut pa, mut pb) = (Vec::new(), Vec::new());
+            a.geometry.as_ref().unwrap().for_each_coord(|c| pa.push(c));
+            b.geometry.as_ref().unwrap().for_each_coord(|c| pb.push(c));
+            assert_eq!(pa.len(), pb.len());
+            for (p, q) in pa.iter().zip(&pb) {
+                assert!((p.x - q.x).abs() < 1e-7 && (p.y - q.y).abs() < 1e-7, "{}: {p:?} {q:?}", ds.name);
+            }
+        }
+    }
+    // From layers held in UTM, the layers stay in UTM in an LV95 project.
+    let utm = Crs::Epsg(32632);
+    let mut s = session(Some(utm));
+    s.run("project.coordinateSystem", &json!({"crs": "EPSG:2056"})).unwrap();
+    for ds in run(&mut s) {
+        assert_eq!(ds.coord_crs(), utm, "{}", ds.name);
+    }
+}
+
+/// A layer made from another that the project's system can't hold stays in longitude/latitude,
+/// said once with its name; in a geocentric project system it stays there unsaid.
+#[test]
+fn a_layer_made_from_another_the_project_system_cant_hold_stays_in_longitude_latitude() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as Cell};
+    let session = |crs: &str| {
+        let mut s = Session::new(Project::default());
+        let mut parcels = Dataset::new("Arctic", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+        let ring =
+            vec![Coord::new(10.0, 87.0), Coord::new(11.0, 87.0), Coord::new(11.0, 88.0), Coord::new(10.0, 88.0), Coord::new(10.0, 87.0)];
+        parcels.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Cell::Text("north".into())]);
+        s.map_mut().add_dataset(parcels);
+        s.run("project.coordinateSystem", &json!({"crs": crs})).unwrap();
+        s
+    };
+    let mut s = session("EPSG:3857");
+    let out = said(&mut s, "analysis.simulate", &json!({"layer": "Arctic", "count": 2, "seed": 1, "name": "Pts"}));
+    let made = &s.map().layer_by_name("Pts").unwrap().dataset;
+    assert_eq!(made.coord_crs(), Crs::LonLat);
+    let note: Vec<&String> = out.iter().filter(|m| m.contains("kept in longitude/latitude")).collect();
+    assert_eq!(note.len(), 1, "{out:?}");
+    assert!(note[0].starts_with("Pts: kept in longitude/latitude, as it was made, not in the project's EPSG:3857: feature"), "{note:?}");
+    assert_eq!(note[0].matches("Pts").count(), 1, "{note:?}");
+    let mut s = session("EPSG:4978");
+    let out = said(&mut s, "analysis.simulate", &json!({"layer": "Arctic", "count": 2, "seed": 1, "name": "Pts"}));
+    assert_eq!(s.map().layer_by_name("Pts").unwrap().dataset.coord_crs(), Crs::LonLat);
+    assert!(!out.iter().any(|m| m.contains("kept in")), "{out:?}");
+}

@@ -721,9 +721,11 @@ impl ToolRun {
                 };
                 let mut result = pin.run(&inputs, &params, control, &|| continuation.check());
                 if let Ok(r) = &mut result {
-                    inputs.hold_results(r);
                     r.messages.extend(inputs.messages.iter().cloned());
                     r.losses.extend(inputs.losses.iter().cloned());
+                }
+                if let Err(e) = result.as_mut().map_or(Ok(()), |r| inputs.hold_results(r)) {
+                    result = Err(e);
                 }
                 ToolDone { inputs: Vec::new(), result, full_ids: full_ids(&inputs.loaded) }
             })
@@ -1267,13 +1269,22 @@ struct Snapshot<'a> {
     env: std::borrow::Cow<'a, crate::project::GpEnvironment>,
     /// The map view's size, for its extent.
     view_size: (f64, f64),
+    /// The project's coordinate system ([`crate::project::Project::coordinate_system`]): the one
+    /// outputs made in longitude/latitude are held in ([`MapInputs::hold_results`]).
+    project: Option<Crs>,
 }
 
 impl<'a> Snapshot<'a> {
     /// The session itself, for a run on its thread.
     fn of(s: &'a Session) -> Snapshot<'a> {
         use std::borrow::Cow::Borrowed;
-        Snapshot { map: Borrowed(s.map()), tables: Borrowed(&s.project.tables), env: Borrowed(&s.project.gp_env), view_size: s.view_size }
+        Snapshot {
+            map: Borrowed(s.map()),
+            tables: Borrowed(&s.project.tables),
+            env: Borrowed(&s.project.gp_env),
+            view_size: s.view_size,
+            project: s.project.coordinate_system,
+        }
     }
 
     /// A copy of the session for a run on another thread: cheap, as the features and pixels are
@@ -1286,6 +1297,7 @@ impl<'a> Snapshot<'a> {
             tables: Owned(s.project.tables.clone()),
             env: Owned(s.project.gp_env.clone()),
             view_size: s.view_size,
+            project: s.project.coordinate_system,
         }
     }
 }
@@ -1321,28 +1333,67 @@ struct MapInputs<'a> {
 impl MapInputs<'_> {
     /// Marks the layers a tool made as held in the system it worked in ([`MapInputs::work`]),
     /// where their coordinates are, so they aren't taken for longitude/latitude: a layer it made
-    /// from scratch starts in longitude/latitude ([`Dataset::held_in`]). Nothing for a tool that
-    /// worked in longitude/latitude, or for a table.
-    fn hold_results(&self, result: &mut rustgis_analysis::ToolResult) {
-        if self.work == Crs::LonLat {
-            return;
+    /// from scratch starts in longitude/latitude ([`Dataset::held_in`]). A tool that worked in
+    /// longitude/latitude leaves them there, unless the project has a coordinate system of its own
+    /// (#2032 C3a): they are converted into it and hold it as theirs (`crs`), as a layer drawn in
+    /// the project is; one with a place it can't hold stays in longitude/latitude, said. Tables
+    /// have no coordinates to hold.
+    fn hold_results(&self, result: &mut rustgis_analysis::ToolResult) -> Result<(), String> {
+        // A geocentric system holds no map coordinates: outputs stay in longitude/latitude then.
+        let project = self.snap.project.filter(|c| *c != Crs::LonLat && !c.is_geocentric());
+        if self.work == Crs::LonLat && project.is_none() {
+            return Ok(());
         }
-        let hold = |ds: &mut Dataset| {
-            if ds.geometry_type != rustgis_data::GeometryType::None {
-                ds.held_in = self.work;
+        // The layers kept in longitude/latitude, and why the first was.
+        let (mut kept, mut why) = (0usize, None);
+        let mut hold = |ds: &mut Dataset| -> Result<(), String> {
+            if ds.geometry_type == rustgis_data::GeometryType::None {
+                return Ok(());
             }
+            match (self.work, project) {
+                // A tool that holds what it made in a system of its own (XY Table To Point, in the
+                // one its coordinates are given in) keeps it there.
+                (Crs::LonLat, _) if ds.held_in != Crs::LonLat => {}
+                (Crs::LonLat, Some(p)) => match ds.hold_as(p, Some(p)) {
+                    // A Cancel stops the run, which adds nothing.
+                    Err(e) if matches!(rustgis_data::DataError::of_conversion(e.clone()), rustgis_data::DataError::Cancelled) => {
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        kept += 1;
+                        // Its refusal starts with the layer's name, named once here.
+                        let reason = e.strip_prefix(&format!("{}: ", ds.name)).unwrap_or(&e).to_string();
+                        why.get_or_insert((ds.name.clone(), reason));
+                    }
+                    Ok(()) => {}
+                },
+                (work, _) => ds.held_in = work,
+            }
+            Ok(())
         };
         match &mut result.output {
-            Output::Layer(ds) | Output::Update { dataset: ds, .. } => hold(ds),
+            Output::Layer(ds) => hold(ds)?,
+            // An update writes into a layer the map has, which keeps its own system.
+            Output::Update { dataset: ds, .. } if self.work != Crs::LonLat && ds.geometry_type != rustgis_data::GeometryType::None => {
+                ds.held_in = self.work
+            }
             Output::Layers(outputs) => {
                 for o in outputs {
                     if let rustgis_analysis::OutputLayer::Vector(ds) = o {
-                        hold(ds);
+                        hold(ds)?;
                     }
                 }
             }
-            Output::Selection { .. } | Output::Table(_) | Output::File { .. } => {}
+            Output::Update { .. } | Output::Selection { .. } | Output::Table(_) | Output::File { .. } => {}
         }
+        if let (Some((name, reason)), Some(p)) = (why, project) {
+            let others = match kept {
+                1 => String::new(),
+                n => format!(" (and {} more layer{})", n - 1, if n == 2 { "" } else { "s" }),
+            };
+            result.messages.push(format!("{name}{others} is kept in longitude/latitude, not the project's {}: {reason}", p.label()));
+        }
+        Ok(())
     }
 
     /// The flat map's projection, built on first use.
@@ -1371,27 +1422,32 @@ fn map_inputs<'a>(s: &'a Session, spec: Option<&rustgis_analysis::ToolSpec>, par
 /// whole, and the rows of each layer it runs on. It reads, so a background run does this on its
 /// thread.
 fn inputs_of<'a>(snap: Snapshot<'a>, spec: Option<&rustgis_analysis::ToolSpec>, params: &Value) -> Result<MapInputs<'a>, String> {
-    let (full, mut messages) = streamed_inputs(&snap.map, spec, params)?;
-    let losses = Vec::new();
-    #[cfg(not(target_arch = "wasm32"))]
-    let (mut full, mut losses) = (full, losses);
+    let (full, said) = streamed_inputs(&snap.map, spec, params)?;
+    let (mut messages, mut losses) = (Vec::new(), Vec::new());
+    for m in said {
+        match m.loss {
+            Some(code) => losses.push(LossMessage { code, text: m.text }),
+            None => messages.push(m.text),
+        }
+    }
+    let mut full = full;
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(spec) = spec.filter(|t| rustgis_analysis::TOOLS.iter().any(|builtin| std::ptr::eq(builtin, *t))) {
         for parameter in spec.params.iter().filter(|p| p.kind == rustgis_analysis::ParamKind::VectorLayers) {
             for name in rustgis_analysis::layer_list(params.get(parameter.name).unwrap_or(&Value::Null))? {
                 if vector_file_input(spec, &snap.map, name) && !full.contains_key(name) {
                     let (dataset, report) = rustgis_data::io::read_path(std::path::Path::new(name)).map_err(|e| format!("{name}: {e}"))?;
-                    messages.extend(report.messages.into_iter().map(|message| format!("{name}: {message}")));
-                    losses.extend(
-                        report.losses.into_iter().map(|loss| LossMessage { code: loss.code, text: format!("{name}: {}", loss.text) }),
-                    );
+                    for message in report.messages.prefixed(name) {
+                        match message.loss {
+                            Some(code) => losses.push(LossMessage { code, text: message.text }),
+                            None => messages.push(message.text),
+                        }
+                    }
                     full.insert(name.to_string(), dataset);
                 }
             }
         }
     }
-    #[cfg(target_arch = "wasm32")]
-    let mut full = full;
     let work = work_inputs(&snap.map, &snap.tables, spec, params, &mut full, &mut messages)?;
     let mut rows = env_inputs(&snap.map, &full, &snap.env, params)?;
     narrow_to_queries(&snap.map, spec, params, &full, &mut rows, &mut messages)?;
@@ -1504,9 +1560,9 @@ fn streamed_inputs(
     map: &rustgis_map::Map,
     spec: Option<&rustgis_analysis::ToolSpec>,
     params: &Value,
-) -> Result<(std::collections::HashMap<String, Dataset>, Vec<String>), String> {
+) -> Result<(std::collections::HashMap<String, Dataset>, rustgis_data::loss::Notes), String> {
     let mut full = std::collections::HashMap::new();
-    let mut said = Vec::new();
+    let mut said = rustgis_data::loss::Notes::new();
     for n in layer_names(spec, params) {
         let key = n.to_ascii_lowercase();
         if full.contains_key(&key) {
@@ -1521,21 +1577,9 @@ fn streamed_inputs(
     Ok((full, said))
 }
 
-/// Whether a tool that works in its first input's own system ([`ToolSpec::works_in_own_system`])
-/// works in `crs`: a projected system, whose coordinates are a plane's. Longitude/latitude, Web
-/// Mercator and the other world projections (whose plane has the antimeridian as a seam and the
-/// poles as lines, [`Crs::is_world_projection`]), and other geographic or geocentric systems, keep
-/// the longitude/latitude path, whose plane and geodesics their coordinates need. So does a system
-/// whose conversion can't be made or gives no parameters, whose unit and axes
-/// ([`Crs::unit_and_axes`]) aren't known.
-///
-/// [`ToolSpec::works_in_own_system`]: rustgis_analysis::ToolSpec::works_in_own_system
+/// Whether a run works in `crs`: [`rustgis_analysis::works_in`].
 fn works_in(crs: Crs) -> bool {
-    crs != Crs::LonLat
-        && !crs.is_world_projection()
-        && !crs.is_geographic()
-        && !crs.is_geocentric()
-        && crs.transformer().is_ok_and(|t| t.params().is_some())
+    rustgis_analysis::works_in(crs)
 }
 
 /// The system a run works in: its first input's own ([`Dataset::coord_crs`]) when the tool works
@@ -1980,6 +2024,9 @@ impl Inputs for MapInputs<'_> {
     fn work_crs(&self) -> Crs {
         self.work
     }
+    fn project_crs(&self) -> Option<Crs> {
+        self.snap.project
+    }
     fn selection(&self, layer: &str) -> &[usize] {
         let Some(l) = self.snap.map.layer_by_name(layer) else { return &[] };
         // Loaded selections and environment extents are already rows of the dataset returned
@@ -1992,6 +2039,16 @@ impl Inputs for MapInputs<'_> {
     fn project(&self, c: rustgis_geom::Coord) -> Option<rustgis_geom::Coord> {
         let (_, flat, to_meter) = self.flat()?;
         flat.forward(c).map(|m| rustgis_geom::Coord::new(m.x * to_meter, m.y * to_meter))
+    }
+    fn unproject(&self, m: rustgis_geom::Coord) -> Option<rustgis_geom::Coord> {
+        let (_, flat, to_meter) = self.flat()?;
+        flat.inverse(rustgis_geom::Coord::new(m.x / to_meter, m.y / to_meter))
+    }
+    fn map_edge(&self) -> Option<f64> {
+        match &self.flat()?.1 {
+            rustgis_map::projection::Flat::Mercator => Some(180.0),
+            rustgis_map::projection::Flat::Custom(p) => p.edge().map(|e| e.lon),
+        }
     }
     fn view_extent(&self) -> Option<rustgis_geom::Extent> {
         *self.view.get_or_init(|| view_extent(&self.snap))
@@ -2403,9 +2460,7 @@ pub fn run_batch_with(s: &mut Session, p: &Value, control: &std::sync::Arc<rustg
                 }
                 match read_batch_file(s, path) {
                     Ok((dataset, report)) => {
-                        let messages = report.messages.into_iter().map(|text| (text, None));
-                        let losses = report.losses.into_iter().map(|loss| (loss.text, Some(loss.code)));
-                        for (msg, code) in messages.chain(losses) {
+                        for (msg, code) in report.messages.into_iter().map(|m| (m.text, m.loss)) {
                             item_reader_warnings.push(format!("{target}: {msg}"));
                             reader_warnings.push((target.clone(), msg, code));
                         }
@@ -3125,9 +3180,17 @@ pub(crate) fn execute(
                 pin.run(&inputs, params, control, &|| continuation.check())
             };
             if let Ok(result) = &mut res {
-                inputs.hold_results(result);
                 result.messages.extend(inputs.messages.iter().cloned());
                 result.losses.extend(inputs.losses.iter().cloned());
+            }
+            // The conversion stays under this run's Cancel, as in `ToolRun::run`: the tool's own
+            // probe ended with it.
+            let held = {
+                let _probe = rustgis_analysis::control::install_progress(Some(control.clone()));
+                res.as_mut().map_or(Ok(()), |r| inputs.hold_results(r))
+            };
+            if let Err(e) = held {
+                res = Err(e);
             }
             let ids = full_ids(&inputs.loaded);
             #[cfg(not(target_arch = "wasm32"))]

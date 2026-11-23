@@ -454,7 +454,7 @@ pub fn aef_place(url: &str) -> Option<String> {
 pub type Found = (Vec<Tile>, bool);
 
 fn aef_request(bbox: [f64; 4]) -> Request {
-    Request { extent: Some(Extent::new(bbox[0], bbox[1], bbox[2], bbox[3])), limit: MAX_INDEX_ROWS }
+    Request { extent: Some(Extent::new(bbox[0], bbox[1], bbox[2], bbox[3])), limit: MAX_INDEX_ROWS, own: None }
 }
 
 /// Finds AlphaEarth's tiles of a year in a box (longitude/latitude), reading the index in place.
@@ -927,7 +927,7 @@ mod tests {
             unread_dates: Vec::new(),
             rounded_dates: Vec::new(),
             null_text: Vec::new(),
-            notes: Vec::new(),
+            notes: Default::default(),
             not_utf8: Vec::new(),
         };
         let t = aef_tiles(&fields, &batch, 2021, [-123.0, 40.0, -122.0, 41.0]);
@@ -994,7 +994,7 @@ mod tests {
             unread_dates: Vec::new(),
             rounded_dates: Vec::new(),
             null_text: Vec::new(),
-            notes: Vec::new(),
+            notes: Default::default(),
             not_utf8: Vec::new(),
         };
         let f = aef_series(&fields, &batch, (2017, 2025), [-43.0, -20.9, -42.9, -20.8]);

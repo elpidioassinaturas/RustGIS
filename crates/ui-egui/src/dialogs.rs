@@ -4,6 +4,7 @@
 use egui::{Align2, vec2};
 use rustgis_engine::Session;
 use rustgis_engine::cmd::service_added::Removal;
+use rustgis_engine::render::rustgis_tiles::{address::Reach, cache};
 use serde_json::{Value, json};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -22,6 +23,7 @@ pub struct Dialogs {
     pub projection_map: Option<(u64, usize, String)>,
     pub geometry: Option<crate::geometrycalc::Form>,
     pub repair: Option<crate::repairsource::Form>,
+    pub conflicts: Option<crate::conflictsui::Form>,
     #[cfg(not(target_arch = "wasm32"))]
     pub reload: Option<crate::reloaddata::Form>,
     pub open: Option<&'static str>,
@@ -326,6 +328,10 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     }
     if which == "repairSource" {
         crate::repairsource::show(app, ctx);
+        return;
+    }
+    if which == "offlineConflicts" {
+        crate::conflictsui::show(app, ctx);
         return;
     }
     let title = match which {
@@ -1877,6 +1883,12 @@ fn add_service(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     // Into a directory's folder or service, keeping the way back; or back out of it.
     let here = app.ui.service.as_ref().map(|c| (c.url.clone(), c.kind));
     if let (Some(url), Some(here)) = (open, here) {
+        // A directory read from the internet lists folders and services there only.
+        use rustgis_engine::data::ogc::capabilities_url;
+        let kind_of = |kind: &'static str| (kind != "auto").then_some(kind);
+        if cache::ceiling_for(&capabilities_url(&here.0, kind_of(here.1))) == Reach::Public {
+            cache::restrict_to_public(&capabilities_url(&url, Some("arcgis")));
+        }
         let before = app.ui.service_browse.back.clone();
         let mut way = before.clone();
         way.push(here);

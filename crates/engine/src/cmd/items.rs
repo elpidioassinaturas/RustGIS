@@ -860,6 +860,9 @@ fn package_map(s: &mut Session, mobile: bool, tol: f64) -> Result<Vec<u8>, Strin
     // pole, a one-vertex line part left out, a feature left as it was or too intricate), over all
     // the layers: said once the package is made, one notice per kind (#1811).
     let mut notes = rustgis_analysis::SimplifyNotes::default();
+    // Features with a place that can't be given in longitude/latitude, packaged without their
+    // geometry: one notice for all the layers.
+    let mut unplaced = (0usize, Vec::new());
     if mobile {
         for l in &mut m.layers {
             if l.is_raster() || tol <= 0.0 {
@@ -867,8 +870,13 @@ fn package_map(s: &mut Session, mobile: bool, tol: f64) -> Result<Vec<u8>, Strin
             }
             // Simplified in longitude/latitude, as the tolerance is in degrees, whatever system
             // the layer holds its coordinates in; the package saves it there.
-            if let std::borrow::Cow::Owned(ds) = l.dataset.in_lonlat()? {
+            let (lonlat, lost) = l.dataset.in_lonlat_leaving_out()?;
+            if let std::borrow::Cow::Owned(ds) = lonlat {
                 l.dataset = ds;
+            }
+            if lost > 0 {
+                unplaced.0 += lost;
+                unplaced.1.push(l.name.clone());
             }
             for f in &mut l.dataset.features {
                 if let Some(g) = &f.geometry {
@@ -891,6 +899,9 @@ fn package_map(s: &mut Session, mobile: bool, tol: f64) -> Result<Vec<u8>, Strin
     for said in notes.without_polar().messages("Mobile map package, simplifying") {
         s.notify(said, false);
     }
+    if let Some(said) = rustgis_data::unplaced_note("Mobile map package", &unplaced.1.join(", "), unplaced.0) {
+        s.notify(said, false);
+    }
     Ok(archive)
 }
 
@@ -904,6 +915,7 @@ fn package_gp(s: &mut Session) -> Result<Vec<u8>, String> {
     crate::durable::notify(s, &report);
     let mut entries = vec![("history.json".to_string(), history)];
     let mut files = std::collections::HashSet::new();
+    let mut unplaced = (0usize, Vec::new());
     for (_, l) in gp_result_layers(s) {
         // Names that clean up to the same file name get a number.
         let base = safe(&l.name);
@@ -913,11 +925,20 @@ fn package_gp(s: &mut Session) -> Result<Vec<u8>, String> {
             k += 1;
             file = format!("results/{base}_{k}.geojson");
         }
-        // GeoJSON is longitude/latitude, whatever system the result holds its coordinates in.
-        let ds = l.dataset.in_lonlat()?;
+        // GeoJSON is longitude/latitude, whatever system the result holds its coordinates in; a
+        // feature with a place that can't be given there is written without its geometry.
+        let (ds, lost) = l.dataset.in_lonlat_leaving_out()?;
+        if lost > 0 {
+            unplaced.0 += lost;
+            unplaced.1.push(l.name.clone());
+        }
         entries.push((file, rustgis_data::io::to_geojson(&ds).to_string().into_bytes()));
     }
-    rustgis_data::zip::write(&entries)
+    let archive = rustgis_data::zip::write(&entries)?;
+    if let Some(said) = rustgis_data::unplaced_note("Geoprocessing package", &unplaced.1.join(", "), unplaced.0) {
+        s.notify(said, false);
+    }
+    Ok(archive)
 }
 
 fn layer_template(s: &mut Session, p: &Value) -> CmdResult {
@@ -1215,6 +1236,10 @@ struct Mesh {
     flat: usize,
     /// Features whose height field isn't a finite number, so they took the default height.
     default_heights: usize,
+    /// Features left out, as a place of each can't be given in longitude/latitude.
+    unplaced: usize,
+    /// The layer's name, for what is said of it.
+    layer: String,
     /// Line parts left out because they have a single vertex.
     short_lines: usize,
 }
@@ -1265,6 +1290,31 @@ impl Mesh {
     }
 }
 
+/// The longitude/latitude box of a held layer's features without those with a place that can't
+/// be given there, when it has any (`None` otherwise, and for a layer in longitude/latitude,
+/// whose box is the layer's). It converts each geometry once more than the mesh does, rather than
+/// keep a converted copy of the layer.
+fn placed_extent(ds: &Dataset, to: &rustgis_data::raster::Reprojection) -> Result<Option<rustgis_geom::Extent>, String> {
+    if to.is_identity() {
+        return Ok(None);
+    }
+    let (mut kept, mut left_out) = (rustgis_geom::Extent::EMPTY, false);
+    for (row, g) in ds.features.rows().filter_map(|r| r.geometry()).enumerate() {
+        if row.is_multiple_of(256) {
+            rustgis_data::progress::check().map_err(|e| e.to_string())?;
+        }
+        match Dataset::geometry_to_lonlat_by(to, g) {
+            Ok(g) => g.for_each_coord(|c| {
+                if c.is_finite() {
+                    kept.expand(c);
+                }
+            }),
+            Err(_) => left_out = true,
+        }
+    }
+    Ok(left_out.then_some(kept))
+}
+
 /// A feature layer as a mesh.
 fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> {
     let id = s.layer_id(p)?;
@@ -1272,7 +1322,16 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
     let hf = ps(p, "heightField").map(|n| l.dataset.field_index(n).ok_or_else(|| format!("no field '{n}'"))).transpose()?;
     let base_h = f(p, "height").unwrap_or(1000.0).clamp(0.0, 1e7);
     let zs = f(p, "zScale").unwrap_or(1.0).clamp(0.0, 1e6);
-    let e = l.extent();
+    let to = l.dataset.lonlat_conversion().map_err(|e| format!("{}: {e}", l.name))?;
+    // Placed by the features it holds: a feature left out below (a place that can't be given in
+    // longitude/latitude) doesn't move the origin or the scale, through a place of it that can.
+    let e = match placed_extent(&l.dataset, &to)? {
+        Some(kept) if kept.is_empty() => {
+            return Err(format!("no feature of {} has a place that can be given in longitude/latitude", l.name));
+        }
+        Some(kept) => kept,
+        None => l.extent(),
+    };
     if e.is_empty() {
         return Err("the layer has no geometry".into());
     }
@@ -1283,9 +1342,8 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
         let m = rustgis_geom::lonlat_to_merc(c);
         ((m.x - origin.x) * k, (m.y - origin.y) * k)
     };
-    let mut mesh = Mesh { keep_lines, ..Mesh::default() };
+    let mut mesh = Mesh { keep_lines, layer: l.name.clone(), ..Mesh::default() };
     let rows = l.visible_rows();
-    let to = l.dataset.lonlat_conversion().map_err(|e| format!("{}: {e}", l.name))?;
     for (row, ft) in l.dataset.features.iter().enumerate() {
         if row.is_multiple_of(256) {
             rustgis_data::progress::check().map_err(|e| e.to_string())?;
@@ -1293,7 +1351,11 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
         // A feature with no geometry draws nothing, so its height is neither used nor reported.
         let Some(g) = ft.geometry.as_ref().filter(|_| rows.get(row) == Some(&true)) else { continue };
         // Placed from longitude/latitude, whatever system the layer holds its coordinates in.
-        let g = rustgis_data::Dataset::geometry_to_lonlat_by(&to, g).map_err(|e| format!("{}: feature {}: {e}", l.name, ft.id))?;
+        // One with a place that can't be given there is left out, and counted.
+        let Ok(g) = rustgis_data::Dataset::geometry_to_lonlat_by(&to, g) else {
+            mesh.unplaced += 1;
+            continue;
+        };
         // A height that isn't a finite number takes the default, and is counted.
         let height = match hf {
             Some(fi) => match l.dataset.value(row, fi).as_f64().filter(|h| h.is_finite()) {
@@ -1523,6 +1585,9 @@ fn mesh_notices(s: &mut Session, mesh: &Mesh) {
     if mesh.short_lines > 0 {
         s.notify(format!("Skipped {} line part(s) with a single vertex", mesh.short_lines), false);
     }
+    if let Some(note) = rustgis_data::unplaced_note("The 3D model", &mesh.layer, mesh.unplaced) {
+        s.notify(note, false);
+    }
     if mesh.default_heights > 0 {
         s.notify(format!("{} feature(s) without a numeric height used the default height instead", mesh.default_heights), false);
     }
@@ -1699,14 +1764,14 @@ pub const ITEMS: &[(&str, &str, &str)] = &[
 pub fn item_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>), String> {
     let (name, bytes, notes) = item_output(s, kind, p)?;
     for note in notes {
-        s.notify(note, false);
+        s.say(note);
     }
     Ok((name, bytes))
 }
 
 /// Builds an item and returns construction-loss notes for publication only after delivery.
-pub fn item_output(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>, Vec<String>), String> {
-    let mut construction_notes = match kind {
+pub fn item_output(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>, rustgis_data::loss::Notes), String> {
+    let mut construction_notes: rustgis_data::loss::Notes = (match kind {
         "map" => {
             let m = saved_map(s, p)?;
             s.constructions.output_notes(m.layers.iter().map(|l| (m.instance_id(), l)))?
@@ -1723,7 +1788,8 @@ pub fn item_output(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Ve
         "mapPackage" | "fieldPackage" => s.constructions.output_notes(s.map().layers.iter().map(|l| (s.map().instance_id(), l)))?,
         "gpPackage" => s.constructions.output_notes(gp_result_layers(s).into_iter().map(|(m, l)| (m.instance_id(), l)))?,
         _ => Vec::new(),
-    };
+    })
+    .into();
     let (name, bytes) = match kind {
         "map" => {
             let map = saved_map(s, p)?;
@@ -1799,14 +1865,14 @@ pub fn item_output(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Ve
             let id = s.layer_id(p)?;
             let name = s.map().layer(id).map(|l| l.name.clone()).unwrap_or_default();
             let (text, notes) = obj_text(s, p)?;
-            construction_notes = notes;
+            construction_notes = notes.into();
             (name, text.into_bytes())
         }
         "stl" => {
             let id = s.layer_id(p)?;
             let name = s.map().layer(id).map(|l| l.name.clone()).unwrap_or_default();
             let (bytes, _, notes) = stl_bytes(s, p)?;
-            construction_notes = notes;
+            construction_notes = notes.into();
             (name, bytes)
         }
         "report" | "reportTemplate" => {
@@ -1837,7 +1903,7 @@ pub fn item_output(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Ve
         }
         k if super::sharing::KINDS.iter().any(|x| x.0 == k) => {
             let (name, bytes, _, notes) = super::sharing::share_output(s, k, p)?;
-            construction_notes = notes;
+            construction_notes = notes.into();
             super::sharing::note_label_classes(s, k, p);
             super::sharing::note_export(s, k, p, &name);
             (name, bytes)
@@ -1855,7 +1921,7 @@ pub(crate) fn save_item(s: &mut Session, kind: &str, p: &Value) -> CmdResult {
     let (_, bytes, notes) = item_output(s, kind, p)?;
     rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
     for note in notes {
-        s.notify(note, false);
+        s.say(note);
     }
     s.retain_written_notices(written);
     Ok(json!({"path": path, "bytes": bytes.len()}))

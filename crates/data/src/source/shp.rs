@@ -11,6 +11,8 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering::Relaxed;
 
 mod cache;
 mod index;
@@ -68,6 +70,53 @@ pub struct ShpSource {
     table: Table,
     encoding: crate::dbf::DbfEncoding,
     reproject: Reproject,
+    /// Whether every record's stored box holds its shape, as reads by area take the boxes on
+    /// trust: [`BOXES_UNKNOWN`] until a whole read has looked, then [`BOXES_HOLD`] or
+    /// [`BOXES_DONT`].
+    boxes: AtomicU8,
+    /// The `.shp`'s and the `.dbf`'s versions as opened
+    /// ([`FeatureSource::same_as_opened`]).
+    stamps: [Option<Stamp>; 2],
+}
+
+/// What a file's metadata says of its version ([`FeatureSource::same_as_opened`]): its size and
+/// modification time and, on Unix, its identity and change time, which a write of the same size
+/// within the clock's step still moves. `None` without a modification time: then no copy of what
+/// was read is trusted.
+#[derive(PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    identity_and_change: (u64, u64, i64, i64),
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Option<Stamp> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(path).ok()?;
+        Some(Stamp {
+            len: m.len(),
+            modified: m.modified().ok()?,
+            #[cfg(unix)]
+            identity_and_change: (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()),
+        })
+    }
+}
+
+/// Not yet looked at ([`ShpSource::boxes`]).
+const BOXES_UNKNOWN: u8 = 0;
+/// Every stored box holds its shape.
+const BOXES_HOLD: u8 = 1;
+/// Some stored box misses part of its shape: reads by area leave that shape out.
+const BOXES_DONT: u8 = 2;
+
+/// Whether `b`, a stored box as [`record_box`] gives it (rounded outward to f32, as the index
+/// keeps it), holds `e`: a box that held the shape still does once rounded outward.
+fn holds(b: [f32; 4], e: &Extent) -> bool {
+    let [x0, y0, x1, y1] = b.map(f64::from);
+    x0 <= e.min_x && y0 <= e.min_y && x1 >= e.max_x && y1 >= e.max_y
 }
 
 /// Bytes read ahead from the files: shapes and rows near each other in a read share a fill.
@@ -93,6 +142,8 @@ impl ShpSource {
         if !dbf.is_file() {
             return Err(bad(format!("{} is missing", dbf.display())));
         }
+        // Taken before anything is read, so a file written while it opens is seen as changed.
+        let stamps = [Stamp::of(path), Stamp::of(&dbf)];
         let mut notes = Vec::new();
         let table = read_table(&dbf)?;
         let cpg = crate::dbf::read_cpg(path, &mut notes);
@@ -198,20 +249,26 @@ impl ShpSource {
             // (`SourceInfo::coordinate_system`) as a whole read does.
             crs: reproject.crs.definition_text(),
             indexed: index.indexed(),
-            notes,
+            notes: notes.into(),
             zm_dropped: false,
         };
         // PointZ … MultiPointM: the header's type says every shape carries Z or M values.
         if matches!(shape_type, 11 | 13 | 15 | 18 | 21 | 23 | 25 | 28) {
             info.drop_zm(Some(index.count));
         }
-        Ok(ShpSource { info, shp: path.to_path_buf(), dbf, index, table, encoding, reproject })
+        // Points too: each record's own type is read, whatever the header says.
+        let boxes = AtomicU8::new(BOXES_UNKNOWN);
+        Ok(ShpSource { info, shp: path.to_path_buf(), dbf, index, table, encoding, reproject, boxes, stamps })
     }
 }
 
 impl FeatureSource for ShpSource {
     fn info(&self) -> &SourceInfo {
         &self.info
+    }
+
+    fn reads_own_box(&self) -> bool {
+        true
     }
 
     /// Its own system, in which it gives its features as the file holds them.
@@ -229,7 +286,7 @@ impl FeatureSource for ShpSource {
     fn read(&self, req: &Request) -> Result<Batch> {
         let encoding = self.encoding.decoder();
         let limit = clamp_limit(req.limit);
-        let extent = req.extent.and_then(|e| self.reproject.extent_from_lonlat(&e));
+        let extent = self.reproject.request_box(req);
         // Keep indexed zero-limit counts; a refused view has no cheap candidate count.
         if limit == 0 && req.extent.is_some() && extent.is_none() {
             return Err(super::unbounded_count());
@@ -275,7 +332,7 @@ impl FeatureSource for ShpSource {
                     boxed_off += u64::from(index::usable(record_box(&buf, u64::from(place.len))));
                     return Ok(());
                 }
-                Ok(Some(g)) => match self.reproject.read(g) {
+                Ok(Some(g)) => match self.reproject.place(g, req) {
                     Some(placed) => Some(placed),
                     None => {
                         skipped += 1;
@@ -290,7 +347,7 @@ impl FeatureSource for ShpSource {
             };
             // The index's boxes are rounded outward to f32, so it can match a shape just outside. A
             // shape without geometry doesn't match an extent, bounded natively or not.
-            if geometry.as_ref().map_or(req.extent.is_some(), |g| !g.in_request(req)) {
+            if geometry.as_ref().map_or(req.extent.is_some(), |g| !g.inside) {
                 return Ok(());
             }
             let geometry = geometry.map(|p| p.geometry);
@@ -350,19 +407,42 @@ impl FeatureSource for ShpSource {
     fn streams_chunks(&self) -> bool {
         true
     }
+    /// Once a whole read has found every stored box holding its shape, and the index placed every
+    /// record (those without a usable box are left out of reads by area, said when the file is
+    /// opened). Until then, and for a file whose boxes miss their shapes, reads by area may leave
+    /// shapes out.
+    fn finds_all_by_area(&self) -> bool {
+        self.index.unboxed == 0 && self.boxes.load(Relaxed) == BOXES_HOLD
+    }
+    /// Both files opened as a read opens them, so one gone gives a read's error, then their
+    /// versions ([`Stamp`]) compared with those at opening.
+    fn same_as_opened(&self) -> Result<bool> {
+        drop(crate::provenance::open(&self.shp)?);
+        drop(crate::provenance::open(&self.dbf)?);
+        let now = [Stamp::of(&self.shp), Stamp::of(&self.dbf)];
+        Ok(self.stamps.iter().all(Option::is_some) && now == self.stamps)
+    }
     /// Visits located shapes in a spatial request; geometry-less rows belong only to whole reads.
     /// Counts scanned records and checks Cancel before filtering them.
     fn visit_chunks(&self, extent: Option<Extent>, bytes: usize, visit: &mut dyn FnMut(Vec<Feature>) -> Result<()>) -> Result<Batch> {
         let encoding = self.encoding.decoder();
         let mut chunks = super::chunk_memory::Chunker::new(bytes, visit)?;
-        let req = Request { extent, limit: usize::MAX };
+        let req = Request { extent, limit: usize::MAX, own: None };
         let extent = extent.and_then(|e| self.reproject.extent_from_lonlat(&e));
         if extent.is_some_and(|e| e.is_empty()) {
             return Ok(Batch { complete: true, ..Batch::default() });
         }
-        let bounds = extent.map(|e| [e.min_x as f32, e.min_y as f32, e.max_x as f32, e.max_y as f32]);
+        // Rounded outward, as the index keeps the records' boxes, so a box reaching the extent by
+        // less than an f32 step is still found.
+        let bounds = extent.map(|e| [f32_down(e.min_x), f32_down(e.min_y), f32_up(e.max_x), f32_up(e.max_y)]);
         // As in `read`, an extent the file's system couldn't bound (#1925) visits every record.
         let late = req.extent.is_some() && bounds.is_none();
+        // A whole read looks at whether the stored boxes hold their shapes, once.
+        let checking = req.extent.is_none() && self.boxes.load(Relaxed) == BOXES_UNKNOWN;
+        let mut missed = false;
+        // A record a whole read couldn't read this time had its box left unchecked: the check
+        // waits for a read that reads them all.
+        let mut unchecked = false;
         let mut shp = Cursor::open(&self.shp)?;
         let mut dbf = Cursor::open(&self.dbf)?;
         let mut buf = Vec::new();
@@ -384,6 +464,7 @@ impl FeatureSource for ShpSource {
             buf.resize(place.len as usize, 0);
             if shp.read_at(u64::from(place.offset), &mut buf).is_err() {
                 skipped += 1;
+                unchecked = true;
                 return Ok(());
             }
             let geometry = match parse_shape(&buf) {
@@ -396,13 +477,20 @@ impl FeatureSource for ShpSource {
                     boxed_off += u64::from(index::usable(record_box(&buf, u64::from(place.len))));
                     return Ok(());
                 }
-                Ok(Some(g)) => match self.reproject.read(g) {
-                    Some(placed) => Some(placed),
-                    None => {
-                        skipped += 1;
-                        return Ok(());
+                Ok(Some(g)) => {
+                    // A box the index took as stored (one in order) that misses part of the shape.
+                    if checking && !missed {
+                        let stored = record_box(&buf, u64::from(place.len));
+                        missed = index::usable(stored) && !holds(stored, &g.extent());
                     }
-                },
+                    match self.reproject.place(g, &req) {
+                        Some(placed) => Some(placed),
+                        None => {
+                            skipped += 1;
+                            return Ok(());
+                        }
+                    }
+                }
                 Ok(None) => None,
                 Err(()) => {
                     skipped += 1;
@@ -410,7 +498,7 @@ impl FeatureSource for ShpSource {
                 }
             };
             // As in `read`, the shape itself is checked.
-            if geometry.as_ref().map_or(req.extent.is_some(), |g| !g.in_request(&req)) {
+            if geometry.as_ref().map_or(req.extent.is_some(), |g| !g.inside) {
                 return Ok(());
             }
             let geometry = geometry.map(|p| p.geometry);
@@ -432,6 +520,9 @@ impl FeatureSource for ShpSource {
             chunks.push(Feature { id: u64::from(i) + 1, geometry, attrs })
         })?;
         chunks.flush()?;
+        if checking && complete && (missed || !unchecked) {
+            self.boxes.store(if missed { BOXES_DONT } else { BOXES_HOLD }, Relaxed);
+        }
         Ok(Batch {
             features: Vec::new(),
             matched,

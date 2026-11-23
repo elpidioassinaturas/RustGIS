@@ -528,6 +528,12 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                             continue;
                         }
                         menu_item(ui, app, "", label, "ui.connection", json!({"kind": kind}));
+                        // An Esri enterprise geodatabase is a SQL Server connection, entered as
+                        // ArcGIS Pro asks for it or from its .sde file.
+                        if kind == "sqlserver" {
+                            let form = json!({"kind": "sqlserver", "form": true});
+                            menu_item(ui, app, "", "Enterprise Geodatabase…", "ui.connection", form);
+                        }
                     }
                 });
                 menu_item(ui, app, "graphics_layer", "Graphics Layer", "graphics.newLayer", Value::Null);
@@ -1065,6 +1071,28 @@ fn offline_group(app: &mut RustGisApp, ui: &mut Ui) {
                     }
                 });
             }
+            // The versions that lost when an area's edits came back, kept until dismissed (#2468).
+            let held: Vec<(String, usize)> =
+                app.session.project.offline_areas.iter().map(|a| (a.name.clone(), a.conflicts.len())).collect();
+            small_menu(
+                ui,
+                app,
+                "merge",
+                "Conflicts",
+                "Look at the versions that lost when an offline area's edits came back.",
+                move |ui, app| {
+                    if held.is_empty() {
+                        ui.label(egui::RichText::new(tl!("No offline areas")).weak());
+                    }
+                    for (n, count) in &held {
+                        let label = crate::i18n::fmt("{area} ({count})", &[("area", n), ("count", &count.to_string())]);
+                        if ui.button(label).clicked() {
+                            let _ = app.run("ui.dialog", json!({"name": "offlineConflicts", "area": n}));
+                            ui.close();
+                        }
+                    }
+                },
+            );
         });
     });
 }

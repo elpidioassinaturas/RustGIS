@@ -24,6 +24,7 @@ mod catalogsui;
 mod chrome;
 mod comets;
 mod completion;
+mod conflictsui;
 mod connectiontree;
 mod connectionui;
 #[cfg(not(target_arch = "wasm32"))]
@@ -51,6 +52,8 @@ mod fieldmenu;
 #[cfg(not(target_arch = "wasm32"))]
 mod filedialog;
 mod fill_editor;
+#[cfg(not(target_arch = "wasm32"))]
+mod fontloading;
 mod geocodeui;
 mod geolibreui;
 mod geometrycalc;
@@ -140,6 +143,7 @@ mod zarrui;
 
 use rustgis_engine::cmd::service_added::Removal;
 use rustgis_engine::render::rustgis_tiles::failure::Failure;
+use rustgis_engine::render::rustgis_tiles::{address::Reach, cache};
 use rustgis_engine::{Project, Session};
 use serde_json::{Value, json};
 
@@ -147,7 +151,7 @@ use serde_json::{Value, json};
 pub use autosave::FolderStore;
 pub use autosave::{Recovery, RecoveryStore};
 pub use chrome::{DoubleClick, TitlebarMetrics};
-pub use coordreadout::CoordReadout;
+pub use coordreadout::{CoordReadout, MapSystem};
 pub use rustgis_assistant;
 pub use rustgis_engine;
 pub use widgets::big_split_menu;
@@ -243,6 +247,44 @@ const LAYOUT_ARRANGEMENTS_PREF: &str = "layout_saved_arrangements";
 
 /// A result an asynchronous service fills in when it's done (the app polls it each frame).
 pub type Slot<T> = std::sync::Arc<std::sync::Mutex<Option<T>>>;
+
+/// Runs `work` on a thread of its own named `name`, off the frame. When the system refuses one,
+/// `slot` gets the refusal as its error instead and `work` is dropped unrun, so the job ends with
+/// an error rather than the app (AGENTS.md › Use the threads). In the browser, which has no
+/// threads, that is every time.
+pub(crate) fn work_off_frame<T, E: From<String>>(name: &str, slot: &Slot<Result<T, E>>, work: impl FnOnce() + Send + 'static) {
+    work_off_frame_with(|work| std::thread::Builder::new().name(name.into()).spawn(work).map(drop), slot, work);
+}
+
+/// [`work_off_frame`], its thread started by `spawn`, which a test can make refuse.
+fn work_off_frame_with<T, E: From<String>>(
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    slot: &Slot<Result<T, E>>,
+    work: impl FnOnce() + Send + 'static,
+) {
+    if let Err(e) = spawn(Box::new(work)) {
+        let why = i18n::fmt("The system refused a thread to do this on ({error}); try again", &[("error", &e.to_string())]);
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(E::from(why)));
+    }
+}
+
+#[cfg(test)]
+mod work_off_frame_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A thread the system refuses ends the job with the refusal in its slot, its work unrun.
+    #[test]
+    fn a_refused_thread_ends_the_job_with_an_error() {
+        let slot: super::Slot<Result<(), String>> = super::Slot::default();
+        let ran = Arc::new(AtomicBool::new(false));
+        let r = ran.clone();
+        super::work_off_frame_with(|_| Err(std::io::Error::other("no threads left")), &slot, move || r.store(true, Ordering::Relaxed));
+        let landed = slot.lock().unwrap().take();
+        assert!(landed.is_some_and(|r| r.is_err_and(|e| e.contains("no threads left"))));
+        assert!(!ran.load(Ordering::Relaxed));
+    }
+}
 
 /// One window is read off the frame at a time, however many have started: each may hold 256 MB
 /// and more. A read keeps its turn until the frame has taken what it read, so a frame that stalls
@@ -659,14 +701,36 @@ pub(crate) fn fetch_into(url: &str) -> Slot<Result<Vec<u8>, String>> {
     fetch_into_limited(url, rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD)
 }
 
-/// Like [`fetch_into`], with what is known of a failure (#509).
+/// Fetches a service's document as [`fetch_into`] does, with what is known of a failure (#509).
+/// One that came from the internet, wherever its name pointed, is recorded so
+/// ([`restrict_to_public`](rustgis_engine::render::rustgis_tiles::cache::restrict_to_public)):
+/// the documents it links to and the layers it lists are then fetched only from there.
 pub(crate) fn fetch_detailed_into(url: &str) -> Slot<Result<Vec<u8>, Failure>> {
-    let slot: Slot<Result<Vec<u8>, Failure>> = Slot::default();
+    fetch_document_as(url, |failure| failure)
+}
+
+/// [`fetch_detailed_into`], with a failure's message alone.
+pub(crate) fn fetch_document_into(url: &str) -> Slot<Result<Vec<u8>, String>> {
+    fetch_document_as(url, |failure| failure.message)
+}
+
+/// [`fetch_detailed_into`], its failure told as `told` gives it.
+fn fetch_document_as<E: Send + 'static>(url: &str, told: fn(Failure) -> E) -> Slot<Result<Vec<u8>, E>> {
+    let slot: Slot<Result<Vec<u8>, E>> = Slot::default();
     let land = slot.clone();
-    rustgis_engine::render::rustgis_tiles::cache::download_detailed(
+    let asked = url.to_string();
+    cache::download_detailed_with_origin(
         url,
-        rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD,
-        Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)),
+        cache::MAX_DOWNLOAD,
+        Box::new(move |r| {
+            let r = r.map_err(told).map(|fetched| {
+                if fetched.origin.reach() == Reach::Public {
+                    cache::restrict_to_public(&asked);
+                }
+                fetched.bytes
+            });
+            *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+        }),
     );
     slot
 }
@@ -1436,8 +1500,10 @@ pub struct RustGisApp {
     fonts_requested: Vec<String>,
     /// Downloads that failed; cleared when a language is picked, which retries them.
     fonts_failed: Vec<String>,
-    /// CJK faces asked for by the map's text, not the interface (`ensure_data_cjk_font`).
-    fonts_for_data: Vec<rustgis_engine::render::fonts::CjkRegion>,
+    /// Fallbacks asked for by data/widget text, independent of the interface language.
+    fonts_for_data: Vec<rustgis_engine::render::fonts::ScriptFont>,
+    /// Non-CJK misses already handled with the current font stack; suppress repeated wakes.
+    other_scripts_handled: Vec<rustgis_engine::render::fonts::ScriptFont>,
     /// CJK scripts `ensure_data_cjk_font` has dealt with: a face asked for, or none to be had said.
     cjk_scripts_handled: Vec<rustgis_engine::render::fonts::CjkScript>,
     /// CJK scripts whose characters the downloaded face lacks, said once each.
@@ -1449,6 +1515,9 @@ pub struct RustGisApp {
     /// The language the interface is drawn in. It trails the chosen one until a font for its
     /// script is active, so switching to Chinese never draws a frame of missing-glyph boxes.
     shown_lang: i18n::Lang,
+    /// Coverage of the last chosen catalog in the active font stack. Cleared when fonts change
+    /// or a language is picked again, so checking thousands of letters is never a per-frame loop.
+    language_coverage: Option<(i18n::Lang, bool)>,
     /// The project path last seen, so a change (whoever opened or saved it) updates Last Project.
     seen_project: Option<std::path::PathBuf>,
 }
@@ -1700,11 +1769,13 @@ impl RustGisApp {
             fonts_requested: Vec::new(),
             fonts_failed: Vec::new(),
             fonts_for_data: Vec::new(),
+            other_scripts_handled: Vec::new(),
             cjk_scripts_handled: Vec::new(),
             cjk_lacking_said: Vec::new(),
             fonts_pending: false,
             label_fonts_indexed: false,
             shown_lang: i18n::Lang::EN,
+            language_coverage: None,
             seen_project: None,
             autosave: Default::default(),
             save_prompt: Default::default(),
@@ -1855,15 +1926,15 @@ impl RustGisApp {
             .unwrap_or_else(|| "Meters".into());
         self.ui.measurement_imperial =
             self.services.load_pref.as_ref().and_then(|load| load("measurement_units")).as_deref() == Some("imperial");
-        // The pointer's coordinate format; a missing one reads as decimal degrees. One this
-        // version doesn't know (a newer RustGIS may have saved it) is said and read as decimal
-        // degrees too. It stays saved until the user picks a format (`ui.coordinateFormat`).
+        // The pointer's coordinate format; a missing one reads in the map's coordinates. One this
+        // version doesn't know (a newer RustGIS may have saved it) is said and read in the map's
+        // coordinates too. It stays saved until the user picks a format (`ui.coordinateFormat`).
         if let Some(code) = self.services.load_pref.as_ref().and_then(|load| load(coordreadout::PREF)) {
             match CoordReadout::from_code(&code) {
                 Some(format) => self.map.coord_format = format,
                 None => {
                     self.session
-                        .notify(tl!("The saved coordinate format isn't known to this version, so decimal degrees are shown."), false);
+                        .notify(tl!("The saved coordinate format isn't known to this version, so map coordinates are shown."), false);
                 }
             }
         }
@@ -1914,15 +1985,83 @@ impl RustGisApp {
         i18n::Lang::from_pref(&self.ui.language)
     }
 
-    /// Whether the interface can be drawn in `lang` this frame: its script needs no extra font, or
-    /// that font is installed and active (fonts installed this very frame aren't yet). A web app
-    /// waits for the download; a failed one keeps the previous language. A desktop without the
-    /// font has nothing to wait for.
-    fn can_draw(&self, lang: i18n::Lang) -> bool {
-        let Some(region) = Self::script_region(lang.script()) else { return true };
-        let have = self.extra_fonts.iter().any(|(_, _, r)| *r == Some(region));
-        let can_fetch = self.services.fetch_font.is_some() && rustgis_engine::render::fonts::script_font_url(region).is_some();
-        (have || !can_fetch) && !self.fonts_pending && self.installed_region == Some(region)
+    /// Enables cached native font downloads for an interactive shell. Hosts opt in at setup,
+    /// so headless tests and embedded applications do not start network work implicitly.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn enable_native_font_downloads(&mut self, ctx: &egui::Context) {
+        fontloading::install(&mut self.services, ctx);
+    }
+
+    /// Waits for a requested face and the frame that activates it, then checks the actual
+    /// catalog's letters in every UI family. With no usable font, keep the readable language
+    /// and say why once; a failed download or an absent native font must not activate boxes.
+    fn can_draw(&mut self, ctx: &egui::Context, lang: i18n::Lang) -> bool {
+        if self.fonts_pending && Self::script_region(lang.script()).is_some() {
+            return false;
+        }
+        if let Some(region) = Self::script_region(lang.script()) {
+            if self.installed_region != Some(region) {
+                return false;
+            }
+            let name = format!("script-{region:?}");
+            let have = self.extra_fonts.iter().any(|(_, _, r)| *r == Some(region));
+            if !have
+                && self.fonts_requested.contains(&name)
+                && !self.fonts_failed.contains(&name)
+                && self.services.fetch_font.is_some()
+                && rustgis_engine::render::fonts::script_font_url(region).is_some()
+            {
+                return false;
+            }
+        }
+        let families = [egui::FontFamily::Proportional, egui::FontFamily::Name("semibold".into()), egui::FontFamily::Monospace];
+        // Text laid out by the host can defer our font install until the next pass. An undefined
+        // family is pending, not proof that the catalog is unsupported.
+        if ctx.fonts_mut(|fonts| families.iter().any(|family| !fonts.definitions().families.contains_key(family))) {
+            ctx.request_repaint();
+            return false;
+        }
+        if let Some((_, covered)) = self.language_coverage.filter(|(checked, _)| *checked == lang) {
+            return covered;
+        }
+        let covered = ctx.fonts_mut(|fonts| {
+            families.into_iter().all(|family| {
+                let font = egui::FontId::new(14.0, family);
+                lang.letters().iter().all(|c| fonts.has_glyph(&font, *c))
+            })
+        });
+        // The host may have defined these families before our deferred install. Their old
+        // coverage is usable for this frame, but must not become a cached result or a warning.
+        if self.fonts_pending {
+            ctx.request_repaint();
+            return covered;
+        }
+        if !covered
+            && let Some(region) = Self::script_region(lang.script())
+            && let (Some(fetch), Some(url)) = (&self.services.fetch_font, rustgis_engine::render::fonts::script_font_url(region))
+        {
+            let downloading = format!("download-{region:?}");
+            let failed = format!("script-{region:?}");
+            let downloaded = self.extra_fonts.iter().any(|(name, _, script)| name.starts_with("web-") && *script == Some(region));
+            if !downloaded && !self.fonts_failed.contains(&failed) {
+                if !self.fonts_requested.contains(&downloading) {
+                    self.fonts_requested.push(downloading);
+                    fetch(url);
+                }
+                return false;
+            }
+        }
+        self.language_coverage = Some((lang, covered));
+        if !covered {
+            self.session.notify(
+                i18n::fmt(
+                    "The available fonts can't display {language}. The interface stays in {previous}; choose the language again to retry.",
+                    &[("language", lang.english()), ("previous", self.shown_lang.english())],
+                ),
+                true,
+            );
+        }
+        covered
     }
 
     /// On the desktop, an installed CJK face as a last-resort fallback, so CJK text (language names
@@ -1970,6 +2109,7 @@ impl RustGisApp {
             i18n::Script::Bengali => Some(ScriptFont::Bengali),
             i18n::Script::Lao => Some(ScriptFont::Lao),
             i18n::Script::Alphabetic => None,
+            i18n::Script::LatinExtended => Some(ScriptFont::Latin),
         }
     }
 
@@ -1999,6 +2139,83 @@ impl RustGisApp {
         }
     }
 
+    /// Missing non-CJK text can come from any UI widget or renderer, regardless of interface
+    /// language. Load one fallback per supported script and report a terminal missing-font case.
+    fn ensure_other_script_fonts(&mut self, ctx: &egui::Context) {
+        use rustgis_engine::render::fonts::{ScriptFont, script_font, script_font_url, take_missing_text};
+        if self.fonts_dirty || self.fonts_pending {
+            return;
+        }
+        for (script, chars) in take_missing_text().into_iter().filter(|(s, _)| !matches!(s, ScriptFont::Cjk(_))) {
+            // A preceding script may just have queued a native face. Keep the remaining
+            // reports until it is active; one face can cover more than one script.
+            if self.fonts_dirty || self.fonts_pending {
+                for c in chars {
+                    rustgis_engine::render::fonts::note_missing_script(c);
+                }
+                continue;
+            }
+            if !text_still_missing(ctx, &chars) {
+                continue;
+            }
+            if !self.other_scripts_handled.contains(&script) {
+                self.other_scripts_handled.push(script);
+            }
+            let script_name = fallback_script_name(script);
+            if !self.fonts_for_data.contains(&script) {
+                self.fonts_for_data.push(script);
+            }
+            let name = format!("script-{script:?}");
+            let loaded = self.extra_fonts.iter().any(|(_, _, s)| *s == Some(script));
+            if loaded {
+                let downloaded = self.extra_fonts.iter().any(|(n, _, s)| n.starts_with("web-") && *s == Some(script));
+                let request = format!("download-{script:?}");
+                if !downloaded
+                    && !self.fonts_failed.contains(&name)
+                    && let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(script))
+                {
+                    if !self.fonts_requested.contains(&request) {
+                        self.fonts_requested.push(request);
+                        fetch(url);
+                    }
+                } else {
+                    let lacking = format!("lacking-{script:?}");
+                    if !self.fonts_failed.contains(&lacking) {
+                        self.fonts_failed.push(lacking);
+                        self.session.notify(
+                            i18n::fmt(
+                                "At least one character in the {script} text is missing from the available fonts.",
+                                &[("script", script_name)],
+                            ),
+                            true,
+                        );
+                    }
+                }
+                continue;
+            }
+            if self.fonts_requested.contains(&name) || self.fonts_failed.contains(&name) {
+                continue;
+            }
+            self.fonts_requested.push(name.clone());
+            if let Some((bytes, index)) = script_font(script) {
+                self.extra_fonts.push((name, std::sync::Arc::new(theme::installed_face(bytes, *index, false)), Some(script)));
+                self.fonts_dirty = true;
+            } else if let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(script)) {
+                fetch(url);
+                self.session.notify(
+                    i18n::fmt(
+                        "Downloading a fallback font for {script} text. That text may be missing until the font arrives.",
+                        &[("script", script_name)],
+                    ),
+                    false,
+                );
+            } else {
+                self.fonts_failed.push(name);
+                self.session.notify(i18n::fmt("No available font draws the {script} text.", &[("script", script_name)]), true);
+            }
+        }
+    }
+
     /// In the browser, downloads a CJK face for the CJK text the renderer met with none to draw it
     /// in (map labels, a layout's text, an export), whatever the interface language: the browser
     /// has no installed fonts, and the interface downloads one only for its own language. Once the
@@ -2008,9 +2225,20 @@ impl RustGisApp {
     /// Either way it says so, once a script: the text is left out until the face arrives (an image
     /// exported meanwhile lacks it), or for good where nothing can be downloaded (a desktop with no
     /// CJK font installed).
-    fn ensure_data_cjk_font(&mut self) {
+    fn ensure_data_cjk_font(&mut self, ctx: &egui::Context) {
         use rustgis_engine::render::fonts::{CjkRegion, CjkScript, ScriptFont, script_font_url, take_missing_cjk};
-        let missing = take_missing_cjk();
+        if self.fonts_dirty || self.fonts_pending {
+            return;
+        }
+        let samples = rustgis_engine::render::fonts::peek_missing_text();
+        let missing: Vec<_> = take_missing_cjk()
+            .into_iter()
+            .filter(|script| {
+                let chars: Vec<char> =
+                    samples.iter().flat_map(|(_, chars)| chars.iter().copied()).filter(|c| CjkScript::of(*c) == Some(*script)).collect();
+                chars.is_empty() || text_still_missing(ctx, &chars)
+            })
+            .collect();
         if missing.is_empty() {
             return;
         }
@@ -2024,7 +2252,7 @@ impl RustGisApp {
                 self.cjk_scripts_handled.push(script);
                 let language = Self::cjk_language(cjk_downloads(&[script], han, |_| false).first().copied().unwrap_or(han));
                 let msg = i18n::fmt(
-                    "No installed font draws the {language} text on the map, so it is left out of the map and its exports.",
+                    "No available font draws the {language} text, so those characters cannot be displayed or exported.",
                     &[("language", language.english())],
                 );
                 self.session.notify(msg, false);
@@ -2044,10 +2272,28 @@ impl RustGisApp {
         for script in &missing {
             let region = cjk_downloads(&[*script], han, |_| false).first().copied().unwrap_or(han);
             let loaded = self.extra_fonts.iter().any(|(_, _, x)| *x == Some(ScriptFont::Cjk(region)));
+            if loaded {
+                let downloadable = ScriptFont::Cjk(region);
+                let downloaded = self.extra_fonts.iter().any(|(n, _, s)| n.starts_with("web-") && *s == Some(downloadable));
+                let request = format!("download-{downloadable:?}");
+                if !downloaded
+                    && !self.fonts_failed.contains(&name(region))
+                    && let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(downloadable))
+                {
+                    if !self.fonts_requested.contains(&request) {
+                        self.fonts_requested.push(request);
+                        fetch(url);
+                    }
+                    if !self.fonts_for_data.contains(&ScriptFont::Cjk(region)) {
+                        self.fonts_for_data.push(ScriptFont::Cjk(region));
+                    }
+                    continue;
+                }
+            }
             if loaded && !self.cjk_lacking_said.contains(script) {
                 self.cjk_lacking_said.push(*script);
                 let msg = i18n::fmt(
-                    "Some characters of the {language} text on the map aren't in its downloaded font, so they are left out.",
+                    "Some characters of the {language} text aren't in its downloaded font, so they cannot be displayed or exported.",
                     &[("language", Self::cjk_language(region).english())],
                 );
                 self.session.notify(msg, false);
@@ -2060,38 +2306,39 @@ impl RustGisApp {
         }
         for region in wanted {
             self.fonts_requested.push(name(region));
-            if !self.fonts_for_data.contains(&region) {
-                self.fonts_for_data.push(region);
+            if !self.fonts_for_data.contains(&ScriptFont::Cjk(region)) {
+                self.fonts_for_data.push(ScriptFont::Cjk(region));
             }
             if let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(ScriptFont::Cjk(region))) {
                 fetch(url);
             }
             let msg = i18n::fmt(
-                "Downloading the font for the {language} text on the map. Images exported before it arrives leave that text out.",
+                "Downloading the font for the {language} text. Those characters may be missing until the font arrives.",
                 &[("language", Self::cjk_language(region).english())],
             );
             self.session.notify(msg, false);
         }
     }
 
-    /// Asks again for the CJK faces the map's text asked for that failed to download: picking a
+    /// Asks again for the fallback faces that data text requested and failed to download: picking a
     /// language is the retry the failure notice offers, and text measured before (its widths
     /// cached) notes nothing again to ask for them.
-    fn retry_data_cjk_fonts(&mut self) {
-        use rustgis_engine::render::fonts::{ScriptFont, script_font_url};
-        for region in self.fonts_for_data.clone() {
-            let name = format!("script-{:?}", ScriptFont::Cjk(region));
-            let loaded = self.extra_fonts.iter().any(|(_, _, x)| *x == Some(ScriptFont::Cjk(region)));
-            if loaded || self.fonts_requested.contains(&name) {
+    fn retry_data_fonts(&mut self, failed: &[String]) {
+        use rustgis_engine::render::fonts::script_font_url;
+        for script in self.fonts_for_data.clone() {
+            let name = format!("script-{script:?}");
+            let loaded = self.extra_fonts.iter().any(|(_, _, x)| *x == Some(script));
+            let request = if loaded { format!("download-{script:?}") } else { name.clone() };
+            if (loaded && !failed.contains(&name)) || self.fonts_requested.contains(&request) {
                 continue;
             }
-            self.fonts_requested.push(name);
-            if let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(ScriptFont::Cjk(region))) {
+            self.fonts_requested.push(request);
+            if let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(script)) {
                 fetch(url);
             }
             let msg = i18n::fmt(
-                "Downloading the font for the {language} text on the map. Images exported before it arrives leave that text out.",
-                &[("language", Self::cjk_language(region).english())],
+                "Downloading the font for the {script} text. Those characters may be missing until the font arrives.",
+                &[("script", fallback_script_name(script))],
             );
             self.session.notify(msg, false);
         }
@@ -3008,7 +3255,7 @@ impl RustGisApp {
             if id == "service.layers" {
                 return readjob::run(self, "service.layers", params);
             }
-            if id == "service.add" && params.get("text").and_then(Value::as_str).is_some() {
+            if id == "service.add" {
                 return readjob::run(self, "service.add", params);
             }
             if id == "layer.repairSource" {
@@ -3078,6 +3325,16 @@ impl RustGisApp {
                 let command = if id == "offline.package" { "offline.package" } else { "share.exportTable" };
                 let mark = self.session.notice_mark();
                 return exportjob::start(self, command, params).inspect_err(|e| self.command_failed(id, e, mark));
+            }
+            // A command that makes a raster grows with its input: on a thread of its own, its
+            // progress and Cancel in the Workflows pane, when asked here (Command Search; the
+            // Assistant runs its commands on the session). Run again with what it made (`ran`),
+            // it adds the raster here.
+            if params.get("ran").is_none_or(Value::is_null)
+                && let Some((command, name)) = rustgis_engine::cmd::workflows::runs_in_background(id)
+            {
+                let mark = self.session.notice_mark();
+                return analysispane::start_from_dispatch(self, command, name, params).inspect_err(|e| self.command_failed(id, e, mark));
             }
             // Converting the labels of a layer read in place reads all of its source first, on a
             // thread of its own, whoever asks (a click, the assistant).
@@ -3808,8 +4065,12 @@ impl RustGisApp {
                     return Err(format!("unknown language '{code}'"));
                 }
                 self.ui.language = code.to_ascii_lowercase();
-                self.fonts_failed.clear();
-                self.retry_data_cjk_fonts();
+                let failed_fonts = std::mem::take(&mut self.fonts_failed);
+                self.language_coverage = None;
+                self.other_scripts_handled.clear();
+                self.fonts_requested
+                    .retain(|n| n.strip_prefix("download-").is_none_or(|script| !failed_fonts.contains(&format!("script-{script}"))));
+                self.retry_data_fonts(&failed_fonts);
                 self.save_pref("language", &self.ui.language);
                 self.map.invalidate();
             }
@@ -4054,8 +4315,8 @@ impl RustGisApp {
                 let format = match p.get("format") {
                     None | Some(Value::Null) => self.map.coord_format.next(),
                     Some(Value::String(v)) => CoordReadout::from_code(v)
-                        .ok_or_else(|| tl!("The coordinate format must be decimal, dms, utm or mgrs").to_string())?,
-                    _ => return Err(tl!("The coordinate format must be decimal, dms, utm or mgrs").into()),
+                        .ok_or_else(|| tl!("The coordinate format must be map, decimal, dms, utm or mgrs").to_string())?,
+                    _ => return Err(tl!("The coordinate format must be map, decimal, dms, utm or mgrs").into()),
                 };
                 self.map.coord_format = format;
                 self.save_pref(coordreadout::PREF, format.code());
@@ -4331,6 +4592,19 @@ impl RustGisApp {
                     connectionui::open_edit(self, id)?;
                 } else {
                     connectionui::open_new(self, p.get("kind").and_then(Value::as_str).unwrap_or("service"))?;
+                }
+                // An enterprise geodatabase: SQL Server's form (server, sign-in, database), filled
+                // with what is given, or from a .sde file. A file that is refused says why in the
+                // form, which stays open to enter the connection by hand.
+                if p.get("form").and_then(Value::as_bool) == Some(true) && self.ui.connection.kind == "sqlserver" {
+                    let text = |key: &str| p.get(key).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+                    if let Err(e) = connectionui::use_form(&mut self.ui.connection, text("server"), text("database")) {
+                        self.dialogs.error = Some(e);
+                    } else if let Some(file) = text("sdeFile")
+                        && let Err(e) = connectionui::fill_from_sde(self, file)
+                    {
+                        self.dialogs.error = Some(e);
+                    }
                 }
                 if p.get("test").and_then(Value::as_bool) == Some(true) {
                     connectionui::start_test(self);
@@ -4738,7 +5012,7 @@ impl RustGisApp {
                     // Not handed over (the failure is said): the area made for it goes too.
                     if self.download(&name, bytes) {
                         for note in notes {
-                            self.session.notify(note, false);
+                            self.session.say(note);
                         }
                     } else {
                         rustgis_engine::cmd::field::forget_new_areas(&mut self.session, areas);
@@ -4753,7 +5027,7 @@ impl RustGisApp {
                                 return Err(e.to_string());
                             }
                             for note in notes {
-                                self.session.notify(note, false);
+                                self.session.say(note);
                             }
                             self.session.notify(i18n::fmt("Saved {name}", &[("name", &path)]), false);
                         }
@@ -5219,9 +5493,9 @@ impl RustGisApp {
                 let layer_name = l.name.clone();
                 // In the layer's own coordinate system, as share.exportLayer writes a file.
                 use rustgis_engine::data::io;
-                let crs = io::default_export_crs(&ds, &ext);
-                let written = io::write_bytes_in(&ds, &ext, crs).map_err(|e| e.to_string());
-                let (bytes, left_out) = match written {
+                let (crs, default_note) = io::default_export_in(&ds, &name, self.session.project.coordinate_system);
+                let written = io::write_bytes_noted(&ds, &ext, crs, &name).map_err(|e| e.to_string());
+                let (bytes, left_out, unplaced) = match written {
                     Ok(w) => w,
                     Err(e) => {
                         self.session.notify(e.clone(), true);
@@ -5231,9 +5505,13 @@ impl RustGisApp {
                 let ext = download_ext;
                 // The features written, read whole, give their own extent, in longitude/latitude
                 // (not a raster's, or the one a streamed layer's source declares).
-                let mut notes = rustgis_engine::data::export_notes([(ds.as_ref(), ds.lonlat_extent())], &name, crs);
+                let mut notes: rustgis_engine::data::loss::Notes =
+                    rustgis_engine::data::export_notes([(ds.as_ref(), ds.lonlat_extent())], &name, crs).into();
                 rustgis_engine::cmd::share::coalesce_read_zm(&mut notes, &name, &ds, &lost);
-                let mut dbf_notes = Vec::new();
+                notes.extend(unplaced);
+                // Which system it is written in, where that isn't the layer's own, as share.exportLayer says.
+                notes.extend(default_note);
+                let mut dbf_notes = rustgis_engine::data::loss::Notes::new();
                 if ext == "zip" {
                     dbf_notes.extend(io::shapefile_names_note(&ds.fields, &name));
                     dbf_notes.extend(io::shapefile_values_notes(&ds, &name));
@@ -5259,8 +5537,12 @@ impl RustGisApp {
                 }
                 if self.download(&name, bytes) {
                     rustgis_engine::cmd::share::notify_export_query(&mut self.session, &name, &layer_name, &query_report);
-                    for note in notes.into_iter().chain(dbf_notes).chain(construction_notes) {
-                        self.session.notify(note, false);
+                    for note in notes
+                        .into_iter()
+                        .chain(dbf_notes)
+                        .chain(construction_notes.into_iter().map(rustgis_engine::data::loss::Note::plain))
+                    {
+                        self.session.say(note);
                     }
                 }
             }
@@ -5434,6 +5716,12 @@ impl RustGisApp {
                     let id = self.session.layer_id(p)?;
                     let form = geometrycalc::Form::new(&self.session, id)?;
                     self.dialogs = dialogs::Dialogs { open: Some("calculateGeometry"), geometry: Some(form), ..Default::default() };
+                    return Ok(Value::Null);
+                }
+                if which == "offlineConflicts" {
+                    let area = p.get("area").and_then(Value::as_str).ok_or_else(|| tl!("Name the offline area.").to_string())?;
+                    let form = conflictsui::Form::new(&self.session, area)?;
+                    self.dialogs = dialogs::Dialogs { open: Some("offlineConflicts"), conflicts: Some(form), ..Default::default() };
                     return Ok(Value::Null);
                 }
                 if matches!(which, "repairSource" | "repairTiles") {
@@ -5807,6 +6095,11 @@ impl RustGisApp {
                 if p.get(k).and_then(Value::as_bool) == Some(true) {
                     q[k] = json!(true);
                 }
+            }
+            // A coverage's own system it was asked for in (`service.coverage`'s "crs"), for an
+            // answer that doesn't say it.
+            if let Some(crs) = p.get("coverageCrs").filter(|v| v.is_string()) {
+                q["coverageCrs"] = crs.clone();
             }
             if let Some(from_document) = p.get("fromDocument").and_then(Value::as_bool) {
                 q["fromDocument"] = json!(from_document);
@@ -6427,8 +6720,12 @@ impl RustGisApp {
                                 Ok(()) => {
                                     resolve.crossed_origin |= rustgis_engine::render::rustgis_tiles::logins::origin(&resolve.doc)
                                         != rustgis_engine::render::rustgis_tiles::logins::origin(&next);
+                                    // A tile set document read from the internet leads only there.
+                                    if cache::ceiling_for(&resolve.doc) == Reach::Public {
+                                        cache::restrict_to_public(&next);
+                                    }
                                     resolve.doc = next;
-                                    resolve.slot = fetch_into(&resolve.doc);
+                                    resolve.slot = fetch_document_into(&resolve.doc);
                                 }
                                 Err(e) => {
                                     self.notice_service_query_loss(resolve.withheld_addresses);
@@ -6445,6 +6742,11 @@ impl RustGisApp {
                             rustgis_engine::render::rustgis_tiles::logins::inner(&resolve.fallback),
                         ),
                     };
+                    // After a tile set document read from the internet, the tiles come only from
+                    // there: the template it names, or the usual one in its place.
+                    if cache::ceiling_for(&resolve.doc) == Reach::Public {
+                        cache::restrict_to_public(&template);
+                    }
                     resolve.crossed_origin |= rustgis_engine::render::rustgis_tiles::logins::origin(&resolve.doc)
                         != rustgis_engine::render::rustgis_tiles::logins::origin(&template);
                     self.notice_service_query_loss(resolve.withheld_addresses);
@@ -6484,6 +6786,14 @@ impl RustGisApp {
                         let connection = params.as_object_mut().and_then(|p| p.remove("connection"));
                         let get = c.get("url").and_then(Value::as_str).unwrap_or("").to_string();
                         let mut p = json!({"url": get, "name": title, "coverage": true});
+                        // The system it was asked in, for an answer that doesn't say it.
+                        if let Some(crs) = c.get("coverageCrs").and_then(Value::as_str) {
+                            p["coverageCrs"] = json!(crs);
+                        }
+                        // Its service's document came from the internet: so does the coverage.
+                        if cache::ceiling_for(&get) == Reach::Public {
+                            p["fromDocument"] = json!(true);
+                        }
                         if params.get("anonymous").and_then(Value::as_bool) == Some(true)
                             || c.get("anonymous").and_then(Value::as_bool) == Some(true)
                         {
@@ -6753,38 +7063,47 @@ impl RustGisApp {
         }
         #[cfg(not(target_arch = "wasm32"))]
         syncmark::tick(self);
+        // On native apps this final fallback observes missing text in tables, plugin panels
+        // and language pickers. Web eframe's earlier canvas fallback can draw UI-only misses.
+        // This observer queues work only; no network or file I/O runs in shaping.
+        ctx.add_glyph_rasterizer(egui::epaint::text::GlyphRasterizer::new("rustgis::missing-font", |request| {
+            for c in request.cluster.chars() {
+                rustgis_engine::render::fonts::note_missing_script(c);
+            }
+            None
+        }));
         self.ensure_script_font();
-        self.ensure_data_cjk_font();
+        self.ensure_data_cjk_font(ctx);
+        self.ensure_other_script_fonts(ctx);
         // Fonts downloaded by the web app.
         let fonts: Vec<(String, Vec<u8>)> = match &self.services.font_inbox {
             Some(inbox) => std::mem::take(&mut *inbox.lock().unwrap_or_else(|e| e.into_inner())),
             None => Vec::new(),
         };
         for (url, bytes) in fonts {
-            use rustgis_engine::render::fonts::{CjkRegion, ScriptFont, script_font_url, valid_font};
-            let region = [CjkRegion::SimplifiedChinese, CjkRegion::TraditionalChinese, CjkRegion::Japanese, CjkRegion::Korean]
-                .map(ScriptFont::Cjk)
-                .into_iter()
-                .chain([ScriptFont::Arabic, ScriptFont::Bengali, ScriptFont::Lao])
-                .find(|r| script_font_url(*r) == Some(url.as_str()));
-            if bytes.is_empty() || !valid_font(&bytes, 0) {
+            use rustgis_engine::render::fonts::{ScriptFont, script_font_url};
+            let region = ScriptFont::ALL.into_iter().find(|r| script_font_url(*r) == Some(url.as_str()));
+            let Some(known) = region else { continue };
+            if !valid_script_download(&bytes, known) {
                 // A failed download: say so; picking the language again retries.
                 log::error!("{url}: no usable font downloaded");
                 // Name the language whose font failed (not the current one), in English: its own
                 // script has no font yet.
-                let language = i18n::Lang::all()
-                    .find(|l| region.is_some_and(|r| Self::script_region(l.script()) == Some(r)))
-                    .unwrap_or(self.chosen_lang());
-                let for_data =
-                    matches!(region, Some(ScriptFont::Cjk(r)) if self.fonts_for_data.contains(&r)) && region != self.current_region();
+                let chosen = self.chosen_lang();
+                let language = if Self::script_region(chosen.script()) == region {
+                    chosen
+                } else {
+                    i18n::Lang::all().find(|l| region.is_some_and(|r| Self::script_region(l.script()) == Some(r))).unwrap_or(chosen)
+                };
+                let for_data = self.fonts_for_data.contains(&known);
                 let msg = if for_data {
                     i18n::fmt(
-                        "Couldn't download the font for the {language} text on the map, so it is left out of the map and its exports; pick a language in Settings › Language to retry.",
-                        &[("language", language.english())],
+                        "Couldn't download or validate the font for the {script} text, so those characters cannot be displayed or exported; pick a language in Settings › Language to retry.",
+                        &[("script", fallback_script_name(known))],
                     )
                 } else {
                     i18n::fmt(
-                        "Couldn't download the font for {language}; pick the language again to retry.",
+                        "Couldn't download or validate the font for {language}; pick the language again to retry.",
                         &[("language", language.english())],
                     )
                 };
@@ -6799,12 +7118,9 @@ impl RustGisApp {
             // The renderer (exported images and PDFs, the layout view) has no installed CJK
             // font in the browser either: it draws CJK text with this face too. It keeps the
             // face for good, and the interface shares those bytes rather than a second copy.
-            let face = match region {
-                Some(ScriptFont::Cjk(r)) => match rustgis_engine::render::fonts::add_downloaded_cjk_font(r, bytes) {
-                    Ok(kept) => egui::FontData::from_static(kept),
-                    Err(bytes) => egui::FontData::from_owned(bytes),
-                },
-                _ => egui::FontData::from_owned(bytes),
+            let face = match rustgis_engine::render::fonts::add_downloaded_script_font(known, bytes) {
+                Ok(kept) => egui::FontData::from_static(kept),
+                Err(bytes) => egui::FontData::from_owned(bytes),
             };
             let name = format!("web-{}", url.rsplit('/').next().unwrap_or("font"));
             self.extra_fonts.retain(|(n, _, _)| *n != name);
@@ -6825,6 +7141,8 @@ impl RustGisApp {
                 // the ideographs it draws take the same forms, whichever face arrived first.
                 put_first(&mut self.extra_fonts, rustgis_engine::render::fonts::ScriptFont::Cjk(han));
             }
+            self.language_coverage = None;
+            self.other_scripts_handled.clear();
             theme::install_fonts(ctx, &self.extra_fonts, self.installed_region);
             self.fonts_pending = true;
             self.map.invalidate();
@@ -6932,13 +7250,15 @@ impl RustGisApp {
             self.add_cjk_fallback();
             self.add_symbol_fallback();
             self.installed_region = self.current_region();
+            self.language_coverage = None;
+            self.other_scripts_handled.clear();
             theme::install_fonts(ctx, &self.extra_fonts, self.installed_region);
             self.fonts_pending = true;
         }
         // Switch the drawn language once its font can draw it; until then keep the previous one.
         let chosen = self.chosen_lang();
         if self.shown_lang != chosen {
-            if self.can_draw(chosen) {
+            if self.can_draw(ctx, chosen) {
                 self.shown_lang = chosen;
                 self.map.invalidate();
             } else if self.fonts_pending {
@@ -7087,9 +7407,13 @@ impl RustGisApp {
         if self.autosave.phone {
             autosave::tick(self, &ctx);
         }
-        // CJK text this frame drew with no face for it: the next frame's `logic` deals with it
-        // (`ensure_data_cjk_font`), so there must be a next frame, though no input comes.
-        if rustgis_engine::render::fonts::peek_missing_cjk().iter().any(|s| !self.cjk_scripts_handled.contains(s)) {
+        // Missing text first drawn this frame needs a next logic pass even without input.
+        // Handled requests wait for their result instead of keeping an idle window repainting.
+        if rustgis_engine::render::fonts::peek_missing_cjk().iter().any(|s| !self.cjk_scripts_handled.contains(s))
+            || rustgis_engine::render::fonts::peek_missing_text()
+                .iter()
+                .any(|(s, _)| !matches!(s, rustgis_engine::render::fonts::ScriptFont::Cjk(_)) && !self.other_scripts_handled.contains(s))
+        {
             ctx.request_repaint();
         }
         // egui times clicks by the frame they arrive in: at a slow frame rate the two clicks of a
@@ -7119,6 +7443,51 @@ fn project_file_name(url: &str) -> Option<&str> {
 /// still read as two.
 fn double_click_delay(dt: f32) -> f64 {
     (0.3 + 2.0 * f64::from(dt)).clamp(0.5, 1.2)
+}
+
+/// Names a script without guessing a data string's language from the current UI preference.
+fn fallback_script_name(script: rustgis_engine::render::fonts::ScriptFont) -> &'static str {
+    use rustgis_engine::render::fonts::ScriptFont;
+    match script {
+        ScriptFont::Latin => tl!("Latin"),
+        ScriptFont::Arabic => tl!("Arabic script"),
+        ScriptFont::Bengali => tl!("Bengali"),
+        ScriptFont::Lao => tl!("Lao"),
+        ScriptFont::Cjk(region) => RustGisApp::cjk_language(region).english(),
+    }
+}
+
+/// Missing reports can be one frame old. Recheck the small bounded sample against the active
+/// UI and export stacks before downloading another face or announcing a terminal coverage gap.
+fn text_still_missing(ctx: &egui::Context, chars: &[char]) -> bool {
+    let ui_missing = ctx.fonts_mut(|fonts| {
+        [egui::FontFamily::Proportional, egui::FontFamily::Name("semibold".into()), egui::FontFamily::Monospace].into_iter().any(|family| {
+            // Before the first theme install a standalone host need not define semibold yet.
+            if !fonts.definitions().families.contains_key(&family) {
+                return false;
+            }
+            let font = egui::FontId::new(14.0, family);
+            chars.iter().any(|c| !fonts.has_glyph(&font, *c))
+        })
+    });
+    ui_missing || chars.iter().any(|c| !rustgis_engine::render::covers_quietly(&c.to_string(), false))
+}
+
+/// Validates the requested script against the shipped catalogs, not just one representative
+/// character. Latin letters belonging to the base UI face aren't required in script-only fonts.
+fn valid_script_download(bytes: &[u8], script: rustgis_engine::render::fonts::ScriptFont) -> bool {
+    use rustgis_engine::render::fonts::{self, ScriptFont};
+    if bytes.len() > fonts::MAX_FONT_BYTES || !fonts::draws_script(bytes, 0, script) {
+        return false;
+    }
+    let chars = i18n::Lang::all()
+        .filter(|lang| RustGisApp::script_region(lang.script()) == Some(script))
+        .flat_map(|lang| lang.letters().iter().copied())
+        .filter(|c| match script {
+            ScriptFont::Cjk(_) => fonts::CjkScript::of(*c).is_some(),
+            _ => ScriptFont::of(*c) == Some(script),
+        });
+    fonts::has_characters(bytes, 0, chars)
 }
 
 /// The CJK faces to download for the scripts the renderer had no face for: a Korean face for
@@ -7172,7 +7541,411 @@ fn han_region_for(
 }
 
 #[cfg(test)]
+mod language_coverage_tests {
+    use super::*;
+
+    /// Runs the app's real completion hook: only it can change `shown_lang`, and a second frame
+    /// exercises the steady state rather than only inspecting a helper's result.
+    fn frame(app: &mut RustGisApp, ctx: &egui::Context) {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.logic(ui.ctx()));
+        output.textures_delta.clear();
+    }
+
+    /// Even on a machine with fonts installed, emulate a missing or failed face deterministically:
+    /// the normal request cache prevents host discovery, and egui starts with its bundled fonts.
+    fn without_script_font(code: &str) -> (RustGisApp, egui::Context) {
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.language", json!({"code": code})).unwrap();
+        let region = RustGisApp::script_region(app.chosen_lang().script());
+        if let Some(region) = region {
+            let name = format!("script-{region:?}");
+            app.fonts_requested.push(name.clone());
+            app.fonts_failed.push(name);
+        }
+        app.installed_region = region;
+        app.fonts_frames = 1;
+        let ctx = egui::Context::default();
+        let mut defs = egui::FontDefinitions::default();
+        let regular = defs.families.get(&egui::FontFamily::Proportional).unwrap().clone();
+        defs.families.insert(egui::FontFamily::Name("semibold".into()), regular);
+        ctx.set_fonts(defs);
+        (app, ctx)
+    }
+
+    /// An embedding host may lay out its own text before the app installs its font families.
+    /// That install is deferred by egui, so startup must wait without a notice or cached failure.
+    #[test]
+    fn a_saved_alphabetic_language_waits_for_deferred_font_families() {
+        for defined_but_incomplete in [false, true] {
+            let mut app = RustGisApp::with_sample();
+            app.run("ui.language", json!({"code": "de"})).unwrap();
+            let ctx = egui::Context::default();
+            if defined_but_incomplete {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "partial".into(),
+                    std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../render/testdata/test-cff.otf"))),
+                );
+                fonts.families.insert(egui::FontFamily::Name("semibold".into()), vec!["partial".into()]);
+                ctx.set_fonts(fonts);
+            }
+            let mark = app.session.notice_mark();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.label("Host text before RustGIS");
+                app.logic(ui.ctx());
+            });
+            output.textures_delta.clear();
+            assert_eq!(app.lang(), i18n::Lang::EN, "wait until the new families become active");
+            assert!(app.language_coverage.is_none(), "deferred families are not a coverage failure");
+            assert!(!app.session.notices_since(mark).iter().any(|n| n.text.contains("can't display")));
+            frame(&mut app, &ctx);
+            assert_eq!(app.lang().code(), "de", "activate once the font families are defined");
+        }
+    }
+
+    #[test]
+    fn missing_fonts_keep_the_previous_language_and_say_why_once() {
+        for code in ["zh", "zh-tw", "ja", "ko", "fa", "bn", "lo", "vi", "az"] {
+            let (mut app, ctx) = without_script_font(code);
+            let mark = app.session.notice_mark();
+            frame(&mut app, &ctx);
+            frame(&mut app, &ctx);
+            assert_eq!(app.lang(), i18n::Lang::EN, "{code}: activated a language with missing glyphs");
+            assert_eq!(app.chosen_lang().code(), code, "preserve the requested preference for retry");
+            let notices = app.session.notices_since(mark);
+            assert_eq!(notices.iter().filter(|n| n.text.contains("The available fonts can't display")).count(), 1, "{code}: {notices:?}");
+            app.run("ui.language", json!({"code": "de"})).unwrap();
+            frame(&mut app, &ctx);
+            assert_eq!(app.lang().code(), "de", "a covered language still activates");
+        }
+    }
+
+    /// A real English UI widget, rather than a direct missing-font helper call, must ask for
+    /// both scripts. A child process pins the installed-font override without mutating global
+    /// environment state in the test process or depending on fonts installed on the CI host.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn missing_widget_glyphs_request_fonts_and_report_the_data_script() {
+        if std::env::var_os("RUSTGIS_WIDGET_FONT_TEST").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "language_coverage_tests::missing_widget_glyphs_request_fonts_and_report_the_data_script", "--nocapture"])
+                .env("RUSTGIS_WIDGET_FONT_TEST", "1")
+                .env("RUSTGIS_BUILTIN_FONTS", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        // Exercise the real theme install under the child's built-in-font override.
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx, &[], None);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.ctx().fonts_mut(|fonts| {
+                for family in [egui::FontFamily::Proportional, egui::FontFamily::Name("semibold".into()), egui::FontFamily::Monospace] {
+                    let font = egui::FontId::new(14.0, family);
+                    for lang in i18n::Lang::all().filter(|lang| matches!(lang.script(), i18n::Script::Alphabetic)) {
+                        for c in lang.letters() {
+                            assert!(fonts.has_glyph(&font, *c), "{} {:?}: missing U+{:04X}", lang.code(), font.family, u32::from(*c));
+                        }
+                    }
+                }
+            });
+        });
+        output.textures_delta.clear();
+        use rustgis_engine::render::fonts::{ScriptFont, script_font_url};
+        let (mut app, ctx) = without_script_font("en");
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = asked.clone();
+        app.services.fetch_font = Some(Box::new(move |url| sink.lock().unwrap().push(url.to_string())));
+        let inbox = Inbox::default();
+        app.services.font_inbox = Some(inbox.clone());
+        let mark = app.session.notice_mark();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.logic(ui.ctx());
+                ui.label("অệ");
+            });
+            output.textures_delta.clear();
+        }
+        let bengali = script_font_url(ScriptFont::Bengali).unwrap();
+        let latin = script_font_url(ScriptFont::Latin).unwrap();
+        let urls = asked.lock().unwrap().clone();
+        assert_eq!(urls.iter().filter(|url| *url == bengali).count(), 1, "Bengali widget did not ask once: {urls:?}");
+        assert_eq!(urls.iter().filter(|url| *url == latin).count(), 1, "Vietnamese widget did not ask once: {urls:?}");
+        assert_eq!(app.lang(), i18n::Lang::EN);
+        assert_eq!(app.session.notices_since(mark).iter().filter(|n| n.text.contains("Downloading a fallback font")).count(), 2);
+        let failure = app.session.notice_mark();
+        inbox.lock().unwrap().push((latin.into(), Vec::new()));
+        frame(&mut app, &ctx);
+        let notices = app.session.notices_since(failure);
+        assert!(notices.iter().any(|n| n.text.contains("Couldn't download or validate the font for the Latin text")), "{notices:?}");
+        assert!(!notices.iter().any(|n| n.text.contains("Azerbaijani")), "a data string is not an Azerbaijani UI request");
+        app.run("ui.language", json!({"code": "en"})).unwrap();
+        assert_eq!(asked.lock().unwrap().iter().filter(|url| *url == latin).count(), 2, "retry includes non-CJK data fonts");
+    }
+
+    #[test]
+    fn data_download_retry_is_not_blocked_by_a_partial_installed_face() {
+        use rustgis_engine::render::fonts::{ScriptFont, script_font_url};
+        let (mut app, ctx) = without_script_font("en");
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = asked.clone();
+        app.services.fetch_font = Some(Box::new(move |url| sink.lock().unwrap().push(url.to_string())));
+        app.extra_fonts.push((
+            "installed-latin".into(),
+            std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../render/testdata/test-fallback.otf"))),
+            Some(ScriptFont::Latin),
+        ));
+        app.fonts_for_data.push(ScriptFont::Latin);
+        app.fonts_failed.push("script-Latin".into());
+        app.fonts_requested.push("download-Latin".into());
+        app.run("ui.language", json!({"code": "vi"})).unwrap();
+        assert_eq!(*asked.lock().unwrap(), vec![script_font_url(ScriptFont::Latin).unwrap().to_string()]);
+        assert!(app.fonts_failed.is_empty());
+        app.installed_region = Some(ScriptFont::Latin);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(!app.can_draw(ui.ctx(), app.chosen_lang()), "wait for the retried font");
+        });
+        output.textures_delta.clear();
+        assert_eq!(asked.lock().unwrap().len(), 1, "language activation must reuse the data retry");
+    }
+
+    /// Selecting a language while a data fallback is still in flight must reuse that request.
+    #[test]
+    fn choosing_a_language_keeps_a_partial_face_download_in_flight() {
+        use rustgis_engine::render::fonts::ScriptFont;
+        let (mut app, ctx) = without_script_font("en");
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = asked.clone();
+        app.services.fetch_font = Some(Box::new(move |url| sink.lock().unwrap().push(url.to_string())));
+        app.extra_fonts.push((
+            "installed-latin".into(),
+            std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../render/testdata/test-fallback.otf"))),
+            Some(ScriptFont::Latin),
+        ));
+        app.fonts_for_data.push(ScriptFont::Latin);
+        app.fonts_requested.push("download-Latin".into());
+        app.installed_region = Some(ScriptFont::Latin);
+        app.run("ui.language", json!({"code": "vi"})).unwrap();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(!app.can_draw(ui.ctx(), app.chosen_lang()));
+        });
+        output.textures_delta.clear();
+        assert!(asked.lock().unwrap().is_empty(), "the existing request must not start again");
+    }
+
+    /// Exercise the real end-of-UI wake after a widget first records non-CJK missing text.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn missing_script_text_wakes_the_next_frame_once() {
+        if crate::isolate_account_test("language_coverage_tests::missing_script_text_wakes_the_next_frame_once") {
+            return;
+        }
+        let (mut app, ctx) = without_script_font("en");
+        app.fonts_frames = 2;
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0))),
+            ..Default::default()
+        };
+        let wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink = wakes.clone();
+        ctx.set_repaint_observer(move |request| {
+            if request.delay.is_zero() {
+                sink.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        app.label_fonts_indexed = true;
+        app.chrome = Some(|_, _| {});
+        app.services.fetch_font = Some(Box::new(|_| {}));
+        for _ in 0..8 {
+            let mut output = ctx.run_ui(input(), |ui| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            });
+            output.textures_delta.clear();
+        }
+        let mut output = ctx.run_ui(input(), |ui| {
+            app.logic(ui.ctx());
+            wakes.store(0, std::sync::atomic::Ordering::SeqCst);
+            app.ui(ui);
+            assert_eq!(wakes.load(std::sync::atomic::Ordering::SeqCst), 0, "the UI must add no immediate wake before the missing text");
+        });
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(input(), |ui| {
+            app.logic(ui.ctx());
+            ui.label("অ");
+            wakes.store(0, std::sync::atomic::Ordering::SeqCst);
+            app.ui(ui);
+            assert!(wakes.load(std::sync::atomic::Ordering::SeqCst) > 0, "the new missing script must wake font loading");
+        });
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(input(), |ui| {
+            app.logic(ui.ctx());
+            ui.label("অ");
+            app.ui(ui);
+        });
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(input(), |ui| {
+            app.logic(ui.ctx());
+            ui.label("অ");
+            // A download notice has its own toast animation, independent of font scheduling.
+            app.map.notices_seen = app.session.notice_mark();
+            app.map.toasts.clear();
+            wakes.store(0, std::sync::atomic::Ordering::SeqCst);
+            app.ui(ui);
+            assert_eq!(wakes.load(std::sync::atomic::Ordering::SeqCst), 0, "a handled request must not keep the interface busy");
+        });
+        output.textures_delta.clear();
+    }
+
+    /// Reports survive a queued native-face install; readable text needs no redundant download.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn queued_fonts_preserve_reports_until_their_installation() {
+        if crate::isolate_account_test("language_coverage_tests::queued_fonts_preserve_reports_until_their_installation") {
+            return;
+        }
+        use rustgis_engine::render::fonts::{self, CjkRegion, CjkScript, ScriptFont};
+        let (mut app, ctx) = without_script_font("en");
+        app.fonts_frames = 2;
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = asked.clone();
+        app.services.fetch_font = Some(Box::new(move |url| sink.lock().unwrap().push(url.to_string())));
+        let bytes = include_bytes!("../../render/testdata/test-fallback.otf");
+        let face = std::sync::Arc::new(egui::FontData::from_static(bytes));
+        for script in [ScriptFont::Bengali, ScriptFont::Cjk(CjkRegion::Japanese)] {
+            app.extra_fonts.push((format!("native-{script:?}"), face.clone(), Some(script)));
+        }
+        app.fonts_dirty = true;
+        // Reports from a preceding widget frame, before these native faces became active.
+        fonts::note_missing_script('অ');
+        fonts::note_missing_script('あ');
+        frame(&mut app, &ctx);
+        assert!(asked.lock().unwrap().is_empty(), "queued native faces must be tried before downloading");
+        assert!(fonts::peek_missing_text().iter().any(|(script, chars)| *script == ScriptFont::Bengali && chars.contains(&'অ')));
+        assert!(fonts::peek_missing_cjk().contains(&CjkScript::Kana));
+        // The renderer uses the same original face bytes, as it does with an installed font.
+        for script in [ScriptFont::Bengali, ScriptFont::Cjk(CjkRegion::Japanese)] {
+            fonts::add_downloaded_script_font(script, bytes.to_vec()).unwrap();
+        }
+        frame(&mut app, &ctx);
+        assert!(asked.lock().unwrap().is_empty(), "the active native faces cover the reported characters");
+        assert!(fonts::peek_missing_text().is_empty());
+        assert!(fonts::peek_missing_cjk().is_empty());
+    }
+
+    /// Missing data in the same script must not block a catalog the active fonts already cover.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn data_downloads_do_not_block_a_covered_interface_in_the_same_script() {
+        if crate::isolate_account_test("language_coverage_tests::data_downloads_do_not_block_a_covered_interface_in_the_same_script") {
+            return;
+        }
+        use rustgis_engine::render::fonts::{ScriptFont, script_font_url};
+        let (mut app, ctx) = without_script_font("az");
+        app.fonts_frames = 2;
+        app.fonts_failed.clear();
+        app.extra_fonts.push((
+            "script-Latin".into(),
+            std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../render/testdata/test-latin-catalog.otf"))),
+            Some(ScriptFont::Latin),
+        ));
+        theme::install_fonts(&ctx, &app.extra_fonts, Some(ScriptFont::Latin));
+        app.fonts_for_data.push(ScriptFont::Latin);
+        app.fonts_requested.push("download-Latin".into());
+        app.services.fetch_font = Some(Box::new(|_| {}));
+        let inbox = Inbox::default();
+        app.services.font_inbox = Some(inbox.clone());
+        frame(&mut app, &ctx);
+        assert_eq!(app.lang().code(), "az", "data-only downloads must not delay a readable interface");
+        let mark = app.session.notice_mark();
+        inbox.lock().unwrap().push((script_font_url(ScriptFont::Latin).unwrap().into(), Vec::new()));
+        frame(&mut app, &ctx);
+        let notices = app.session.notices_since(mark);
+        assert!(notices.iter().any(|n| n.error && n.text.contains(fallback_script_name(ScriptFont::Latin))), "{notices:?}");
+        assert!(!notices.iter().any(|n| n.text.contains("Azerbaijani")), "{notices:?}");
+        assert_eq!(app.lang().code(), "az");
+    }
+
+    /// A complete font delivered through the real inbox must release the activation guard.
+    /// The isolated process keeps its permanent downloaded-font slot out of other tests.
+    #[test]
+    fn a_complete_download_activates_the_requested_language() {
+        #[cfg(not(target_arch = "wasm32"))]
+        if crate::isolate_account_test("language_coverage_tests::a_complete_download_activates_the_requested_language") {
+            return;
+        }
+        let (mut app, ctx) = without_script_font("vi");
+        let inbox = Inbox::default();
+        app.services.font_inbox = Some(inbox.clone());
+        frame(&mut app, &ctx);
+        assert_eq!(app.lang(), i18n::Lang::EN, "missing letters must keep the readable language");
+        let bytes = include_bytes!("../../render/testdata/test-latin-catalog.otf");
+        let url = rustgis_engine::render::fonts::script_font_url(rustgis_engine::render::fonts::ScriptFont::Latin).unwrap();
+        inbox.lock().unwrap().push((url.into(), bytes.to_vec()));
+        for _ in 0..3 {
+            frame(&mut app, &ctx);
+        }
+        assert_eq!(app.lang().code(), "vi", "the admitted font must activate Vietnamese");
+        app.run("ui.language", json!({"code": "az"})).unwrap();
+        for _ in 0..3 {
+            frame(&mut app, &ctx);
+        }
+        assert_eq!(app.lang().code(), "az", "the same complete fallback supports Azerbaijani");
+    }
+
+    #[test]
+    fn a_download_must_cover_its_catalog_not_just_the_probe_character() {
+        let bytes = include_bytes!("../../render/testdata/test-fallback.otf");
+        for script in rustgis_engine::render::fonts::ScriptFont::ALL {
+            assert!(rustgis_engine::render::fonts::draws_script(bytes, 0, script), "fixture should draw the probe for {script:?}");
+            assert!(!super::valid_script_download(bytes, script), "{script:?}: a partial font must not fill the permanent slot/cache");
+        }
+    }
+
+    #[test]
+    fn wrong_script_downloads_are_rejected_and_the_language_can_be_retried() {
+        let (mut app, ctx) = without_script_font("bn");
+        let inbox = Inbox::default();
+        app.services.font_inbox = Some(inbox.clone());
+        let url = rustgis_engine::render::fonts::script_font_url(rustgis_engine::render::fonts::ScriptFont::Bengali).unwrap();
+        let face = egui::FontDefinitions::default().font_data.get("Ubuntu-Light").unwrap().font.as_ref().as_ref().to_vec();
+        inbox.lock().unwrap().push((url.into(), face));
+        frame(&mut app, &ctx);
+        assert_eq!(app.lang(), i18n::Lang::EN);
+        assert!(!app.extra_fonts.iter().any(|(name, _, _)| name.starts_with("web-")), "never install a wrong-script font");
+        assert!(app.fonts_failed.contains(&"script-Bengali".to_string()));
+        app.run("ui.language", json!({"code": "bn"})).unwrap();
+        assert!(app.fonts_failed.is_empty(), "explicit retry clears the failure");
+        assert!(!app.fonts_requested.contains(&"script-Bengali".to_string()), "failed request must not suppress the retry");
+    }
+
+    #[test]
+    fn a_region_tag_is_not_proof_that_its_font_draws_the_catalog() {
+        let (mut app, ctx) = without_script_font("fa");
+        app.extra_fonts.push((
+            "wrong-face".into(),
+            egui::FontDefinitions::default().font_data.get("Ubuntu-Light").unwrap().clone(),
+            Some(rustgis_engine::render::fonts::ScriptFont::Arabic),
+        ));
+        // Preserve the deterministic bundled stack rather than the host's system UI font.
+        app.fonts_dirty = false;
+        frame(&mut app, &ctx);
+        frame(&mut app, &ctx);
+        assert_eq!(app.lang(), i18n::Lang::EN, "a valid font with no Persian must not activate Persian");
+    }
+}
+
+#[cfg(test)]
 mod cjk_download_tests {
+    /// Initializes the font stack before a poll can recheck actual missing characters.
+    fn poll_cjk(app: &mut super::RustGisApp) {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.ensure_data_cjk_font(ui.ctx()));
+        output.textures_delta.clear();
+    }
+
     use rustgis_engine::render::fonts::{CjkRegion, CjkScript};
 
     /// The map's ideographs take the interface's CJK region, else that of the first CJK language
@@ -7217,20 +7990,20 @@ mod cjk_download_tests {
         use rustgis_engine::render::fonts::{cjk_font_url, note_missing_cjk, take_missing_cjk};
         let mut app = crate::RustGisApp::with_sample();
         let _ = take_missing_cjk();
-        let said =
-            |app: &crate::RustGisApp, mark| app.session.notices_since(mark).iter().filter(|n| n.text.contains("text on the map")).count();
+        let said = |app: &crate::RustGisApp, mark| app.session.notices_since(mark).len();
         let mark = app.session.notice_mark();
-        app.ensure_data_cjk_font();
+        poll_cjk(&mut app);
         assert_eq!(said(&app, mark), 0, "nothing missing, nothing said");
         note_missing_cjk('臺');
         note_missing_cjk('北');
-        app.ensure_data_cjk_font();
+        poll_cjk(&mut app);
         assert_eq!(said(&app, mark), 1, "{:?}", app.session.notices_since(mark));
+        assert!(app.session.notices_since(mark)[0].text.contains("Chinese (Simplified) text"));
         note_missing_cjk('市');
-        app.ensure_data_cjk_font();
+        poll_cjk(&mut app);
         assert_eq!(said(&app, mark), 1, "once a script");
         note_missing_cjk('한');
-        app.ensure_data_cjk_font();
+        poll_cjk(&mut app);
         assert_eq!(said(&app, mark), 2);
 
         // In the browser the face is asked for, once, and that is said.
@@ -7240,7 +8013,7 @@ mod cjk_download_tests {
         let mark = app.session.notice_mark();
         for _ in 0..2 {
             note_missing_cjk('か');
-            app.ensure_data_cjk_font();
+            poll_cjk(&mut app);
         }
         assert_eq!(*asked.lock().unwrap(), vec![cjk_font_url(CjkRegion::Japanese).to_string()]);
         assert_eq!(said(&app, mark), 1, "{:?}", app.session.notices_since(mark));
@@ -7252,7 +8025,7 @@ mod cjk_download_tests {
         let mark = app.session.notice_mark();
         for _ in 0..2 {
             note_missing_cjk('か');
-            app.ensure_data_cjk_font();
+            poll_cjk(&mut app);
         }
         assert_eq!(said(&app, mark), 1, "{:?}", app.session.notices_since(mark));
         assert_eq!(asked.lock().unwrap().len(), 1);
@@ -7260,7 +8033,7 @@ mod cjk_download_tests {
         // A face the map's text asked for that failed is asked for again when a language is
         // picked, the retry its failure notice offers, though nothing notes it again.
         note_missing_cjk('한');
-        app.ensure_data_cjk_font();
+        poll_cjk(&mut app);
         let korean = cjk_font_url(CjkRegion::Korean).to_string();
         assert_eq!(asked.lock().unwrap().last(), Some(&korean));
         let name = format!("script-{:?}", rustgis_engine::render::fonts::ScriptFont::Cjk(CjkRegion::Korean));
@@ -7333,6 +8106,7 @@ pub(crate) fn isolate_account_test(name: &str) -> bool {
 /// and a test that replaces it (`set_fetcher`) would answer another's downloads. So do tests that
 /// log in to a connection, as a login replaced or ended empties the cache (`cache::clear`), and
 /// tests that wait for what it reads (tiles, an archive's header), which that would drop.
+#[expect(clippy::disallowed_methods, reason = "a thread the system refuses fails the test, as it should")]
 #[cfg(test)]
 pub(crate) mod fetching {
     use std::io::{Read, Write};
@@ -7528,6 +8302,7 @@ const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
     "cube.reduce",
 ];
 
+#[expect(clippy::disallowed_methods, reason = "a thread the system refuses fails the test, as it should")]
 #[cfg(test)]
 mod record_tests {
     use super::{DEFAULTS_TO_ACTIVE_LAYER, RustGisApp};
@@ -7777,6 +8552,22 @@ mod record_tests {
             assert_eq!(omitted, usize::from(succeeded), "{outcome}: {notices:?}");
             assert_eq!(notices.iter().filter(|n| n.error).count(), usize::from(!succeeded), "{outcome}: {notices:?}");
         }
+    }
+
+    /// A WCS coverage's download keeps the system it was asked for in (`coverageCrs`, from
+    /// `service.coverage`), for `layer.addDownload` to read an answer that doesn't say its own in
+    /// it (#2032); a value that isn't text isn't passed on.
+    #[test]
+    fn a_coverage_download_keeps_the_system_it_was_asked_in() {
+        let _turn = crate::fetching::turn();
+        rustgis_engine::render::rustgis_tiles::cache::set_fetcher(|_, _| {});
+        let mut app = RustGisApp::with_sample();
+        let url = "https://wcs.invalid/wcs?SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage&COVERAGEID=dem";
+        app.run("ui.addUrl", json!({"url": url, "name": "Terrain", "coverage": true, "coverageCrs": "EPSG:2056"})).unwrap();
+        app.run("ui.addUrl", json!({"url": url, "name": "Other", "coverage": true, "coverageCrs": 2056})).unwrap();
+        let kept: Vec<serde_json::Value> = app.ui.downloads.iter().map(|d| d.params["coverageCrs"].clone()).collect();
+        assert_eq!(kept, [json!("EPSG:2056"), serde_json::Value::Null]);
+        assert!(app.ui.downloads.iter().all(|d| d.params["coverage"] == true));
     }
 
     /// A window read off the frame is a step all the same: the command that reads it, with its box,

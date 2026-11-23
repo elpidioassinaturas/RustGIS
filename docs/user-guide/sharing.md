@@ -65,10 +65,16 @@ goes below 0). Neither has a CRS; STL stores them as unitless 32-bit floats, so 
 **Data › Export** (or `share.exportLayer`, **Export Features**) writes a layer to GeoJSON, CSV,
 GeoPackage, GeoParquet, Shapefile (including a zip), FlatGeobuf, KML, KMZ or GPX (see
 [Writing](data-formats.md#writing)). GeoPackage, Shapefile and FlatGeobuf use the layer's source
-coordinate system by default; the `crs` parameter chooses another. Export Features writes the
+coordinate system by default, and the project's (see
+[the project's coordinate system](maps.md#the-projects-coordinate-system)) for a layer with none of
+its own, which the export says (GeoParquet too); the `crs` parameter chooses another. Export Features writes the
 features the layer's definition query keeps and reports how many it leaves out. For a streamed
 layer, it applies the query to the whole source, including features outside the current view.
-The web app downloads every format but GeoPackage and FlatGeobuf. `share.exportTable` exports a
+A feature with a place that can't be given in the system written (one far past where the
+layer's own system reaches, exported in WGS 84) is written without its geometry, and the export
+says how many; a format that holds only features with geometry leaves it out. Copy, Data
+Interop, the shared web map, web layer, geodata service and locator, 3D files and the mobile
+map package do the same. The web app downloads every format but GeoPackage and FlatGeobuf. `share.exportTable` exports a
 standalone table. **Data › Export** also writes rasters to GeoTIFF, and **Data Interop** converts layers to
 KML, GPX or CSV with WKT. Layouts, reports and presentations export from their own tabs and panes
 (see [Layouts and Reports](layouts.md)).

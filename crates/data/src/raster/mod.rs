@@ -1267,7 +1267,12 @@ impl Raster {
 
     /// The pixel under a longitude/latitude point.
     pub fn pixel_at(&self, lonlat: Coord) -> Option<(i64, i64)> {
-        let (c, r) = self.transform.to_pixel(self.transformer.from_lonlat(lonlat)?);
+        self.pixel_at_world(self.transformer.from_lonlat(lonlat)?)
+    }
+
+    /// The pixel under a place in the raster's own system.
+    pub fn pixel_at_world(&self, w: Coord) -> Option<(i64, i64)> {
+        let (c, r) = self.transform.to_pixel(w);
         let (c, r) = (self.wrap_col(c).floor(), r.floor());
         (c >= 0.0 && r >= 0.0 && c < self.width as f64 && r < self.height as f64).then_some((c as i64, r as i64))
     }
@@ -2199,7 +2204,13 @@ pub(crate) mod tests {
                 let cog = geotiff::read(std::io::Cursor::new(cogwrite::write(&r, 0).unwrap()), "cog").unwrap();
                 assert_eq!((back.data_type.as_str(), cog.data_type.as_str()), ("Float32", "Float32"));
             }
-            assert_eq!(back.bands.iter().map(stats).collect::<Vec<_>>(), r.bands.iter().map(stats).collect::<Vec<_>>(), "{data_type}");
+            // The alpha band's top is its type's opaque value: a 16-bit one, written as floats, is
+            // opaque at 1 (its pixels are divided by 65535).
+            let mut same: Vec<_> = r.bands.iter().map(stats).collect();
+            if let Some(a) = same.get_mut(3).filter(|_| data_type == "UInt16") {
+                a.2 = 1.0;
+            }
+            assert_eq!(back.bands.iter().map(stats).collect::<Vec<_>>(), same, "{data_type}");
         }
         // As the map draws it: an alpha under half a 256th of opaque is see-through (16 bits: 100
         // of 65535), one above it isn't (200).

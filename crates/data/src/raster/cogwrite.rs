@@ -34,6 +34,9 @@
 //!
 //! The untiled GeoTIFF ([`super::geotiff::write`]) is written here too, by [`write_strips`]: one
 //! image in strips of rows, with the same predictors, Deflate effort and threads, and no overviews.
+//!
+//! Alpha: a float file's alpha is opaque at 1, so the alpha of an integer raster written as floats
+//! is divided by its opaque value (255 for bytes), as the untiled writer does.
 
 use std::io::{Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -137,10 +140,11 @@ fn fits_shorts(r: &Raster, b: usize) -> bool {
     r.data_type == "UInt16" && nodata_ok && ((s.min >= 0.0 && s.max <= 65_535.0) || s.count == 0)
 }
 
-/// Chooses the file's samples like [`super::geotiff::write`] does: a colour raster's colour bands
-/// (as bytes when they are bytes, alpha kept), otherwise `band` alone. 16-bit rasters stay 16-bit,
-/// and a grey byte raster is written as bytes when no pixel needs a no-data value the bytes can't
-/// hold. Grey with alpha keeps both bands; a palette raster keeps its colour table.
+/// Chooses the file's samples like [`super::geotiff::write`] does, except for a colour cell with
+/// no value under an opaque alpha: it is written see-through here (its alpha 0), not as floats
+/// there. A colour raster's colour bands are written (as bytes when they are bytes, alpha kept),
+/// otherwise `band` alone. 16-bit rasters stay 16-bit, and a grey byte raster is written as bytes
+/// when no pixel needs a no-data value the bytes can't hold. Grey with alpha keeps both bands; a palette raster keeps its colour table.
 fn plan(r: &Raster, band: usize) -> Result<Plan> {
     let int_nodata = |max: f64| r.nodata.filter(|d| (0.0..=max).contains(d) && d.fract() == 0.0).map(|d| d as u16);
     // The type of a set of bands: bytes, else 16-bit when that is what they are, else floats.
@@ -325,6 +329,7 @@ fn tile_samples(r: &Raster, plan: &Plan, lv: &Level, tx: u32, ty: u32) -> Vec<u8
     let mut raw = Vec::with_capacity(t * t * spp * bps);
     let float_pad = r.nodata.map_or(f32::NAN, |d| d as f32);
     let int_pad = plan.nodata_int.unwrap_or(0);
+    let opaque = super::alpha_max(&r.data_type);
     let mut px = vec![f32::NAN; spp];
     for y in 0..t {
         let oy = ty as usize * t + y;
@@ -341,6 +346,13 @@ fn tile_samples(r: &Raster, plan: &Plan, lv: &Level, tx: u32, ty: u32) -> Vec<u8
                 && let Some(alpha) = px.get_mut(a)
             {
                 *alpha = 0.0;
+            }
+            // A float file's alpha is opaque at 1: an integer raster's is divided by its opaque value.
+            // (No no-data tag goes with an alpha band, so none of its cells is a no-data one.)
+            if plan.sample == Sample::Float
+                && let Some(alpha) = plan.alpha.and_then(|a| px.get_mut(a))
+            {
+                *alpha /= opaque;
             }
             for v in &px {
                 match plan.sample {
@@ -1063,6 +1075,16 @@ pub fn write_file(r: &Raster, band: usize, path: &Path) -> Result<CogInfo> {
         let _ = std::fs::remove_file(&tmp);
     }
     res
+}
+
+/// [`write_file`]'s file, written and synced beside `path` but not yet in its place: the caller
+/// installs it ([`crate::io::StagedWrite::commit`]) once nothing can cancel the result any more,
+/// and dropping it leaves `path` as it was.
+pub fn write_staged(r: &Raster, band: usize, path: &Path) -> Result<(CogInfo, crate::io::StagedWrite)> {
+    let (staged, info) = crate::io::stage_streamed(path, |w| write_to(r, band, Flavour::Auto, w))?;
+    // The last look while it is written: a Cancel that came meanwhile leaves `path` as it was.
+    crate::progress::check()?;
+    Ok((info, staged))
 }
 
 #[cfg(test)]

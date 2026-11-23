@@ -315,7 +315,7 @@ impl ParquetSource {
             count,
             crs: reproject.label(),
             indexed: covering.is_some(),
-            notes,
+            notes: notes.into(),
             zm_dropped: false,
         };
         info.note_columns(
@@ -347,7 +347,7 @@ impl ParquetSource {
             match src.peek_zm() {
                 Some(true) => src.info.drop_zm(None),
                 Some(false) => {}
-                None => src.info.notes.push("couldn't tell whether it has Z or M values, which RustGIS doesn't keep".into()),
+                None => src.info.notes.push("couldn't tell whether it has Z or M values, which RustGIS doesn't keep"),
             }
         }
         if src.info.geometry_type == GeometryType::None {
@@ -518,6 +518,10 @@ impl FeatureSource for ParquetSource {
         (lo.is_finite() && hi.is_finite() && lo <= hi).then_some((lo, hi))
     }
 
+    fn reads_own_box(&self) -> bool {
+        true
+    }
+
     /// Its own system, in which it gives its features as the file holds them.
     fn coord_crs(&self) -> crate::raster::Crs {
         self.reproject.crs()
@@ -531,7 +535,7 @@ impl FeatureSource for ParquetSource {
         self.attribute();
         let limit = clamp_limit(req.limit);
         let md = self.reader.metadata();
-        let native = req.extent.and_then(|e| self.reproject.extent_from_lonlat(&e));
+        let native = self.reproject.request_box(req);
         // Preserve ordinary candidate counts; a refused view needs a geometry scan to count.
         if limit == 0 && req.extent.is_some() && native.is_none() {
             return Err(super::unbounded_count());
@@ -697,7 +701,7 @@ impl FeatureSource for ParquetSource {
                 // Null geometry is valid; malformed non-null WKB is skipped and counted.
                 let geometry = match geoms.get(k).and_then(|b| b.as_deref()) {
                     Some(bytes) => {
-                        let Some(geometry) = wkb::decode(bytes).and_then(|g| self.reproject.read(g)) else {
+                        let Some(geometry) = wkb::decode(bytes).and_then(|g| self.reproject.place(g, req)) else {
                             skipped += 1;
                             continue;
                         };
@@ -705,7 +709,7 @@ impl FeatureSource for ParquetSource {
                     }
                     None => None,
                 };
-                let matches_extent = geometry.as_ref().map_or(req.extent.is_none(), |g| g.in_request(req));
+                let matches_extent = geometry.as_ref().map_or(req.extent.is_none(), |g| g.inside);
                 if !matches_extent || (late && !sample.wants()) {
                     continue;
                 }
@@ -724,7 +728,7 @@ impl FeatureSource for ParquetSource {
             unread_dates,
             rounded_dates,
             null_text: Vec::new(),
-            notes: Vec::new(),
+            notes: Default::default(),
             not_utf8: Vec::new(),
         })
     }
@@ -750,7 +754,7 @@ impl FeatureSource for ParquetSource {
         if self.remote.is_some() {
             return Err(DataError::Unsupported("a whole GeoParquet by its web address read a chunk at a time".into()));
         }
-        let req = Request { extent, limit: usize::MAX };
+        let req = Request { extent, limit: usize::MAX, own: None };
         let md = self.reader.metadata();
         let native = extent.and_then(|e| self.reproject.extent_from_lonlat(&e));
         let mut out = Batch { complete: true, ..Batch::default() };
@@ -806,7 +810,7 @@ impl FeatureSource for ParquetSource {
                 crate::progress::step(1)?;
                 let geometry = match geoms.get(k).and_then(|b| b.as_deref()) {
                     Some(bytes) => {
-                        let Some(geometry) = wkb::decode(bytes).and_then(|geom| self.reproject.read(geom)) else {
+                        let Some(geometry) = wkb::decode(bytes).and_then(|geom| self.reproject.place(geom, &req)) else {
                             out.skipped += 1;
                             continue;
                         };
@@ -814,7 +818,7 @@ impl FeatureSource for ParquetSource {
                     }
                     None => None,
                 };
-                if !geometry.as_ref().map_or(req.extent.is_none(), |g| g.in_request(&req)) {
+                if !geometry.as_ref().map_or(req.extent.is_none(), |g| g.inside) {
                     continue;
                 }
                 let geometry = geometry.map(|p| p.geometry);

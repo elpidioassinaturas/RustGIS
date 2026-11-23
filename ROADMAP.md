@@ -69,12 +69,9 @@ The shared pieces the everyday workflow stands on.
 ### Correct results
 A result is right, or RustGIS says what it lost or assumed
 ([AGENTS.md](AGENTS.md#never-silent)).
-- Known silent losses: DuckDB queries (`ST_Force2D`) drop Z without a notice; the OSM reader leaves out rings that don't close, rings and member ways with
-  nodes or ways the file doesn't hold, and inner rings outside every outer one; and the text
-  readers' losses listed as `Silent` in `crates/engine/tests/integration/never_silent_reading.rs`, among them
-  unreadable coordinates, holes and parts in KML, GeoRSS, MapInfo and
-  DXF,
-  and attribute fields/values in XLSB short-cell workbooks (the original SheetJS 0.18.5 clean
+- Known silent losses: DXF polyface faces with missing vertices and unreadable supplied Z outside 3D POLYLINE vertices; and the text
+  reader loss listed as `Silent` in `crates/engine/tests/integration/never_silent_reading.rs`:
+  attribute fields/values in XLSB short-cell workbooks (the original SheetJS 0.18.5 clean
   workbook retains its point but no attributes, without a notice). A fix makes
   its case `Said` or `Imported` _(open)_.
 - Lossy sample files in `never_silent_reading.rs` for the readers it doesn't cover yet:
@@ -85,13 +82,12 @@ A result is right, or RustGIS says what it lost or assumed
   FlatGeobuf, GeoParquet and FileGDB, Z/M-loss and non-UTF-8 text cases for Shapefile, and
   ring-loss cases for OSM PBF, separate Z- and M-loss cases for feature-service PBF, and WKT
   height/member losses for XLSX, ODS, XLS and XLSB, and
-  error-cell losses for XLSX; other loss kinds remain.
+  error-cell losses for XLSX and invalid-date losses for standalone DBF; other loss kinds remain.
   XLSM shares the XLSX parser; macros are untested.
   Exports are checked by `never_silent_roundtrip.rs` _(open)_.
-- Loss notices classified by code so scheduled jobs can detect them (the engine carries codes
-  through reader and tool results today; the remaining notices are to migrate). Then
-  `rustgis-cli run --strict`, which exits non-zero on a disallowed loss, and the codes exposed
-  to Python and MCP ([#2371](https://github.com/opengeos/RustGIS/issues/2371)).
+- The remaining loss notices classified by code (the engine carries codes through reader and
+  tool results today), so `rustgis-cli run --strict`, Python's warnings and MCP's `losses` see
+  them ([#2371](https://github.com/opengeos/RustGIS/issues/2371)).
 - NTv2 grid shifts named in a file's own definition (a WKT or PROJ string that binds NAD27 to
   WGS 84 through a `.gsb` grid), which are said but not applied today (the grids PROJ's
   operations use are applied when present and downloaded on request). _Coordinate first_ (needs
@@ -111,8 +107,6 @@ features build on.
   already are refused, [#1364](https://github.com/opengeos/RustGIS/pull/1364)); packages
   (`.rgispkg`) that hold everything or say what stayed linked; projects written to disk as they
   save, not built in memory first.
-- A snapshot test of command ids and parameters, so a removal is always deliberate (the project
-  file's JSON Schema, its fixtures and the files past releases saved are checked today).
 - A compressed encoding of today's project JSON, read one release before it is written.
   _Coordinate first_: an issue is needed.
 - A system for the data a project refers to: named connections, copies that remember their
@@ -261,7 +255,7 @@ attributes kept.
 - Kriging with a fitted variogram and leave-one-out cross-validation (the variogram is a default
   estimated from the points and extent today, not fitted; `kriging.rs`).
 - Charts linked to the selection: histogram, scatter, bar and box plots of a layer's fields.
-- H3 grids built in, next to the A5 grids _(open)_.
+- ISEA3H (DGGAL) and DGGRID grids, next to Generate Tessellation's H3, S2, A5 and hexagons _(open)_.
 - Reverse geocoding; a DEM downloader so
   viewshed works without a loaded elevation raster _(open)_.
 - Reference results for zonal statistics and the terrain tools, beside the existing analysis

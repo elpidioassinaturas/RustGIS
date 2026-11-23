@@ -3254,8 +3254,8 @@ fn layer_list(form: &mut GpForm, ui: &mut Ui, param: &'static str, cur: &str, of
 /// Whether a layer parameter's picker offers no layer (`—`), to leave it out again once one is
 /// picked: when it is optional and names no layer as its default. One that does would run with
 /// that layer when left empty (its default is filled in then), so `—` would show one layer and
-/// run with another (#1517). A built-in tool's `layer` picker offers none (A5 Grid's follows the
-/// active layer).
+/// run with another (#1517). A built-in tool's `layer` picker offers none (Generate Tessellation's
+/// follows the active layer).
 fn no_layer_offered(p: &rustgis_engine::analysis::ParamSpec) -> bool {
     !p.required && serde_json::from_str::<String>(p.default).map_or(true, |n| n.is_empty())
 }
@@ -3263,8 +3263,8 @@ fn no_layer_offered(p: &rustgis_engine::analysis::ParamSpec) -> bool {
 impl GpForm {
     /// Opens a tool, pre-filling layer parameters from the active layer. An external tool's
     /// optional input stays empty until it's picked: it changes what the tool does, as a weight
-    /// or a mask would (#1517). A built-in tool's is filled as before; the form shows A5 Grid's,
-    /// the only one, when its options ask for it (`applies`).
+    /// or a mask would (#1517). A built-in tool's is filled as before; the form shows Generate
+    /// Tessellation's, the only one, when its options ask for it (`applies`).
     pub fn open(&mut self, tool: Option<&'static str>, s: &Session) {
         self.tool = tool;
         self.values.clear();
@@ -7020,7 +7020,8 @@ pub(crate) fn source_details(ui: &mut Ui, l: &Layer, t: &Tokens) {
     egui::Grid::new("details").num_columns(2).striped(true).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
         let rows = [
             ("Geometry", tl!(l.geometry_type().label()).to_string()),
-            ("Features", l.dataset.features.len().to_string()),
+            // A layer read in place has its source's total, "?" when the source doesn't say.
+            ("Features", l.feature_count().map_or_else(|| "?".to_string(), |n| n.to_string())),
             ("Fields", l.dataset.fields.len().to_string()),
             ("Selected", l.selection.len().to_string()),
             ("Symbology", tl!(l.renderer.kind_label()).to_string()),
@@ -7817,6 +7818,7 @@ pub(crate) fn layout_menu(app: &mut RustGisApp, ui: &mut Ui, n: &str) {
     }
 }
 
+#[expect(clippy::disallowed_methods, reason = "a thread the system refuses fails the test, as it should")]
 #[cfg(test)]
 mod tests {
     use super::*;

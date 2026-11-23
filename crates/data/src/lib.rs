@@ -166,6 +166,9 @@ impl DataError {
 }
 
 #[cfg(test)]
+mod unplaced_out_tests;
+
+#[cfg(test)]
 mod secret_redaction_tests {
     use super::*;
 
@@ -502,23 +505,33 @@ impl Dataset {
         let to = self.held_in.to(crs)?;
         if !to.is_identity() {
             let lonlat = self.lonlat_conversion()?;
-            // Before the rows are copied (by the first change), which a cancelled command needn't.
-            stop_when_asked(0)?;
-            let mut features = self.features.clone();
-            for (i, f) in features.iter_mut().enumerate() {
-                stop_when_asked(i)?;
-                if let Some(g) = &f.geometry {
-                    let mut past = false;
-                    if crs == raster::Crs::WebMercator {
-                        g.for_each_coord(|c| past |= c.is_finite() && lonlat.point(c).is_some_and(|l| l.y.abs() > rustgis_geom::MAX_LAT));
-                    }
-                    let held = (!past).then(|| convert_keeping_missing(&to, g, &HeldPlaces::default())).flatten();
-                    f.geometry = Some(
-                        held.ok_or_else(|| format!("{}: feature {} has a place that can't be held in {}", self.name, f.id, crs.label()))?,
-                    );
+            let past = |g: &Geometry| {
+                let mut past = false;
+                if crs == raster::Crs::WebMercator {
+                    g.for_each_coord(|c| past |= c.is_finite() && lonlat.point(c).is_some_and(|l| l.y.abs() > rustgis_geom::MAX_LAT));
                 }
+                past
+            };
+            let held = |g: &Geometry| (!past(g)).then(|| convert_keeping_missing(&to, g, &HeldPlaces::default())).flatten();
+            // Each place is converted once, and what goes in is what was checked (a second pass
+            // could convert otherwise, as grids arriving meanwhile change the operations): the
+            // converted geometries are kept beside the rows, then put in their place, so a refusal
+            // or a Cancel changes nothing. Only geometry is kept twice meanwhile, never the
+            // attributes, and rows no one else holds aren't copied.
+            let mut converted = Vec::with_capacity(self.features.len());
+            for (i, f) in self.features.iter().enumerate() {
+                stop_when_asked(i)?;
+                converted.push(match &f.geometry {
+                    Some(g) => Some(
+                        held(g)
+                            .ok_or_else(|| format!("{}: feature {} has a place that can't be held in {}", self.name, f.id, crs.label()))?,
+                    ),
+                    None => None,
+                });
             }
-            self.features = features;
+            for (f, g) in self.features.iter_mut().zip(converted) {
+                f.geometry = g;
+            }
         }
         self.held_in = crs;
         Ok(())
@@ -695,9 +708,8 @@ impl Serialize for Dataset {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ReadReport {
     pub skipped: usize,
-    pub messages: Vec<String>,
-    /// Classified losses to publish alongside the ordinary messages.
-    pub losses: Vec<loss::LossMessage>,
+    /// What the read says, each loss with its code ([`loss::Note`]).
+    pub messages: loss::Notes,
     /// The files read and the rows read from them, when the read recorded them
     /// ([`sync::FileSync::around`]): what a layer kept in the project compares with its source
     /// before writing edits back.
@@ -711,13 +723,6 @@ pub struct ReadReport {
     /// The extrusion the reader suggests for the layer (a city model's volumes): applied when the
     /// layer is added, and only then; a reload keeps the layer's own.
     pub extrusion: Option<SuggestedExtrusion>,
-}
-
-impl ReadReport {
-    /// All report messages in their text form for consumers that do not carry loss codes.
-    pub fn into_messages(self) -> impl Iterator<Item = String> {
-        self.messages.into_iter().chain(self.losses.into_iter().map(|loss| loss.text))
-    }
 }
 
 /// An extrusion a reader suggests for a layer of polygons: heights from one field, on a base from
@@ -758,6 +763,15 @@ fn layer_list(names: &[&str]) -> String {
     let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(", ");
     let more = if names.len() > 5 { format!(" and {} more", names.len() - 5) } else { String::new() };
     format!("{} layers ({shown}{more})", names.len())
+}
+
+/// What `what` (an export to a file, a copy, a package: "{target}") says of the `n` features of
+/// `layer` it took without their geometry, as a place of each can't be given in
+/// longitude/latitude ([`Dataset::in_lonlat_leaving_out`]). `None` for none.
+pub fn unplaced_note(target: &str, layer: &str, n: usize) -> Option<String> {
+    (n > 0).then(|| {
+        format!("{target}: {n} feature(s) of {layer} have a place that can't be given in longitude/latitude, so their geometry is left out (and the feature, where only features with geometry are kept)")
+    })
 }
 
 /// What an export of `layers` written in `crs` says its geometry lacks, one notice per kind. Each
@@ -1106,6 +1120,29 @@ impl Dataset {
             }
         }
         Ok(Cow::Owned(out))
+    }
+
+    /// [`Dataset::in_lonlat`] for what leaves the session (an export, a copy, a package, a
+    /// published map): a feature with a place that can't be given in longitude/latitude keeps its
+    /// attributes and loses its geometry in the copy, rather than failing; returns how many did
+    /// ([`unplaced_note`]). Refused only when its system can't be converted at all.
+    pub fn in_lonlat_leaving_out(&self) -> std::result::Result<(Cow<'_, Dataset>, usize), String> {
+        let to = self.lonlat_conversion()?;
+        if to.is_identity() {
+            return Ok((Cow::Borrowed(self), 0));
+        }
+        stop_when_asked(0)?;
+        let mut out = self.clone();
+        out.held_in = raster::Crs::LonLat;
+        let mut unplaced = 0usize;
+        for (i, f) in out.features.iter_mut().enumerate() {
+            stop_when_asked(i)?;
+            if let Some(g) = f.geometry.take() {
+                f.geometry = convert_keeping_missing(&to, &g, &HeldPlaces::default());
+                unplaced += usize::from(f.geometry.is_none());
+            }
+        }
+        Ok((Cow::Owned(out), unplaced))
     }
 
     /// The dataset in `crs`, the system a tool works in when it works in its first input's own
@@ -1474,6 +1511,42 @@ mod tests {
         polar.push(Some(Geometry::Point(Coord::new(11.5, 89.0))), vec![]);
         assert!(polar.hold_as(raster::Crs::WebMercator, Some(raster::Crs::WebMercator)).is_err());
         assert_eq!((polar.coord_crs(), polar.crs), (raster::Crs::LonLat, None));
+    }
+
+    /// Holding converts the rows where they are, with no copy of rows no one else holds; a Cancel,
+    /// or a place the system can't hold, found among the last rows changes none of them.
+    #[test]
+    fn holding_converts_in_place_and_a_cancel_or_refusal_changes_nothing() {
+        use crate::progress::tests::Counted;
+        let utm = raster::Crs::Epsg(32632);
+        let made = |last_lat: f64| {
+            let mut ds = Dataset::new("made", GeometryType::Point, vec![]);
+            for i in 0..600 {
+                let lat = if i == 599 { last_lat } else { 48.0 };
+                ds.push(Some(Geometry::Point(Coord::new(11.5, lat))), vec![]);
+            }
+            ds
+        };
+        let mut ds = made(48.0);
+        let (held, copied) = rows_copy::with(Box::new(|| {}), || ds.hold_in(utm));
+        held.unwrap();
+        assert!(!copied && ds.coord_crs() == utm, "converted where the rows are");
+        let Some(Geometry::Point(c)) = ds.features[0].geometry else { panic!("no point") };
+        let expected = raster::Crs::LonLat.to(utm).unwrap().point(Coord::new(11.5, 48.0)).unwrap();
+        assert_eq!((c.x.to_bits(), c.y.to_bits()), (expected.x.to_bits(), expected.y.to_bits()));
+        // Cancelled at the third check (row 512), after the first rows were looked at.
+        let mut ds = made(48.0);
+        let before = ds.features.clone();
+        let probe = std::sync::Arc::new(Counted { after_checks: Some(2), ..Default::default() });
+        {
+            let _g = crate::progress::install(Some(probe));
+            assert_eq!(ds.hold_in(utm), Err(DataError::Cancelled.to_string()));
+        }
+        assert!(ds.features.shares(&before) && ds.coord_crs() == raster::Crs::LonLat);
+        let mut polar = made(89.0);
+        let before = polar.features.clone();
+        assert!(polar.hold_in(raster::Crs::WebMercator).unwrap_err().contains("feature 600"));
+        assert!(polar.features.shares(&before) && polar.coord_crs() == raster::Crs::LonLat);
     }
 
     /// A dataset held in another system converts into it, and back, at the same places; one

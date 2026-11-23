@@ -14,11 +14,16 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+use crate::projection::Flat;
 use rustgis_data::source::{Batch, FeatureSource, Request, SourceInfo};
-use rustgis_geom::Extent;
+use rustgis_geom::{Coord, Extent};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod own_tests;
 mod render_lod;
+mod render_view;
+pub use render_view::KEPT_VIEW_BYTES;
 mod window;
 pub(crate) use window::Query;
 
@@ -138,7 +143,7 @@ pub struct SourceLayer {
     conversion_fallback: Option<String>,
     /// Losses from a conversion actually performed while opening, consumed once by its caller.
     #[serde(skip)]
-    conversion_notes_unsaid: Vec<String>,
+    conversion_notes_unsaid: rustgis_data::loss::Notes,
     /// Values in date fields a view read found weren't dates ([`Batch::unread_dates`]), until
     /// said by [`SourceLayer::take_unread_dates`]; once said, later reads aren't counted again.
     /// Kept for each window read ([`Tally`]): a window read again replaces its counts.
@@ -168,7 +173,7 @@ pub struct SourceLayer {
     /// What else view reads lost or assumed ([`Batch::notes`]), until said by
     /// [`SourceLayer::take_read_notes`].
     #[serde(skip)]
-    read_notes: Vec<String>,
+    read_notes: rustgis_data::loss::Notes,
     /// The kinds of note view reads of this opening have given ([`note_kind`]): each is said once,
     /// with the count of the read that first gave it, not again on each redraw.
     #[serde(skip)]
@@ -178,6 +183,9 @@ pub struct SourceLayer {
     /// Whole-source thinning decisions shared by render snapshots, independent of view rows.
     #[serde(skip)]
     render_lod: Arc<Mutex<render_lod::Decisions>>,
+    /// The last view's rows and drawn geometry, shared by render snapshots ([`render_view`]).
+    #[serde(skip)]
+    render_view: Arc<Mutex<render_view::KeptView>>,
     #[serde(skip)]
     pending: Option<Arc<Pending>>,
     /// Projection used for this disposable window's geometry cache.
@@ -704,11 +712,15 @@ pub struct Window {
     pub kept: usize,
     /// The read kept the definition query's matches: `matched` counts them.
     pub filtered: bool,
+    /// The same box in map units, when it was read in the map's own system, which is the
+    /// source's ([`SourceLayer::wanted_in`]): a later view is tested against it there.
+    pub own: Option<Extent>,
 }
 
 /// A read in flight.
 struct Pending {
     extent: Extent,
+    own: Option<Extent>,
     result: Mutex<Option<Result<(Batch, window::Cache), String>>>,
     still: Option<rustgis_data::source::remote::Still>,
 }
@@ -773,11 +785,33 @@ pub(crate) fn another_frame() {
 /// How many windows a [`Tally`] keeps apart.
 const WINDOWS_COUNTED: usize = 64;
 
+/// Which read a batch's counts are of ([`SourceLayer::saw_unread_dates`]): its window's
+/// longitude/latitude extent and, for one read in map units, its box there. Two windows in map
+/// units can share a longitude/latitude extent (both read by the view's where the map can't take
+/// their boxes back), so the box tells them apart.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowKey {
+    extent: Extent,
+    own: Option<Extent>,
+}
+
+impl From<&Extent> for WindowKey {
+    fn from(extent: &Extent) -> Self {
+        WindowKey { extent: *extent, own: None }
+    }
+}
+
+impl From<&Window> for WindowKey {
+    fn from(w: &Window) -> Self {
+        WindowKey { extent: w.extent, own: w.own }
+    }
+}
+
 /// What view reads found, counted for each field by its position, kept for each window read: a
 /// window read again replaces its counts instead of adding to them.
 #[derive(Clone, Default)]
 struct Tally {
-    windows: Vec<(Extent, Vec<usize>)>,
+    windows: Vec<(WindowKey, Vec<usize>)>,
     /// Counts of windows past [`WINDOWS_COUNTED`], added up as they come.
     // ponytail: past 64 windows between two notice passes a window read again adds up as before;
     // keep rows' identity in `Batch` to count exactly.
@@ -785,8 +819,9 @@ struct Tally {
 }
 
 impl Tally {
-    fn saw(&mut self, window: &Extent, counts: &[usize]) {
-        let at = self.windows.iter().position(|(w, _)| w == window);
+    fn saw(&mut self, window: impl Into<WindowKey>, counts: &[usize]) {
+        let window = window.into();
+        let at = self.windows.iter().position(|(w, _)| *w == window);
         if counts.iter().all(|n| *n == 0) {
             if let Some(at) = at {
                 self.windows.remove(at);
@@ -794,7 +829,7 @@ impl Tally {
         } else if let Some((_, kept)) = at.and_then(|at| self.windows.get_mut(at)) {
             *kept = counts.to_vec();
         } else if self.windows.len() < WINDOWS_COUNTED {
-            self.windows.push((*window, counts.to_vec()));
+            self.windows.push((window, counts.to_vec()));
         } else {
             rustgis_data::source::add_unread_dates(&mut self.rest, counts);
         }
@@ -825,7 +860,7 @@ pub enum Polled {
     /// A read is still running.
     Waiting,
     /// A read finished: install its features.
-    Done(Window, Batch),
+    Done(Window, Box<Batch>),
     /// A read failed.
     Failed(String),
 }
@@ -839,10 +874,11 @@ impl SourceLayer {
     /// [`SourceLayer::take_unread_dates`] says it. Once said, later reads aren't counted: they
     /// read the same features again, and the notice says Load All Features counts them all.
     /// Each kind is counted until its own notice is said, so saying one doesn't silence the other.
-    /// `window` is the extent the batch was read for: reading it again replaces its counts, so the
-    /// same rows aren't counted twice. Two different windows that overlap still count the rows
+    /// `window` is what the batch was read for ([`WindowKey`]: its extent, and its box in map
+    /// units): reading it again replaces its counts, so the same rows aren't counted twice. Two different windows that overlap still count the rows
     /// they share twice; the notice says "so far" and Load All Features counts them all.
-    pub fn saw_unread_dates(&mut self, window: &Extent, unread: &[usize], rounded: &[usize]) {
+    pub fn saw_unread_dates(&mut self, window: impl Into<WindowKey>, unread: &[usize], rounded: &[usize]) {
+        let window = window.into();
         if !self.unread_dates_said {
             self.unread_dates.saw(window, unread);
         }
@@ -870,7 +906,7 @@ impl SourceLayer {
 
     /// Keeps what view reads found of text values `<Null>` read as null, until
     /// [`SourceLayer::take_null_text`] says it, as [`SourceLayer::saw_unread_dates`] does for dates.
-    pub fn saw_null_text(&mut self, window: &Extent, counts: &[usize]) {
+    pub fn saw_null_text(&mut self, window: impl Into<WindowKey>, counts: &[usize]) {
         if !self.null_text_said {
             self.null_text.saw(window, counts);
         }
@@ -887,7 +923,7 @@ impl SourceLayer {
 
     /// Keeps what view reads found of text values that aren't UTF-8, until
     /// [`SourceLayer::take_not_utf8`] says it, as [`SourceLayer::saw_unread_dates`] does for dates.
-    pub fn saw_not_utf8(&mut self, window: &Extent, counts: &[usize]) {
+    pub fn saw_not_utf8(&mut self, window: impl Into<WindowKey>, counts: &[usize]) {
         if !self.not_utf8_said {
             let encoding = self.handle.as_ref().map_or("UTF-8", |h| h.text_encoding());
             // Counts of another encoding are of another opening's text: they aren't added to these.
@@ -918,9 +954,14 @@ impl SourceLayer {
     /// their counts ([`note_kind`]: a number starting the note or a clause, before a space); notes
     /// that differ in any other number or word are kinds of their own. Past [`READ_NOTE_KINDS`]
     /// kinds, one last note says there are more.
-    pub fn saw_read_notes(&mut self, notes: &[String]) {
-        for note in notes.iter().filter(|n| !n.trim().is_empty()) {
-            let kind = note_kind(note);
+    pub fn saw_read_notes(&mut self, notes: &[rustgis_data::loss::Note]) {
+        for note in notes.iter().filter(|n| !n.text.trim().is_empty()) {
+            // A kind is its wording without its counts, and its loss code: a coded note isn't
+            // folded into a plain one that reads the same.
+            let kind = match note.loss {
+                Some(code) => format!("{}\u{1f}{}", note_kind(&note.text), code.spec().id),
+                None => note_kind(&note.text),
+            };
             if self.read_note_kinds.contains(&kind) {
                 continue;
             }
@@ -941,7 +982,7 @@ impl SourceLayer {
 
     /// What view reads said they lost or assumed ([`Batch::notes`]) and haven't said yet, each
     /// kind once for the opening ([`SourceLayer::saw_read_notes`]).
-    pub fn take_read_notes(&mut self) -> Vec<String> {
+    pub fn take_read_notes(&mut self) -> rustgis_data::loss::Notes {
         std::mem::take(&mut self.read_notes)
     }
 
@@ -1025,7 +1066,7 @@ impl SourceLayer {
         }
         let mut new =
             SourceLayer { shapefile_crs: self.shapefile_crs, limit: self.limit, byte_budget: self.byte_budget, ..Default::default() };
-        let mut conversion_notes = Vec::new();
+        let mut conversion_notes = rustgis_data::loss::Notes::new();
         let declared_empty;
         let conversion_zm_dropped;
         if let Some(g) = &self.gdal {
@@ -1127,7 +1168,7 @@ impl SourceLayer {
         // Opening a header alone doesn't establish that its payload is readable. Probe the
         // candidate, never the live source, before the caller commits the replacement.
         let handle = new.handle.as_deref().ok_or_else(|| named("the replacement source didn't open"))?;
-        let probe = handle.read(&Request { extent: None, limit: 1 }).map_err(|e| named(&e.to_string()))?;
+        let probe = handle.read(&Request { extent: None, limit: 1, own: None }).map_err(|e| named(&e.to_string()))?;
         if probe.features.is_empty() && probe.skipped > 0 {
             return Err(named(&format!(
                 "no readable features found while checking the replacement ({} rows could not be read)",
@@ -1173,6 +1214,12 @@ impl SourceLayer {
         self.handle.as_ref()?.field_range(field)
     }
 
+    /// Whether its source tests its features against a box in its own system
+    /// ([`FeatureSource::reads_own_box`]); no until it is open.
+    pub fn reads_own_box(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| h.reads_own_box())
+    }
+
     /// A source that can be read whole a chunk at a time, for an export.
     pub fn visit_source(&self) -> Option<Arc<dyn FeatureSource>> {
         self.handle.as_ref().filter(|h| h.visits_chunks()).cloned()
@@ -1202,6 +1249,44 @@ impl SourceLayer {
         // cache. Recover the guard so later frames can cache successful decisions again.
         let mut cache = self.render_lod.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.get_or_try_insert(handle, projection, level, calculate)
+    }
+
+    /// The chunks a frame drew from the source's last view, with their projected and display
+    /// geometry, when that view was read for a longitude/latitude box holding `near`, drawn for
+    /// `key` (the projection and datum grids, as the renderer names them) and holding at most
+    /// `room` bytes (#1065). They hold rows only: the drawing takes the layer's look from the
+    /// layer, its rows and geometry from them ([`crate::Layer::draw_rows_of`]).
+    pub fn kept_view(&self, key: &str, near: &Extent, room: usize) -> Option<Arc<Vec<crate::Layer>>> {
+        let handle = self.handle.as_ref()?;
+        self.render_view.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(handle, key, near, room)
+    }
+
+    /// Whether a frame at resolution `res` (map units a pixel) should read a view wider than it
+    /// draws, to keep it for the frames after: not after a view as coarse or coarser was too large
+    /// to keep.
+    pub fn view_worth_keeping(&self, key: &str, res: f64) -> bool {
+        let Some(handle) = &self.handle else { return false };
+        self.render_view.lock().unwrap_or_else(std::sync::PoisonError::into_inner).worth_keeping(handle, key, res)
+    }
+
+    /// Keeps the chunks a frame at resolution `res` drew from a view read for `read`, with the
+    /// bytes they hold, in place of the last view kept; `None` says they came to more than may be
+    /// kept.
+    pub fn keep_view(&self, key: &str, read: Extent, res: f64, chunks: Option<(Vec<crate::Layer>, usize)>) {
+        let Some(handle) = &self.handle else { return };
+        self.render_view.lock().unwrap_or_else(std::sync::PoisonError::into_inner).put(handle, key, read, res, chunks);
+    }
+
+    /// Lets the kept view go when it holds more than `room` bytes.
+    pub fn trim_kept_view(&self, room: usize) {
+        self.render_view.lock().unwrap_or_else(std::sync::PoisonError::into_inner).trim(room);
+    }
+
+    /// Puts the kept chunks drawn again, with the geometry drawing made of them, in place of
+    /// `drawn`, the ones [`SourceLayer::kept_view`] gave, while those are still what is kept.
+    pub fn refresh_kept_view(&self, key: &str, drawn: &Arc<Vec<crate::Layer>>, chunks: Vec<crate::Layer>, bytes: usize) {
+        let Some(handle) = &self.handle else { return };
+        self.render_view.lock().unwrap_or_else(std::sync::PoisonError::into_inner).refresh(handle, key, drawn, chunks, bytes);
     }
 
     /// Retained interaction bytes assigned by the map, or the standalone default.
@@ -1655,7 +1740,7 @@ impl SourceLayer {
     }
 
     /// Takes diagnostics only from a fresh conversion performed by [`Self::open`].
-    pub fn take_conversion_notes(&mut self) -> Vec<String> {
+    pub fn take_conversion_notes(&mut self) -> rustgis_data::loss::Notes {
         std::mem::take(&mut self.conversion_notes_unsaid)
     }
 
@@ -1735,6 +1820,7 @@ impl SourceLayer {
     pub fn detach_read(&mut self) {
         self.pending = None;
         self.render_lod = Default::default();
+        self.render_view = Default::default();
     }
 
     /// Whether `other` (a copy of this one) reads the same source the same way: the same file and
@@ -1758,6 +1844,7 @@ impl SourceLayer {
     /// Forgets the window, so the next view reads again (after the source changes).
     pub fn reset(&mut self) {
         self.render_lod = Default::default();
+        self.render_view = Default::default();
         self.reset_window();
     }
 
@@ -1795,21 +1882,48 @@ impl SourceLayer {
         self.saved_selection.clear();
     }
 
-    /// The extent to read for a view (longitude/latitude), or `None` when the window serves it.
-    pub fn wanted(&self, view: &Extent) -> Option<Extent> {
+    /// The extent to read for a view, or `None` when the window serves it. `own` is the view in
+    /// map units with the map's projection, given when the map is in the source's own system: the
+    /// window is then read and kept in map units too, its longitude/latitude extent the place of
+    /// that box there.
+    pub fn wanted_in(&self, view: &Extent, own: Option<(&Flat, Extent)>) -> Option<Wanted> {
         let v = clamp_world(view);
         if v.is_empty() {
             return None;
         }
-        if let Some(w) = &self.window {
-            let all = self.info().map(|i| i.extent).filter(|e| !e.is_empty());
-            // Everything has been read: nothing more to fetch, wherever the view goes.
-            if w.complete && all.is_some_and(|a| contains(&w.extent, &a)) {
+        let own = own.filter(|(_, o)| !o.is_empty() && [o.min_x, o.min_y, o.max_x, o.max_y].iter().all(|n| n.is_finite()));
+        // A view past the world (zoomed out) reads the world, as in longitude/latitude: clamped to
+        // the world's box in map units, or read in longitude/latitude where the map can't place
+        // the world (a system for an area).
+        let whole = contains(&v, &Extent::WORLD_LONLAT);
+        let own = own.and_then(|(flat, o)| {
+            if !whole {
+                return Some((flat, o));
+            }
+            let world = map_around(flat, &Extent::WORLD_LONLAT)?;
+            let clamped =
+                Extent::new(o.min_x.max(world.min_x), o.min_y.max(world.min_y), o.max_x.min(world.max_x), o.max_y.min(world.max_y));
+            (!clamped.is_empty()).then_some((flat, clamped))
+        });
+        let all = self.info().map(|i| i.extent).filter(|e| !e.is_empty());
+        // A window is reused only by a view of the kind it was read for: one read in
+        // longitude/latitude lacks the features a read in map units also keeps (a place past
+        // where longitude/latitude goes), and one read in map units holds less than its
+        // longitude/latitude extent.
+        if let Some(w) = self.window.as_ref().filter(|w| w.own.is_some() == own.is_some()) {
+            // Everything has been read: nothing more to fetch, wherever the view goes. Only in
+            // longitude/latitude, where the source's extent bounds every feature it reads; in map
+            // units a feature with no place in longitude/latitude lies outside that extent.
+            if w.own.is_none() && w.complete && all.is_some_and(|a| contains(&w.extent, &a)) {
                 return None;
             }
             // The window covers the view, and is complete or not much larger (a view zoomed well
             // inside a sampled window reads again, for the detail the sample left out).
-            if contains(&w.extent, &v) && (w.complete || area(&v) * 6.0 > area(&w.extent)) {
+            let (view, read) = match (own, w.own) {
+                (Some((_, o)), Some(read)) => (o, read),
+                _ => (v, w.extent),
+            };
+            if contains(&read, &view) && (w.complete || area(&view) * 6.0 > area(&read)) {
                 return None;
             }
         }
@@ -1819,15 +1933,34 @@ impl SourceLayer {
         if self.pending.is_some() {
             return None;
         }
-        Some(clamp_world(&v.padded(0.5, 0.0)))
+        let lonlat = clamp_world(&v.padded(0.5, 0.0));
+        // In map units, the read's longitude/latitude extent is the place of its box there. Where
+        // the map can't take that box back (a regional system zoomed far out), it is the view's,
+        // as without one; the window is still kept in map units, so the same view doesn't read
+        // again.
+        if let Some((flat, o)) = own {
+            let padded = o.padded(0.5, 0.0);
+            let extent = lonlat_around(flat, &padded).map(|e| clamp_world(&e)).filter(|e| !e.is_empty()).unwrap_or(lonlat);
+            return Some(Wanted { extent, own: Some(padded) });
+        }
+        Some(Wanted { extent: lonlat, own: None })
     }
 
     /// Starts reading an extent: on a background thread unless `block` (or in the browser).
     pub fn start(&mut self, extent: Extent, block: bool) {
+        self.start_wanted(Wanted { extent, own: None }, block);
+    }
+
+    /// Starts reading what [`SourceLayer::wanted_in`] asked for: on a background thread unless
+    /// `block` (or in the browser). A box in map units goes to the source as one in its own
+    /// system ([`Request::own`]).
+    pub fn start_wanted(&mut self, wanted: Wanted, block: bool) {
+        let Wanted { extent, own } = wanted;
         self.ready_cache = None;
         let Some(h) = self.handle.clone() else { return };
         let most = if h.remote().is_some() { REMOTE_VIEW_LIMIT } else { VIEW_LIMIT };
-        let req = Request { extent: Some(extent), limit: if self.limit == 0 { most } else { self.limit } };
+        let own_box = own.map(|o| (h.coord_crs(), o));
+        let req = Request { extent: Some(extent), limit: if self.limit == 0 { most } else { self.limit }, own: own_box };
         let budget = self.budget();
         let projection = self.projection.clone().unwrap_or(crate::Projection::WebMercator);
         let estimate = self.estimated_row_bytes;
@@ -1835,7 +1968,7 @@ impl SourceLayer {
         let fields = self.window_fields;
         let query = self.query.clone();
         let still = rustgis_data::source::remote::current_still();
-        let pending = Arc::new(Pending { extent, result: Mutex::new(None), still: still.clone() });
+        let pending = Arc::new(Pending { extent, own, result: Mutex::new(None), still: still.clone() });
         let p = pending.clone();
         // A source by its web address: the read runs as its bytes land (on the desktop and in
         // the browser alike), fetching what it needs in rounds.
@@ -1896,7 +2029,7 @@ impl SourceLayer {
                 Err(e) => {
                     self.saved_selection.clear();
                     self.error = Some(format!("couldn't start reading the layer: {e}"));
-                    self.window = Some(Window { extent, complete: true, matched: 0, kept: 0, filtered: false });
+                    self.window = Some(Window { extent, complete: true, matched: 0, kept: 0, filtered: false, own });
                 }
             }
             return;
@@ -1918,10 +2051,11 @@ impl SourceLayer {
                     self.estimated_row_bytes = cache.mean_bytes;
                     let filtered = cache.filtered;
                     self.ready_cache = Some(cache);
-                    let w = Window { extent: p.extent, complete: b.complete, matched: b.matched, kept: b.features.len(), filtered };
+                    let w =
+                        Window { extent: p.extent, complete: b.complete, matched: b.matched, kept: b.features.len(), filtered, own: p.own };
                     self.window = Some(w);
                     self.clear_error();
-                    return Polled::Done(w, b);
+                    return Polled::Done(w, Box::new(b));
                 }
                 Some(Err(e)) => {
                     self.pending = None;
@@ -1929,7 +2063,7 @@ impl SourceLayer {
                     self.saved_selection.clear();
                     self.error = Some(e.clone());
                     // Not read again until the view moves past it.
-                    self.window = Some(Window { extent: p.extent, complete: true, matched: 0, kept: 0, filtered: false });
+                    self.window = Some(Window { extent: p.extent, complete: true, matched: 0, kept: 0, filtered: false, own: p.own });
                     return Polled::Failed(e);
                 }
                 None if block && cfg!(not(target_arch = "wasm32")) && start.elapsed() < web_time::Duration::from_secs(60) => {
@@ -1971,6 +2105,50 @@ fn contains(outer: &Extent, inner: &Extent) -> bool {
         && outer.min_y <= inner.min_y
         && outer.max_x >= inner.max_x
         && outer.max_y >= inner.max_y
+}
+
+/// What a view wants read ([`SourceLayer::wanted_in`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wanted {
+    /// Longitude/latitude.
+    pub extent: Extent,
+    /// The same box in map units, when the map is in the source's own system.
+    pub own: Option<Extent>,
+}
+
+/// Where a box in map units lies in longitude/latitude: its edges taken back, 16 places each,
+/// reaching a pole inside it (a polar system); `None` when the map can't take a place back.
+fn lonlat_around(flat: &Flat, e: &Extent) -> Option<Extent> {
+    let mut out = Extent::EMPTY;
+    const N: usize = 16;
+    for i in 0..=N {
+        let t = i as f64 / N as f64;
+        let (x, y) = (e.min_x + t * e.width(), e.min_y + t * e.height());
+        for c in [Coord::new(x, e.min_y), Coord::new(x, e.max_y), Coord::new(e.min_x, y), Coord::new(e.max_x, y)] {
+            out.expand(flat.inverse(c).filter(|p| p.is_finite())?);
+        }
+    }
+    for pole in [Coord::new(0.0, 90.0), Coord::new(0.0, -90.0)] {
+        if flat.forward(pole).is_some_and(|p| p.is_finite() && e.contains(p)) {
+            out = Extent::new(-180.0, out.min_y.min(pole.y), 180.0, out.max_y.max(pole.y));
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Where a longitude/latitude box lies in map units: its edges taken there, 16 places each;
+/// `None` when the map can't place one of them.
+fn map_around(flat: &Flat, e: &Extent) -> Option<Extent> {
+    let mut out = Extent::EMPTY;
+    const N: usize = 16;
+    for i in 0..=N {
+        let t = i as f64 / N as f64;
+        let (x, y) = (e.min_x + t * e.width(), e.min_y + t * e.height());
+        for c in [Coord::new(x, e.min_y), Coord::new(x, e.max_y), Coord::new(e.min_x, y), Coord::new(e.max_x, y)] {
+            out.expand(flat.forward(c).filter(|p| p.is_finite())?);
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 fn clamp_world(e: &Extent) -> Extent {
@@ -2022,6 +2200,7 @@ impl SourceLayer {
             handle: _,
             window: _,
             render_lod: _,
+            render_view: _,
             pending: _,
             projection: _,
             ready_cache: _,
@@ -2127,7 +2306,7 @@ mod tests {
         let handle = rustgis_data::source::open_shared("converted.fgb", bytes.clone(), None).unwrap();
         let mut source = super::SourceLayer::from_bytes("converted.fgb", bytes, None, handle);
         let mut info = source.info().unwrap().clone();
-        info.notes.push("conversion left out 2 source features".into());
+        info.notes.push("conversion left out 2 source features");
         info.zm_dropped = true;
         source.conversion_info = Some(info);
         let mut layer = crate::Layer::new(1, Dataset::new("layer", GeometryType::Point, Vec::new()));
@@ -2225,6 +2404,18 @@ mod tests {
         assert_eq!(tally.total(), Some(vec![1]));
         tally.saw(&b, &[0]);
         assert_eq!(tally.total(), None);
+        // Two windows in map units read by the same longitude/latitude extent (where the map can't
+        // take their boxes back) are told apart by their boxes: the second's clean read leaves the
+        // first's counts.
+        let mut apart = Tally::default();
+        let first =
+            super::Window { extent: a, complete: true, matched: 1, kept: 1, filtered: false, own: Some(Extent::new(0.0, 0.0, 1.0, 1.0)) };
+        let second = super::Window { own: Some(Extent::new(5.0, 5.0, 6.0, 6.0)), ..first };
+        apart.saw(&first, &[1]);
+        apart.saw(&second, &[0]);
+        assert_eq!(apart.total(), Some(vec![1]));
+        apart.saw(&first, &[0]);
+        assert_eq!(apart.total(), None);
         let nan = Extent::new(f64::NAN, 0.0, 1.0, 1.0);
         for _ in 0..2 * WINDOWS_COUNTED {
             tally.saw(&nan, &[1]);
@@ -2251,16 +2442,18 @@ mod tests {
     #[test]
     fn view_read_notes_are_said_once_for_each_kind() {
         let mut source = super::SourceLayer::default();
-        let note = |n: usize| format!("{n} of the shapes read (a sample of the layer, which may hold more) have a NaN");
-        source.saw_read_notes(&[note(3), String::new(), " ".into()]);
+        let note = |n: usize| {
+            rustgis_data::loss::Note::plain(format!("{n} of the shapes read (a sample of the layer, which may hold more) have a NaN"))
+        };
+        source.saw_read_notes(&[note(3), "".into(), " ".into()]);
         source.saw_read_notes(&[note(5)]);
         assert_eq!(source.take_read_notes(), [note(3)]);
         source.saw_read_notes(&[note(12), "7 values cut".into()]);
         assert_eq!(source.take_read_notes(), ["7 values cut"]);
         assert!(source.take_read_notes().is_empty());
         // A source with endless kinds of note says the first ones, then one note that there are more.
-        let many: Vec<String> = (0..2 * super::READ_NOTE_KINDS)
-            .map(|k| format!("kind {}: 1", char::from(b'a' + (k % 26) as u8).to_string().repeat(k / 26 + 1)))
+        let many: Vec<rustgis_data::loss::Note> = (0..2 * super::READ_NOTE_KINDS)
+            .map(|k| format!("kind {}: 1", char::from(b'a' + (k % 26) as u8).to_string().repeat(k / 26 + 1)).into())
             .collect();
         source.saw_read_notes(&many);
         source.saw_read_notes(&many);
@@ -2270,6 +2463,18 @@ mod tests {
         source.forget_read_notes();
         source.saw_read_notes(&[note(4)]);
         assert_eq!(source.take_read_notes(), [note(4)]);
+    }
+
+    /// A note that reports a loss isn't folded into a plain one that reads the same: its code
+    /// is said too, once.
+    #[test]
+    fn a_coded_read_note_is_its_own_kind() {
+        use rustgis_data::loss::{LossCode, Note};
+        let mut source = super::SourceLayer::default();
+        let plain = Note::plain("2 rings left out");
+        let coded = Note::loss(LossCode::DroppedRing, "3 rings left out");
+        source.saw_read_notes(&[plain.clone(), coded.clone(), coded.clone()]);
+        assert_eq!(source.take_read_notes(), [plain, coded]);
     }
 
     /// Only counts make two notes one kind: notes differing in another number stay apart.
@@ -2290,6 +2495,7 @@ mod tests {
             "EPSG:4326: 3 shape(s) left out".into(),
             "EPSG:3857: 3 shape(s) left out".into(),
         ];
+        let notes = notes.map(rustgis_data::loss::Note::plain);
         source.saw_read_notes(&notes);
         let said = source.take_read_notes();
         let expected = [&notes[0], &notes[2], &notes[4], &notes[5], &notes[6], &notes[7], &notes[8], &notes[9]];
@@ -2364,7 +2570,7 @@ mod tests {
     #[test]
     fn opening_conversion_notes_are_runtime_only_and_taken_once() {
         let note = "GDAL: 2 features of another geometry type were left out";
-        let mut source = super::SourceLayer { conversion_notes_unsaid: vec![note.into()], ..Default::default() };
+        let mut source = super::SourceLayer { conversion_notes_unsaid: [note].into_iter().collect(), ..Default::default() };
         let saved = serde_json::to_value(&source).unwrap();
         assert!(saved.get("conversion_notes_unsaid").is_none());
         let mut restored: super::SourceLayer = serde_json::from_value(saved).unwrap();
