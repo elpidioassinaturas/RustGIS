@@ -302,13 +302,15 @@ fn row_parts(f: &Feature, date: Option<usize>, href: Option<usize>) -> Option<(i
     Some((aef_year(at(date)?)?, url.starts_with("https://").then_some(url)?, f.geometry.as_ref()?))
 }
 
-/// How many rows of what the index read a search can't use ([`row_parts`]) and leaves out; an error
-/// when it can use none, as the search would answer that there are no tiles.
+/// How many rows of what the index read a search can't use ([`row_parts`], and those whose footprint
+/// the reader couldn't decode) and leaves out; an error when it can use none, as the search would
+/// answer that there are no tiles. A row without a footprint is in no box, so a search reads none.
 fn unusable(fields: &[Field], batch: &Batch) -> Result<usize, String> {
     let col = |n: &str| fields.iter().position(|f| f.name == n);
     let (date, href) = (col("datetime"), col(AEF_HREF));
-    let n = batch.features.iter().filter(|f| row_parts(f, date, href).is_none()).count();
-    if n > 0 && n == batch.features.len() {
+    let usable = batch.features.iter().filter(|f| row_parts(f, date, href).is_some()).count();
+    let n = (batch.features.len() - usable).saturating_add(batch.skipped);
+    if n > 0 && usable == 0 {
         return Err(format!(
             "AlphaEarth's index has {n} rows there, none whose date, address and footprint can be read, so its tiles can't be listed"
         ));
@@ -1122,6 +1124,12 @@ mod tests {
             assert_eq!(found(&fields, &batch, 2024, bbox).unwrap().unusable, 1);
             assert_eq!(series_found(&fields, &batch, (2017, 2025), bbox).unwrap().unusable, 1);
         }
+        // And those in the box whose footprint the reader couldn't decode, which it counts itself.
+        let mut batch = Batch { skipped: 2, ..whole.clone() };
+        assert_eq!(found(&fields, &batch, 2024, bbox).unwrap().unusable, 2);
+        assert_eq!(series_found(&fields, &batch, (2017, 2025), bbox).unwrap().unusable, 2);
+        batch.features.clear();
+        assert!(found(&fields, &batch, 2024, bbox).unwrap_err().contains("has 2 rows there"));
         assert_eq!(
             unusable_note(1).as_deref(),
             Some("rows of AlphaEarth's index left out, as their date, address or footprint can't be read: 1")
