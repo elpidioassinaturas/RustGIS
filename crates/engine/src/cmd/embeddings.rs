@@ -569,8 +569,11 @@ const AEF_BANDS: usize = 64;
 /// works on its caller's thread, waiting for AlphaEarth's index and the window: the command line
 /// and Python have no window to hold, and the app's workflows start it on a thread
 /// ([`super::workflows::raster_start`]) and add what it made with `ran`. The app's assistant runs
-/// its tools on the frame, so there the window waits, as it does for `raster.change` and the other
-/// commands that read the network; a plugin's command in the app is refused ([`analysis`]).
+/// its tools on the frame, as it needs a command's answer before its next one, so there the window
+/// waits, without Cancel, as it does for `raster.change` and the other commands of
+/// [`super::workflows::IN_BACKGROUND`]: for the network, and for a point layer's reference
+/// ([`layer_points`]), whose definition query reads every feature, and whose points end at the
+/// limit. A plugin's command in the app is refused ([`analysis`]).
 fn similarity(s: &mut Session, p: &Value) -> CmdResult {
     super::workflows::made_or_ran(s, p, "embeddings.similarity")
 }
@@ -671,6 +674,11 @@ fn reference_points(s: &Session, p: &Value) -> Result<Box<dyn FnOnce() -> Result
     Ok(Box::new(move || Ok((points, None, Vec::new()))))
 }
 
+/// `error`, with what a reference layer had to say (`notes`): it may be why.
+fn with_notes(error: String, notes: &[String]) -> String {
+    if notes.is_empty() { error } else { format!("{error} ({})", notes.join("; ")) }
+}
+
 /// The point layer `p` names, for [`layer_points`]: what that reads of it (its rows shared, not
 /// copied, its selection and its definition query). One read in place holds only the features of
 /// the last view, so only its selection is taken.
@@ -695,9 +703,10 @@ fn reference_layer(s: &Session, p: &Value) -> Result<rustgis_map::Layer, String>
 
 /// The points of layer `l`, in longitude/latitude, each of a multipoint's: of its selected
 /// features, or all of them without a selection, that its definition query keeps, as the tools
-/// take a layer. What is left out is said, by kind with a count; more than
-/// [`MAX_REFERENCE_POINTS`] are refused. Cancel is looked at every few thousand features; the
-/// definition query is one pass that doesn't ([`rustgis_map::Layer::resolve_rows`]).
+/// take a layer. What is left out is said, by kind with a count; the first point past
+/// [`MAX_REFERENCE_POINTS`] refuses the layer, the rest of it not read. Cancel is looked at every
+/// few thousand features; the definition query is one pass that doesn't
+/// ([`rustgis_map::Layer::resolve_rows`]).
 fn layer_points(mut l: rustgis_map::Layer) -> Result<Taken, String> {
     use rustgis_map::rows::{Policy, Rows};
     l.selection.sort_unstable();
@@ -734,7 +743,7 @@ fn layer_points(mut l: rustgis_map::Layer) -> Result<Taken, String> {
         notes.push(format!("{name}: reference points taken from {taken} of its {total} {of} ({how})"));
     }
     let to = ds.lonlat_conversion().map_err(|e| format!("{name}: {e}"))?;
-    let (mut points, mut count, mut used) = (Vec::new(), 0usize, 0usize);
+    let (mut points, mut used) = (Vec::new(), 0usize);
     let (mut without, mut others, mut unplaced) = (0usize, 0usize, 0usize);
     for (k, row) in rows.enumerate() {
         if k.is_multiple_of(4096) {
@@ -754,23 +763,20 @@ fn layer_points(mut l: rustgis_map::Layer) -> Result<Taken, String> {
             without += 1;
             continue;
         }
-        let before = count;
+        let before = points.len();
         for c in coords {
             match to.point(*c).filter(|c| (-180.0..=180.0).contains(&c.x) && (-90.0..=90.0).contains(&c.y)) {
-                Some(c) => {
-                    count += 1;
-                    // Past the limit they are only counted, to be refused.
-                    if count <= MAX_REFERENCE_POINTS {
-                        points.push((c.x, c.y));
-                    }
+                Some(_) if points.len() == MAX_REFERENCE_POINTS => {
+                    let e = format!(
+                        "{name} has more than {MAX_REFERENCE_POINTS} points, the most that make a reference: select the ones to use"
+                    );
+                    return Err(with_notes(e, &notes));
                 }
+                Some(c) => points.push((c.x, c.y)),
                 None => unplaced += 1,
             }
         }
-        used += usize::from(count > before);
-    }
-    if count > MAX_REFERENCE_POINTS {
-        return Err(format!("{name}: {count} points: at most {MAX_REFERENCE_POINTS} make a reference (select the features to use)"));
+        used += usize::from(points.len() > before);
     }
     let left_out = [
         (without, "features without geometry"),
@@ -779,7 +785,7 @@ fn layer_points(mut l: rustgis_map::Layer) -> Result<Taken, String> {
     ];
     notes.extend(left_out.iter().filter(|(n, _)| *n > 0).map(|(n, what)| format!("{name}: {what}, left out of the reference: {n}")));
     if points.is_empty() {
-        return Err(format!("{name} has no reference points ({})", notes.join("; ")));
+        return Err(with_notes(format!("{name} has no reference points"), &notes));
     }
     let from = json!({"layer": name, "features": used, "selected": selected, "filtered": filtered});
     Ok((points, Some(from), notes))
@@ -807,8 +813,7 @@ pub(crate) fn similarity_work(s: &Session, p: &Value) -> Result<super::workflows
         notes.extend(w.notes());
         let r = &w.raster;
         // A reference with no embedding fails with what its layer said.
-        let (reference, missed) =
-            reference(r, &points).map_err(|e| if taken.is_empty() { e } else { format!("{e} ({})", taken.join("; ")) })?;
+        let (reference, missed) = reference(r, &points).map_err(|e| with_notes(e, &taken))?;
         notes.extend(taken);
         notes.extend(missed_points(missed, points.len()));
         let band = similarity_band(r, &reference)?;
@@ -1573,8 +1578,12 @@ mod tests {
         assert_eq!(many(MAX_REFERENCE_POINTS - 1).unwrap().0.len(), MAX_REFERENCE_POINTS);
         assert_eq!(
             many(MAX_REFERENCE_POINTS).unwrap_err(),
-            "Samples: 1001 points: at most 1000 make a reference (select the features to use)"
+            "Samples has more than 1000 points, the most that make a reference: select the ones to use"
         );
+        // The refusal says what narrowed the layer, or failed to: a definition query that can't be read.
+        let mut s = samples(vec![Some(Geometry::MultiPoint(vec![Coord::new(10.0, 45.0); MAX_REFERENCE_POINTS + 1]))]);
+        s.map_mut().layers.first_mut().unwrap().definition_query = Some("n = = 1".into());
+        assert!(taken(&s).unwrap_err().contains("(Samples: its definition query can't be read, so it isn't applied: "));
     }
 
     #[test]
