@@ -488,8 +488,9 @@ impl FeatureSource for ParquetSource {
 
     /// From every row group's statistics of the field's column, which the footer holds: no byte of
     /// the data is read. A row group without a statistics object, or whose statistics give no
-    /// bounds while it has values, leaves the range unknown (`None`); one whose statistics count
-    /// only nulls adds nothing. The field is named exactly as the source lists it.
+    /// bounds while it has values, or bounds that aren't finite and in order, leaves the range
+    /// unknown (`None`); one whose statistics count only nulls adds nothing. The field is named exactly
+    /// as the source lists it.
     fn field_range(&self, field: &str) -> Option<(f64, f64)> {
         let i = self.info.fields.iter().position(|f| f.name == field && f.ty.is_numeric())?;
         let col = *self.field_cols.get(i)?;
@@ -509,7 +510,10 @@ impl FeatureSource for ParquetSource {
             let rg = md.row_group(g);
             let s = rg.columns().get(col)?.statistics()?;
             match (number_stat(s, false), number_stat(s, true)) {
-                (Some(a), Some(b)) => Some((lo.min(a * scale), hi.max(b * scale))),
+                (Some(a), Some(b)) => {
+                    let (a, b) = (a * scale, b * scale);
+                    (a.is_finite() && b.is_finite() && a <= b).then(|| (lo.min(a), hi.max(b)))
+                }
                 // A row group of nulls only has no bounds.
                 _ if s.null_count_opt() == Some(u64::try_from(rg.num_rows()).ok()?) => Some((lo, hi)),
                 _ => None,

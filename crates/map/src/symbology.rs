@@ -1388,6 +1388,26 @@ impl Renderer {
         Some(open)
     }
 
+    /// These Graduated Colors classes with the ends of `other`'s, whose last bound closes them at
+    /// the field's largest value `hi` ([`Renderer::graduated_manual_within`]), when the bounds
+    /// between classes are the same: every feature keeps its class. `None` for other renderers,
+    /// for other inner bounds, and when either last bound is past `hi` (one of its own).
+    pub fn with_ends_of(&self, other: &Renderer, hi: f64) -> Option<Renderer> {
+        let (Renderer::Graduated { breaks: ours, .. }, Renderer::Graduated { breaks: theirs, min: start, .. }) = (self, other) else {
+            return None;
+        };
+        let ((our_last, our_inner), (their_last, their_inner)) = (ours.split_last()?, theirs.split_last()?);
+        if our_inner != their_inner || *their_last != hi || (*our_last > hi && *our_last < OPEN_ABOVE) {
+            return None;
+        }
+        let mut same = self.clone();
+        if let Renderer::Graduated { breaks, min, .. } = &mut same {
+            breaks.clone_from(theirs);
+            *min = *start;
+        }
+        Some(same)
+    }
+
     /// A graduated renderer on `field`, with the bounds `breaks` works out from the field's sorted
     /// values.
     fn graduated_by(

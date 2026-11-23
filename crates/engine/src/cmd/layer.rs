@@ -7585,6 +7585,8 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
     // On a layer read in place, classes worked out from the features of the view read so far
     // (#2497), and what becomes of the values elsewhere in the layer.
     let mut from_view: Option<&str> = None;
+    // The file's largest value, when it closes Manual classes.
+    let mut closed_at = None;
     let mut r = match kind.as_str() {
         "single" | "singlesymbol" => Renderer::Single(base),
         "unique" | "uniquevalues" => {
@@ -7637,7 +7639,10 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
                 // range is unknown: the classes take every value up to the first bound and past
                 // the last.
                 (ClassMethod::Manual, Some(b)) if l.is_streamed() => match range {
-                    Some(range) => Renderer::graduated_manual_within(&l.dataset, &field, &b, range, ramp, base)?,
+                    Some(range) => {
+                        closed_at = Some(range.1);
+                        Renderer::graduated_manual_within(&l.dataset, &field, &b, range, ramp, base)?
+                    }
                     None => Renderer::graduated_manual_open(&l.dataset, &field, &b, ramp, base)?,
                 },
                 (ClassMethod::Manual, Some(b)) => Renderer::graduated_manual(&l.dataset, &rows()?, &field, &b, ramp, base)?,
@@ -7678,12 +7683,13 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
     };
     // Applied again on the same field, the classes keep the labels set by hand, and the colours
     // and outlines set by hand too while the colour scheme stays (#314). Closed classes made open
-    // on a layer read in place class every feature as before, so their edits carry over too.
+    // on a layer read in place class every feature as before, so their edits carry over too; so do
+    // those of the view's classes closed at the file's range.
     let opened = match &r {
         Renderer::Graduated { breaks, .. } if l.is_streamed() && breaks.last() == Some(&rustgis_map::symbology::OPEN_ABOVE) => {
             l.renderer.opened()
         }
-        _ => None,
+        _ => closed_at.and_then(|hi| l.renderer.with_ends_of(&r, hi)),
     };
     r.carry_edits_from(opened.as_ref().unwrap_or(&l.renderer), g);
     // The same field and scheme again carry the classes' alpha, which No Fill made 0.
@@ -7700,7 +7706,9 @@ fn symbology(s: &mut Session, p: &Value) -> CmdResult {
         _ => String::new(),
     };
     let order = if rest.by_number { "by number" } else { "in text order" };
-    let from_view = from_view.filter(|_| l.is_streamed()).map(|then| (l.dataset.kept_features(&l.visible_rows()).count(), then));
+    // A view that holds the whole source says nothing.
+    let part = l.source.as_ref().is_some_and(|src| src.exact_count() != Some(l.dataset.features.len() as u64));
+    let from_view = from_view.filter(|_| part).map(|then| (l.dataset.kept_features(&l.visible_rows()).count(), then));
     let mut dropped = None;
     let out = with(s, p, |l| {
         l.renderer = r;

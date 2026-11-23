@@ -1214,6 +1214,12 @@ impl SourceLayer {
         self.handle.as_ref()?.field_range(field)
     }
 
+    /// Its source's number of features, when known exactly: a database's can be an estimate.
+    pub fn exact_count(&self) -> Option<u64> {
+        let database = self.postgis.is_some() || self.mysql.is_some() || self.sqlserver.is_some();
+        self.info().filter(|_| !database)?.count
+    }
+
     /// Whether its source tests its features against a box in its own system
     /// ([`FeatureSource::reads_own_box`]); no until it is open.
     pub fn reads_own_box(&self) -> bool {

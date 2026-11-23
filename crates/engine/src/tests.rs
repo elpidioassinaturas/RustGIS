@@ -46858,6 +46858,114 @@ fn classes_on_a_geoparquet_read_in_place_close_at_its_statistics_and_say_what_co
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// On a GeoParquet read in place, with a view of part of the file, a label and colour set by hand
+/// on the view's classes stay when Manual closes them at the file's range, and only while the
+/// inner bounds stay; the notice of the view is for a view that isn't the whole source (#2497).
+#[test]
+fn hand_edits_and_the_notice_on_a_geoparquet_read_in_place_follow_the_view() {
+    use rustgis_data::source::{Batch, FeatureSource, Request, SourceInfo};
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_map::source::{PostgisOrigin, SourceLayer};
+    // A source that counts its features as told.
+    struct Says(SourceInfo);
+    impl FeatureSource for Says {
+        fn info(&self) -> &SourceInfo {
+            &self.0
+        }
+        fn read(&self, _: &Request) -> rustgis_data::Result<Batch> {
+            Ok(Batch::default())
+        }
+    }
+    let mut ds = Dataset::new("buildings", GeometryType::Point, vec![Field::new("height", FieldType::Double)]);
+    for h in 1..=40 {
+        ds.push(Some(Geometry::Point(Coord::new(f64::from(h), 0.0))), vec![V::Float(f64::from(h))]);
+    }
+    let dir = std::env::temp_dir().join(format!("rustgis-hand-edits-in-view-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("buildings.parquet");
+    rustgis_data::io::write_path(&ds, &path).unwrap();
+    let mut s = Session::new(Project::default());
+    let id =
+        s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+    let run = |s: &mut Session, mut p: Value| {
+        p["layer"] = json!(id);
+        p["type"] = json!("graduated");
+        p["field"] = json!("height");
+        let mark = s.notice_mark();
+        s.run("layer.symbology", &p).unwrap();
+        s.notices_since(mark).iter().filter(|n| n.text.contains("of the view read so far")).count()
+    };
+    let red = rustgis_map::Rgba::rgb(255, 0, 0);
+    let legend = |s: &Session| s.map().layer(id).unwrap().renderer.legend();
+    let kept = |s: &Session| {
+        legend(s).iter().enumerate().filter(|(_, c)| c.label == "Tall" || c.symbol.fill == red).map(|(i, _)| i).collect::<Vec<_>>()
+    };
+    // Part of the file: three classes of the view's, the middle one edited by hand.
+    let edited = |s: &mut Session| {
+        run(s, json!({"type": "graduated", "breaks": [99]}));
+        assert_eq!(run(s, json!({"method": "equalInterval", "classes": 3})), 1);
+        s.run("layer.classStyle", &json!({"layer": id, "index": 1, "label": "Tall", "color": "#ff0000"})).unwrap();
+        assert_eq!(kept(s), [1]);
+        match &s.map().layer(id).unwrap().renderer {
+            rustgis_map::Renderer::Graduated { breaks, .. } => breaks.clone(),
+            r => panic!("{r:?}"),
+        }
+    };
+    let v = view_of(&mut s, rustgis_geom::Extent::new(0.5, -1.0, 3.5, 1.0));
+    crate::render::render_png(s.map_mut(), &v).unwrap();
+    assert!(s.map().layer(id).unwrap().dataset.features.len() < 40);
+    let b = edited(&mut s);
+    run(&mut s, json!({"method": "manual"}));
+    assert_eq!((kept(&s), legend(&s)[2].label.ends_with("40")), (vec![1], true));
+    // The same inner bounds, typed.
+    edited(&mut s);
+    run(&mut s, json!({"breaks": [b[0], b[1]]}));
+    assert_eq!(kept(&s), [1]);
+    // Other inner bounds, one fewer, one more, or a closing bound of one's own: none is kept.
+    for other in [vec![b[0], b[1] + 1.0], vec![b[0]], vec![b[0], b[1], b[2]], vec![b[0], b[1], 50.0]] {
+        edited(&mut s);
+        run(&mut s, json!({"breaks": other}));
+        assert!(kept(&s).is_empty(), "{other:?}: {:?}", kept(&s));
+    }
+    // Nor those of a class past the file's largest value, once its bound is taken out.
+    run(&mut s, json!({"breaks": [5, 50]}));
+    s.run("layer.classStyle", &json!({"layer": id, "index": 1, "label": "Tall", "color": "#ff0000"})).unwrap();
+    run(&mut s, json!({"breaks": [5]}));
+    assert!(kept(&s).is_empty());
+    // Open classes a project saved before they closed at the file's range keep theirs too.
+    edited(&mut s);
+    let l = s.map_mut().layer_mut(id).unwrap();
+    l.renderer = l.renderer.opened().unwrap();
+    run(&mut s, json!({"method": "manual"}));
+    assert_eq!((kept(&s), legend(&s)[2].label.ends_with("40")), (vec![1], true));
+    // Nor when the classes are worked out again from another view.
+    edited(&mut s);
+    let v = view_of(&mut s, rustgis_geom::Extent::new(-5.0, -5.0, 45.0, 5.0));
+    crate::render::render_png(s.map_mut(), &v).unwrap();
+    let l = s.map().layer(id).unwrap();
+    assert_eq!((l.dataset.features.len(), l.feature_count()), (40, Some(40)));
+    // The view now holds the whole source: nothing to say.
+    let classes = json!({"method": "equalInterval", "classes": 3});
+    assert_eq!(run(&mut s, classes.clone()), 0);
+    assert!(kept(&s).is_empty());
+    // The same 40 features of a source that doesn't count them, counts more, or whose count can
+    // be an estimate (a database's): the notice stays.
+    let source = s.map().layer(id).unwrap().source.as_ref().unwrap();
+    let info = source.info().unwrap().clone();
+    let says = |count| Box::new(Says(SourceInfo { count, ..info.clone() }));
+    let origin = PostgisOrigin { database: "postgres:host=h".into(), table: "t".into(), family: None, crs: None };
+    for (source, said) in [
+        (SourceLayer::from_path("b.parquet", None, says(None)), 1),
+        (SourceLayer::from_path("b.parquet", None, says(Some(41))), 1),
+        (SourceLayer::from_postgis(origin, says(Some(40))), 1),
+        (SourceLayer::from_path("b.parquet", None, says(Some(40))), 0),
+    ] {
+        s.map_mut().layer_mut(id).unwrap().source = Some(source);
+        assert_eq!(run(&mut s, classes.clone()), said);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Raster-side projection failures retain good multipart coverage and reach both command results.
 #[test]
 fn raster_projection_failures_are_reported_for_zonal_statistics_and_clipping() {
