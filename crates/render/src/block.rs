@@ -1612,6 +1612,106 @@ fn stroke_outlines(pm: &mut Pixmap, outlines: &mut Vec<(tiny_skia::Path, Rgba)>,
     }
 }
 
+/// The most pixels the four pictures of [`flat_walls`] hold together (a quarter of the largest
+/// ground texture's): taller walls are squeezed up and down to fit.
+const FLAT_WALL_PIXELS: f64 = (crate::MAX_SIDE as f64) * (crate::MAX_SIDE as f64) / 4.0;
+
+/// A box's walls drawn flat for a 3D model (#2319 part 2), from [`flat_walls`].
+pub struct FlatWalls {
+    /// Each side seen straight on from outside, in `Block::side`'s order (south, east, north,
+    /// west): `None` when the walls are plain (no walls layer, or no polygon of it under the
+    /// box's edge), so the model keeps their colour.
+    pub pictures: Option<[Pixmap; 4]>,
+    /// The share (0 to 1) the most squeezed picture was squeezed to up and down, under 1 when the
+    /// walls are too tall for `FLAT_WALL_PIXELS` or a side for `MAX_SIDE` pixels.
+    pub squeeze: f64,
+    /// How many stretches of the walls run through water (#2317): the pictures leave its section out.
+    pub water: usize,
+    /// What the drawing approximated, as the map view says it (gradient fills left plain).
+    pub gaps: Vec<String>,
+}
+
+/// The walls of box `b` on `map` as `draw_walls` colours them, unlit and unfogged (a 3D viewer
+/// lights the model): each side a picture seen from outside, from its first end (`Block::side`,
+/// at column 0) to its last, from `tops[side]` (its highest ground, metres exaggerated as `b.base`
+/// is) along row 0 down to `b.base` along the last row. A pixel is `res` Web Mercator units along
+/// the side and as many up, a unit `per_unit` metres (the box's centre's scale), so a pattern is
+/// as big as on the ground's texture drawn at `res`, and its lattice is the map view's. Contacts
+/// between colours are drawn straight down in the walls' outline colour.
+///
+/// A box only: the caller turns a round block or one cut to polygons into its box first.
+pub fn flat_walls(map: &Map, ground: &Ground, b: &Block, res: f64, per_unit: f64, tops: [f64; 4]) -> FlatWalls {
+    let res = res.max(1e-9);
+    let env = rustgis_data::query::Env::default();
+    let camera = rustgis_map::Camera::new(Coord::new((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0), res);
+    let scale = map.ground_res_at(&camera) / rustgis_geom::PIXEL_M;
+    // What `runs` approximates is this drawing's, said with it; what frames before it said stays.
+    let before = crate::approximations::keep();
+    let runs = runs(map, b, scale, &env);
+    let gaps = crate::approximations::take();
+    crate::approximations::restore(before);
+    let water = water_runs(map, b, ground, res, scale, &env).iter().map(Vec::len).sum();
+    let mut out = FlatWalls { pictures: None, squeeze: 1.0, water, gaps };
+    let boxed = b.circle.is_none() && b.outline.is_none() && runs.len() == 4;
+    if !boxed || runs.iter().flatten().all(|r| r.color == b.walls && r.patterns.is_empty()) {
+        return out;
+    }
+    let up_px = |h: f64| h / per_unit.max(1e-9) / res;
+    let max_side = f64::from(crate::MAX_SIDE);
+    let sides: [(u16, Coord, Coord); 4] = std::array::from_fn(|s| b.side(s));
+    let wide = |s: usize| {
+        let (key, a, z) = sides[s];
+        ((b.along(key, z) - b.along(key, a)).abs() / res).round().clamp(1.0, max_side)
+    };
+    let high = |s: usize| (up_px(tops[s]) - up_px(b.base)).max(1.0);
+    let pixels: f64 = (0..4).map(|s| wide(s) * high(s).min(max_side)).sum();
+    let budget = (FLAT_WALL_PIXELS / pixels).min(1.0);
+    let mut pictures = Vec::with_capacity(4);
+    for (s, side_runs) in runs.iter().enumerate() {
+        let (key, a, z) = sides[s];
+        let (w, h) = (wide(s), (high(s).min(max_side) * budget).round().max(1.0));
+        // Squeezed to fit the budget, or a side taller than a picture can be.
+        out.squeeze = out.squeeze.min(h / high(s).round().max(1.0));
+        // (Both sides are 1 to `MAX_SIDE` pixels, which a pixmap and a mask always take.)
+        let Some(mut pm) = Pixmap::new(w as u32, h as u32) else { return out };
+        let Some(mut mask) = Mask::new(pm.width(), pm.height()) else { return out };
+        // Across as the view lays a pattern out: Web Mercator along the side over `res`, left to
+        // right seen from outside; up from the ground's zero, `up_px`.
+        let (lo, hi) = (b.along(key, a), b.along(key, z));
+        let dir = if hi >= lo { 1.0 } else { -1.0 };
+        let left = lo * dir / res;
+        let (sx, sy) = (w / ((hi - lo).abs() / res).max(1e-9), h / high(s));
+        let top = up_px(tops[s]);
+        let at = |x: f64, up: f64| Some(((x - left) * sx, (top - up) * sy));
+        for run in side_runs {
+            let (p, q) = ((run.lo * dir / res - left) * sx, (run.hi * dir / res - left) * sx);
+            let Some(rect) = tiny_skia::Rect::from_ltrb(p.min(q) as f32, 0.0, p.max(q) as f32, h as f32) else { continue };
+            pm.fill_rect(rect, &paint(run.color.with_alpha(255), 1.0), Transform::identity(), None);
+            if run.patterns.is_empty() {
+                continue;
+            }
+            mask.data_mut().fill(0);
+            mask.fill_path(&PathBuilder::from_rect(rect), FillRule::Winding, false, Transform::identity());
+            let (x0, x1) = (run.lo * dir / res, run.hi * dir / res);
+            let span = ((x0.min(x1), x0.max(x1)), (up_px(b.base), top));
+            draw_patterns(&mut pm, &mask, &run.patterns, span, (sx * sy).sqrt(), |c| c, at);
+        }
+        let mut contacts = PathBuilder::new();
+        for c in side_runs.windows(2).map(|r| r[0].hi) {
+            let x = ((c * dir / res - left) * sx) as f32;
+            contacts.move_to(x, 0.0);
+            contacts.line_to(x, h as f32);
+        }
+        if let Some(path) = contacts.finish() {
+            let stroke = Stroke { width: (0.7 * (sx * sy).sqrt()) as f32, line_cap: LineCap::Butt, ..Stroke::default() };
+            pm.stroke_path(&path, &paint(b.walls.shade(0.45), 1.0), &stroke, Transform::identity(), None);
+        }
+        pictures.push(pm);
+    }
+    out.pictures = pictures.try_into().ok();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
