@@ -299,15 +299,21 @@ fn row_year(f: &Feature, date: Option<usize>) -> Option<i32> {
     aef_year(f.attrs.get(date?)?)
 }
 
-/// Refuses an index whose rows there are all without a year that can be read: every one would be
-/// left out, and the search would answer that there are no tiles.
-fn check_dates(fields: &[Field], batch: &Batch) -> Result<(), String> {
+/// How many rows of what the index read have no year that can be read, which a search leaves out;
+/// an error when none has one, as the search would answer that there are no tiles.
+fn undated(fields: &[Field], batch: &Batch) -> Result<usize, String> {
     let date = fields.iter().position(|f| f.name == "datetime");
-    let rows = batch.features.len();
-    if rows == 0 || batch.features.iter().any(|f| row_year(f, date).is_some()) {
-        return Ok(());
+    let n = batch.features.iter().filter(|f| row_year(f, date).is_none()).count();
+    if n > 0 && n == batch.features.len() {
+        return Err(format!("AlphaEarth's index has {n} rows there, none with a date that can be read, so its tiles can't be listed"));
     }
-    Err(format!("AlphaEarth's index has rows there ({rows}), but none whose date can be read, so its tiles can't be listed"))
+    Ok(n)
+}
+
+/// What to say of the `n` rows of AlphaEarth's index a search left out, without a date that can be
+/// read ([`Found::undated`], [`SeriesFound::undated`]): nothing when there were none.
+pub fn undated_note(n: usize) -> Option<String> {
+    (n > 0).then(|| format!("rows of AlphaEarth's index left out, as their date can't be read: {n}"))
 }
 
 /// The tiles of a year in what the index read, nearest the box's centre first (at most
@@ -397,6 +403,8 @@ pub struct SeriesFound {
     pub duplicates: usize,
     /// Whether the index was read whole for the box.
     pub complete: bool,
+    /// Rows left out because their date can't be read.
+    pub undated: usize,
 }
 
 /// How far apart (degrees, about 10 m) two years' footprint corners may be and still be one
@@ -473,20 +481,33 @@ pub fn aef_place(url: &str) -> Option<String> {
     Some(format!("{zone} {place}"))
 }
 
-/// What a search found: the tiles, and whether the index was read whole for the box (a box
-/// holding more rows than one search reads is read in part, and the map should be zoomed in).
-pub type Found = (Vec<Tile>, bool);
+/// What a search found.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Found {
+    pub tiles: Vec<Tile>,
+    /// Whether the index was read whole for the box (a box holding more rows than one search reads
+    /// is read in part, and the map should be zoomed in).
+    pub complete: bool,
+    /// Rows of the index left out because their date can't be read (AlphaEarth).
+    pub undated: usize,
+}
+
+impl From<(Vec<Tile>, bool)> for Found {
+    fn from((tiles, complete): (Vec<Tile>, bool)) -> Self {
+        Found { tiles, complete, undated: 0 }
+    }
+}
 
 /// [`Found`], from what the index read.
 fn found(fields: &[Field], batch: &Batch, year: i32, bbox: [f64; 4]) -> Result<Found, String> {
-    check_dates(fields, batch)?;
-    Ok((aef_tiles(fields, batch, year, bbox), batch.complete))
+    let undated = undated(fields, batch)?;
+    Ok(Found { tiles: aef_tiles(fields, batch, year, bbox), complete: batch.complete, undated })
 }
 
 /// [`SeriesFound`], from what the index read.
 fn series_found(fields: &[Field], batch: &Batch, years: (i32, i32), bbox: [f64; 4]) -> Result<SeriesFound, String> {
-    check_dates(fields, batch)?;
-    Ok(aef_series(fields, batch, years, bbox))
+    let undated = undated(fields, batch)?;
+    Ok(SeriesFound { undated, ..aef_series(fields, batch, years, bbox) })
 }
 
 fn aef_request(bbox: [f64; 4]) -> Request {
@@ -656,7 +677,7 @@ pub fn search_earth_index(bbox: [f64; 4], done: Box<dyn FnOnce(Result<Found, Str
     };
     let (tiles, all) = earth_index_candidates(bbox);
     if tiles.is_empty() {
-        return done(Ok((Vec::new(), all)));
+        return done(Ok((Vec::new(), all).into()));
     }
     struct Probe {
         left: usize,
@@ -694,7 +715,7 @@ pub fn search_earth_index(bbox: [f64; 4], done: Box<dyn FnOnce(Result<Found, Str
                     drop(s);
                     done(match failed {
                         Some(e) if found.is_empty() => Err(e),
-                        _ => Ok((found, all)),
+                        _ => Ok((found, all).into()),
                     });
                 }
             }),
@@ -1079,22 +1100,30 @@ mod tests {
             let at = |y: i32| if utc { DateTime::with_offset(micros(y), 0) } else { DateTime::local(micros(y)) };
             let (fields, batch) = file(&|y| Value::DateTime(at(y).unwrap()));
             assert!(matches!(batch.features.first().and_then(|f| f.attrs.get(1)), Some(Value::DateTime(_))));
-            let (tiles, complete) = found(&fields, &batch, 2024, bbox).unwrap();
-            assert_eq!((tiles.len(), complete), (1, true));
-            assert_eq!(tiles[0].url, "https://data.source.coop/a/2024/23S/x2024-0-0.tiff");
+            let one = found(&fields, &batch, 2024, bbox).unwrap();
+            assert_eq!((one.tiles.len(), one.complete, one.undated), (1, true, 0));
+            assert_eq!(one.tiles[0].url, "https://data.source.coop/a/2024/23S/x2024-0-0.tiff");
             let f = series_found(&fields, &batch, (2017, 2025), bbox).unwrap();
             let years: Vec<Vec<i32>> = f.series.iter().map(|s| s.years.keys().copied().collect()).collect();
-            assert_eq!(years, [[2017, 2024, 2025]]);
+            assert_eq!((years, f.undated), (vec![vec![2017, 2024, 2025]], 0));
             // A year with no file is no tiles, while the dates are read.
-            assert_eq!(found(&fields, &batch, 2020, bbox), Ok((Vec::new(), true)));
+            assert_eq!(found(&fields, &batch, 2020, bbox), Ok((Vec::new(), true).into()));
         }
+        // A row without a date among others is left out, counted whatever the year asked for.
+        let (fields, batch) = file(&|y| if y == 2025 { Value::Null } else { Value::DateTime(DateTime::local(micros(y)).unwrap()) });
+        let left = found(&fields, &batch, 2024, bbox).unwrap();
+        assert_eq!((left.tiles.len(), left.undated), (1, 1));
+        let left = series_found(&fields, &batch, (2017, 2025), bbox).unwrap();
+        assert_eq!((left.series[0].years.len(), left.undated), (2, 1));
+        assert_eq!(undated_note(1).as_deref(), Some("rows of AlphaEarth's index left out, as their date can't be read: 1"));
+        assert_eq!(undated_note(0), None);
         // Rows whose dates can't be read are said, not taken for no tiles; no rows are no tiles.
         let (fields, mut batch) = file(&|_| Value::Null);
         let e = found(&fields, &batch, 2024, bbox).unwrap_err();
-        assert!(e.contains("rows there (3), but none whose date can be read"), "{e}");
+        assert!(e.contains("has 3 rows there, none with a date that can be read"), "{e}");
         assert_eq!(series_found(&fields, &batch, (2017, 2025), bbox).unwrap_err(), e);
         batch.features.clear();
-        assert_eq!(found(&fields, &batch, 2024, bbox), Ok((Vec::new(), true)));
+        assert_eq!(found(&fields, &batch, 2024, bbox), Ok((Vec::new(), true).into()));
         assert_eq!(aef_year(&Value::Date(rustgis_data::Date::from_ymd(2024, 1, 1).unwrap())), Some(2024));
         assert_eq!(aef_year(&Value::Text("2024-01-01T00:00:00Z".into())), Some(2024));
     }
