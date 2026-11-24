@@ -238,16 +238,17 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   and so no labels along its edges.
 - **Section lines**: the **Section Lines** section of a frame's properties draws the traces of
   cross-sections over its map, up to 26 a frame. **Add Horizontal** and **Add Vertical** add one
-  across the whole frame, straight on the page, through the place at the frame's centre, its name
-  in a box at both ends (A and A'); its **Name**, **Direction**, place (**Longitude** and
-  **Latitude**), **Dash**, **Color** and **Line width** are below. The place is what is kept, so the
-  line follows it when the frame is moved, turned or rescaled, and on each page of a map series; the
-  line runs to the frame's edge, or to the outline of a round or polygon frame. A line whose
-  place is outside the frame, or that the frame's map can't show, isn't drawn: its properties, the
-  layout view and exports say which and why (for a map series' PDF, on how many of its pages). On a
-  tilted frame or one on the globe, the line runs through the place as the grid puts it there, only
-  as far as there is ground along it; it is straight on the page there, and not a straight section
-  of the ground. From a command:
+  across the whole frame, straight on the page, through the place at the frame's centre, its name in
+  a box at both ends (A and A'); its **Name**, **Direction**, place (**Longitude** and
+  **Latitude**), **Dash**, **Color** and **Line width** are below. With the frame selected, a line
+  can also be dragged across its map, up or down, or sideways for a vertical one. The place is what
+  is kept, so the line follows it when the frame is moved, turned or rescaled, and on each page of a
+  map series; the line runs to the frame's edge, or to the outline of a round or polygon frame. A
+  line whose place is outside the frame, or that the frame's map can't show, isn't drawn: its
+  properties, the layout view and exports say which and why (for a map series' PDF, on how many of
+  its pages). On a tilted frame or one on the globe, the line runs through the place as the grid
+  puts it there, only as far as there is ground along it; it is straight on the page there, and not
+  a straight section of the ground. From a command:
   `layout.addElement={"kind":"section","frame":1,"name":"A","direction":"horizontal","at":[-44.66,-22.38]}`
   (the name defaults to the first free letter, the place to the frame's centre), then
   `layout.update={"element":1,"section":{"name":"A","at":[-44.7,-22.4],"color":"#1F5C84"}}`

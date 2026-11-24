@@ -1832,6 +1832,65 @@ pub(crate) fn nice_step(span: f64, smallest: f64) -> f64 {
 /// A section line's ends in its frame's points, from its left or top.
 pub type SectionEnds = [(f64, f64); 2];
 
+/// The globe a frame `w` × `h` points shows, if its map is on one.
+fn section_globe(map: &Map, cam: &rustgis_map::Camera, (w, h): (f64, f64)) -> Option<rustgis_map::globe::Globe> {
+    map.projection.is_globe().then(|| rustgis_map::globe::Globe::new(cam, w, h))
+}
+
+/// Where the place `at` is on a frame `w` × `h` points, in its points; on a map whose world
+/// repeats, the copy nearest the frame's middle. `None` where the frame's map can't show it.
+fn section_px(
+    map: &Map,
+    cam: &rustgis_map::Camera,
+    globe: Option<&rustgis_map::globe::Globe>,
+    (w, h): (f64, f64),
+    mut at: Coord,
+) -> Option<(f64, f64)> {
+    if let Some(mid) = map.to_lonlat(cam.center).filter(|c| c.x.is_finite()) {
+        at.x += 360.0 * ((mid.x - at.x) / 360.0).round();
+    }
+    match globe {
+        Some(g) => g.forward(at),
+        None => map.to_map(at).and_then(|m| cam.try_to_screen(m, w, h)),
+    }
+    .filter(|(x, y)| x.is_finite() && y.is_finite())
+}
+
+/// `line` moved `by` points across itself (down, or right for a vertical one) on a frame drawn as
+/// for [`section_ends`], and its ends there. Its place keeps where it is along the line; where that
+/// isn't in the frame's shape there, it goes to `along` points from the frame's left (or top).
+/// `None` where the frame would not draw the line there.
+pub fn section_moved(
+    map: &Map,
+    cam: &rustgis_map::Camera,
+    (w, h): (f64, f64),
+    shape: &FrameShape,
+    line: SectionLine,
+    by: f64,
+    along: f64,
+) -> Option<(SectionLine, SectionEnds)> {
+    let globe = section_globe(map, cam, (w, h));
+    let vertical = matches!(line, SectionLine::Vertical(_));
+    let swap = |(x, y): (f64, f64)| if vertical { (y, x) } else { (x, y) };
+    let (own, across) = swap(section_px(map, cam, globe.as_ref(), (w, h), line.at())?);
+    let to = across + by;
+    [own, along].into_iter().find_map(|along| {
+        let (x, y) = swap((along, to));
+        let at = match &globe {
+            Some(g) => g.inverse(x, y),
+            None => cam.try_to_map(x, y, w, h).and_then(|m| map.to_lonlat(m)),
+        }?;
+        let at = Coord::new((at.x + 180.0).rem_euclid(360.0) - 180.0, at.y);
+        if !at.x.is_finite() || !(-90.0..=90.0).contains(&at.y) {
+            return None;
+        }
+        let moved = line.through(at);
+        let ends = section_ends(map, cam, (w, h), shape, moved).ok()?;
+        // Where the projection has no such place, its inverse can give one that is drawn elsewhere.
+        ((swap(ends[0]).1 - to).abs() < 0.5).then_some((moved, ends))
+    })
+}
+
 /// Where `line` is drawn on a frame `w` × `h` points showing `map` through `cam`, within its
 /// `shape`: its ends, the outermost of where it meets the shape's outline (#2863). It is straight
 /// on the page whatever the frame's projection or bearing. On a tilted frame or the globe it runs
@@ -1847,18 +1906,8 @@ pub fn section_ends(
     line: SectionLine,
 ) -> Result<SectionEnds, &'static str> {
     const NOT_SHOWN: &str = "its place isn't one the frame's map shows";
-    let globe = map.projection.is_globe().then(|| rustgis_map::globe::Globe::new(cam, w, h));
-    let mut at = line.at();
-    // On a map whose world repeats, the copy of the place nearest the frame's middle.
-    if let Some(mid) = map.to_lonlat(cam.center).filter(|c| c.x.is_finite()) {
-        at.x += 360.0 * ((mid.x - at.x) / 360.0).round();
-    }
-    let (px, py) = match &globe {
-        Some(g) => g.forward(at),
-        None => map.to_map(at).and_then(|m| cam.try_to_screen(m, w, h)),
-    }
-    .filter(|(x, y)| x.is_finite() && y.is_finite())
-    .ok_or(NOT_SHOWN)?;
+    let globe = section_globe(map, cam, (w, h));
+    let (px, py) = section_px(map, cam, globe.as_ref(), (w, h), line.at()).ok_or(NOT_SHOWN)?;
     // Along the line and across it: a vertical line is worked out with the axes swapped.
     let vertical = matches!(line, SectionLine::Vertical(_));
     let swap = |(x, y): (f64, f64)| if vertical { (y, x) } else { (x, y) };
@@ -10328,6 +10377,60 @@ Elaboração: RustGIS",
         assert!(a.0 > 1.0 && b.0 < w - 1.0 && near(a.0 + b.0, w), "{a:?} {b:?}");
         let far = SectionLine::Vertical(Coord::new(at.x + 180.0, -at.y));
         assert!(ends(&globe, whole, &rect, far).unwrap_err().contains("map shows"));
+    }
+
+    /// A section line moved across itself is drawn where it was moved to, its place kept along it
+    /// whatever the frame's projection or bearing; in a round frame its place goes where the pointer
+    /// is when the shape leaves it out. Off the frame, its ground or its projection, it isn't moved.
+    #[test]
+    fn a_section_line_moves_across_its_frame() {
+        use rustgis_map::Projection;
+        let (w, h) = (400.0, 200.0);
+        let at = Coord::new(-44.66, -22.38);
+        let moved = |map: &Map, (c, scale, bearing, pitch): (Coord, f64, f64, f64), shape: &FrameShape, line, by, along| {
+            section_moved(map, &frame_camera(map, c, scale, bearing, pitch), (w, h), shape, line, by, along)
+        };
+        let rect = FrameShape::Rectangle;
+        let mut albers = Map::new("albers");
+        albers.projection = Projection::Custom("EPSG:10857".into());
+        for (map, bearing) in [(Map::new("m"), 0.0), (Map::new("m"), 40.0), (albers, -30.0)] {
+            let view = (Coord::new(at.x - 0.1, at.y + 0.05), 1e6, bearing, 0.0);
+            let cam = frame_camera(&map, view.0, view.1, view.2, view.3);
+            let px = |at: Coord| cam.try_to_screen(map.to_map(at).unwrap(), w, h).unwrap();
+            let (x, y) = px(at);
+            let near = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01;
+            let (line, ends) = moved(&map, view, &rect, SectionLine::Horizontal(at), -20.0, 7.0).unwrap();
+            assert!(near(px(line.at()), (x, y - 20.0)) && matches!(line, SectionLine::Horizontal(_)), "{line:?}");
+            assert!(near(ends[0], (0.0, y - 20.0)) && near(ends[1], (w, y - 20.0)), "{ends:?}");
+            let (line, ends) = moved(&map, view, &rect, SectionLine::Vertical(at), 25.0, 7.0).unwrap();
+            assert!(near(px(line.at()), (x + 25.0, y)) && matches!(line, SectionLine::Vertical(_)), "{line:?}");
+            assert!(near(ends[0], (x + 25.0, 0.0)) && near(ends[1], (x + 25.0, h)), "{ends:?}");
+            assert_eq!(moved(&map, view, &rect, SectionLine::Horizontal(at), h, 7.0), None, "below the frame");
+            assert_eq!(moved(&map, view, &rect, SectionLine::Vertical(at), -w, 7.0), None, "left of the frame");
+        }
+        // A place by a round frame's edge, moved up: the shape is narrower there, so it goes to the
+        // pointer, and there is no line where the pointer is off the shape too.
+        let map = Map::new("m");
+        let here = (at, 1e6, 0.0, 0.0);
+        let cam = frame_camera(&map, at, 1e6, 0.0, 0.0);
+        let edge = SectionLine::Horizontal(map.to_lonlat(cam.to_map(110.0, h / 2.0, w, h)).unwrap());
+        let (line, _) = moved(&map, here, &FrameShape::Circle, edge, -80.0, 210.0).unwrap();
+        let (x, y) = cam.try_to_screen(map.to_map(line.at()).unwrap(), w, h).unwrap();
+        assert!((x - 210.0).abs() < 0.01 && (y - 20.0).abs() < 0.01, "{x} {y}");
+        assert_eq!(moved(&map, here, &FrameShape::Circle, edge, -80.0, 110.0), None);
+        // Across 180°, the place keeps within the longitudes a command takes.
+        let line = SectionLine::Vertical(Coord::new(179.5, 0.0));
+        let (line, _) = moved(&map, (Coord::new(179.5, 0.0), 1e7, 0.0, 0.0), &rect, line, 60.0, 100.0).unwrap();
+        assert!((-180.0..-175.0).contains(&line.at().x), "{line:?}");
+        // Not over the horizon, nor off the globe.
+        let tilted = (at, 5e4, 0.0, 80.0);
+        assert!(moved(&map, tilted, &rect, SectionLine::Horizontal(at), 20.0, 200.0).is_some());
+        assert_eq!(moved(&map, tilted, &rect, SectionLine::Horizontal(at), -99.0, 200.0), None);
+        let mut globe = Map::new("g");
+        globe.projection = Projection::Globe;
+        let whole = (at, 5e8, 0.0, 0.0);
+        assert!(moved(&globe, whole, &rect, SectionLine::Vertical(at), 20.0, 100.0).is_some());
+        assert_eq!(moved(&globe, whole, &rect, SectionLine::Vertical(at), 190.0, 100.0), None);
     }
 
     /// A frame's section lines are drawn over its map in their colour, dashed, with their names at
