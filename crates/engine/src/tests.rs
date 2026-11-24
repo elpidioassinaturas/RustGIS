@@ -47918,6 +47918,8 @@ fn hand_edits_and_the_notice_on_a_geoparquet_read_in_place_follow_the_view() {
     let kept = |s: &Session| {
         legend(s).iter().enumerate().filter(|(_, c)| c.label == "Tall" || c.symbol.fill == red).map(|(i, _)| i).collect::<Vec<_>>()
     };
+    // Both edits, on the class they were made on.
+    let both = |s: &Session| legend(s)[1].label == "Tall" && legend(s)[1].symbol.fill == red;
     // Part of the file: three classes of the view's, the middle one edited by hand.
     let edited = |s: &mut Session| {
         run(s, json!({"type": "graduated", "breaks": [99]}));
@@ -47934,11 +47936,11 @@ fn hand_edits_and_the_notice_on_a_geoparquet_read_in_place_follow_the_view() {
     assert!(s.map().layer(id).unwrap().dataset.features.len() < 40);
     let b = edited(&mut s);
     run(&mut s, json!({"method": "manual"}));
-    assert_eq!((kept(&s), legend(&s)[2].label.ends_with("40")), (vec![1], true));
+    assert_eq!((kept(&s), both(&s), legend(&s)[2].label.ends_with("40")), (vec![1], true, true));
     // The same inner bounds, typed.
     edited(&mut s);
     run(&mut s, json!({"breaks": [b[0], b[1]]}));
-    assert_eq!(kept(&s), [1]);
+    assert_eq!((kept(&s), both(&s)), (vec![1], true));
     // Other inner bounds, one fewer, one more, or a closing bound of one's own: none is kept.
     for other in [vec![b[0], b[1] + 1.0], vec![b[0]], vec![b[0], b[1], b[2]], vec![b[0], b[1], 50.0]] {
         edited(&mut s);
@@ -47955,7 +47957,7 @@ fn hand_edits_and_the_notice_on_a_geoparquet_read_in_place_follow_the_view() {
     let l = s.map_mut().layer_mut(id).unwrap();
     l.renderer = l.renderer.opened().unwrap();
     run(&mut s, json!({"method": "manual"}));
-    assert_eq!((kept(&s), legend(&s)[2].label.ends_with("40")), (vec![1], true));
+    assert_eq!((kept(&s), both(&s), legend(&s)[2].label.ends_with("40")), (vec![1], true, true));
     // Nor when the classes are worked out again from another view.
     edited(&mut s);
     let v = view_of(&mut s, rustgis_geom::Extent::new(-5.0, -5.0, 45.0, 5.0));

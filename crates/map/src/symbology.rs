@@ -1391,7 +1391,8 @@ impl Renderer {
     /// These Graduated Colors classes with the ends of `other`'s, whose last bound closes them at
     /// the field's largest value `hi` ([`Renderer::graduated_manual_within`]), when the bounds
     /// between classes are the same: every feature keeps its class. `None` for other renderers,
-    /// for other inner bounds, and when either last bound is past `hi` (one of its own).
+    /// for other inner bounds, and when either last bound is a typed one past `hi`; an open last
+    /// bound of these classes ([`OPEN_ABOVE`]) is taken as closed at `hi`.
     pub fn with_ends_of(&self, other: &Renderer, hi: f64) -> Option<Renderer> {
         let (Renderer::Graduated { breaks: ours, .. }, Renderer::Graduated { breaks: theirs, min: start, .. }) = (self, other) else {
             return None;
