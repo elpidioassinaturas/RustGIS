@@ -60,6 +60,21 @@ impl Project {
         if !required.contains(&"picture-markers") && self.styles.iter().any(|s| s.renderer.has_picture_markers()) {
             required.push("picture-markers");
         }
+        if !required.contains(&"svg-markers") && self.styles.iter().any(|s| s.renderer.any_picture(svg_picture)) {
+            required.push("svg-markers");
+        }
+        // And its labels' weights (#2803): an older reader would apply the style without them.
+        if !required.contains(&"label-weight")
+            && self.styles.iter().any(|s| s.labels.in_order().any(|c| c.weight != rustgis_map::symbology::DEFAULT_LABEL_WEIGHT))
+        {
+            required.push("label-weight");
+        }
+        // And their clearances (#2828), for the same reason.
+        if !required.contains(&"label-clearance")
+            && self.styles.iter().any(|s| s.labels.in_order().any(|c| c.clearance != rustgis_map::symbology::DEFAULT_LABEL_CLEARANCE))
+        {
+            required.push("label-clearance");
+        }
         let commands: Vec<&'static str> =
             COMMAND_CAPABILITIES.iter().filter_map(|&(name, uses)| self.uses_commands(uses).then_some(name)).collect();
         required.extend(commands.into_iter().filter(|name| !required.contains(name)).collect::<Vec<_>>());
@@ -79,36 +94,10 @@ impl Project {
             required.push("table-export-order");
         }
         // Saved layouts as well as saved commands: an older reader keeps neither.
-        if !required.contains(&"layout-element-background")
-            && self.layouts.iter().any(|l| l.elements.iter().any(|e| e.background.is_some()))
-        {
-            required.push("layout-element-background");
-        }
-        if !required.contains(&"layout-element-ink") && self.layouts.iter().any(|l| l.elements.iter().any(|e| e.kind.ink().is_some())) {
-            required.push("layout-element-ink");
-        }
-        if !required.contains(&"layout-element-wrap") && self.layouts.iter().any(|l| l.elements.iter().any(wraps)) {
-            required.push("layout-element-wrap");
-        }
-        if !required.contains(&"layout-chart-data") && self.layouts.iter().any(|l| l.elements.iter().any(charts_data)) {
-            required.push("layout-chart-data");
-        }
-        if !required.contains(&"layout-chart-look") && self.layouts.iter().any(|l| l.elements.iter().any(charts_look)) {
-            required.push("layout-chart-look");
-        }
-        if !required.contains(&"layout-chart-classes") && self.layouts.iter().any(|l| l.elements.iter().any(charts_classes)) {
-            required.push("layout-chart-classes");
-        }
-        if !required.contains(&"layout-chart-stack") && self.layouts.iter().any(|l| l.elements.iter().any(charts_stack)) {
-            required.push("layout-chart-stack");
-        }
-        if !required.contains(&"layout-frame-border") && self.layouts.iter().any(|l| l.elements.iter().any(|e| e.kind.has_custom_border()))
-        {
-            required.push("layout-frame-border");
-        }
-        if !required.contains(&"layout-text-size") && self.layouts.iter().any(|l| l.elements.iter().any(|e| e.kind.has_custom_text_size()))
-        {
-            required.push("layout-text-size");
+        for name in layout_capabilities(&self.layouts) {
+            if !required.contains(&name) {
+                required.push(name);
+            }
         }
         // A coordinate system whose PROJ definition, which an older reader reads, doesn't place
         // points as its WKT does (angles in grads, a datum transformation the definition can't
@@ -147,6 +136,7 @@ const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] = &[
     ("tabulate-intersection-empty-zones", command_uses_tabulate_empty_zones),
     ("layout-element-background", command_uses_element_background),
     ("picture-markers", command_uses_picture_marker),
+    ("svg-markers", command_uses_svg_marker),
     ("graticule-mgrs", command_draws_mgrs_graticule),
     ("graticule-on-top", command_puts_graticule_on_top),
     ("graticule-color", command_colors_graticule),
@@ -156,11 +146,42 @@ const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] = &[
     ("layout-chart-look", command_uses_chart_look),
     ("layout-chart-classes", command_uses_chart_classes),
     ("layout-chart-stack", command_uses_chart_stack),
+    ("layout-chart-facing", command_uses_chart_facing),
     ("blank-paper", command_uses_blank_paper),
     ("layout-frame-border", command_uses_frame_border),
     ("layout-text-size", command_uses_text_size),
     ("dggs-system", command_uses_dggs_system),
+    ("label-weight", command_weighs_labels),
+    ("label-clearance", command_clears_labels),
 ];
+
+/// A saved `labels.placement` that gives a class a clearance other than 2, read as the command
+/// reads it (#2828): an older reader runs it without the key, saying nothing, so the labels would
+/// keep 2 points apart as before. 2 or null is what an older reader keeps.
+fn command_clears_labels(id: &str, params: &Value) -> bool {
+    match id {
+        "labels.placement" => params
+            .get("clearance")
+            .and_then(crate::cmd::labels::number)
+            .is_some_and(|c| rustgis_map::symbology::label_clearance(c) != rustgis_map::symbology::DEFAULT_LABEL_CLEARANCE),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_clears_labels)),
+        _ => false,
+    }
+}
+
+/// A saved `labels.placement` that gives a class a weight other than 5, read as the command reads
+/// it (#2803): an older reader runs it without the key, saying nothing, so the labels would compete
+/// as before. 5 or null is what an older reader keeps.
+fn command_weighs_labels(id: &str, params: &Value) -> bool {
+    match id {
+        "labels.placement" => params
+            .get("weight")
+            .and_then(crate::cmd::labels::number)
+            .is_some_and(|w| rustgis_map::symbology::label_weight(w) != rustgis_map::symbology::DEFAULT_LABEL_WEIGHT),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_weighs_labels)),
+        _ => false,
+    }
+}
 
 /// A saved `map.graticule` that switches to the MGRS grid, its type read as the command reads it:
 /// an older reader refuses the type, so the command would fail there.
@@ -394,9 +415,35 @@ fn command_uses_chart_stack(id: &str, params: &Value) -> bool {
     }
 }
 
+fn charts_facing(e: &rustgis_map::layout::Element) -> bool {
+    e.kind.chart_uses_facing()
+}
+
+/// A layout command that mirrors a chart, gives it a fixed maximum or hides its labels (#2487
+/// part 4): an older reader ignores those keys and draws the chart the usual way round, on its
+/// bars' own scale, labelled. `false`, `null` and `"auto"` keep a chart as an older reader draws
+/// it; only a chart takes the keys, so a `layout.update` is read by them alone.
+fn command_uses_chart_facing(id: &str, params: &Value) -> bool {
+    let facing = || {
+        let on = |k: &str| params.get(k).and_then(crate::cmd::bool_value) == Some(true);
+        on("mirror")
+            || on("hideLabels")
+            || params.get("max").and_then(Value::as_f64).and_then(|m| rustgis_map::layout::chart_max(Some(m))).is_some()
+    };
+    match id {
+        "layout.addElement" => {
+            params.get("kind").and_then(Value::as_str).is_some_and(|k| k.trim().eq_ignore_ascii_case("chart")) && facing()
+        }
+        "layout.update" => facing(),
+        "layout.import" => imported_layout_uses(params, &["\"mirror\"", "\"max\"", "\"hide_labels\""], charts_facing),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_chart_facing)),
+        _ => false,
+    }
+}
+
 /// Whether a `layout.import` carries its layout as `"text"` with an element `uses`: an older
 /// reader reads it without the keys it doesn't know. One read from a `"path"` is a layout file,
-/// which carries no format header yet (#2277). Every save asks, so a text with none of the
+/// whose own header requires what it uses (#2277). Every save asks, so a text with none of the
 /// feature's `keys` (a saved layout writes them only when set) isn't read through, unless it has a
 /// backslash: JSON may spell a key with escapes (`"\u0063olor"`). It is read once, whatever its
 /// keys.
@@ -490,16 +537,35 @@ fn tool_uses(tools: &[&str], id: &str, params: &Value, uses: fn(&Value) -> bool)
 /// `layer.marker`, a line stroke's markers or a dot fill given an image: an older reader would
 /// leave its `image` out and keep the marker it had, or refuse `"image"` as a mark.
 fn command_uses_picture_marker(id: &str, params: &Value) -> bool {
-    let any = |list: &str, image: fn(&Value) -> Option<&Value>| {
-        params.get(list).and_then(Value::as_array).is_some_and(|l| l.iter().any(|v| image(v).is_some_and(Value::is_string)))
+    command_sets_marker_image(id, params, |_| true)
+}
+
+/// [`command_uses_picture_marker`] with an SVG (#2266 part E1b): a reader of PNG and JPEG markers
+/// only would refuse the command.
+fn command_uses_svg_marker(id: &str, params: &Value) -> bool {
+    command_sets_marker_image(id, params, rustgis_render::picture_marker_is_svg)
+}
+
+/// Whether command `id` gives a marker an image (base64) that `image` holds true for.
+fn command_sets_marker_image(id: &str, params: &Value, image: fn(&str) -> bool) -> bool {
+    let any = |list: &str, at: fn(&Value) -> Option<&Value>| {
+        params.get(list).and_then(Value::as_array).is_some_and(|l| l.iter().any(|v| at(v).and_then(Value::as_str).is_some_and(image)))
     };
     match id {
-        "layer.marker" => params.get("image").is_some_and(Value::is_string),
+        "layer.marker" => params.get("image").and_then(Value::as_str).is_some_and(image),
         "layer.lineStrokes" => any("strokes", |st| st.get("markers")?.get("image")),
         "layer.fillLayers" => any("fills", |f| f.get("image")),
-        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_picture_marker)),
+        "script.run" => params
+            .get("script")
+            .and_then(Value::as_str)
+            .is_some_and(|s| script_uses(s, |id, params| command_sets_marker_image(id, params, image))),
         _ => false,
     }
+}
+
+/// Whether marker image `p` is an SVG ([`command_uses_svg_marker`]'s reason, for saved symbology).
+fn svg_picture(p: rustgis_map::Picture) -> bool {
+    rustgis_render::picture_marker_is_svg(p.base64())
 }
 
 /// Use the executor's line grammar; comments/invalid lines are not executable commands, and
@@ -545,6 +611,18 @@ fn label_guide(layer: &Layer) -> bool {
     layer.labels.in_order().any(|c| c.guide.is_some())
 }
 
+/// Whether a layer's label classes weigh other than the default (#2803): an older reader would
+/// drop the weights, and place and save the labels as without them.
+fn label_weight(layer: &Layer) -> bool {
+    layer.labels.in_order().any(|c| c.weight != rustgis_map::symbology::DEFAULT_LABEL_WEIGHT)
+}
+
+/// Whether a layer's label classes keep other than the default room free (#2828): an older reader
+/// would drop the clearances, and place and save the labels as without them.
+fn label_clearance(layer: &Layer) -> bool {
+    layer.labels.in_order().any(|c| c.clearance != rustgis_map::symbology::DEFAULT_LABEL_CLEARANCE)
+}
+
 /// The capabilities a layer needs, in [`map_capabilities`]'s order.
 fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
     [
@@ -552,8 +630,11 @@ fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
         (relief_light(layer), "shaded-relief-light"),
         (layer.size_by.is_some(), super::SIZE_BY_CAPABILITY),
         (layer.has_picture_markers(), "picture-markers"),
+        (layer.any_picture(svg_picture), "svg-markers"),
         (zarr_window(layer), "zarr-window"),
         (label_guide(layer), "label-guide"),
+        (label_weight(layer), "label-weight"),
+        (label_clearance(layer), "label-clearance"),
         (held_natively(&layer.dataset), super::NATIVE_COORDINATES),
     ]
     .into_iter()
@@ -579,13 +660,15 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         mut on_top,
         mut grid_color,
     ) = (false, false, false, false, false, false, false, false, false, false, false, false, false, false, false);
-    let mut polygon = false;
-    let (mut offline_area_id, mut paper, mut native, mut guided) = (false, false, false, false);
+    let (mut polygon, mut svg) = (false, false);
+    let (mut offline_area_id, mut paper, mut native, mut guided, mut weighed, mut cleared) = (false, false, false, false, false, false);
     for map in maps {
         offline_area_id |= map.offline_area_id.is_some();
         // A blank basemap's paper colour (#2532), which an older reader would draw and save white.
         paper |= map.paper.is_some();
         guided |= map.layers.iter().any(label_guide);
+        weighed |= map.layers.iter().any(label_weight);
+        cleared |= map.layers.iter().any(label_clearance);
         // An older reader doesn't know the MGRS graticule (#1042 piece 8): it refuses the
         // project by name rather than failing to read the type.
         mgrs |= map.graticule_type == rustgis_map::graticule::GraticuleType::Mgrs;
@@ -610,6 +693,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         light |= map.layers.iter().any(relief_light);
         sized |= map.layers.iter().any(|layer| layer.size_by.is_some());
         pictures |= map.layers.iter().any(Layer::has_picture_markers);
+        svg |= map.layers.iter().any(|layer| layer.any_picture(svg_picture));
         zarr |= map.layers.iter().any(zarr_window);
         native |= map.layers.iter().any(|layer| held_natively(&layer.dataset));
         legends |= map.tiles.iter().any(|tile| {
@@ -629,8 +713,11 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         (legends, "normalized-legend-urls"),
         (sized, super::SIZE_BY_CAPABILITY),
         (pictures, "picture-markers"),
+        (svg, "svg-markers"),
         (zarr, "zarr-window"),
         (guided, "label-guide"),
+        (weighed, "label-weight"),
+        (cleared, "label-clearance"),
         (offline_area_id, "offline-map-area-id"),
         (paper, "blank-paper"),
         (native, super::NATIVE_COORDINATES),
@@ -659,6 +746,35 @@ pub(crate) fn map_file_bytes(map: &Map) -> Result<Vec<u8>, String> {
         requires.push("crs-wkt");
     }
     serde_json::to_vec(&Item { format: FORMAT, requires, value: map }).map_err(|e| e.to_string())
+}
+
+/// A layout file has its own header, as a map file has: what its elements use, as the project
+/// holding it requires for them (#2277). Indented, as layout files have always been written. No
+/// `crs-wkt`: a layout holds no coordinate system, only a measured grid's as text.
+pub fn layout_file_bytes(layout: &rustgis_map::layout::Layout) -> Result<Vec<u8>, String> {
+    let requires = layout_capabilities(std::slice::from_ref(layout));
+    serde_json::to_vec_pretty(&Item { format: FORMAT, requires, value: layout }).map_err(|e| e.to_string())
+}
+
+/// What the elements of `layouts` use that an older reader would draw without and save again
+/// without: the project requires it for its layouts, and a layout file for its own.
+fn layout_capabilities(layouts: &[rustgis_map::layout::Layout]) -> Vec<&'static str> {
+    let elements = || layouts.iter().flat_map(|l| &l.elements);
+    [
+        (elements().any(|e| e.background.is_some()), "layout-element-background"),
+        (elements().any(|e| e.kind.ink().is_some()), "layout-element-ink"),
+        (elements().any(wraps), "layout-element-wrap"),
+        (elements().any(charts_data), "layout-chart-data"),
+        (elements().any(charts_look), "layout-chart-look"),
+        (elements().any(charts_classes), "layout-chart-classes"),
+        (elements().any(charts_stack), "layout-chart-stack"),
+        (elements().any(charts_facing), "layout-chart-facing"),
+        (elements().any(|e| e.kind.has_custom_border()), "layout-frame-border"),
+        (elements().any(|e| e.kind.has_custom_text_size()), "layout-text-size"),
+    ]
+    .into_iter()
+    .filter_map(|(used, name)| used.then_some(name))
+    .collect()
 }
 
 /// A layer file keeps the same renderer capabilities as the layer saved inside a project.
@@ -796,6 +912,44 @@ mod tests {
         let fixture = Project::from_json(include_str!("../../../schema/fixtures/dggs_system.rgis")).unwrap();
         assert_eq!(fixture.models[0].steps[0].params["system"], "H3");
         assert_eq!(serde_json::to_value(&fixture).unwrap()["requires"], json!(["dggs-system"]));
+    }
+
+    /// A saved command that sets an SVG as a marker's image requires `svg-markers` as well as
+    /// `picture-markers`, in every replayable container: a reader of PNG and JPEG markers only
+    /// would refuse the command when it replays. A PNG requires `picture-markers` alone, and an
+    /// image that is neither is refused by the command anyway (#2266 part E1b).
+    #[test]
+    fn a_saved_command_setting_an_svg_marker_requires_svg_markers() {
+        use base64::Engine;
+        let svg = base64::engine::general_purpose::STANDARD.encode(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 4"/>"#);
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==";
+        let base = serde_json::to_value(Project::default()).unwrap();
+        for (image, expected) in [(png.to_string(), vec!["picture-markers"]), (svg, vec!["picture-markers", "svg-markers"])] {
+            for (command, params) in [
+                ("layer.marker", json!({"layer": "Cities", "image": image})),
+                ("layer.lineStrokes", json!({"layer": "Rivers", "strokes": [{"width": 1}, {"markers": {"image": image}}]})),
+                ("layer.fillLayers", json!({"layer": "Lakes", "fills": [{"pattern": "dots", "image": image}]})),
+            ] {
+                let script = format!("# Icons\n{command} {params}");
+                for (field, value) in [
+                    ("tasks", json!([{"name": "Task", "steps": [{"title": "Icon", "command": command, "params": params}]}])),
+                    (
+                        "tasks",
+                        json!([{"name": "Script", "steps": [{"title": "Icon", "command": "script.run", "params": {"script": script}}]}]),
+                    ),
+                    ("notebooks", json!([{"name": "Notebook", "cells": [{"kind": "code", "source": script}]}])),
+                    (
+                        "gp_history",
+                        json!([{"tool": "Marker", "params": {}, "command": [command, params], "ok": true, "messages": [], "millis": 0}]),
+                    ),
+                ] {
+                    let mut document = base.clone();
+                    document[field] = value;
+                    let project = Project::from_json(&document.to_string()).unwrap();
+                    assert_eq!(serde_json::to_value(&project).unwrap()["requires"], json!(expected), "{field} {command} {image}");
+                }
+            }
+        }
     }
 
     /// All replayable project containers require non-default options only when requested.
@@ -1325,6 +1479,72 @@ mod tests {
                 document["tasks"] = value;
                 let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
                 let expected = if required { json!(["layout-chart-stack"]) } else { Value::Null };
+                assert_eq!(saved.get("requires").cloned().unwrap_or(Value::Null), expected, "{id} {params}");
+            }
+        }
+    }
+
+    /// A chart that faces another (#2487 part 4: mirrored, a fixed maximum, labels hidden) is
+    /// required where it is saved, so an older reader refuses the project instead of drawing it
+    /// the usual way round, on its own scale, labelled; so is a saved command that sets one. Each
+    /// at its default (`false`, `null`, `"auto"`) needs nothing, nor is written.
+    #[test]
+    fn chart_facing_capability_follows_saved_layouts_and_commands() {
+        use rustgis_map::layout::ElementKind;
+        let fixture = Project::from_json(include_str!("../../../schema/fixtures/layout_chart_facing.rgis")).unwrap();
+        let saved = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(saved["requires"], json!(["layout-chart-facing"]));
+        let mut clean = fixture;
+        for e in &mut clean.layouts[0].elements {
+            if let ElementKind::Chart { mirror, max, hide_labels, .. } = &mut e.kind {
+                (*mirror, *max, *hide_labels) = (false, None, false);
+            }
+        }
+        let base = serde_json::to_value(&clean).unwrap();
+        assert!(base.get("requires").is_none(), "a chart drawn the usual way needs nothing");
+        for key in ["\"mirror\"", "\"max\"", "\"hide_labels\""] {
+            assert!(!base["layouts"].to_string().contains(key), "nor writes {key}");
+        }
+        // Each one alone requires it.
+        for key in ["mirror", "max", "hide_labels"] {
+            let mut one = base.clone();
+            one["layouts"][0]["elements"][1]["kind"]["Chart"][key] = if key == "max" { json!(100.0) } else { json!(true) };
+            let saved = serde_json::to_value(Project::from_json(&one.to_string()).unwrap()).unwrap();
+            assert_eq!(saved["requires"], json!(["layout-chart-facing"]), "{key}");
+        }
+        // A hand-edited maximum not above 0 is let go on read (and said), so it is neither written
+        // back nor required.
+        let mut kept = base.clone();
+        kept["layouts"][0]["elements"][1]["kind"]["Chart"]["max"] = json!(-5.0);
+        let saved_kept = serde_json::to_value(Project::from_json(&kept.to_string()).unwrap()).unwrap();
+        assert!(saved_kept.get("requires").is_none());
+        assert!(saved_kept["layouts"][0]["elements"][1]["kind"]["Chart"].get("max").is_none());
+        let mut document = base.clone();
+        document["tasks"] = json!([{"name": "Task", "steps": [{"title": "Chart", "command": "layout.import", "params": {"text": saved["layouts"][0].to_string()}}]}]);
+        let imported = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+        assert_eq!(imported["requires"], json!(["layout-chart-facing"]));
+        for (id, params, required) in [
+            ("layout.addElement", json!({"kind": "chart", "mirror": true}), true),
+            ("layout.addElement", json!({"kind": "chart", "max": 100}), true),
+            ("layout.addElement", json!({"kind": "chart", "hideLabels": true}), true),
+            ("layout.addElement", json!({"kind": "chart", "mirror": false, "max": null, "hideLabels": false}), false),
+            ("layout.addElement", json!({"kind": "chart", "max": "auto"}), false),
+            ("layout.addElement", json!({"kind": "legend", "mirror": true}), false),
+            ("layout.update", json!({"element": 2, "mirror": true}), true),
+            ("layout.update", json!({"element": 2, "max": 50}), true),
+            ("layout.update", json!({"element": 2, "hideLabels": true}), true),
+            ("layout.update", json!({"element": 2, "mirror": false, "max": null, "hideLabels": false}), false),
+            ("layout.import", json!({"text": base["layouts"][0].to_string()}), false),
+        ] {
+            let script = format!("{id}= {params}");
+            for value in [
+                json!([{"name": "Task", "steps": [{"title": "Chart", "command": id, "params": params}]}]),
+                json!([{"name": "Script", "steps": [{"title": "Chart", "command": "script.run", "params": {"script": script}}]}]),
+            ] {
+                let mut document = base.clone();
+                document["tasks"] = value;
+                let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+                let expected = if required { json!(["layout-chart-facing"]) } else { Value::Null };
                 assert_eq!(saved.get("requires").cloned().unwrap_or(Value::Null), expected, "{id} {params}");
             }
         }

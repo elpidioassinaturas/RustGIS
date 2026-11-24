@@ -73,7 +73,43 @@ loss_codes! {
         Dropped,
         "Correct the expression or check the input rows named in the notice."
     ),
+    DroppedZm => (
+        "dropped.zm",
+        Dropped,
+        "Keep the source file where heights or measures matter: RustGIS keeps x and y only."
+    ),
+    DroppedCrsName => (
+        "dropped.crs-name",
+        Dropped,
+        "Keep the source file's coordinate system definition with the export."
+    ),
     ChangedTruncated => ("changed.truncated", Changed, "Use a decimal field to keep the fractional part."),
+    ChangedBody => ("changed.body", Changed, "Export in the layer's own coordinate system, which keeps its body."),
+    ChangedEncoding => (
+        "changed.encoding",
+        Changed,
+        "Put a .cpg file naming the file's own encoding beside it."
+    ),
+    ChangedRounded => (
+        "changed.rounded",
+        Changed,
+        "Keep the source file where times finer than a microsecond matter."
+    ),
+    ChangedPosition => (
+        "changed.position",
+        Changed,
+        "Export in a coordinate system that holds the positions, such as WGS 84."
+    ),
+    ApproximatedDatum => (
+        "approximated.datum",
+        Approximated,
+        "Export in the layer's own coordinate system, or give that system with a known transformation to WGS 84."
+    ),
+    AssumedNullMarker => (
+        "assumed.null-marker",
+        Assumed,
+        "Write the value another way if the text Null is meant as text, not as an empty value."
+    ),
 }
 
 impl LossCode {

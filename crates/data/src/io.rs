@@ -1644,28 +1644,11 @@ pub(crate) fn is_epsg_or_crs84_name(name: &str) -> bool {
     up == "CRS84" || up == "OGC:CRS84" || up.strip_prefix("OGC:").and_then(|rest| tail(rest, ':')).is_some_and(|c| c == "CRS84")
 }
 
-/// A geometry in longitude/latitude from the coordinates `t` converts: `None` when a coordinate
-/// can't be converted or comes out beyond longitude/latitude (a declared system that doesn't match
-/// the coordinates).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn geometry_to_lonlat(g: &Geometry, t: &crate::raster::Transformer) -> Option<Geometry> {
-    let mut ok = true;
-    let out = g.map_coords(&|c| t.to_lonlat(c).unwrap_or(Coord::new(f64::NAN, f64::NAN)));
-    out.for_each_coord(|c: Coord| ok &= c.is_finite() && c.x.abs() <= 180.5 && c.y.abs() <= 90.5);
-    ok.then_some(out)
-}
-
-/// Whether every coordinate of `g`, in the system `t` converts, has a place in longitude/latitude
-/// (a finite one): a reader keeps the geometry as the file holds it, held in its system
-/// ([`Dataset::held_in`]), when it does, and leaves the feature's geometry out when it doesn't,
-/// as one it couldn't convert. Each coordinate is converted to be checked, none is kept.
-pub(crate) fn places_in_lonlat(g: &Geometry, t: &crate::raster::Transformer) -> bool {
-    places_lonlat_extent(g, t).is_some()
-}
-
-/// [`places_in_lonlat`] with the box of the places in longitude/latitude, for a reader that says
-/// when they come out beyond it (a `.prj` that doesn't match the coordinates): `None` when one of
-/// them has no place there.
+/// The box in longitude/latitude of `g`'s places, in the system `t` converts: `None` when one of
+/// them has no place there (none that is finite). A reader keeps the geometry as the file holds
+/// it, held in its system ([`Dataset::held_in`]), either way, and counts those with none
+/// ([`kept_unplaced_note`]) and those whose box comes out beyond longitude/latitude
+/// ([`beyond_lonlat_note`]). Each coordinate is converted to be checked, none is kept.
 pub(crate) fn places_lonlat_extent(g: &Geometry, t: &crate::raster::Transformer) -> Option<rustgis_geom::Extent> {
     let mut ok = true;
     let mut e = rustgis_geom::Extent::EMPTY;
@@ -1676,18 +1659,44 @@ pub(crate) fn places_lonlat_extent(g: &Geometry, t: &crate::raster::Transformer)
     ok.then_some(e)
 }
 
-/// The box in longitude/latitude of a geometry in the coordinates `t` converts, for a reader that
-/// keeps the geometry as the file holds it: `None` where [`geometry_to_lonlat`] refuses it (a
-/// coordinate that can't be converted, or comes out beyond longitude/latitude). Each coordinate
-/// is converted to be checked, none is kept.
-pub(crate) fn lonlat_box(g: &Geometry, t: &crate::raster::Transformer) -> Option<rustgis_geom::Extent> {
-    let mut ok = true;
-    let mut out = rustgis_geom::Extent::EMPTY;
-    g.for_each_coord(|c: Coord| match t.to_lonlat(c) {
-        Some(l) if l.is_finite() && l.x.abs() <= 180.5 && l.y.abs() <= 90.5 => out.expand(l),
-        _ => ok = false,
-    });
-    ok.then_some(out)
+/// What a reader says of the `n` of its `what` (features, shapes, rows) it keeps as the file holds
+/// them, held in `crs`, though a place of theirs can't be given in longitude/latitude: they don't
+/// draw (the map says so too), and a step that needs longitude/latitude leaves them out and says
+/// so, or refuses naming one where leaving it out would lose it (a write-back, a sync of an
+/// offline area holding it, a Field Package's list of changes) or a contract says so (the plugin
+/// host's layers) (#2032 C2f-4b). `all` when none of the file's has a place there: then its system
+/// doesn't seem to match its coordinates, and Define Projection can set the one that does, as
+/// nothing was lost. `None` for none.
+pub(crate) fn kept_unplaced_note(what: &str, n: usize, all: bool, crs: Crs) -> Option<String> {
+    (n > 0).then(|| {
+        if all {
+            format!(
+                "none of the {what} has a place in longitude/latitude from {}: it doesn't seem to be their coordinate system. They are kept as the file holds them, but don't draw; Define Projection can set the right one",
+                crs.label()
+            )
+        } else {
+            let system = crs.label();
+            if n == 1 {
+                format!("one of the {what} has a place in {system} that can't be given in longitude/latitude: it is kept as the file holds it, but doesn't draw")
+            } else {
+                format!("{n} {what} have a place in {system} that can't be given in longitude/latitude: they are kept as the file holds them, but don't draw")
+            }
+        }
+    })
+}
+
+/// What a reader says of the `n` of its `what` whose places convert from `crs` but come out beyond
+/// longitude/latitude (their box there is, [`rustgis_geom::Extent::beyond_lonlat`]): the system
+/// may not be theirs, and they may draw out of place. `None` for none.
+pub(crate) fn beyond_lonlat_note(what: &str, n: usize, crs: Crs) -> Option<String> {
+    let system = crs.label();
+    (n > 0).then(|| {
+        if n == 1 {
+            format!("one of the {what} has coordinates that come out beyond longitude/latitude once converted from {system}: it may not be their coordinate system, and it may draw out of place")
+        } else {
+            format!("{n} {what} have coordinates that come out beyond longitude/latitude once converted from {system}: it may not be their coordinate system, and they may draw out of place")
+        }
+    })
 }
 
 /// What takes a FeatureCollection's features as they're read.
@@ -1931,26 +1940,24 @@ impl Collector {
         let mut said = Vec::new();
         let declared = declared_crs(root, &mut said)?;
         report.messages.extend(said);
-        let mut unconverted = 0usize;
+        let (mut unconverted, mut placed) = (0usize, 0usize);
+        let mut beyond = 0usize;
         // Only features kept count toward the heights dropped.
         let mut zm = 0usize;
         // Features kept, as longitude/latitude, with a latitude past the poles.
         let mut swapped = 0usize;
         for (n, (geom, values, had_z)) in self.features.into_iter().enumerate() {
-            // A feature that can't be converted is dropped, and its id is not reused, as when the
-            // file is read in place.
-            // Kept as the file holds it, in its declared system, when it has a place in
-            // longitude/latitude (as [`geometry_to_lonlat`] would give it).
-            let geom = match (&declared, geom) {
-                (Some((_, t)), Some(g)) => match lonlat_box(&g, t) {
-                    Some(_) => Some(g),
-                    None => {
-                        unconverted += 1;
-                        continue;
+            // Kept as the file holds it, in its declared system, and counted when it has no place
+            // in longitude/latitude ([`places_lonlat_extent`]), as when the file is read in place.
+            if let (Some((_, t)), Some(g)) = (&declared, &geom) {
+                match places_lonlat_extent(g, t) {
+                    Some(e) => {
+                        placed += 1;
+                        beyond += usize::from(e.beyond_lonlat());
                     }
-                },
-                (_, g) => g,
-            };
+                    None => unconverted += 1,
+                }
+            }
             let mut attrs = vec![Value::Null; ds.fields.len()];
             for (i, v) in values {
                 if let (Some(slot), Some(field)) = (attrs.get_mut(i), ds.fields.get(i)) {
@@ -1958,8 +1965,7 @@ impl Collector {
                 }
             }
             zm += usize::from(had_z);
-            // Converted geometry is already within ±90.5° (or dropped above), so only what is read
-            // as longitude/latitude can be swapped.
+            // Only what is read as longitude/latitude can be swapped.
             swapped += usize::from(declared.is_none() && geom.as_ref().is_some_and(latitude_past_poles));
             ds.features.push(crate::Feature { id: n as u64 + 1, geometry: geom, attrs });
         }
@@ -1967,15 +1973,8 @@ impl Collector {
         if let Some((crs, _)) = &declared {
             ds.crs = Some(*crs);
             ds.held_in = *crs;
-            if unconverted > 0 {
-                report.skipped += unconverted;
-                report.messages.push(format!(
-                    "{unconverted} features couldn't be converted from {} to longitude/latitude and were skipped",
-                    crs.label()
-                ));
-            }
-            // What couldn't be converted can't come back by defining the projection again.
-            ds.crs_incomplete = unconverted > 0;
+            report.messages.extend(kept_unplaced_note("features", unconverted, placed == 0, *crs));
+            report.messages.extend(beyond_lonlat_note("features", beyond, *crs));
         }
         report.messages.extend(swapped_latitude_note(swapped));
         // Last, as a source read in place notes it.
@@ -2974,24 +2973,25 @@ pub(crate) fn read_rows(
     if let Some(c) = crs.filter(|c| *c != crate::raster::Crs::LonLat) {
         let t = c.transformer().map_err(DataError::Format)?;
         ds.crs = Some(c);
-        // Kept as the file holds them, in its system, where they have a place in longitude/latitude.
+        // Kept as the file holds them, in its system; counted where they have no place in
+        // longitude/latitude.
         ds.held_in = c;
-        let mut lost = 0usize;
-        for f in &mut ds.features {
-            if let Some(g) = f.geometry.take() {
-                if places_in_lonlat(&g, &t) {
-                    f.geometry = Some(g);
-                } else {
-                    lost += 1;
+        let (mut lost, mut placed, mut beyond) = (0usize, 0usize, 0usize);
+        for g in ds.features.iter().filter_map(|f| f.geometry.as_ref()) {
+            match places_lonlat_extent(g, &t) {
+                Some(e) => {
+                    placed += 1;
+                    beyond += usize::from(e.beyond_lonlat());
                 }
+                None => lost += 1,
             }
         }
-        if lost > 0 {
-            report.skipped += lost;
-            report.messages.push(format!("{lost} rows couldn't be converted from {} to longitude/latitude", c.label()));
-        }
+        report.messages.extend(kept_unplaced_note("rows", lost, placed == 0, c));
+        report.messages.extend(beyond_lonlat_note("rows", beyond, c));
     }
-    let read_as_degrees = crs.is_none_or(Crs::is_geographic);
+    // Read as longitude/latitude as they are: no system given, or longitude/latitude itself. A
+    // row a given system can't place is said above, as kept.
+    let read_as_degrees = crs.is_none_or(|c| c == Crs::LonLat);
     let (mut outside, mut zero) = (0usize, 0usize);
     for f in &ds.features {
         crate::progress::check()?;
@@ -3323,7 +3323,7 @@ pub fn shapefile_for_dbf(path: &Path) -> Option<std::path::PathBuf> {
 
 /// Finds the attributes beside a Shapefile, accepting every ASCII case of `.dbf` in whole
 /// and streamed reads. A missing sidecar keeps the usual lowercase path for the error.
-pub(crate) fn dbf_sidecar(path: &Path) -> std::path::PathBuf {
+pub fn dbf_sidecar(path: &Path) -> std::path::PathBuf {
     ["dbf", "DBF", "Dbf", "dBf", "dbF", "DBf", "DbF", "dBF"]
         .iter()
         .map(|e| path.with_extension(e))
@@ -3769,8 +3769,9 @@ struct DbfRead {
 /// `name` is the layer's, for the error of a `.dbf` it can't open.
 fn dbf_reader(mut bytes: Vec<u8>, cpg: Option<&[u8]>, name: &str) -> Result<DbfRead> {
     use std::io::Cursor;
-    let mut encoding_notes = Vec::new();
-    let encoding = crate::dbf::encoding(cpg, bytes.get(29).copied().unwrap_or(0), &mut encoding_notes);
+    let mut declared = Vec::new();
+    let encoding = crate::dbf::encoding(cpg, bytes.get(29).copied().unwrap_or(0), &mut declared);
+    let mut encoding_notes = crate::loss::Notes::from(declared);
     // Counted before a date column is marked a character one below: its values aren't text.
     let (names, not_utf8) = crate::dbf::not_utf8(&bytes, &encoding);
     encoding_notes.extend(crate::dbf::not_utf8_names_note(&names, encoding.name()));
@@ -3804,7 +3805,7 @@ fn dbf_reader(mut bytes: Vec<u8>, cpg: Option<&[u8]>, name: &str) -> Result<DbfR
         })
         .collect();
     let fields = order.into_iter().map(|(n, t)| Field::new(n, t)).collect();
-    let report = ReadReport { messages: encoding_notes.into(), ..Default::default() };
+    let report = ReadReport { messages: encoding_notes, ..Default::default() };
     Ok(DbfRead { reader: dbf, fields, decimals, report, not_utf8, deleted, encoding: encoding.name() })
 }
 
@@ -3954,7 +3955,7 @@ fn dbf_notices(ds: &Dataset, report: &mut ReadReport, counts: &DbfCounts) {
     let DbfCounts { unread_dates, nonfinite, null_text, not_utf8, encoding } = counts;
     let name = &ds.name;
     report.unread_dates = crate::source::unread_dates_note(&ds.fields, unread_dates);
-    report.messages.extend(report.unread_dates.iter().map(|n| format!("{name}: {n}")));
+    report.messages.extend(report.unread_dates.iter().map(|n| n.clone().prefixed(name)));
     let nonfinite_total: usize = nonfinite.iter().sum();
     if nonfinite_total > 0 {
         let what = if nonfinite_total == 1 {
@@ -3962,10 +3963,13 @@ fn dbf_notices(ds: &Dataset, report: &mut ReadReport, counts: &DbfCounts) {
         } else {
             format!("{nonfinite_total} numbers aren't finite (nan or inf) and were")
         };
-        report.messages.push(format!("{name}: {what} read as empty, in {}", named_fields(&ds.fields, nonfinite)));
+        report.messages.push(crate::loss::Note::loss(
+            crate::loss::LossCode::DroppedValue,
+            format!("{name}: {what} read as empty, in {}", named_fields(&ds.fields, nonfinite)),
+        ));
     }
-    report.messages.extend(crate::source::null_text_note(&ds.fields, null_text).map(|n| format!("{name}: {n}")));
-    report.messages.extend(crate::source::not_utf8_note(&ds.fields, not_utf8, encoding).map(|n| format!("{name}: {n}")));
+    report.messages.extend(crate::source::null_text_note(&ds.fields, null_text).map(|n| n.prefixed(name)));
+    report.messages.extend(crate::source::not_utf8_note(&ds.fields, not_utf8, encoding).map(|n| n.prefixed(name)));
 }
 
 /// The files of a Shapefile, read into memory.
@@ -4004,7 +4008,7 @@ pub(crate) fn read_shapefile_parts(parts: ShapefileParts, name: &str, crs: Optio
     let (mut converted, mut unconverted, mut zm_shapes, mut not_numbers) = (0usize, 0usize, 0usize, 0usize);
     // The box of the converted places in longitude/latitude, for the notice of a `.prj` that
     // doesn't match the coordinates.
-    let mut lonlat_extent = rustgis_geom::Extent::EMPTY;
+    let mut beyond = 0usize;
     let mut counts = DbfCounts::new(ds.fields.len(), not_utf8, encoding);
     let mut source_kind = GeometryType::None;
     let pt = |x: f64, y: f64| Coord::new(x, y);
@@ -4103,19 +4107,16 @@ pub(crate) fn read_shapefile_parts(parts: ShapefileParts, name: &str, crs: Optio
             }
             g => g,
         };
-        // Kept as the file holds it, in its own system, when it has a place in longitude/latitude.
-        let geom = match (&to_lonlat, geom) {
-            (Some(t), Some(g)) => {
-                let placed = places_lonlat_extent(&g, t);
-                if let Some(e) = &placed {
-                    lonlat_extent = lonlat_extent.union(e);
-                }
-                converted += usize::from(placed.is_some());
-                unconverted += usize::from(placed.is_none());
-                placed.map(|_| g)
+        // Kept as the file holds it, in its own system; counted when it has no place in
+        // longitude/latitude.
+        if let (Some(t), Some(g)) = (&to_lonlat, &geom) {
+            let placed = places_lonlat_extent(g, t);
+            if let Some(e) = &placed {
+                beyond += usize::from(e.beyond_lonlat());
             }
-            (_, g) => g,
-        };
+            converted += usize::from(placed.is_some());
+            unconverted += usize::from(placed.is_none());
+        }
         let attrs = dbf_attrs(&record, &ds.fields, &mut counts);
         ds.push_next(geom, attrs);
     }
@@ -4143,9 +4144,9 @@ pub(crate) fn read_shapefile_parts(parts: ShapefileParts, name: &str, crs: Optio
     }
     dbf_notices(&ds, &mut report, &counts);
     ds.geometry_type = dominant_type(&ds);
-    // A bad .prj must not turn a spatial layer into an attribute-only table and hide the
-    // conversion warning. Its shapes can be recovered by importing with an override.
-    if ds.geometry_type == GeometryType::None && (unconverted > 0 || not_numbers > 0) {
+    // Shapes whose coordinates aren't numbers must not turn a spatial layer into an
+    // attribute-only table.
+    if ds.geometry_type == GeometryType::None && not_numbers > 0 {
         ds.geometry_type = source_kind;
     }
     integral_numeric_to_integer(&mut ds, &decimals);
@@ -4154,15 +4155,14 @@ pub(crate) fn read_shapefile_parts(parts: ShapefileParts, name: &str, crs: Optio
     if let Some(c) = ds.crs.filter(|_| to_lonlat.is_some()) {
         ds.held_in = c;
     }
-    // In longitude/latitude, as the file's places come out there (beyond it: a `.prj` that
-    // doesn't match the coordinates), or as they are without a system to convert from.
-    let e = if to_lonlat.is_some() { lonlat_extent } else { ds.extent() };
-    if e.beyond_lonlat() {
-        report.messages.push(if to_lonlat.is_some() {
-            "coordinates are not longitude/latitude once converted from the .prj's coordinate system; the .prj may not match them, and they may draw out of place"
-        } else {
-            "coordinates are not longitude/latitude; RustGIS reads them as WGS 84 and they may draw out of place"
-        });
+    // Beyond longitude/latitude: as the file's shapes come out there from the `.prj`'s system
+    // (one that doesn't match them), counted; or as they are without a system to convert from.
+    match ds.crs.filter(|_| to_lonlat.is_some()) {
+        Some(c) => report.messages.extend(beyond_lonlat_note("shapes", beyond, c)),
+        None if ds.extent().beyond_lonlat() => {
+            report.messages.push("coordinates are not longitude/latitude; RustGIS reads them as WGS 84 and they may draw out of place")
+        }
+        None => {}
     }
     if report.skipped > 0 {
         report.messages.push(format!("{} shapes were unreadable or unsupported", report.skipped));
@@ -4172,11 +4172,8 @@ pub(crate) fn read_shapefile_parts(parts: ShapefileParts, name: &str, crs: Optio
             "{name}: {not_numbers} shape(s) have a coordinate that isn't a number (NaN or infinite): their features are kept without geometry"
         ));
     }
-    ds.crs_incomplete = unconverted > 0;
-    if unconverted > 0 && converted == 0 {
-        report.messages.push("no shape could be converted to longitude/latitude: the .prj doesn't seem to match the coordinates");
-    } else if unconverted > 0 {
-        report.messages.push(format!("{unconverted} shapes couldn't be converted to longitude/latitude and have no geometry"));
+    if let Some(c) = ds.crs.filter(|_| to_lonlat.is_some()) {
+        report.messages.extend(kept_unplaced_note("shapes", unconverted, converted == 0, c));
     }
     Ok((ds, report))
 }
@@ -4939,6 +4936,12 @@ struct FieldText {
     /// Text with spaces around it in a KML or GPX name, which reading trims whatever its
     /// extended data column's type.
     name_padded: usize,
+    /// dBase text with a NUL in what the file keeps: reading keeps only the text before it, and
+    /// reads it as null when that is blank (#2415).
+    nul: usize,
+    /// CSV text starting with an apostrophe before a formula's first character (`'=x`), which
+    /// reading takes for the formula guard and drops ([`unguard`], #2415).
+    apostrophe: usize,
     /// Blank text, read as null.
     blank: usize,
     /// Text `<Null>` ([`Value::is_null_marker`]), which CSV and dBase read as null.
@@ -5057,14 +5060,28 @@ impl TextLosses {
                     }
                 }
                 let Value::Text(s) = v else { continue };
-                let trimmed = s.trim();
                 // A value is counted once, however many copies of it are written (a KML name
                 // field's extended data, a GPX multipoint's waypoints): by its first copy, the
                 // name, whose loss is never less than the extended data's.
                 if let Some(read) = reads.first() {
+                    // dBase keeps only the text before a NUL in the 254 bytes a Character column
+                    // keeps: counted apart, and what's kept then loses its trailing spaces as
+                    // other text does; a blank one, read as null, the NUL's notice says (#2415).
+                    let mut s = s.as_str();
+                    if *read == TextRead::Dbf
+                        && let Some(at) = s.bytes().take(254).position(|b| b == 0)
+                    {
+                        loss.nul += 1;
+                        s = s.get(..at).unwrap_or_default();
+                        if s.trim_end_matches(' ').is_empty() {
+                            continue;
+                        }
+                    }
+                    let trimmed = s.trim();
                     let count = match read {
                         TextRead::Cell if s.is_empty() => &mut loss.blank,
                         TextRead::Cell | TextRead::Dbf if Value::is_null_marker(s) => &mut loss.markers,
+                        TextRead::Cell if s.strip_prefix('\'').is_some_and(|rest| rest.starts_with(FORMULA_START)) => &mut loss.apostrophe,
                         TextRead::Cell if trimmed.is_empty() => &mut loss.blank_in_numbers,
                         // A Character column; text cut to 254 bytes is said as cut.
                         TextRead::Dbf if s.len() <= 254 && s.trim_end_matches(' ').is_empty() => &mut loss.blank,
@@ -5116,6 +5133,24 @@ impl TextLosses {
             };
             notes.push(format!("{target}: {what} back as empty (null), in {}", named_fields(fields, &blank)));
         }
+        let nul = counts(&|t| t.nul);
+        let n: usize = nul.iter().sum();
+        if n > 0 {
+            let what = if n == 1 { "1 text value holds".to_string() } else { format!("{n} text values hold") };
+            notes.push(format!(
+                "{target}: {what} a NUL character, and reading the file back keeps only the text before it, read as empty (null) when that is blank, in {}",
+                named_fields(fields, &nul)
+            ));
+        }
+        let apostrophe = counts(&|t| t.apostrophe);
+        let n: usize = apostrophe.iter().sum();
+        if n > 0 {
+            let what = if n == 1 { "1 text value starts".to_string() } else { format!("{n} text values start") };
+            notes.push(format!(
+                "{target}: {what} with an apostrophe before =, +, -, @, a tab or a line break, which reading the file back takes for the formula guard and drops, in {}",
+                named_fields(fields, &apostrophe)
+            ));
+        }
         if self.unread > 0 {
             let what = if self.unread == 1 { "1 feature is".to_string() } else { format!("{} features are", self.unread) };
             notes.push(format!(
@@ -5144,6 +5179,8 @@ impl std::ops::AddAssign for TextLosses {
         for (a, b) in self.layers.iter_mut().zip(other.layers).flat_map(|(a, b)| a.iter_mut().zip(b)) {
             a.padded += b.padded;
             a.name_padded += b.name_padded;
+            a.nul += b.nul;
+            a.apostrophe += b.apostrophe;
             a.blank += b.blank;
             a.markers += b.markers;
             a.blank_in_numbers += b.blank_in_numbers;
@@ -5192,12 +5229,43 @@ pub fn export_losses_notes_in(ds: &Dataset, ext: &str, name_field: Option<usize>
             notes.extend(losses.coordinates_note_in(&ds.fields, target, crs));
             notes
         }
-        "kml" | "kmz" => kml_empty_fields_note(ds, target)?.into_iter().collect(),
+        "kml" | "kmz" => kml_empty_fields_note(ds, target)?.into_iter().chain(kml_blank_names_note(ds, target)?).collect(),
         "gpx" => gpx_notes(ds, name_field, target),
         _ => Vec::new(),
     };
     notes.extend(TextLosses::of(&ds.features, &ds.fields, ds.geometry_type, ext, name_field).notes(&ds.fields, target));
     Ok(notes)
+}
+
+/// KML fields whose name is blank once trimmed, with values in the placemarks written: each is
+/// written as `<Data name="">`, which reading drops, so the column and its values are gone
+/// (#2415). A field with no value written is said by [`kml_empty_fields_note`].
+fn kml_blank_names_note(ds: &Dataset, target: &str) -> Result<Option<String>> {
+    let blank: Vec<usize> = ds.fields.iter().enumerate().filter(|(_, f)| f.name.trim().is_empty()).map(|(k, _)| k).collect();
+    if blank.is_empty() {
+        return Ok(None);
+    }
+    // One pass over the placemarks written, looking at Cancel as [`kml_empty_fields_note`] does.
+    let mut with_value = vec![false; blank.len()];
+    let mut values = 0usize;
+    for f in ds.features.iter().filter(|f| f.geometry.is_some()) {
+        crate::progress::check()?;
+        for (has, k) in with_value.iter_mut().zip(&blank) {
+            if f.attrs.get(*k).is_some_and(|v| !v.is_null()) {
+                *has = true;
+                values += 1;
+            }
+        }
+    }
+    let with_values = with_value.iter().filter(|has| **has).count();
+    Ok((values > 0).then(|| {
+        let target: String = target.chars().map(dbf_notice_char).collect();
+        let fields = if with_values == 1 { "1 field".to_string() } else { format!("{with_values} fields") };
+        let written = if values == 1 { "1 value".to_string() } else { format!("{values} values") };
+        format!(
+            "{target}: {fields} with a blank name, and {written} in them, won't read back: reading KML drops extended data without a name"
+        )
+    }))
 }
 
 /// KML writes ExtendedData only for non-null values of placemarks it writes. Report every
@@ -6552,9 +6620,9 @@ mod tests {
         assert_eq!(
             rep.messages,
             [
-                crate::zm_note(Some(1)).as_str(),
-                "1 rows had geometry that isn't readable WKT",
-                "1 rows have another kind of geometry than the layer's polyline"
+                crate::loss::Note::loss(crate::loss::LossCode::DroppedZm, crate::zm_note(Some(1))),
+                "1 rows had geometry that isn't readable WKT".into(),
+                "1 rows have another kind of geometry than the layer's polyline".into()
             ]
         );
         // A named WKT column with a given system.
@@ -6603,7 +6671,7 @@ mod tests {
         assert_eq!(
             report.messages,
             [
-                crate::zm_note(Some(1)),
+                crate::loss::Note::loss(crate::loss::LossCode::DroppedZm, crate::zm_note(Some(1))),
                 "1 WKT value in 'wkt' lost later non-empty geometry-collection members; only the first non-empty member is kept".into()
             ]
         );
@@ -6720,8 +6788,11 @@ mod tests {
         other.name = "wells".into();
         let flat = Dataset::new("roads", GeometryType::Polyline, vec![]);
         assert_eq!(
-            crate::zm_export_note([&ds, &flat, &other], "site.zip").as_deref(),
-            Some("site.zip: its geometry has no Z or M values for 2 layers (pts, wells), which were dropped when they were read")
+            crate::zm_export_note([&ds, &flat, &other], "site.zip"),
+            Some(crate::loss::Note::loss(
+                crate::loss::LossCode::DroppedZm,
+                "site.zip: its geometry has no Z or M values for 2 layers (pts, wells), which were dropped when they were read"
+            ))
         );
         assert_eq!(crate::zm_export_note([&flat], "roads.zip"), None);
 
@@ -6744,6 +6815,7 @@ mod tests {
         assert!(rep.messages.is_empty(), "{:?}", rep.messages);
         assert_eq!(
             crate::export_notes([(&utm, ext(&utm)), (&lonlat, ext(&lonlat))], "out.geojson", Crs::LonLat),
+            // Told by the extent alone: said without a code.
             [
                 "out.geojson: the coordinates of utm aren't longitude/latitude, so they're out of place: define its projection and export again"
             ]
@@ -6762,9 +6834,12 @@ mod tests {
         let saved: Dataset = serde_json::from_value(serde_json::to_value(&parcels).unwrap()).unwrap();
         assert_eq!(
             crate::export_notes([(&saved, ext(&saved))], "parcels.geojson", Crs::LonLat),
-            [format!(
-                "parcels.geojson: the positions of parcels are approximate, possibly a few hundred metres off: its coordinate system ({}) has no shift to WGS 84",
-                nad27.label()
+            [crate::loss::Note::loss(
+                crate::loss::LossCode::ApproximatedDatum,
+                format!(
+                    "parcels.geojson: the positions of parcels are approximate, possibly a few hundred metres off: its coordinate system ({}) has no shift to WGS 84",
+                    nad27.label()
+                )
             )]
         );
         // Written back in NAD 27, the positions come back as they were read.
@@ -6776,9 +6851,10 @@ mod tests {
         shifted.crs = Some(Crs::Epsg(26716));
         assert_eq!(
             crate::export_notes([&parcels, &roads, &shifted].map(|ds| (ds, ext(ds))), "map.json", Crs::LonLat),
-            [
+            [crate::loss::Note::loss(
+                crate::loss::LossCode::ApproximatedDatum,
                 "map.json: the positions of 2 layers (parcels, roads) are approximate, possibly a few hundred metres off: their coordinate systems have no shift to WGS 84"
-            ]
+            )]
         );
     }
 
@@ -6815,7 +6891,10 @@ mod tests {
         assert_eq!(merc.features[0].geometry, Some(Geometry::Point(lonlat_to_merc(c(10.0, MAX_LAT)))));
         assert_eq!(
             crate::export_notes([(&polar, ext(&polar))], "polar.shp", Crs::WebMercator),
-            ["polar.shp: 3 vertices of polar are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"]
+            [crate::loss::Note::loss(
+                crate::loss::LossCode::ChangedPosition,
+                "polar.shp: 3 vertices of polar are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"
+            )]
         );
         // In another system, or within 85.05°: nothing.
         for crs in [Crs::LonLat, Crs::Epsg(32631)] {
@@ -6827,13 +6906,17 @@ mod tests {
         let one = layer("one", &[c(0.0, 86.0)]);
         assert_eq!(
             crate::export_notes([(&one, ext(&one))], "one.gpkg", Crs::WebMercator),
-            ["one.gpkg: 1 vertex of one is beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"]
+            [crate::loss::Note::loss(
+                crate::loss::LossCode::ChangedPosition,
+                "one.gpkg: 1 vertex of one is beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"
+            )]
         );
         assert_eq!(
             crate::export_notes([(&polar, ext(&polar)), (&within, ext(&within)), (&one, ext(&one))], "map.gpkg", Crs::WebMercator),
-            [
+            [crate::loss::Note::loss(
+                crate::loss::LossCode::ChangedPosition,
                 "map.gpkg: 4 vertices of 2 layers (polar, one) are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"
-            ]
+            )]
         );
         // A streamed layer's features are only those in view: its source's extent tells, without
         // a count, and only that it reaches beyond, as a source can declare a wider one than its
@@ -6850,9 +6933,10 @@ mod tests {
         // A layer counted and a window told by its extent: one notice, saying both.
         assert_eq!(
             crate::export_notes([(&polar, ext(&polar)), (&window, Extent::new(-180.0, -90.0, 180.0, 84.0))], "map.gpkg", Crs::WebMercator),
-            [
+            [crate::loss::Note::loss(
+                crate::loss::LossCode::ChangedPosition,
                 "map.gpkg: 3 vertices of polar are beyond 85.05° north or south, and written at 85.05°; the extent of tiles reaches beyond 85.05° north or south, and what lies beyond is written at 85.05°, where Web Mercator ends"
-            ]
+            )]
         );
         // A layer without features that isn't a window (a raster layer's, or a streamed layer's
         // written a chunk at a time, whose export counts as it writes) has no extent tell.
@@ -6891,8 +6975,11 @@ mod tests {
             {
                 assert_eq!(
                     crate::export_notes([(ds, ext(ds))], &target, Crs::WebMercator),
-                    [format!(
-                        "{target}: {n} vertices of {name} are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"
+                    [crate::loss::Note::loss(
+                        crate::loss::LossCode::ChangedPosition,
+                        format!(
+                            "{target}: {n} vertices of {name} are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"
+                        )
                     )]
                 );
             }
@@ -7448,6 +7535,74 @@ mod tests {
         assert!(text_notes(&clean, "shp").is_empty());
     }
 
+    /// Shapefile text with a NUL in it is said: reading the `.dbf` back keeps only the text before
+    /// it, and reads a value starting with one as null (#2415).
+    #[test]
+    fn shapefile_says_text_cut_at_a_nul() {
+        // The text before a NUL loses its trailing spaces as other text does ('ab '), and blank
+        // text before one (' ') reads as null, which the NUL's notice says.
+        let ds = text_layer(&["a", "b"], &[&[Some("ab\0cd"), Some("kept")], &[Some("\0x"), None], &[Some("ab \0cd"), Some(" \0y")]]);
+        assert_eq!(
+            text_notes(&ds, "shp"),
+            [
+                "t: 1 text value ends with spaces, which reading the file back drops, in 'a'",
+                "t: 4 text values hold a NUL character, and reading the file back keeps only the text before it, read as empty (null) when that is blank, in 'a', 'b'",
+            ]
+        );
+        // What the note says is what reading the file back does.
+        let (bytes, _) = write_bytes(&ds, "zip").unwrap();
+        let back = read_bytes("t.zip", &bytes).unwrap().0;
+        let column = |k: usize| back.features.iter().take(3).map(|f| f.attrs[k].clone()).collect::<Vec<_>>();
+        assert_eq!(column(0), [Value::Text("ab".into()), Value::Null, Value::Text("ab".into())]);
+        assert_eq!(column(1), [Value::Text("kept".into()), Value::Null, Value::Null]);
+        let clean = text_layer(&["a"], &[&[Some("abcd")], &[None]]);
+        assert!(text_notes(&clean, "shp").is_empty());
+    }
+
+    /// CSV text starting with an apostrophe before a formula's first character is said: reading
+    /// the file back takes the apostrophe for the formula guard and drops it (#2415). Text the
+    /// writer guards (`=y`) reads back as it was, and says nothing.
+    #[test]
+    fn csv_says_an_apostrophe_reading_takes_for_the_guard() {
+        let ds = text_layer(&["note", "code"], &[&[Some("'=x"), Some("a")], &[Some("'kept"), Some("'-5")], &[Some("=y"), Some("b")]]);
+        let said = "t: 2 text values start with an apostrophe before =, +, -, @, a tab or a line break, which reading the file back takes for the formula guard and drops, in 'note', 'code'";
+        assert_eq!(text_notes(&ds, "csv"), [said]);
+        assert_eq!(text_notes(&ds, "wkt"), [said]);
+        // What the note says is what reading the file back does.
+        let (bytes, _) = write_bytes(&ds, "csv").unwrap();
+        let back = read_bytes("t.csv", &bytes).unwrap().0;
+        let column = |n: &str| {
+            let i = back.field_index(n).unwrap();
+            back.features.iter().take(3).map(|f| f.attrs[i].to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(column("note"), ["=x", "'kept", "=y"]);
+        assert_eq!(column("code"), ["a", "-5", "b"]);
+        let clean = text_layer(&["note"], &[&[Some("'kept")], &[Some("=y")], &[Some("it's")]]);
+        assert!(text_notes(&clean, "csv").is_empty());
+    }
+
+    /// A KML field whose name is blank is said with its values: it's written as
+    /// `<Data name="">`, which reading drops, column and values (#2415). One without a value is
+    /// said by the note on fields with no values, not by this one.
+    #[test]
+    fn kml_says_fields_with_a_blank_name() {
+        let ds = text_layer(&["name", "", " ", "\t"], &[&[Some("a"), Some("x"), Some("y"), None], &[Some("b"), Some("z"), None, None]]);
+        let notes = export_losses_notes(&ds, "kml", name_field(&ds), "t").unwrap();
+        let blank: Vec<&String> = notes.iter().filter(|n| n.contains("blank name")).collect();
+        assert_eq!(
+            blank,
+            ["t: 2 fields with a blank name, and 3 values in them, won't read back: reading KML drops extended data without a name"],
+            "{notes:?}"
+        );
+        // What the note says is what reading the file back does.
+        let (bytes, _) = write_bytes(&ds, "kml").unwrap();
+        let back = &crate::kml::read("t.kml", &bytes).unwrap()[0].dataset;
+        assert!(back.fields.iter().all(|f| !f.name.trim().is_empty()), "{:?}", back.fields);
+        let clean = text_layer(&["name", "note", " "], &[&[Some("a"), Some("x"), None]]);
+        let notes = export_losses_notes(&clean, "kml", name_field(&clean), "t").unwrap();
+        assert!(!notes.iter().any(|n| n.contains("blank name")), "{notes:?}");
+    }
+
     #[test]
     fn kml_says_trimmed_and_blank_text() {
         let ds = text_layer(
@@ -7733,6 +7888,22 @@ mod tests {
             assert_eq!(sum, whole, "chunks of {size}");
         }
         assert_eq!(whole.notes(&wide.fields, "t"), Vec::<String>::new());
+        // The NUL and apostrophe counts add up too (#2415).
+        for (ext, layer, said) in [
+            ("csv", text_layer(&["note"], &[&[Some("'=x")], &[Some("y")], &[Some("'+z")]]), "2 text values start with an apostrophe"),
+            ("shp", text_layer(&["note"], &[&[Some("a\0b")], &[Some("y")], &[Some("ab \0c")]]), "2 text values hold a NUL"),
+        ] {
+            let whole = TextLosses::of(&layer.features, &layer.fields, layer.geometry_type, ext, None);
+            for size in 1..=layer.features.len() {
+                let mut sum = TextLosses::default();
+                for chunk in layer.features.chunks(size) {
+                    sum += TextLosses::of(chunk, &layer.fields, layer.geometry_type, ext, None);
+                }
+                assert_eq!(sum, whole, "{ext}: chunks of {size}");
+            }
+            let notes = whole.notes(&layer.fields, "t");
+            assert!(notes.iter().any(|n| n.contains(said)), "{ext}: {notes:?}");
+        }
     }
 
     /// GPX names fields with values before fields of nulls, so a field that lost data isn't
@@ -7902,7 +8073,11 @@ mod tests {
             for (read, (back, report)) in [("whole", whole), ("streamed", streamed)] {
                 assert_eq!(back.features[1].attrs[0], Value::Null, "{read}");
                 let said = "permits: 1 value written as Null was read as empty, in 'issued'";
-                assert!(report.messages.iter().any(|m| m == said), "{read}: {:?}", report.messages);
+                assert!(
+                    report.messages.iter().any(|m| m.as_str() == said && m.loss == Some(crate::loss::LossCode::AssumedNullMarker)),
+                    "{read}: {:?}",
+                    report.messages
+                );
                 assert!(!report.messages.iter().any(|m| m.contains("date")), "{read}: {:?}", report.messages);
             }
         }
@@ -7935,7 +8110,11 @@ mod tests {
             assert_eq!(ds.fields[3].ty, FieldType::Double, "{what}: `<Null>` doesn't type a column");
             assert_eq!(column(3), [Value::Float(1.5), Value::Null, Value::Float(2.5), Value::Float(3.5)], "{what}");
             let said = "3 values written as Null were read as empty, in 'code', 'note', 'x'";
-            assert!(report.messages.iter().any(|m| m == said), "{what}: {:?}", report.messages);
+            assert!(
+                report.messages.iter().any(|m| m.as_str() == said && m.loss == Some(crate::loss::LossCode::AssumedNullMarker)),
+                "{what}: {:?}",
+                report.messages
+            );
         }
         let (_, report) = read_csv("code\n 2535\n", "t").unwrap();
         assert!(report.messages.iter().all(|m| !m.contains("written as Null")), "{:?}", report.messages);
@@ -9116,7 +9295,8 @@ mod tests {
             assert_eq!(days, [at("2026-03-05"), Value::Null, Value::Null, at("0001-01-01"), Value::Null], "{read}");
             assert!(back.features.iter().all(|f| f.geometry.is_some()), "{read}");
             let note = report.messages.iter().find(|m| m.contains("date")).unwrap_or_else(|| panic!("{read}: {report:?}"));
-            assert_eq!(note, "permits: 1 value isn't a date and was read as empty, in 'issued'", "{read}");
+            assert_eq!(note.as_str(), "permits: 1 value isn't a date and was read as empty, in 'issued'", "{read}");
+            assert_eq!(note.loss, Some(crate::loss::LossCode::DroppedValue), "{read}");
         }
     }
 

@@ -197,7 +197,14 @@ world projection (World Mercator, Plate Carrée, Robinson, Equal Earth and the l
 the antimeridian as a seam and the poles as lines, is worked on in longitude/latitude, as Web
 Mercator is. If another input has a place that system can't hold, the tool works in
 longitude/latitude instead, and its message says so. A layer in longitude/latitude, Web Mercator or
-another geographic system is worked on in longitude/latitude, as before. In a projected system a
+another geographic system is worked on in longitude/latitude, as before. There, a feature with a place
+that can't be given in longitude/latitude (one far past where its layer's own system reaches) is read
+without its geometry, and the tool's message says how many of each layer were; a tool that updates
+its input in place, as Calculate Geometry Attributes does, leaves that feature's geometry as it was.
+A layer read in place from its file (streamed) holds only the part the map shows: an update of it
+worked in longitude/latitude that read such a feature without its geometry is refused until you
+Load All Features, since that feature's stored geometry may not be in that part.
+In a projected system a
 tool works in, distances in metres (Buffer's, Simplify's tolerance, Points Along Lines' spacing,
 Near's, and the search distances of Select Layer By Location and Spatial Join) are measured flat
 there, in its unit, as distances in a projected system are: a kilometre is 1000 of its metres, or
@@ -1611,7 +1618,7 @@ click them on the map:
 | Geostatistical Wizard | An IDW surface from feature values, using 12 nearest neighbours by default |
 | Network Analysis | The shortest (or cheapest, by a cost field) route over a line layer |
 | Neighborhood Explorer | What lies within a distance of a point, with sums of numeric fields |
-| Simulation | Random points in polygons (a fixed number, or from a field × rate), spread in the layer's own coordinates when it is held in a projected system, else in longitude/latitude (then held in the project's coordinate system when it has one, other than a geocentric one) |
+| Simulation | Random points in polygons (a fixed number, or from a field × rate), spread in the layer's own coordinates when it is held in a projected system, else in longitude/latitude (then held in the project's coordinate system when it has one, other than a geocentric one; a polygon with a place that can't be given in longitude/latitude gets no points, and a notice counts them) |
 | Data Engineering | Counts, nulls, distinct values, min, max and mean of every field |
 | Exploratory Analysis | Histograms and correlations of numeric fields |
 | Embeddings | The features most like the selected one, by their numeric attributes |
@@ -1791,7 +1798,7 @@ on a grid of any coordinate system, cell size and extent, and Polygons to Raster
 (`raster.rasterize`) burns polygons onto the same grids; Raster Functions › Resample matches a
 target raster's grid.
 
-The **Script** pane runs commands from text, one per line (`id {json}`); its box grows with the script down to the bottom of the pane,
+The **Script** pane runs commands from text, one per line (`id {json}`, or `id={json}` as on the command line); its box grows with the script down to the bottom of the pane,
 short of the buttons, and then scrolls, so **Run** stays in view; Ctrl+Enter (⌘+Enter on macOS)
 in the box runs the script too. Above a run's results, a line tells its number, how long it took
 and when it started (`Run #2 (0.84 s)`, and `14:04 UTC` on the right), so a run made again by
@@ -1990,8 +1997,23 @@ The Imagery tab's groups open their tools in the Workflows pane. The tab belongs
   images are in another geographic system (NAD83, say), the run says so. A geographic `crs` other
   than EPSG:4326 is refused.
 - **Georeference** places a raster from control points (column, row, longitude, latitude) or
-  stretches it over the map view. Those only shift and scale a north-up grid, as RustGIS's
-  geotransform has no rotation. With `transform` (`raster.georeference`) the points are fitted by any
+  stretches it over the map view (**Fit To Map View**, `"extent": "view"`). Those only shift and
+  scale a north-up grid, as RustGIS's geotransform has no rotation. Fitted to the view, the raster
+  is placed in the map's own system on a flat map of the Earth (Web Mercator's EPSG:3857, the map's
+  EPSG or ESRI code, or a preset's definition), so it fills the view as drawn; on the globe and
+  another body's map, over the longitude and latitude box the view shows. A turned or tilted map
+  is refused (Reset North first), as is a Web Mercator view wider than the world or across the
+  antimeridian; a view of a world copy past it is fitted to the same place within ±180°. Control
+  points without `transform` are longitude and latitude, and `pointsCrs` or `crs` with them is
+  refused. An `extent` of four
+  numbers is in degrees, or in `crs` when given (`{"extent": [2599000, 1199000, 2601000, 1201000],
+  "crs": "EPSG:2056"}`), and the raster is placed in that system; an entry that isn't a number is
+  refused, not passed over. An extent goes without control points, `transform` and `pointsCrs`:
+  any of them beside it is refused, as none would be used. So are `name`, `path`, `cellSize` and
+  `resampling` without `transform`, as only a warp makes a new raster; without one the layer itself
+  is placed. The `extent` it answers is in longitude/latitude, whatever system the raster is
+  placed in.
+  With `transform` (`raster.georeference`) the points are fitted by any
   of the Control Point Fit transforms and the raster is warped onto a new north-up grid covering the
   warped image: `{"layer": "scan", "transform": "spline", "points": [[column, row, x, y], …],
   "pointsCrs": "EPSG:4326", "crs": 32613, "resampling": "bilinear", "cellSize": 5, "name": "warped",

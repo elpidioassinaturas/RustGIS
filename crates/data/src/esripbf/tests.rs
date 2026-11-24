@@ -163,7 +163,7 @@ fn z_and_m_are_dropped_and_said_even_when_they_are_all_alike() {
     let (ds, report) = read(&bytes, "t").unwrap();
     assert_eq!(ds.features[0].geometry, Some(Geometry::Point(c(4.0, 6.0))));
     assert!(ds.zm_dropped);
-    assert_eq!(report.messages, [crate::zm_note(Some(2))]);
+    assert_eq!(report.messages, [crate::loss::Note::loss(crate::loss::LossCode::DroppedZm, crate::zm_note(Some(2)))]);
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn a_page_read_within_a_limit_counts_what_the_features_kept_lost() {
     ]);
     let page = read_page_within(&bytes, "t", 1).unwrap();
     assert_eq!((page.dataset.features.len(), page.left_out, page.losses.with_zm), (1, 2, 1));
-    assert_eq!(page.losses.messages(), [crate::zm_note(Some(1))]);
+    assert_eq!(page.losses.messages(), [crate::loss::Note::loss(crate::loss::LossCode::DroppedZm, crate::zm_note(Some(1)))]);
     assert!(page.report.messages.is_empty(), "the losses are said apart: {:?}", page.report.messages);
     // Within a limit it doesn't reach, the whole page.
     let page = read_page_within(&bytes, "t", 3).unwrap();
@@ -245,7 +245,7 @@ fn an_answer_without_a_coordinate_system_is_said_to_be_read_as_longitude_latitud
 }
 
 #[test]
-fn coordinates_past_longitude_latitude_lose_their_geometry_and_the_layer_says_so() {
+fn coordinates_past_longitude_latitude_are_kept_and_the_layer_says_so() {
     // Web Mercator: 1,113,195 m is 10°; 1,000,000,000 m comes out near 8,983°, beyond the world.
     let bytes = answer(&[
         message(8, &number(1, 3857)),
@@ -255,10 +255,17 @@ fn coordinates_past_longitude_latitude_lose_their_geometry_and_the_layer_says_so
     ]);
     let (ds, report) = read(&bytes, "t").unwrap();
     assert!(ds.features[0].geometry.is_some());
-    assert_eq!(ds.features[1].geometry, None);
-    // Defining the projection again can't bring it back.
-    assert!(ds.crs_incomplete);
-    assert_eq!(report.messages, ["1 features have coordinates outside their coordinate system: they are kept without geometry"]);
+    // Kept as the answer gives it (#2032 C2f-4b), and said: it converts beyond
+    // longitude/latitude, so it draws out of place. Nothing was lost, so a projection can still be
+    // defined.
+    assert_eq!(ds.features[1].geometry, Some(Geometry::Point(c(1e9, 0.0))));
+    assert!(!ds.crs_incomplete);
+    assert_eq!(
+        report.messages,
+        [
+            "one feature has coordinates that come out beyond longitude/latitude once converted from the answer's coordinate system: it may not be their coordinate system, and it may draw out of place"
+        ]
+    );
 }
 
 #[test]

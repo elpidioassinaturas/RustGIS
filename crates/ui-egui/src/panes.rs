@@ -1956,6 +1956,12 @@ fn disk_note(app: &RustGisApp, layer: Option<&Layer>, tile: Option<usize>) -> Op
 /// file again (and Source File State), not Reload Data, which can't read it again; with edits,
 /// Publish to Source refuses to overwrite the change and Export Features keeps them.
 pub(crate) fn layer_note(app: &mut RustGisApp, l: &Layer, ctx: &egui::Context) -> Option<(String, String, Option<bool>)> {
+    let note = file_note(app, l, ctx);
+    linked_note(l, note)
+}
+
+/// [`layer_note`] before "(linked)": what [`disk_note`] and `syncmark` say.
+fn file_note(app: &mut RustGisApp, l: &Layer, ctx: &egui::Context) -> Option<(String, String, Option<bool>)> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use crate::diskwatch::Status;
@@ -1991,6 +1997,26 @@ pub(crate) fn layer_note(app: &mut RustGisApp, l: &Layer, ctx: &egui::Context) -
         let _ = ctx;
         disk_note(app, Some(l), None)
     }
+}
+
+/// "(linked)" for a layer read in place from a local file (#2350), with the file and what linking
+/// means, joined with `other` (a change on disk): "(linked, changed on disk)". A layer streamed
+/// from a service or a database has no file and says nothing; a raster is always linked, so it
+/// isn't marked either.
+fn linked_note(l: &Layer, other: Option<(String, String, Option<bool>)>) -> Option<(String, String, Option<bool>)> {
+    let Some(path) = l.linked_file().filter(|_| l.is_streamed()) else { return other };
+    let linked = crate::i18n::fmt(
+        "Linked to {path}: read in place, a view at a time. The project keeps where the file is, not its features: to edit it or define its projection, Load All Features first.",
+        &[("path", path)],
+    );
+    Some(match other {
+        Some((note, detail, tint)) if !note.is_empty() => {
+            let inner = note.trim().trim_start_matches('(').trim_end_matches(')');
+            (crate::i18n::fmt("(linked, {note})", &[("note", inner)]), format!("{linked}\n{detail}"), tint)
+        }
+        Some((_, detail, tint)) => (tl!("(linked)").to_string(), format!("{linked}\n{detail}"), tint),
+        None => (tl!("(linked)").to_string(), linked, None),
+    })
 }
 
 /// A layer's row and, expanded, its legend; returns the rectangle of both. With `reorder` off
@@ -2118,7 +2144,7 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
                     ("renderer", tl_raw!(rl.style.renderer.label())),
                 ],
             ),
-            None if rl.error.is_none() && rl.in_place => tl!("Reading in place…").to_string(),
+            None if rl.error.is_none() && rl.reads_in_place() => tl!("Reading in place…").to_string(),
             None => crate::i18n::fmt(
                 "The raster's data couldn't be read: {error}",
                 &[("error", rl.error.as_deref().or(rl.path.as_deref()).unwrap_or(""))],
@@ -2608,18 +2634,23 @@ fn catalog(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
             egui::CollapsingHeader::new(egui::RichText::new(tl!("Maps")).font(semibold(12.5))).default_open(true).show(ui, |ui| {
                 let maps: Vec<String> = app.session.project.maps.iter().map(|m| m.name.clone()).collect();
+                let mut rows = Vec::with_capacity(maps.len());
                 for (i, m) in maps.iter().enumerate() {
-                    ui.horizontal(|ui| {
+                    let row = ui.horizontal(|ui| {
                         let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                         icons::paint(ui.painter(), r, "map", t.icon, t.accent);
                         let active = i == app.session.project.active_map;
-                        let resp = ui.selectable_label(active, m);
+                        // Dragged to another place among the maps, as its tab is (#2829).
+                        let resp = ui.selectable_label(active, m).interact(Sense::drag());
+                        crate::mapview::drag_tab(ui, &resp, false, m);
                         if resp.clicked() {
                             let _ = app.run("map.activate", json!({"name": m}));
                         }
                         resp.context_menu(|ui| map_menu(app, ui, m));
                     });
+                    rows.push(row.response.rect);
                 }
+                crate::mapview::tab_drop(app, ui, t, &rows, &maps, false, true);
             });
             let toolboxes =
                 egui::CollapsingHeader::new(egui::RichText::new(tl!("Toolboxes")).font(semibold(12.5))).id_salt("browser_toolboxes");
@@ -2655,25 +2686,31 @@ fn catalog(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             let layouts: Vec<String> = app.session.project.layouts.iter().map(|l| l.name.clone()).collect();
             if !layouts.is_empty() {
                 egui::CollapsingHeader::new(egui::RichText::new(tl!("Layouts")).font(semibold(12.5))).default_open(true).show(ui, |ui| {
-                    for n in layouts {
-                        ui.horizontal(|ui| {
+                    let mut rows = Vec::with_capacity(layouts.len());
+                    for n in &layouts {
+                        let row = ui.horizontal(|ui| {
                             let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                             icons::paint(ui.painter(), r, "new_layout", t.icon, t.accent);
-                            let resp = ui.selectable_label(
-                                app.session
-                                    .project
-                                    .layouts
-                                    .get(app.session.active_layout.unwrap_or(usize::MAX))
-                                    .is_some_and(|l| l.name == n),
-                                &n,
-                            );
+                            let resp = ui
+                                .selectable_label(
+                                    app.session
+                                        .project
+                                        .layouts
+                                        .get(app.session.active_layout.unwrap_or(usize::MAX))
+                                        .is_some_and(|l| l.name == *n),
+                                    n,
+                                )
+                                .interact(Sense::drag());
+                            crate::mapview::drag_tab(ui, &resp, true, n);
                             if resp.clicked() {
                                 let _ = app.run("layout.activate", json!({"name": n}));
                                 app.ui.tab = "Publish".into();
                             }
-                            resp.context_menu(|ui| layout_menu(app, ui, &n));
+                            resp.context_menu(|ui| layout_menu(app, ui, n));
                         });
+                        rows.push(row.response.rect);
                     }
+                    crate::mapview::tab_drop(app, ui, t, &rows, &layouts, true, true);
                 });
             }
             let styles: Vec<String> = app.session.project.styles.iter().map(|st| st.name.clone()).collect();
@@ -4674,6 +4711,15 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 app.ui.symbology_pending = Some(pending);
             }
         });
+        // Or by an expression's values, as under the field once applied (the same box, so what is
+        // typed here stays in it): classing by it ends the field choice.
+        let id = egui::Id::unique(("unique_expression", crate::labelpane::layer_key(app, &l)));
+        if let Some(text) = expression_box(ui, id, tl!("Expression"), None, &l.dataset, t) {
+            match app.run("layer.symbology", json!({"type": "unique", "expression": text})) {
+                Ok(_) => app.ui.symbology_pending = None,
+                Err(error) => app.session.notify(error, true),
+            }
+        }
         ui.add_space(6.0);
     }
     if l.has_geometry(GeometryType::Polygon) && !l.graphics {
@@ -7113,7 +7159,7 @@ fn raster_details(ui: &mut Ui, rl: &rustgis_engine::map::RasterLayer, t: &Tokens
     let Some(d) = &rl.data else {
         // Read in place, its overview is on its way until it lands, or fails (said why).
         match &rl.error {
-            None if rl.in_place => {
+            None if rl.reads_in_place() => {
                 ui.label(egui::RichText::new(tl!("Reading in place…")).color(t.text_dim));
             }
             error => {
@@ -7131,7 +7177,7 @@ fn raster_details(ui: &mut Ui, rl: &rustgis_engine::map::RasterLayer, t: &Tokens
     let e = d.extent();
     let unit = if d.crs.is_geographic() { "°" } else { " m" };
     // Read in place, the map draws the full image: its size and cell size, not the overview's.
-    let full = d.overview.filter(|_| rl.in_place);
+    let full = d.overview.filter(|_| rl.reads_in_place());
     let (w, h) = full.unwrap_or((d.width, d.height));
     let (cx, cy) = d.cell_size();
     let (cx, cy) = (cx * f64::from(d.width) / f64::from(w.max(1)), cy * f64::from(d.height) / f64::from(h.max(1)));
@@ -7153,7 +7199,7 @@ fn raster_details(ui: &mut Ui, rl: &rustgis_engine::map::RasterLayer, t: &Tokens
     ];
     match d.overview {
         // Read in place: the overview is what the layer holds.
-        Some(_) if rl.in_place => {
+        Some(_) if rl.reads_in_place() => {
             rows.insert(
                 1,
                 (
@@ -7166,7 +7212,7 @@ fn raster_details(ui: &mut Ui, rl: &rustgis_engine::map::RasterLayer, t: &Tokens
             );
         }
         Some((fw, fh)) => rows.insert(1, ("Full size", format!("{fw} × {fh}"))),
-        None if rl.in_place => rows.insert(1, ("Read", tl!("In place").to_string())),
+        None if rl.reads_in_place() => rows.insert(1, ("Read", tl!("In place").to_string())),
         None => {}
     }
     let value_w = (ui.available_width() - 140.0).max(80.0);
@@ -7247,7 +7293,7 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
     let Some(rl) = l.raster.clone() else { return };
     let Some(d) = rl.data.clone() else {
         // Read in place, its overview is on its way until it lands, or fails (as Details says).
-        if rl.error.is_none() && rl.in_place {
+        if rl.error.is_none() && rl.reads_in_place() {
             ui.label(egui::RichText::new(tl!("Reading in place…")).color(t.text_dim));
         } else {
             ui.label(egui::RichText::new(tl!("The raster's data couldn't be read.")).color(t.red));
@@ -7791,6 +7837,8 @@ pub(crate) fn map_menu(app: &mut RustGisApp, ui: &mut Ui, m: &str) {
         let _ = app.run("layer.paste", json!({"map": m}));
         ui.close();
     }
+    let at = app.session.project.maps.iter().position(|x| x.name == m);
+    move_buttons(app, ui, "map.move", m, at, app.session.project.maps.len());
     // A project keeps at least one map (`map.remove` refuses the last).
     let delete = ui.add_enabled(app.session.project.maps.len() > 1, egui::Button::new(tl!("Delete")));
     if delete.on_disabled_hover_text(tl!("A project keeps at least one map")).clicked() {
@@ -7799,7 +7847,22 @@ pub(crate) fn map_menu(app: &mut RustGisApp, ui: &mut Ui, m: &str) {
     }
 }
 
-/// A layout's menu, in the Browser and on its view tab: rename, duplicate, delete.
+/// Move Up and Move Down, between separators, for the map or layout `name` at `at` of `count`:
+/// one place in the project's order (`cmd`, `map.move` or `layout.move`), as its tabs and the
+/// Browser show it (#2802).
+fn move_buttons(app: &mut RustGisApp, ui: &mut Ui, cmd: &str, name: &str, at: Option<usize>, count: usize) {
+    let Some(at) = at else { return };
+    ui.separator();
+    for (label, to, can) in [(tl!("Move Up"), at.saturating_sub(1), at > 0), (tl!("Move Down"), at + 1, at + 1 < count)] {
+        if ui.add_enabled(can, egui::Button::new(label)).clicked() {
+            let _ = app.run(cmd, json!({"name": name, "to": to}));
+            ui.close();
+        }
+    }
+    ui.separator();
+}
+
+/// A layout's menu, in the Browser and on its view tab: rename, duplicate, move, delete.
 pub(crate) fn layout_menu(app: &mut RustGisApp, ui: &mut Ui, n: &str) {
     if ui.button(tl!("Rename…")).clicked() {
         let _ = app.run("ui.dialog", json!({"name": "renameLayout", "target": n}));
@@ -7812,6 +7875,8 @@ pub(crate) fn layout_menu(app: &mut RustGisApp, ui: &mut Ui, n: &str) {
         }
         ui.close();
     }
+    let at = app.session.project.layouts.iter().position(|x| x.name == n);
+    move_buttons(app, ui, "layout.move", n, at, app.session.project.layouts.len());
     if ui.button(tl!("Delete")).clicked() {
         app.map.deleting = Some(crate::mapview::Deletion::Layout(n.to_string()));
         ui.close();
@@ -7822,6 +7887,45 @@ pub(crate) fn layout_menu(app: &mut RustGisApp, ui: &mut Ui, n: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A layer linked to its file says so after its name, with the file and what linking means
+    /// (#2350); a copy, and the same layer once Load All Features copies it, don't. Another note
+    /// (a change on disk) goes with it.
+    #[test]
+    fn a_layer_linked_to_its_file_says_so() {
+        use rustgis_engine::data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+        let dir = tempfile::tempdir().unwrap();
+        let mut ds = Dataset::new("points", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        ds.push(Some(Geometry::Point(Coord::new(1.0, 1.0))), vec![V::Text("a".into())]);
+        let path = dir.path().join("points.fgb");
+        rustgis_engine::data::io::write_path(&ds, &path).unwrap();
+        let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
+        let ctx = egui::Context::default();
+        let add = |app: &mut RustGisApp, stream: bool| {
+            app.session.run("layer.addData", &serde_json::json!({"path": path, "stream": stream})).unwrap()["layer"].as_u64().unwrap()
+                as u32
+        };
+        let note = |app: &mut RustGisApp, id: u32| {
+            let l = app.session.map().layer(id).unwrap().clone();
+            layer_note(app, &l, &ctx)
+        };
+        let linked = add(&mut app, true);
+        let (shown, detail, _) = note(&mut app, linked).unwrap();
+        assert_eq!(shown, "(linked)");
+        assert!(detail.contains(&*path.display().to_string()) && detail.contains("Load All Features"), "{detail}");
+        let copied = add(&mut app, false);
+        assert_eq!(note(&mut app, copied), None);
+        app.session.run("layer.loadAll", &serde_json::json!({"layer": linked})).unwrap();
+        assert_eq!(note(&mut app, linked), None, "Load All Features makes it a copy");
+        // With another note: one parenthesis, both details.
+        let again = add(&mut app, true);
+        let l = app.session.map().layer(again).unwrap().clone();
+        let other = Some(("(changed on disk)".to_string(), "Changed on disk.".to_string(), Some(false)));
+        let (shown, detail, tint) = linked_note(&l, other).unwrap();
+        assert_eq!(shown, "(linked, changed on disk)");
+        assert!(detail.ends_with("\nChanged on disk."), "{detail}");
+        assert_eq!(tint, Some(false));
+    }
 
     /// An editor sends back an image that draws as it is, and one refused for itself (not an
     /// image) as the circle it is drawn as, counted. The rule is render's
@@ -9066,6 +9170,56 @@ mod tests {
         assert_eq!(classes.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), ["high", "low"], "the rows the query keeps");
         assert_eq!(h.state().session.undo_depth(), steps + 1);
         assert!(h.query_all_by_role(Role::ComboBox).any(|n| n.value().as_deref() == Some("(expression)")));
+    }
+
+    /// Choosing Unique Values shows its Expression box at once, under the field still to apply
+    /// (#2784): an expression typed there classes by it in one step, and the field choice goes; a
+    /// blank box or one that doesn't read applies nothing and leaves the choice open.
+    #[test]
+    fn unique_values_offer_their_expression_before_a_field_is_applied() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let mut h = symbology_retry_harness();
+        let id = layer(h.state(), "retry");
+        let steps = h.state().session.undo_depth();
+        h.get_by_role_and_label(Role::Button, "Unique Values").click();
+        h.run_steps(3);
+        assert!(h.state().ui.symbology_pending.is_some(), "the field still to apply");
+        let enter = |h: &mut egui_kittest::Harness<'static, RustGisApp>, text: &str| {
+            h.get_by_role_and_label(Role::TextInput, "Expression").focus();
+            h.run();
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+            if !text.is_empty() {
+                h.get_by_role_and_label(Role::TextInput, "Expression").type_text(text);
+                h.run();
+            }
+            h.key_press(egui::Key::Enter);
+            h.run_steps(3);
+        };
+        let unique = |h: &egui_kittest::Harness<'static, RustGisApp>| {
+            matches!(h.state().session.map().layer(id).unwrap().renderer, Renderer::Unique { .. })
+        };
+        let open = |h: &egui_kittest::Harness<'static, RustGisApp>| {
+            (unique(h), h.state().session.undo_depth(), h.state().ui.symbology_pending.is_some())
+        };
+        enter(&mut h, "");
+        assert_eq!(open(&h), (false, steps, true), "blank");
+        enter(&mut h, "nosuch + 1");
+        assert!(h.query_by_label_contains("Invalid:").is_some(), "says why");
+        assert_eq!(open(&h), (false, steps, true), "doesn't read");
+        h.get_by_role_and_label(Role::TextInput, "Expression").focus();
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        enter(&mut h, "if(c_valid > 15, 'high', 'low')");
+        let Renderer::Unique { expression, .. } = h.state().session.map().layer(id).unwrap().renderer.clone() else { panic!() };
+        assert_eq!(expression.as_deref(), Some("if(c_valid > 15, 'high', 'low')"));
+        assert_eq!((h.state().session.undo_depth(), h.state().ui.symbology_pending.is_some()), (steps + 1, false));
+        assert!(h.query_all_by_role(Role::ComboBox).any(|n| n.value().as_deref() == Some("(expression)")));
+        // Undone, the renderer before comes back, without the field choice.
+        h.state_mut().run("edit.undo", json!(null)).unwrap();
+        h.run_steps(3);
+        assert_eq!(open(&h), (false, steps, false), "undone");
     }
 
     /// A By Expression box (symbols, Unique Values, labels) offers the fields as it's typed (#1240):

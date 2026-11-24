@@ -196,11 +196,16 @@ status bar. Remote
 FlatGeobuf date/time columns stay ISO text with a notice so opening them can keep reading by
 range without downloading every feature.
 
-Vector geometry is stored as WGS 84 longitude/latitude. Data in another supported coordinate
-system is converted as it is read; Shapefiles use their `.prj`, and formats such as GeoPackage,
-GeoParquet and FlatGeobuf carry their coordinate system in the file. Rasters keep their own
-coordinate system and are reprojected as they draw. The map uses Web Mercator by default, but
-**View › Projection** can change it; see [Maps](maps.md).
+A layer keeps its file's own coordinates and coordinate system; Shapefiles use their `.prj`, and
+formats such as GeoPackage, GeoParquet and FlatGeobuf carry their coordinate system in the file.
+Rasters keep theirs too. The map uses Web Mercator by default, but **View › Projection** can
+change it; see [Maps](maps.md). On a map in a coordinate system, a layer or raster in that system
+is drawn as it is. On a map in a system made for one area (a UTM zone or a Gauss-Krüger strip,
+say), one in another system is drawn by the transformation PROJ picks between the two (between
+two datums, the one for that pair, not one through WGS 84); on a world projection, such a layer
+goes through WGS 84 longitude/latitude. On a map in a coordinate system, Zoom To Layer, Zoom To
+Selection and Full Extent frame a layer in the map's system by its own coordinates, and its
+simplified drawing at small scales is made from them, with nothing converted.
 
 Coordinate systems are read and transformed as PROJ 9.9.0 does, through terrio-crs. A few EPSG
 and ESRI codes PROJ 9.9.0 dropped or can't compute (EPSG:3752 and 22700, ESRI:10820 and 65162)
@@ -1478,6 +1483,19 @@ GeoJSON file, which leaves such a feature out when it opens, and says so). On an
 map, each feature is placed in longitude/latitude to be compared. Remote files have lower limits (see
 [Data formats](data-formats.md)). Smaller files load
 whole; `layer.addData` with `"stream": true` or `false` overrides the choice.
+
+On the desktop, adding a GeoPackage, GeoParquet, FlatGeobuf, Shapefile or `.geojson` file (with
+**Add Data**, by dropping it on the window or from the Browser pane) asks which: **Copy into the
+project** or **Link to the file**. The size rule above picks the answer already selected, so
+**Add** (or Enter) takes the file as before; a `.geojson` file is taken as the answer shows (one
+past 32 MiB starts at Link, and stays linked even when it holds few features). A linked layer is read in place, and the project keeps
+the file's path (relative to the project's folder when it can, so a folder moved whole keeps it),
+not its features: to edit it or define its projection, choose **Load All Features** first. A file
+too large to read whole can only be linked. A GeoPackage of several tables asks once, at the foot
+of **Choose Layers**. A linked layer shows "(linked)" after its name in Layers, and Package Project
+names the layers it leaves linked to files outside the package. LiDAR is always linked, and a `.json`
+file (which may be a city model) isn't asked about: it is linked or copied by the size rule above,
+as before. Files read whole are copied.
 
 On the desktop, **Load All Features** from the layer's menu in Layers reads its features in the
 background, with **Cancel** in the status bar; the layer stays streamed until they are all read.

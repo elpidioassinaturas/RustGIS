@@ -1693,20 +1693,22 @@ pub fn read(file_name: &str, bytes: &[u8], opts: &Options) -> Result<Vec<(Datase
         // What the drawing as a whole said goes with its first layer only.
         let mut rep = if layers.is_empty() { report.clone() } else { ReadReport::default() };
         if let Some((t, c)) = &transformer {
-            // Kept as the drawing holds them, in its system, where they have a place in
+            // Kept as the drawing holds them, in its system; counted where they have no place in
             // longitude/latitude.
             ds.held_in = *c;
-            let mut lost = 0usize;
-            for (f, varying) in ds.features.iter_mut().zip(&flags) {
+            let (mut lost, mut placed, mut beyond) = (0usize, 0usize, 0usize);
+            for (f, varying) in ds.features.iter().zip(&flags) {
                 crate::progress::check()?;
-                if let Some(g) = f.geometry.take() {
-                    if crate::io::places_in_lonlat(&g, t) {
-                        f.geometry = Some(g);
-                        ds.zm_dropped |= *varying;
-                        varying_count += usize::from(*varying);
-                    } else {
-                        lost += 1;
+                if let Some(g) = &f.geometry {
+                    match crate::io::places_lonlat_extent(g, t) {
+                        Some(e) => {
+                            placed += 1;
+                            beyond += usize::from(e.beyond_lonlat());
+                        }
+                        None => lost += 1,
                     }
+                    ds.zm_dropped |= *varying;
+                    varying_count += usize::from(*varying);
                 }
             }
             for (index, loss) in &losses {
@@ -1715,9 +1717,8 @@ pub fn read(file_name: &str, bytes: &[u8], opts: &Options) -> Result<Vec<(Datase
                 }
             }
             ds.features.retain(|f| f.geometry.is_some());
-            if lost > 0 {
-                rep.messages.push(format!("{lost} features couldn't be converted from {}", c.label()));
-            }
+            rep.messages.extend(crate::io::kept_unplaced_note("features", lost, placed == 0, *c));
+            rep.messages.extend(crate::io::beyond_lonlat_note("features", beyond, *c));
         }
         if transformer.is_none() {
             for (_, loss) in losses {
@@ -1751,7 +1752,10 @@ pub fn read(file_name: &str, bytes: &[u8], opts: &Options) -> Result<Vec<(Datase
         && let Some((_, report)) = layers.first_mut()
     {
         let subject = if varying_count == 1 { "feature" } else { "features" };
-        report.messages.push(format!("{varying_count} {subject} lost varying Z coordinates; only the elevation attribute is kept"));
+        report.messages.push(crate::loss::Note::loss(
+            crate::loss::LossCode::DroppedZm,
+            format!("{varying_count} {subject} lost varying Z coordinates; only the elevation attribute is kept"),
+        ));
     }
     if recovered.unreadable_vertices > 0
         && let Some((_, report)) = layers.first_mut()
@@ -2050,16 +2054,17 @@ mod tests {
                 "2 vertices without Y were left out of spline paths",
             ]
         );
-        // A CRS-rejected placement contributes no partial counters.
+        // A placement with no place in longitude/latitude is kept as the drawing holds it
+        // (#2032 C2f-4b), so what it lost is said too.
         let text = "0 SECTION 2 ENTITIES 0 POINT 10 0 20 0 0 SPLINE 71 3 11 0 21 100 11 1 11 2 21 101 0 ENDSEC 0 EOF"
             .split_whitespace()
             .collect::<Vec<_>>()
             .join("\n");
         let layers = read("a.dxf", text.as_bytes(), &Options { crs: Some(Crs::from_epsg(4269).unwrap()), ..Options::default() }).unwrap();
         let messages: Vec<&str> = layers.iter().flat_map(|(_, report)| &report.messages).map(|m| m.as_str()).collect();
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].starts_with("1 features couldn't be converted from "));
-        assert!(!messages[0].contains("without Y"));
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("from EPSG:4269") && m.contains("kept as the file holds them")), "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("without Y")), "{messages:?}");
     }
 
     #[test]
@@ -2650,8 +2655,11 @@ mod tests {
         assert_eq!(l[0].0.features.len(), MAX_TOTAL_VERTICES / 200_000);
         assert!(l[0].0.zm_dropped);
         assert_eq!(
-            l[0].1.messages.iter().filter(|m| m.contains("varying Z")).collect::<Vec<_>>(),
-            [&format!("{} features lost varying Z coordinates; only the elevation attribute is kept", l[0].0.features.len())]
+            l[0].1.messages.iter().filter(|m| m.contains("varying Z")).map(|m| (m.as_str(), m.loss)).collect::<Vec<_>>(),
+            [(
+                &*format!("{} features lost varying Z coordinates; only the elevation attribute is kept", l[0].0.features.len()),
+                Some(crate::loss::LossCode::DroppedZm)
+            )]
         );
         assert!(l[0].1.messages.iter().any(|m| m.contains("coordinates")), "{:?}", l[0].1.messages);
     }
@@ -2903,7 +2911,8 @@ mod tests {
         let layers = read("placed.dxf", text.as_bytes(), &opts).unwrap();
         assert_eq!(layers.len(), 2);
         let lines = &layers[1].0;
-        assert_eq!(lines.features.len(), 2);
+        // The insertion at 100°N has no place in longitude/latitude: kept as the drawing holds it.
+        assert_eq!(lines.features.len(), 3);
         assert_eq!(lines.held_in, opts.crs.unwrap());
         assert!(!lines.zm_dropped);
         for (i, x) in [10.0, 14.0].into_iter().enumerate() {
@@ -2926,7 +2935,8 @@ mod tests {
         }
         let notes: Vec<&str> =
             layers.iter().flat_map(|(_, r)| &r.messages).filter(|m| m.contains("POLYLINE")).map(|m| m.as_str()).collect();
-        assert_eq!(notes, ["4 unreadable POLYLINE vertices were left out of their lines"]);
+        // The kept insertion at 100°N counts its own (#2032 C2f-4b).
+        assert_eq!(notes, ["6 unreadable POLYLINE vertices were left out of their lines"]);
         let no_blocks = read("placed.dxf", text.as_bytes(), &Options { blocks: false, ..opts }).unwrap();
         assert_eq!(no_blocks.len(), 1);
         assert!(no_blocks.iter().all(|(_, r)| r.messages.iter().all(|m| !m.contains("POLYLINE"))));
@@ -3066,7 +3076,10 @@ mod tests {
                 } else {
                     vec![]
                 };
-                assert_eq!(report.messages, expected);
+                assert_eq!(report.messages.texts().collect::<Vec<_>>(), expected);
+                assert!(
+                    report.messages.iter().filter(|m| m.contains("varying Z")).all(|m| m.loss == Some(crate::loss::LossCode::DroppedZm))
+                );
                 let Some(Geometry::Line(parts)) = &ds.features[0].geometry else { panic!("spline line") };
                 let (start_xy, end_xy) = if tilted {
                     (Coord::new(0.1, 0.0), Coord::new(end.parse().unwrap(), 3.0))
@@ -3139,7 +3152,8 @@ mod tests {
             assert_eq!(ds.zm_dropped, tilted);
             assert_eq!(report.skipped, 0);
             let expected = if tilted { vec!["1 feature lost varying Z coordinates; only the elevation attribute is kept"] } else { vec![] };
-            assert_eq!(report.messages, expected);
+            assert_eq!(report.messages.texts().collect::<Vec<_>>(), expected);
+            assert!(report.messages.iter().filter(|m| m.contains("varying Z")).all(|m| m.loss == Some(crate::loss::LossCode::DroppedZm)));
         }
     }
 
@@ -3190,7 +3204,8 @@ mod tests {
             assert_eq!(ds.zm_dropped, varying, "rotation={rotation}: {:?}", report.messages);
             let expected =
                 if varying { vec!["1 feature lost varying Z coordinates; only the elevation attribute is kept"] } else { vec![] };
-            assert_eq!(report.messages, expected);
+            assert_eq!(report.messages.texts().collect::<Vec<_>>(), expected);
+            assert!(report.messages.iter().filter(|m| m.contains("varying Z")).all(|m| m.loss == Some(crate::loss::LossCode::DroppedZm)));
             assert_eq!(report.skipped, 0);
             let Some(Geometry::Line(parts)) = &ds.features[0].geometry else { panic!("rotated line") };
             assert_eq!(parts[0].first(), Some(&Coord::new(0.0, 0.0)));
@@ -3240,7 +3255,11 @@ mod tests {
             assert_eq!(ds.value(0, 8), &Value::Float(0.0));
             assert!(ds.zm_dropped, "start={start}, offset={offset}");
             assert_eq!(report.skipped, 0);
-            assert_eq!(report.messages, ["1 feature lost varying Z coordinates; only the elevation attribute is kept"]);
+            assert_eq!(
+                report.messages.texts().collect::<Vec<_>>(),
+                ["1 feature lost varying Z coordinates; only the elevation attribute is kept"]
+            );
+            assert_eq!(report.messages[0].loss, Some(crate::loss::LossCode::DroppedZm));
         }
     }
 
@@ -3289,26 +3308,27 @@ mod tests {
             );
             assert_eq!(report.messages.len(), if end == "9" { 2 } else { 1 });
             if end == "9" {
-                assert_eq!(report.messages[1], "1 feature lost varying Z coordinates; only the elevation attribute is kept");
+                assert_eq!(report.messages[1].as_str(), "1 feature lost varying Z coordinates; only the elevation attribute is kept");
+                assert_eq!(report.messages[1].loss, Some(crate::loss::LossCode::DroppedZm));
             }
         }
     }
 
-    /// A wholly rejected feature loses its geometry, not just heights in retained output.
+    /// A feature with no place in longitude/latitude is kept as the drawing holds it (#2032
+    /// C2f-4b), its varying heights dropped and said, as any kept feature's.
     #[test]
-    fn varying_heights_exclude_crs_rejected_features() {
+    fn varying_heights_of_a_kept_unplaced_feature_are_said() {
         let text = "0 SECTION 2 ENTITIES 0 POINT 10 0 20 0 30 5
             0 LINE 10 0 20 100 30 5 11 1 21 100 31 9 0 ENDSEC 0 EOF"
             .split_whitespace()
             .collect::<Vec<_>>()
             .join("\n");
         let layers = read("crs.dxf", text.as_bytes(), &Options { crs: Some(Crs::from_epsg(4269).unwrap()), ..Options::default() }).unwrap();
-        assert_eq!(layers.iter().map(|(ds, _)| ds.features.len()).sum::<usize>(), 1);
-        assert_eq!(layers[0].0.features[0].geometry, Some(Geometry::Point(Coord::new(0.0, 0.0))));
-        assert!(layers.iter().all(|(ds, r)| !ds.zm_dropped && r.messages.iter().all(|m| !m.contains("varying Z"))));
+        assert_eq!(layers.iter().map(|(ds, _)| ds.features.len()).sum::<usize>(), 2);
+        assert!(layers.iter().flat_map(|(ds, _)| ds.features.rows()).all(|r| r.geometry().is_some()));
         let messages: Vec<&str> = layers.iter().flat_map(|(_, r)| &r.messages).map(|m| m.as_str()).collect();
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].starts_with("1 features couldn't be converted from "), "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("EPSG:4269") && m.contains("kept as the file holds them")), "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("varying Z")), "{messages:?}");
     }
 
     #[test]

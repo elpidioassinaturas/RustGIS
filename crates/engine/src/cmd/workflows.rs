@@ -1290,6 +1290,43 @@ pub fn script_commands(script: &str) -> Result<Vec<(usize, String, Value)>, Stri
     Ok(out)
 }
 
+/// Where in `script` a run stopped, from its `error`: the line (1-based) and, when that line's JSON
+/// doesn't read, the column of its error in the line (1-based, in characters, as an editor counts).
+/// `None` for an error that names no line of `script`. The Script pane marks the line and goes to
+/// it (#2815). It reads the `line {n}` that `run_script`'s and [`script_commands`]' stops at a line
+/// start with (the line cap and a run ahead's refusal name none, so they leave no mark), rather
+/// than the run returning the line apart, which would change the error type every caller of a
+/// command shares; `a_scripts_error_says_where_it_stopped` pins each message.
+pub fn script_error_at(script: &str, error: &str) -> Option<(usize, Option<usize>)> {
+    let rest = error.strip_prefix("line ")?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if !rest[digits..].starts_with([':', ' ']) {
+        return None;
+    }
+    let n: usize = rest[..digits].parse().ok()?;
+    let line = script.lines().nth(n.checked_sub(1)?)?;
+    Some((n, json_error_column(line)))
+}
+
+/// The column (1-based, in characters) where `line`'s JSON stops reading, read as
+/// [`crate::script_line`] reads it; `None` when it reads or there is none. serde counts its column
+/// in bytes from the JSON's start.
+fn json_error_column(line: &str) -> Option<usize> {
+    let (_, rest) = crate::parameters::split_script_id(line.trim());
+    let json = rest.trim();
+    if json.is_empty() {
+        return None;
+    }
+    let e = serde_json::from_str::<Value>(json).err()?;
+    // `rest` ends where the trimmed line does.
+    let start = line.trim_end().len() - rest.trim_start().len();
+    let mut at = (start + e.column().saturating_sub(1)).min(line.len());
+    while !line.is_char_boundary(at) {
+        at -= 1;
+    }
+    Some(line[..at].chars().count() + 1)
+}
+
 /// One raster function's output pixels on `r`'s grid, or a resample's on `target`'s (from
 /// [`resample_target`]). A remap adds its ranges that match nothing to `remaps`, and whether it
 /// left any cell with a value.
@@ -1822,12 +1859,13 @@ fn route(s: &mut Session, p: &Value) -> CmdResult {
         rustgis_map::rows::Rows::Subset(rows) => rows,
     };
     // The network in longitude/latitude, as `from` and `to` are, whatever system the layer holds
-    // its coordinates in: converted only when its graph is built, which is kept for the layer's
-    // rows, so routes over a held network reuse it as they do over one in longitude/latitude.
+    // its coordinates in: each line given there as its graph is built, which is kept for the
+    // layer's rows, so routes over a held network reuse it as they do over one in
+    // longitude/latitude. A line with a place that can't be given there is left out of it, its
+    // segments counted with those with invalid coordinates, rather than the route refused.
     let system = (l.dataset.coord_crs(), l.dataset.crs);
     let r = network::shortest_route_held(
         &l.dataset,
-        || l.dataset.in_lonlat(),
         &rows,
         point(p, "from")?,
         point(p, "to")?,
@@ -1968,7 +2006,17 @@ fn simulate(s: &mut Session, p: &Value) -> CmdResult {
     // system, as the polygons are.
     let system = (l.dataset.coord_crs(), l.dataset.crs);
     let own = rustgis_analysis::works_in(system.0);
-    let polygons = if own { std::borrow::Cow::Borrowed(&l.dataset) } else { l.dataset.in_lonlat()? };
+    // A polygon with a place that can't be given in longitude/latitude gets no points, and is
+    // said, rather than the run refused.
+    let polygons = if own { std::borrow::Cow::Borrowed(&l.dataset) } else { l.dataset.in_lonlat_leaving_out()?.0 };
+    let unplaced = rows
+        .iter()
+        .filter(|&&r| {
+            l.dataset.features.row(r).is_some_and(|f| f.geometry().is_some())
+                && polygons.features.row(r).is_some_and(|f| f.geometry().is_none())
+        })
+        .count();
+    let source = l.name.clone();
     let seed = f(p, "seed").map_or(42, |v| v.max(0.0) as u64);
     let pts: Vec<(usize, Coord)> = match ps(p, "field") {
         Some(fname) => {
@@ -2007,6 +2055,12 @@ fn simulate(s: &mut Session, p: &Value) -> CmdResult {
     }
     if let Some(notice) = query_notice {
         s.notify_text(notice, false);
+    }
+    if unplaced > 0 {
+        s.warn(format!(
+            "{}: {unplaced} polygon(s) of {source} have a place that can't be given in longitude/latitude, so no points are simulated in them",
+            ds.name
+        ));
     }
     let nid = super::layer::add_dataset(s, ds);
     Ok(json!({"layer": nid, "points": n}))
@@ -2132,8 +2186,8 @@ fn convert(s: &mut Session, p: &Value) -> CmdResult {
     let target = ds.name.clone();
     let query_note = super::share::query_export_note(&target, &layer.name, &report);
     drop(ds);
-    for note in notes.into_iter().chain(construction_notes) {
-        s.notify(note, false);
+    for note in notes.into_iter().chain(construction_notes.into_iter().map(rustgis_data::loss::Note::plain)) {
+        s.say(note);
     }
     super::share::notify_null_numbers(s, &target, null_numbers);
     if let Some(note) = query_note {
@@ -2171,7 +2225,7 @@ pub(crate) fn convert_work(s: &Session, p: &Value) -> Result<super::exports::Wor
             )
             .map_err(|e| e.to_string())?;
             let mut notes: rustgis_data::loss::Notes =
-                rustgis_data::export_notes([(&ds, layer.extent())], &path, rustgis_data::raster::Crs::LonLat).into();
+                rustgis_data::export_notes([(&ds, layer.extent())], &path, rustgis_data::raster::Crs::LonLat);
             if format == "csv" {
                 notes.extend(result.csv.notes(&ds.fields, &path));
                 notes.extend(result.csv.coordinates_note(&ds.fields, &path));
@@ -2183,22 +2237,22 @@ pub(crate) fn convert_work(s: &Session, p: &Value) -> Result<super::exports::Wor
             notes.extend(rustgis_data::io::unplaced_export_note(&path, &ds.name, result.unplaced, rustgis_data::raster::Crs::LonLat));
             notes.extend(
                 rustgis_data::source::unread_dates_note(&ds.fields, &result.unread_dates)
-                    .map(|n| format!("{path}: {}: {n} (empty in the export)", ds.name)),
+                    .map(|n| n.map_text(|n| format!("{path}: {}: {n} (empty in the export)", ds.name))),
             );
             notes.extend(
                 rustgis_data::source::rounded_dates_note(&ds.fields, &result.rounded_dates)
-                    .map(|n| format!("{path}: {}: {n} when read for the export", ds.name)),
+                    .map(|n| n.map_text(|n| format!("{path}: {}: {n} when read for the export", ds.name))),
             );
             notes.extend(
                 rustgis_data::source::null_text_note(&ds.fields, &result.null_text)
-                    .map(|n| format!("{path}: {}: {n} (empty in the export)", ds.name)),
+                    .map(|n| n.map_text(|n| format!("{path}: {}: {n} (empty in the export)", ds.name))),
             );
             notes.extend(
                 result.read_notes.iter().map(|n| n.clone().map_text(|t| format!("{path}: {}: {t} when read for the export", ds.name))),
             );
             notes.extend(
                 rustgis_data::source::not_utf8_note(&ds.fields, &result.not_utf8, result.not_utf8_in)
-                    .map(|n| format!("{path}: {}: {n}", ds.name)),
+                    .map(|n| n.prefixed(&format!("{path}: {}", ds.name))),
             );
             (notes, result.null_numbers, result.query)
         } else {
@@ -2211,7 +2265,7 @@ pub(crate) fn convert_work(s: &Session, p: &Value) -> Result<super::exports::Wor
             let report = rustgis_data::export::filter_dataset(&mut ds, query).map_err(|e| e.to_string())?;
             rustgis_data::progress::begin(ds.features.len());
             let (text, notes) = converted(&ds, &params)?;
-            let mut notes: rustgis_data::loss::Notes = notes.into();
+            let mut notes: rustgis_data::loss::Notes = notes;
             super::share::coalesce_read_zm(&mut notes, &path, &ds, &unreadable);
             rustgis_data::io::write_atomic(std::path::Path::new(&path), text.as_bytes()).map_err(|e| format!("{path}: {e}"))?;
             if unreadable.rows > 0 {
@@ -2257,7 +2311,7 @@ fn conversion_format(p: &Value) -> Result<&str, String> {
 }
 
 /// Serializes a complete dataset and collects its loss notices for delivery after success.
-fn converted(ds: &Dataset, p: &Value) -> Result<(String, Vec<String>), String> {
+fn converted(ds: &Dataset, p: &Value) -> Result<(String, rustgis_data::loss::Notes), String> {
     let name_field =
         ps(p, "nameField").and_then(|n| ds.field_index(n)).or_else(|| ds.fields.iter().position(|f| f.name.eq_ignore_ascii_case("name")));
     let format = conversion_format(p)?;

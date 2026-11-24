@@ -98,27 +98,30 @@ draws a circle, so the point still shows. By command:
 layer.marker={"layer":"Peaks","char":"▲","font":"DejaVu Sans","size":12}
 ```
 
-A marker can also be an **image**: a PNG or JPEG picked with **Image…** at the end of **Shape**
-(choose it again for another image), or a PNG, JPEG or SVG given by command as base64 (at most
-2 MiB of base64 text, an image of about 1.5 MiB) and of at most 2048 × 2048 pixels (by area: a
-4096 × 1024 strip is taken). Other formats, such as GIF, aren't taken: a file in another format,
-one too large, or one that doesn't decode is said in a notice and leaves the marker as it was.
-An SVG is drawn once into an image of its proportions, 256 to 700 pixels on its longer side (more
-where it says it is larger), and kept as a PNG is. Its shapes, gradients, patterns, clip paths
-and masks are drawn. One with filters (a blur, a shadow), text, images or links to other files (a
-`<use>`, a paint or a style sheet from elsewhere) isn't taken, as they aren't drawn; nor is a file
-read. What an SVG costs to draw is what it
+A marker can also be an **image**: a PNG, JPEG or SVG file picked with **Image…** at the end of
+**Shape** (choose it again for another image), or given by command as base64 (at most
+2 MiB of base64 text, an image of about 1.5 MiB). A PNG or JPEG may have at most 2048 × 2048
+pixels (by area: a 4096 × 1024 strip is taken). Other formats, such as GIF, aren't taken: a file
+in another format, one too large, or one that doesn't decode is said in a notice, with why, and
+leaves the marker as it was. An SVG is drawn once into an image of its proportions, 256 pixels on
+its longer side, or as many as it says up to 700, and kept as a PNG is. Its shapes, gradients,
+patterns, clip paths and masks are drawn. One with filters (a blur, a shadow), text, images or
+links to other files (a `<use>`, a paint or a style sheet from elsewhere) isn't taken, as they
+aren't drawn; nor is a file read. What an SVG costs to draw is what it
 paints, not its size: a few kilobytes of dashes finer than a pixel, or of see-through shapes piled
 up, can take minutes. So one with more to draw than a 2048 × 2048 image isn't taken either, nor
 one past 10,000 elements or 200,000 points of its shapes once each `<use>` is counted where it
 repeats, nor one with a marker on a shape inside another marker (drawn on each of its vertices
-wherever it is). An arc is counted as the curves it is drawn with, more the larger its radius: one of more
-than a thousand curves isn't taken, nor is a circle, an ellipse or a rounded corner whose radius
-is in em, ex or %, which may come to any size. Each image is decoded
-once until RustGIS restarts, and kept decoded, at most 700 pixels a side: in all at most
-256 megapixels of different marker images and 128 MiB once decoded (as many images as it keeps,
-at 177 × 177 each), so that a crafted file can't hold it for minutes; past it a new image is
-refused, or drawn as a circle, with a notice saying so, until RustGIS is restarted. A vector
+wherever it is). An arc is counted as the curves it is drawn with, more the larger its radius:
+one of more than 200 curves isn't taken, nor is a circle, an ellipse or a rounded corner whose
+radius is in em or ex, which may come to any size. A radius in % is counted as that share of the
+largest size the SVG gives itself; such a radius isn't taken either when the SVG's own width or
+height is in em or ex, or when the width or height of an `<svg>`, `<symbol>` or `<use>` inside it
+is in %, em or ex. Each image is decoded once until RustGIS restarts,
+and kept decoded, at most 700 pixels a side: in all at most 256 megapixels of different marker
+images and 128 MiB once decoded (as many images as it keeps, at 177 × 177 each), so that a
+crafted file can't hold it for minutes; past it a new image is refused, or drawn as a circle,
+with a notice saying so, until RustGIS is restarted. A vector
 export keeps a compressed copy of each image it draws, at most about as much again (some 256 MiB
 in all), which counts too and leaves less for new images.
 Its size is its width, and it is as tall as its proportions make it, as QGIS draws a raster image
@@ -373,12 +376,13 @@ line** turns each mark with the line's direction; the **Angle** turns it further
 take the stroke's colour, its width as a hash mark's line (or a marker's outline, by command), and
 its offset to either side. Stack them with line strokes: a casing, a core and ticks across it. A
 marker can also be an image, with **Image…** under **Shape** or by command (`"image"`, a PNG, JPEG
-or SVG as base64 of at most 2 MiB and 2048 × 2048 pixels, or as much to draw): as wide as its **Size** and as tall as
-its proportions make it, turned with the line, the stroke's colour and outline left out; selected,
-each is framed. An image a file gave that can't be drawn (too large to keep, one that doesn't
-decode or that has too many pixels) shows as a circle; changing the strokes in the pane makes it
-the circle, and says so. One past what RustGIS decodes until it restarts shows as a circle and is
-kept as it is. By command, `"markers"` on a stroke:
+or SVG as base64 of at most 2 MiB; a PNG or JPEG of at most 2048 × 2048 pixels, an SVG with no
+more to draw than such an image): as wide as its **Size** and as tall as its proportions make it,
+turned with the line, the stroke's colour and outline left out; selected, each is framed. An image
+a file gave that can't be drawn (too large to keep, one that doesn't decode, that has too many
+pixels or that is an SVG RustGIS can't draw) shows as a circle; changing the strokes in the pane
+makes it the circle, and says so. One past what RustGIS decodes until it restarts shows as a
+circle and is kept as it is. By command, `"markers"` on a stroke:
 
 ```text
 layer.lineStrokes={"layer":"Railways","strokes":[{"color":"#333333","width":1.5},{"color":"#333333","width":1,"markers":{"mark":"hash","size":6,"interval":10}}]}
@@ -641,9 +645,24 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
   them where they were found along the line, and the distance grows with the labels at a reference
   scale (`labels.placement={"layer": "Rivers", "lineOffset": 4}`; negative is below, `0` or `null`
   on the line).
-- **Show all labels** (Labeling pane › Position): labels among the view's 20,000 highest-priority
-  candidates are drawn, over the others where
-  they crowd, rather than some left out (`labels.placement={"layer": "Cities", "showAll": true}`).
+- **Show all labels** (Labeling pane › Position): the view's first 20,000 label candidates, by
+  weight, then priority, are drawn, over the others where they crowd, rather than some left out
+  (`labels.placement={"layer": "Cities", "showAll": true}`).
+- **Weight** (Labeling pane › Position): where labels compete for a place, the heavier class's
+  label wins, whatever its layer's place in the list, as QGIS's label priority (0 to 10, 5 to
+  start with). Between equal weights the layer above wins, then the class listed first, then the
+  bigger polygon; labels moved by hand still come before all of them. So the rivers' names can
+  win over the towns' without moving the river layer above them, which would change what draws
+  on top (`labels.placement={"layer": "Rivers", "weight": 8}`; a fraction is rounded and a number
+  past 0 or 10 brought to it, with a notice; `null` is 5).
+- **Clearance** (Labeling pane › Position): the room, in points, a class's labels keep free of
+  other labels (0 to 100, 2 to start with, the room every label kept before). Two labels keep
+  both their clearances apart: a river's name with 10 keeps a town's with 2 at least 12 points
+  away, so some labels that fitted before are left out or try their other places. 0 lets the
+  class's labels come as close as their halos and backgrounds allow. It counts round the text
+  only, not an icon; vector tile labels keep their style's own padding
+  (`labels.placement={"layer": "Rivers", "clearance": 10}`; a number past 0 or 100 is brought to
+  it, with a notice; `null` is 2).
 - **Callouts** (Labeling pane › Position): a label crowded off its spot moves to the nearest free
   spot nearby, and a line is drawn from its feature to the text, as QGIS's callouts. **at most**
   sets how long the line may be (5 to 500 points, 40 to start with): a label with no free spot
@@ -663,7 +682,9 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
   moves and old label locks because replacement data can reuse feature ids, with a counted notice
   and undo restoration. Opening a project, importing a map or styles, or adding a layer file
   reports invalid, duplicate or excess moved-label entries that were ignored, callout lengths that
-  were adjusted, and Show all labels settings that were not true or false. A callout length given
+  were adjusted, label weights that were not a whole number from 0 to 10, label clearances that
+  were not a number from 0 to 100 points, and Show all labels settings that were not true or
+  false. A callout length given
   to `labels.placement` outside 5 to 500 points is brought within range with a notice. Clean
   settings give no such notice.
 - **Font**: the labels' font family, any installed on the computer (Labeling pane › Symbol
@@ -730,7 +751,10 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
 - **Other places along lines**: a Parallel or Curved label whose place at the middle is taken, or
   (curved) where the line bends too sharply, tries up to seven others along the same stretch,
   nearest the middle first, and goes to the first that will do (Labeling pane › Position › Along
-  lines › **Try other places along the line**). If none will, it is left out, as with this off. A
+  lines › **Try other places along the line**). Set off the line (**Distance from the line**), it
+  tries each of the four places nearest the middle on its own side first and then on the other,
+  before moving on, so a name kept above a river goes below it where above is taken or (curved)
+  inside a bend too tight. If none will, it is left out, as with this off. A
   line with a repeat keeps its repeats where they are, so the box is hidden while Repeat is on, and
   the setting does nothing there or at a position off the line. Off by default, for the same reason
   as round points, and Lock keeps the place each label took
@@ -773,7 +797,9 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
   The annotation layer is held in the labelled layer's system; for a layer in
   longitude/latitude, Web Mercator or another system in degrees, in the project's coordinate
   system when it has one (not a geocentric one). In a projected system a label's point is found in its own coordinates, where a map in that system draws it; a moved label that
-  can't be placed there stays at its feature's label point, and the conversion says how many.
+  can't be placed there stays at its feature's label point, and the conversion says how many. In
+  longitude/latitude, a feature with a place that can't be given there, which the map doesn't draw
+  either, gets no annotation, and the conversion says how many.
   A label along a line becomes an upright point at its line's middle vertex (the end of a line
   of two), which can be some way from where the label was drawn: its angle, curve, repeats and
   distance from the line are left out, and the conversion says how many, and how many of them

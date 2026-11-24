@@ -40,8 +40,8 @@ Opening or creating a project clears undo history; saving does not.
 
 This version already reads format 2, a newer `.rgis` format
 ([#1853](https://github.com/opengeos/RustGIS/issues/1853)), when the file needs nothing this
-version lacks, and saves it in the format it writes today. A project, package, template, map or
-layer file that needs something this version can't read (what it lists under `requires`) is
+version lacks, and saves it in the format it writes today. A project, package, template, map,
+layer or layout file that needs something this version can't read (what it lists under `requires`) is
 refused, naming what it needs, rather than opened without it; one of a newer format still asks
 you to update RustGIS.
 
@@ -337,8 +337,8 @@ Each layer keeps its look:
   lines as strokes of markers or hash marks, at their places (intervals, vertices, the ends, the
   middle), turned with the line, their markers' offsets and angles kept; font markers as
   characters of their font, on points and along lines; raster image markers as
-  [image markers](cartography.md#symbology) of their PNG, JPEG or SVG (embedded in the file, or a file
-  of their own, relative to the project's folder or, in a style, to the style's), on points
+  [image markers](cartography.md#symbology) of their PNG, JPEG or SVG (embedded in the file, or a
+  file of their own, relative to the project's folder or, in a style, to the style's), on points
   (anchored where QGIS anchors them) and along lines; a marker symbol of several layers, or one
   shifted, turned or anchored off its centre, as a point's marks; a marker angle taken from a
   field (`"field"` or `- "field"`) as the layer's rotation field; a fill symbol of several layers
@@ -474,8 +474,14 @@ such as **Tools**, **Symbology**, **Labeling**, **Format** and **AI Assistant** 
 tabs: select a tab to bring it forward, or its × to close it. Right-click a tab to close it,
 the other panes or all panes; an overflow menu lists tabs that do not fit.
 
-Right-click a map or layout tab (or its entry in Browser) to **Rename**, **Duplicate** or
-**Delete** it. Deletion asks for confirmation; a project must keep at least one map.
+Right-click a map or layout tab (or its entry in Browser) to **Rename**, **Duplicate**,
+**Move Up**, **Move Down** or **Delete** it. Deletion asks for confirmation; a project must keep
+at least one map. Drag a map or layout tab to another place to change the order of the maps or
+the layouts (maps stay before layouts); near the ends of a strip whose tabs don't all fit, the
+tabs scroll. In Browser, drag a map or layout up or down its list the same way; near the
+Browser's top or bottom, the list scrolls. The map or layout in view stays in view, each move is
+one undo step, and the order is saved with the project. From scripts: `map.move` and
+`layout.move`, with the name and the new place (`"to"`: 0 for the first).
 
 Click **Command Search** at the right of the title bar or on the Help tab, or press ++ctrl+k++
 (++cmd+k++ on macOS). Search by command name, ID or ribbon location; analysis tools, workflow

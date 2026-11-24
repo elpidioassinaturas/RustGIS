@@ -444,17 +444,18 @@ pub fn read(mif: &str, mid: Option<&str>, name: &str) -> Result<(Dataset, ReadRe
     if let (Some(_), Some(c)) = (&t, crs) {
         ds.held_in = c;
     }
-    let (mut lost, mut null_text) = (0usize, Vec::new());
+    let (mut lost, mut placed, mut beyond, mut null_text) = (0usize, 0usize, 0usize, Vec::new());
     for (k, g) in geoms.into_iter().enumerate() {
-        // Kept as the file holds it when it has a place in longitude/latitude.
-        let g = match (&t, g) {
-            (Some(t), Some(g)) => {
-                let ok = crate::io::places_in_lonlat(&g, t);
-                lost += usize::from(!ok);
-                ok.then_some(g)
+        // Kept as the file holds it; counted when it has no place in longitude/latitude.
+        if let (Some(t), Some(g)) = (&t, &g) {
+            match crate::io::places_lonlat_extent(g, t) {
+                Some(e) => {
+                    placed += 1;
+                    beyond += usize::from(e.beyond_lonlat());
+                }
+                None => lost += 1,
             }
-            (_, g) => g,
-        };
+        }
         let row = rows.get(k);
         let attrs = ds
             .fields
@@ -470,8 +471,9 @@ pub fn read(mif: &str, mid: Option<&str>, name: &str) -> Result<(Dataset, ReadRe
             .collect();
         ds.push_next(g, attrs);
     }
-    if lost > 0 {
-        report.messages.push(format!("{lost} objects couldn't be converted to longitude/latitude"));
+    if let (Some(_), Some(c)) = (&t, crs) {
+        report.messages.extend(crate::io::kept_unplaced_note("objects", lost, placed == 0, c));
+        report.messages.extend(crate::io::beyond_lonlat_note("objects", beyond, c));
     }
     report.messages.extend(crate::source::null_text_note(&ds.fields, &null_text));
     ds.geometry_type = crate::io::dominant_type(&ds);
@@ -582,7 +584,8 @@ mod tests {
         assert_eq!(ds.value(0, 0), &Value::Text(" 2535 ".into()));
         assert_eq!(ds.value(0, 1), &Value::Int(7));
         assert_eq!(ds.value(1, 0), &Value::Null);
-        assert_eq!(report.messages, ["1 value written as Null was read as empty, in 'code'"]);
+        assert_eq!(report.messages.texts().collect::<Vec<_>>(), ["1 value written as Null was read as empty, in 'code'"]);
+        assert_eq!(report.messages[0].loss, Some(crate::loss::LossCode::AssumedNullMarker));
         let (_, clean) = read(mif, Some("\" 2535 \", 7 \n\"b\",8\n"), "t").unwrap();
         assert!(clean.messages.is_empty(), "no marker, no notice: {:?}", clean.messages);
     }

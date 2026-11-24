@@ -19,10 +19,12 @@ use rustgis_data::source::{Batch, FeatureSource, Request, SourceInfo};
 use rustgis_geom::{Coord, Extent};
 use serde::{Deserialize, Serialize};
 
+mod drawn_index;
 #[cfg(test)]
 mod own_tests;
 mod render_lod;
 mod render_view;
+pub use drawn_index::{DrawnBoxes, PACKING_BYTES};
 pub use render_view::KEPT_VIEW_BYTES;
 mod window;
 pub(crate) use window::Query;
@@ -186,6 +188,9 @@ pub struct SourceLayer {
     /// The last view's rows and drawn geometry, shared by render snapshots ([`render_view`]).
     #[serde(skip)]
     render_view: Arc<Mutex<render_view::KeptView>>,
+    /// The features indexed by their boxes as drawn, shared by render snapshots ([`drawn_index`]).
+    #[serde(skip)]
+    render_drawn: Arc<Mutex<drawn_index::DrawnIndex>>,
     #[serde(skip)]
     pending: Option<Arc<Pending>>,
     /// Projection used for this disposable window's geometry cache.
@@ -890,7 +895,7 @@ impl SourceLayer {
     /// What view reads found of values in date fields that weren't dates
     /// ([`rustgis_data::source::unread_dates_note`]) and of date-times rounded to the microsecond
     /// ([`rustgis_data::source::rounded_dates_note`]), once for the source.
-    pub fn take_unread_dates(&mut self) -> (Option<String>, Option<String>) {
+    pub fn take_unread_dates(&mut self) -> (Option<rustgis_data::loss::Note>, Option<rustgis_data::loss::Note>) {
         let Some(fields) = self.info().map(|i| i.fields.clone()) else { return (None, None) };
         let (unread, rounded) = (std::mem::take(&mut self.unread_dates).total(), std::mem::take(&mut self.rounded_dates).total());
         if unread.is_none() && rounded.is_none() {
@@ -914,7 +919,7 @@ impl SourceLayer {
 
     /// What view reads found of text values `<Null>` read as null
     /// ([`rustgis_data::source::null_text_note`]), once for the source.
-    pub fn take_null_text(&mut self) -> Option<String> {
+    pub fn take_null_text(&mut self) -> Option<rustgis_data::loss::Note> {
         let fields = self.info().map(|i| i.fields.clone())?;
         let counts = std::mem::take(&mut self.null_text).total()?;
         self.null_text_said = true;
@@ -937,7 +942,7 @@ impl SourceLayer {
 
     /// What view reads found of text values that aren't UTF-8
     /// ([`rustgis_data::source::not_utf8_note`]), once for the source.
-    pub fn take_not_utf8(&mut self) -> Option<String> {
+    pub fn take_not_utf8(&mut self) -> Option<rustgis_data::loss::Note> {
         // Checked first: this runs every frame for each layer with a source, and most have nothing pending.
         if self.not_utf8.is_empty() {
             return None;
@@ -1119,7 +1124,10 @@ impl SourceLayer {
                 }
                 let part = out.parts.first().ok_or_else(|| format!("{path}: the table returns no {}", d.family.label()))?;
                 if part.zm_dropped > 0 {
-                    conversion_notes.push(rustgis_data::zm_note(Some(part.zm_dropped)));
+                    conversion_notes.push(rustgis_data::loss::Note::loss(
+                        rustgis_data::loss::LossCode::DroppedZm,
+                        rustgis_data::zm_note(Some(part.zm_dropped)),
+                    ));
                 }
                 declared_empty = part.count == 0;
                 new.path = Some(part.path.display().to_string());
@@ -1283,9 +1291,80 @@ impl SourceLayer {
         self.render_view.lock().unwrap_or_else(std::sync::PoisonError::into_inner).put(handle, key, read, res, chunks);
     }
 
-    /// Lets the kept view go when it holds more than `room` bytes.
+    /// Lets the drawn-box index, then the kept view, go when they hold more than `room` bytes
+    /// between them.
     pub fn trim_kept_view(&self, room: usize) {
-        self.render_view.lock().unwrap_or_else(std::sync::PoisonError::into_inner).trim(room);
+        let mut drawn = self.render_drawn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        drawn.trim(room);
+        let left = room.saturating_sub(drawn.bytes());
+        drop(drawn);
+        self.render_view.lock().unwrap_or_else(std::sync::PoisonError::into_inner).trim(left);
+    }
+
+    /// The source's features indexed by their boxes as drawn for `key` (the projection and datum
+    /// grids, as the renderer names them), when a frame that read them all made one (#2788).
+    pub fn drawn_index(&self, key: &str) -> Option<Arc<DrawnBoxes>> {
+        let handle = self.handle.as_ref()?;
+        self.render_drawn.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(handle, key)
+    }
+
+    /// Whether a frame reading every feature for `key` should gather their drawn boxes to make
+    /// an index: not when one is kept, or was too large to keep.
+    pub fn drawn_index_wanted(&self, key: &str, share: usize) -> bool {
+        let Some(handle) = &self.handle else { return false };
+        self.render_drawn.lock().unwrap_or_else(std::sync::PoisonError::into_inner).wanted(handle, key, share)
+    }
+
+    /// Packs the boxes as drawn (feature id, box) a frame gathered for `key` from a read of every
+    /// feature into an index, off that frame: on a worker on the desktop, as the packing takes
+    /// seconds for millions of features. It is kept when it fits `share` bytes (the source's share
+    /// of the map's view memory beside its interaction rows), the kept view then trimmed to what
+    /// is left; otherwise none is gathered again for `key`. Nothing is packed when an index is
+    /// kept or being packed for `key`; one whose worker can't start is gathered again.
+    pub fn index_drawn_boxes(&self, key: &str, boxes: Vec<(u32, [f32; 4])>, share: usize) {
+        let Some(handle) = self.handle.as_ref() else { return };
+        let lock =
+            |m: &Mutex<drawn_index::DrawnIndex>| m.lock().unwrap_or_else(std::sync::PoisonError::into_inner).begin(handle, key, share);
+        let Some(ticket) = lock(&self.render_drawn) else { return };
+        let (drawn, view) = (Arc::clone(&self.render_drawn), Arc::clone(&self.render_view));
+        let slot = Arc::clone(&drawn);
+        let pack = move || {
+            // Given up once this packing is no longer the one the slot waits for.
+            let replaced = || slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).building_ticket() != Some(ticket);
+            let index = DrawnBoxes::new(boxes, replaced);
+            // The kept view is trimmed to the room the index leaves only when the index is kept.
+            let left = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).finish(ticket, index, share);
+            if let Some(left) = left {
+                view.lock().unwrap_or_else(std::sync::PoisonError::into_inner).trim(left);
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = &drawn;
+            pack();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::thread::Builder::new().name("rustgis-drawn-index".into()).spawn(pack).is_err() {
+            drawn.lock().unwrap_or_else(std::sync::PoisonError::into_inner).finish(ticket, None, share);
+        }
+    }
+
+    /// Keeps no index for `key`: its boxes, `need` bytes, were too large to gather; they are
+    /// gathered again once the source's share has that much room.
+    pub fn refuse_drawn_index(&self, key: &str, need: usize) {
+        let Some(handle) = &self.handle else { return };
+        self.render_drawn.lock().unwrap_or_else(std::sync::PoisonError::into_inner).refuse(handle, key, need);
+    }
+
+    /// Whether an index is being packed for `key` ([`SourceLayer::index_drawn_boxes`]).
+    pub fn drawn_index_building(&self, key: &str) -> bool {
+        let Some(handle) = &self.handle else { return false };
+        self.render_drawn.lock().unwrap_or_else(std::sync::PoisonError::into_inner).building(handle, key)
+    }
+
+    /// The memory the drawn-box index holds.
+    pub fn drawn_index_bytes(&self) -> usize {
+        self.render_drawn.lock().unwrap_or_else(std::sync::PoisonError::into_inner).bytes()
     }
 
     /// Puts the kept chunks drawn again, with the geometry drawing made of them, in place of
@@ -1827,6 +1906,7 @@ impl SourceLayer {
         self.pending = None;
         self.render_lod = Default::default();
         self.render_view = Default::default();
+        self.render_drawn = Default::default();
     }
 
     /// Whether `other` (a copy of this one) reads the same source the same way: the same file and
@@ -1851,6 +1931,7 @@ impl SourceLayer {
     pub fn reset(&mut self) {
         self.render_lod = Default::default();
         self.render_view = Default::default();
+        self.render_drawn = Default::default();
         self.reset_window();
     }
 
@@ -2207,6 +2288,7 @@ impl SourceLayer {
             window: _,
             render_lod: _,
             render_view: _,
+            render_drawn: _,
             pending: _,
             projection: _,
             ready_cache: _,

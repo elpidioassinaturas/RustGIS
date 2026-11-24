@@ -21,13 +21,13 @@ pub const MAX_LAYER_NAME: usize = 200;
 pub fn commands() -> Vec<C> {
     vec![
         C::new("layer.addData", "Add Data", "Home › Add", add_data).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
-            .params(r#"{"path": string, "name"?: string, "layer"?: "GeoPackage, GDAL, DuckDB or DXF layer, or a PDF's page number (the first when left out or blank)", "paperSpace"?: "bool: a DXF's layout entities too", "blocks"?: "bool: a DXF's block (图块) contents, true by default", "stream"?: bool, "as"?: "scan" (a TIFF, PNG, JPEG or PDF page, even a photo, a GeoTIFF or a GeoPDF, as a picture with no coordinates), "crs"?: "EPSG:… (or WKT) for Shapefile coordinates (overrides .prj), a CSV, a DXF (which never says), a CityJSON or CityGML model (it replaces the system a model file names; in a zip, it is used for a model naming none RustGIS knows), or a GDAL or DuckDB file that doesn't say (GDAL takes an authority code such as EPSG:2263 or the exact names WGS84, WGS72, NAD27, NAD83, not WKT or a file)", "x"?: "CSV x/longitude column", "y"?: "CSV y/latitude column", "wkt"?: "CSV WKT geometry column", "delimiter"?: ","|";"|"\\t"|"|"}"#),
+            .params(r#"{"path": string, "name"?: string, "layer"?: "GeoPackage, GDAL, DuckDB or DXF layer, or a PDF's page number (the first when left out or blank)", "paperSpace"?: "bool: a DXF's layout entities too", "blocks"?: "bool: a DXF's block (图块) contents, true by default", "stream"?: "bool: true links the file instead of copying it (read in place, a view at a time; the project keeps its path, not its features), false copies it into the project; left out, decided by its size or feature count", "as"?: "scan" (a TIFF, PNG, JPEG or PDF page, even a photo, a GeoTIFF or a GeoPDF, as a picture with no coordinates), "crs"?: "EPSG:… (or WKT) for Shapefile coordinates (overrides .prj), a CSV, a DXF (which never says), a CityJSON or CityGML model (it replaces the system a model file names; in a zip, it is used for a model naming none RustGIS knows), or a GDAL or DuckDB file that doesn't say (GDAL takes an authority code such as EPSG:2263 or the exact names WGS84, WGS72, NAD27, NAD83, not WKT or a file)", "x"?: "CSV x/longitude column", "y"?: "CSV y/latitude column", "wkt"?: "CSV WKT geometry column", "delimiter"?: ","|";"|"\\t"|"|"}"#),
         C::new("layer.addPhotos", "Add Photos", "Home › Add", add_photos).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"paths"?: [JPEG photo files], "folder"?: "a folder of photos (every JPEG in it)", "name"?: "the layer (default Photos; photos join it when it exists)"}"#,
         ),
         C::new("info.fileLayers", "List Layers in File", "Home › Add › Add Data", file_layers).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
-            .params(r#"{"path": string, "crs"?: "EPSG:… for a CityJSON model (.city.json, a .json, or in a zip) or a CityGML model (.gml, .xml, or in a zip): it replaces the system a model file names; in a zip, it is used for a model naming none RustGIS knows (as layer.addData)"}"#),
+            .params(r#"{"path": string, "crs"?: "EPSG:… for a CityJSON model (.city.json, a .json, or in a zip) or a CityGML model (.gml, .xml, or in a zip): it replaces the system a model file names; in a zip, it is used for a model naming none RustGIS knows (as layer.addData)", "link"?: "bool: for a file Add Data can link instead of copying (GeoPackage, GeoParquet, FlatGeobuf, Shapefile, .geojson; desktop), also say how it would take it, as link: linked (what it does without stream; for a .geojson, by its size alone, so Add Data sends the answer, as layer.addData unasked also looks at its count) and copy (whether it can be read whole); it opens each table, so only when asked"}"#),
         C::new("info.fileColumns", "List Columns in File", "Home › Add › Add Data › Delimited Text", file_columns).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).view().params(
             r#"{"path": "a delimited text file (CSV, TSV, TXT, DAT, or gzip-compressed text) or a spreadsheet", "delimiter"?: ","|";"|"\\t"|"|", "layer"?: "a spreadsheet's sheet (the first by default)", "crs"?: "EPSG:… (or WKT), as layer.addData: a projected system keeps the columns found by name"}"#,
         ),
@@ -139,11 +139,9 @@ pub fn commands() -> Vec<C> {
             .params(r#"{"layer"?: name|id | [name|id] (default: the layer selection), "to": position (0 = top; past the end, the bottom). Several keep their order, the topmost landing at "to" as one layer would, and go only to the top or the bottom (one in a group, to its group's): with 4 layers and 2 of them, 2 or more is the bottom, 1 is refused}"#),
         C::new("layer.zoomTo", "Zoom To Layer", "Layers", |s, p| {
             let ids = layer_ids(s, p)?;
-            let e = ids.iter().filter_map(|id| s.map().layer(*id)).fold(rustgis_geom::Extent::EMPTY, |e, l| e.union(&l.shown_extent()));
-            if e.is_empty() {
+            if s.zoom_to_layers(&ids, rustgis_map::ExtentOf::Shown).is_none() {
                 return Err(if ids.len() > 1 { "the layers have no features" } else { "the layer has no features" }.into());
             }
-            s.zoom_to(&e);
             Ok(Value::Null)
         }).roles(&[]).effects(crate::policy::Effects::NONE).params(r#"{"layer"?: name|id | [name|id] (default: the layer selection; zooms to all of them)}"#)
         .view()
@@ -2513,6 +2511,53 @@ fn streams_geojson(p: &Value, path: &str) -> bool {
         .unwrap_or_else(|| std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > rustgis_data::source::geojson::IN_PLACE_ABOVE))
 }
 
+/// Whether Add Data reads a GeoPackage table, GeoParquet or FlatGeobuf file holding `count`
+/// features in place, without `"stream"`: when it holds more than
+/// [`STREAM_ABOVE`](rustgis_map::source::STREAM_ABOVE), or doesn't say how many.
+fn streams_by_count(count: Option<u64>) -> bool {
+    count.is_none_or(|c| c > rustgis_map::source::STREAM_ABOVE)
+}
+
+/// What Add Data's question, copy a file into the project or link to it (#2350), starts from:
+/// `{"linked", "copy"}`, or `None` for a file it doesn't ask about. Asked about: a `.geojson`
+/// file, a Shapefile, a GeoPackage (one choice for all of `tables`), GeoParquet and FlatGeobuf.
+/// Not asked: LiDAR (always linked), a `.json` (it may be a city model, decided by size as
+/// before), files read whole, and those it can't open (`layer.addData` then says why).
+/// `linked` is what `layer.addData` does without `"stream"`, by the same rules
+/// ([`streams_geojson`], [`past_cap_shapefile`] and [`streams_shapefile`], [`streams_by_count`],
+/// linked when any table would be), except a `.geojson` file: by its size alone, as reading its
+/// count means parsing it, so Add Data always sends the answer (`layer.addData` unasked, once it
+/// reads such a file in place, also copies one of few features). A Cancel stops it between
+/// tables, with no question. `copy` is whether it can be read whole: a GeoJSON file or a
+/// Shapefile (and its `.dbf`) within [`rustgis_data::io::max_bytes`]; a source's whole read is
+/// bounded where it is read.
+#[cfg(not(target_arch = "wasm32"))]
+fn link_choice(path: &str, tables: &[String]) -> Option<Value> {
+    let lower = path.to_ascii_lowercase();
+    let unset = json!({});
+    let fits = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.len() <= rustgis_data::io::max_bytes());
+    let (linked, copy) = if lower.ends_with(".geojson") {
+        (streams_geojson(&unset, path), fits(Path::new(path)))
+    } else if lower.ends_with(".shp") {
+        let shp = Path::new(path);
+        let linked = past_cap_shapefile(path, &unset).is_some() || streams_shapefile(&unset, path);
+        (linked, fits(shp) && fits(&rustgis_data::io::dbf_sidecar(shp)))
+    } else if rustgis_data::source::is_source_name(path) && !lower.ends_with(".las") && !lower.ends_with(".laz") {
+        let gpkg = lower.ends_with(".gpkg");
+        let mut linked = false;
+        for table in tables.iter().map(|t| gpkg.then_some(t.as_str())) {
+            // Cancel (the chooser closed) is looked at between tables: each open counts its rows.
+            rustgis_data::progress::check().ok()?;
+            let src = rustgis_data::source::open_path(Path::new(path), table).ok()?;
+            linked |= streams_by_count(src.info().count);
+        }
+        (linked, true)
+    } else {
+        return None;
+    };
+    Some(json!({"linked": linked, "copy": copy}))
+}
+
 /// A large Shapefile or GeoJSON file, read in place, as Add Data opens it ahead (#2446).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Opened {
@@ -2544,9 +2589,7 @@ impl Opened {
         let stamp = file_stamp(path);
         let source = open();
         let whole = match &source {
-            Ok(src) if may_load && src.info().count.is_some_and(|c| c <= rustgis_map::source::STREAM_ABOVE) => {
-                Some(rustgis_data::source::materialize(src.as_ref()))
-            }
+            Ok(src) if may_load && !streams_by_count(src.info().count) => Some(rustgis_data::source::materialize(src.as_ref())),
             _ => None,
         };
         Self { stamp, source, whole }
@@ -2822,10 +2865,11 @@ fn add_picked(
             })
             .map(|(_, r)| {
                 let mut said = r.report.clone();
-                // The layer's own Z/M note leads its messages; it is said by that layer. A note
-                // that reports another loss is never taken for it.
-                if r.dataset.zm_dropped && said.messages.first().is_some_and(|n| n.loss.is_none()) {
-                    said.messages.drain(..1);
+                // The layer's own Z/M note, by its code: that layer says it.
+                if r.dataset.zm_dropped
+                    && let Some(at) = said.messages.iter().position(|n| n.loss == Some(rustgis_data::loss::LossCode::DroppedZm))
+                {
+                    said.messages.drain(at..=at);
                 }
                 (r.dataset.source.clone(), said)
             })
@@ -3073,8 +3117,27 @@ fn apply_styles(s: &mut Session, id: u32, styles: &[(String, rustgis_data::kml::
 }
 
 /// The layers a file holds, without adding them: a GeoPackage's feature tables, a GDAL dataset's
-/// layers, or the one layer of other files. `layer.addData` takes a name with `"layer"`.
+/// layers, or the one layer of other files. `layer.addData` takes a name with `"layer"`. A file
+/// Add Data can link instead of copying says how it would take it, in `"link"`, when `"link": true`
+/// asks ([`link_choice`]): it opens each of a GeoPackage's tables, which the other callers (List
+/// Tables, Repair Data Source) don't need.
 fn file_layers(s: &mut Session, p: &Value) -> CmdResult {
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+    let mut v = listed_layers(s, p)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    if b(p, "link") == Some(true)
+        && let Some(path) = ps(p, "path")
+    {
+        let tables: Vec<String> = v["layers"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        if let Some(link) = link_choice(path, &tables) {
+            v["link"] = link;
+        }
+    }
+    Ok(v)
+}
+
+/// [`file_layers`]' listing.
+fn listed_layers(s: &mut Session, p: &Value) -> CmdResult {
     let path = s_req(p, "path")?;
     let path = &*gdb_path(path);
     let err = |e: rustgis_data::DataError| format!("{path}: {e}");
@@ -3392,7 +3455,7 @@ fn add_source_read(
         // of points; its colours come from a sample of it.
         let lidar = info.format == "LiDAR";
         let style = if lidar { lidar_renderer(src.as_ref(), s.map().layers.len() as u32) } else { None };
-        let stream = b(p, "stream").unwrap_or(lidar || info.count.is_none_or(|c| c > rustgis_map::source::STREAM_ABOVE));
+        let stream = b(p, "stream").unwrap_or(lidar || streams_by_count(info.count));
         // A name given applies to a single table.
         let name = match ps(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
             Some(n) if ids.is_empty() => n.to_string(),
@@ -3457,10 +3520,7 @@ fn add_source_read(
         }
     }
     if zoom.unwrap_or(empty_before) {
-        let e = ids.iter().filter_map(|id| s.map().layer(*id)).fold(rustgis_geom::Extent::EMPTY, |e, l| e.union(&l.extent()));
-        if !e.is_empty() {
-            s.zoom_to(&e);
-        }
+        s.zoom_to_layers(&ids, rustgis_map::ExtentOf::All);
     }
     if let Some(note) = attribute_note {
         s.notify(format!("{label}: {note}"), false);
@@ -3564,9 +3624,59 @@ fn add_gdal(s: &mut Session, p: &Value, path: &str) -> CmdResult {
     for f in failed {
         s.notify(format!("{path}: {f}"), true);
     }
+    // What the conversion dropped of the parts' Z or M values, as a fresh conversion says it.
+    let (lost, unknown) = zm_notices(path, &converted);
+    if let Some(text) = lost {
+        s.notify_loss(rustgis_data::loss::LossCode::DroppedZm, text.into());
+    }
+    if let Some(text) = unknown {
+        s.notify(text, false);
+    }
     let original = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
     let parts = gdal_parts(converted, &original, crs);
     add_converted(s, p, path, &original, parts)
+}
+
+/// What GDAL's conversion of `path` says of its parts' Z or M values, once for each kind: the
+/// parts that had some, with their total (a loss), and the parts that couldn't be counted. A part
+/// alone is named in a fresh conversion's words; several are counted and named, the first ten.
+#[cfg(not(target_arch = "wasm32"))]
+fn zm_notices(path: &str, converted: &[rustgis_data::source::gdal::Converted]) -> (Option<String>, Option<String>) {
+    let named = |parts: &[&rustgis_data::source::gdal::Converted]| {
+        let mut names: Vec<String> = parts.iter().take(10).map(|c| format!("'{}'", c.name)).collect();
+        if parts.len() > 10 {
+            names.push(format!("{} more", parts.len() - 10));
+        }
+        names.join(", ")
+    };
+    let lost: Vec<_> = converted.iter().filter(|c| c.zm_dropped > 0).collect();
+    let unknown: Vec<_> = converted.iter().filter(|c| c.zm_dropped == 0 && c.zm_unknown).collect();
+    let lost = match lost.as_slice() {
+        [] => None,
+        [one] => Some(format!(
+            "{path}: GDAL: '{}' contains Z or M coordinates on {} source feature(s); conversion keeps only XY coordinates",
+            one.name, one.zm_dropped
+        )),
+        many => Some(format!(
+            "{path}: GDAL: {} layers ({}) contain Z or M coordinates on {} source feature(s); conversion keeps only XY coordinates",
+            many.len(),
+            named(many),
+            many.iter().map(|c| c.zm_dropped).fold(0u64, u64::saturating_add)
+        )),
+    };
+    let unknown = match unknown.as_slice() {
+        [] => None,
+        [one] => Some(format!(
+            "{path}: GDAL: '{}': an unknown number of source feature(s) may have had Z or M coordinates dropped; conversion keeps only XY coordinates",
+            one.name
+        )),
+        many => Some(format!(
+            "{path}: GDAL: {} layers ({}): an unknown number of source feature(s) may have had Z or M coordinates dropped; conversion keeps only XY coordinates",
+            many.len(),
+            named(many)
+        )),
+    };
+    (lost, unknown)
 }
 
 /// GDAL's conversions of the file `original` as the layers to add: the layers in the file's order,
@@ -3584,7 +3694,9 @@ pub(crate) fn gdal_parts(mut converted: Vec<rustgis_data::source::gdal::Converte
             name: c.name,
             unprojected: c.unprojected,
             in_lonlat: c.in_lonlat,
-            zm_dropped: false,
+            // A declared layer whose count failed is taken as having lost them, as a fresh
+            // conversion takes it.
+            zm_dropped: c.zm_dropped > 0 || (c.zm_unknown && c.zm_declared),
             origin: ConvertedOrigin::Gdal(rustgis_map::source::GdalOrigin {
                 path: original.to_string(),
                 layer: c.layer,
@@ -4259,10 +4371,7 @@ fn add_live(s: &mut Session, p: &Value, db: &rustgis_data::source::duckdb::Datab
         return Err(with_left(error, &said));
     }
     if empty_before {
-        let e = ids.iter().filter_map(|id| s.map().layer(*id)).fold(rustgis_geom::Extent::EMPTY, |e, l| e.union(&l.extent()));
-        if !e.is_empty() {
-            s.zoom_to(&e);
-        }
+        s.zoom_to_layers(&ids, rustgis_map::ExtentOf::All);
     }
     // Empty tables (common in a PostGIS database: its TIGER geocoder's) are left out quietly.
     if empty > 0 {
@@ -4347,7 +4456,7 @@ pub(crate) fn duckdb_parts(
     // Z and M values are dropped as DuckDB writes the result: one notice for all its parts.
     let zm = out.parts.iter().fold(0u64, |n, p| n.saturating_add(p.zm_dropped));
     if zm > 0 {
-        s.notify(format!("{name}: {}", rustgis_data::zm_note(Some(zm))), false);
+        s.notify_loss(rustgis_data::loss::LossCode::DroppedZm, format!("{name}: {}", rustgis_data::zm_note(Some(zm))).into());
     }
     let mixed = out.parts.len() > 1;
     out.parts.sort_by_key(|p| bottom_first(p.family));
@@ -4475,10 +4584,7 @@ pub(crate) fn add_converted(s: &mut Session, p: &Value, label: &str, original: &
         s.notify(rustgis_data::source::gdal::in_lonlat_notes(&names), false);
     }
     if empty_before {
-        let e = ids.iter().filter_map(|id| s.map().layer(*id)).fold(rustgis_geom::Extent::EMPTY, |e, l| e.union(&l.extent()));
-        if !e.is_empty() {
-            s.zoom_to(&e);
-        }
+        s.zoom_to_layers(&ids, rustgis_map::ExtentOf::All);
     }
     if ids.is_empty() {
         return Err(format!("{label}: none of its layers could be added"));
@@ -6839,17 +6945,16 @@ fn added_download(s: &mut Session, p: &Value, mut r: Value, mark_source: bool, u
 /// whether the view framed them (not when none had an extent, or the map's projection doesn't
 /// reach it).
 fn zoom_to_added(s: &mut Session, r: &Value) -> bool {
-    let ids = r.get("layers").and_then(Value::as_array).into_iter().flatten().chain(r.get("layer"));
-    let e = ids
+    let ids: Vec<u32> = r
+        .get("layers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(r.get("layer"))
         .filter_map(Value::as_u64)
         .filter_map(|i| u32::try_from(i).ok())
-        .filter_map(|id| s.map().layer(id).map(|l| l.extent()))
-        .filter(|e| !e.is_empty())
-        .fold(rustgis_geom::Extent::EMPTY, |a, e| a.union(&e));
-    if e.is_empty() {
-        return false;
-    }
-    s.zoom_to(&e)
+        .collect();
+    s.zoom_to_layers(&ids, rustgis_map::ExtentOf::All).unwrap_or(false)
 }
 
 pub(crate) fn add_data_text(s: &mut Session, p: &Value) -> CmdResult {
@@ -6907,10 +7012,8 @@ pub(crate) fn add_read(
             stand(l, &x);
         }
     }
-    if zoom.unwrap_or(empty_before)
-        && let Some(e) = s.map().layer(id).map(|l| l.extent())
-    {
-        s.zoom_to(&e);
+    if zoom.unwrap_or(empty_before) {
+        s.zoom_to_layers(&[id], rustgis_map::ExtentOf::All);
     }
     Ok(json!({"layer": id, "features": n}))
 }
@@ -7827,6 +7930,41 @@ pub(crate) fn external_dataset_selector(command: &str) -> bool {
 mod tests {
     use crate::Session;
     use serde_json::json;
+
+    /// A GDAL conversion's parts say their Z or M values once for each kind: a part alone in a
+    /// fresh conversion's words, several counted together; parts without any say nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_conversion_says_its_parts_z_and_m_once_for_each_kind() {
+        let part = |name: &str, zm_dropped: u64, zm_unknown: bool| rustgis_data::source::gdal::Converted {
+            path: std::path::PathBuf::new(),
+            name: name.into(),
+            layer: "roads".into(),
+            family: None,
+            unprojected: false,
+            in_lonlat: false,
+            zm_dropped,
+            zm_unknown,
+            zm_declared: false,
+        };
+        let (lost, unknown) = super::zm_notices("f.kml", &[part("roads (Point)", 2, false), part("roads (Line)", 3, false)]);
+        assert_eq!(
+            lost.as_deref(),
+            Some(
+                "f.kml: GDAL: 2 layers ('roads (Point)', 'roads (Line)') contain Z or M coordinates on 5 source feature(s); conversion keeps only XY coordinates"
+            )
+        );
+        assert_eq!(unknown, None);
+        let (lost, unknown) =
+            super::zm_notices("f.kml", &[part("a", 1, false), part("b", 0, true), part("c", 0, true), part("d", 0, false)]);
+        assert!(lost.is_some_and(|t| t.starts_with("f.kml: GDAL: 'a' contains Z or M coordinates on 1 source feature(s)")));
+        assert!(unknown.is_some_and(|t| t.starts_with("f.kml: GDAL: 2 layers ('b', 'c'): an unknown number")));
+        assert_eq!(super::zm_notices("f.kml", &[part("d", 0, false)]), (None, None));
+        // A part whose count failed is taken as having lost them when its layer declares them.
+        let declared = rustgis_data::source::gdal::Converted { zm_declared: true, ..part("e", 0, true) };
+        let parts = super::gdal_parts(vec![declared, part("f", 0, true), part("g", 4, false)], "f.kml", None);
+        assert_eq!(parts.iter().map(|p| p.zm_dropped).collect::<Vec<_>>(), [true, false, true]);
+    }
 
     /// A payload can start beyond the sniff budget; only root keys decide the route.
     #[test]

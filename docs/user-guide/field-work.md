@@ -39,6 +39,19 @@ are never removed by themselves. **Remove Unused Copies**, in the More sheet, fi
 project in the window doesn't use, says how many there are and how much room they take, and
 removes them once you agree. A copy still being made is kept.
 
+A project (`.rgis`) opened with **Open Project** is different: **Save** writes it back to the file
+it was opened from, where the system lets the app write there (the device's storage, and storage
+apps that allow it). **Save As** asks where, and **Save** then writes to the file chosen. Where the
+app may not write the original (a read-only file, a field package, a project recovered after a
+restart), **Save** asks where, as Save As does.
+
+On an iPhone the project is written whole beside the original and then put in its place, so a
+failed save leaves the original as it was. Android has no way to swap a file in like that: the app
+first keeps a complete copy of the project in its own storage, then writes over the original. If
+that write fails partway, the original may be damaged; the message says so and names the copy,
+and the next **Save** asks where to save. If the app is ended while it writes, the next start says so
+in the same way.
+
 !!! warning
     Remove Unused Copies looks only at the project in the window. A copy that another project
     saved on the phone uses counts as unused, and removing it breaks that project. Open the project
@@ -144,8 +157,11 @@ field package carries the archives its map draws from. Tile layers from the web 
 A field package (`.rgisfield`) carries a map to the phone and its edits back.
 
 1. **On the computer**, with the map in view, **Data › Offline › Package for the Field** makes
-   the package: a project of that map, the features in view, and the MBTiles and PMTiles
-   archives its tile layers use. The package records the area it was made from in your project,
+   the package: a project of that map, the features in view, the MBTiles and PMTiles archives its
+   tile layers use, and the photos its loaded layers' features name (pictures named by their full
+   path, while they fit the package; the notice counts any left out). A layer read in place keeps
+   its photos at home: the notice counts them for a layer copied for reference, and names a layer
+   left out whole. The package records the area it was made from in your project,
    so save the project after packaging. A layer read in place from a supported local file is
    copied within the area while it fits the package budget. The copy is for reference, and
    Bring Back skips edits to it. The sender gets a notice about anything left behind, including
@@ -195,6 +211,11 @@ Where a change meets one made on the computer since the package was made:
   the whole return and changes nothing: add the field back, then Bring Back again. So does a field
   removed on the phone that the computer's layer still has, as its values in the field aren't
   known.
+- A feature of a computer's layer held in its own coordinate system with a place that can't be
+  given in longitude/latitude (one far past where that system reaches) stays as stored when it
+  lies outside the area when the area is synced (**Sync**, or a package that goes back as a whole
+  map); one the area holds can't be compared with the phone's, and the sync is refused, naming it.
+  A return by the list of changes is refused for any such feature of the layer, naming it.
 
 Each of these keeps the version that lost on the offline area: the computer's values and shape
 the phone's replaced, the phone's edits to a feature deleted on the computer, the computer's feature
@@ -205,8 +226,17 @@ project until dismissed, and Undo of the Bring Back takes them away with it. Fro
 command line or Python, `offline.conflicts` lists them with the project's `state`, and `offline.dismissConflicts` dismisses
 them by index with that state, refusing a list read before the project changed.
 
-Only the photos of features the phone added, or whose photos it changed, come back: a photo of a
-feature whose photos it left alone is left out, and the summary says how many.
+A photo the package took from the computer isn't sent back: the feature names the file it was taken
+from again, and nothing is copied. A return opened on another device and sent again from there does
+carry it; Bring Back then keeps the computer's file where it still holds the same photo.
+
+Of the photos taken in the field, a return with its list of changes brings back only those of features
+the phone added, or whose photos it changed. A photo of a feature whose photos it left alone is left
+out, and the summary says how many.
+
+A return that goes back as a whole map brings back every photo it carries, except a photo that only
+layers copied for reference or added in the field name: those layers' edits stay in the field, and so
+do their photos.
 
 Bring Back refuses a package while the area's offline map is open with edits not synced yet, as
 renewing the area would replace them: **Sync** the area first. Syncing moves the area on, so a

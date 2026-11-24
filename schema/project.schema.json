@@ -1263,6 +1263,7 @@
           "layout-chart-look",
           "layout-chart-classes",
           "layout-chart-stack",
+          "layout-chart-facing",
           "field-generation",
           "field-package",
           "field-conflicts",
@@ -1274,8 +1275,11 @@
           "native-coordinates",
           "layout-text-size",
           "label-guide",
+          "label-weight",
           "project-crs",
-          "dggs-system"
+          "dggs-system",
+          "label-clearance",
+          "svg-markers"
         ],
         "type": "string"
       },
@@ -1367,6 +1371,7 @@
     "layout-chart-look",
     "layout-chart-classes",
     "layout-chart-stack",
+    "layout-chart-facing",
     "field-generation",
     "field-package",
     "field-conflicts",
@@ -1378,8 +1383,11 @@
     "native-coordinates",
     "layout-text-size",
     "label-guide",
+    "label-weight",
     "project-crs",
-    "dggs-system"
+    "dggs-system",
+    "label-clearance",
+    "svg-markers"
   ],
   "x-rustgis-reads-format": 2,
   "x-rustgis-writes-format": 2

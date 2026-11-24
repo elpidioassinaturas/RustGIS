@@ -381,6 +381,7 @@ pub mod sample_data {
 
 use std::sync::OnceLock;
 
+pub use block::{FlatWalls, flat_walls};
 pub(crate) use canvas::Canvas;
 use rustgis_data::query::Env;
 use rustgis_data::{Dataset, Geometry, GeometryType};
@@ -606,7 +607,7 @@ pub fn picture_size(b64: &str) -> Option<(u32, u32)> {
     picture::size(b64)
 }
 
-pub use picture::{MARKER_PIXELS, MARKER_PIXELS_SIDE, MarkerRefusal, RUN_MARKER_BYTES, RUN_MARKER_PIXELS};
+pub use picture::{MARKER_PIXELS, MARKER_PIXELS_SIDE, MarkerRefusal, RUN_MARKER_BYTES, RUN_MARKER_PIXELS, SVG_DEPTH, SVG_XML_NODES};
 
 /// Base64 `b64` as a picture marker's image (one kept already, or one before it is set): its
 /// height for its width when it draws (a PNG or JPEG within [`MARKER_PIXELS`], an SVG with as much
@@ -627,6 +628,12 @@ pub fn picture_marker_kept_check(p: rustgis_map::Picture) -> Result<f32, MarkerR
 /// what the run decodes), and is kept as it is.
 pub fn picture_marker_kept_refusal(p: rustgis_map::Picture) -> Option<MarkerRefusal> {
     picture::marker_kept_refusal(p)
+}
+
+/// Whether base64 `b64`, a picture marker's image, starts as an SVG does (whether or not it then
+/// reads): what a reader of PNG and JPEG markers only can't draw.
+pub fn picture_marker_is_svg(b64: &str) -> bool {
+    picture::is_svg(b64)
 }
 
 /// Whether picture marker `p` draws rather than a circle ([`picture_marker_kept_check`]).
@@ -2566,14 +2573,39 @@ fn visit_complete(
     visit_within(source, None, visit)
 }
 
-/// As [`visit_complete`], for the features whose boxes meet `extent` (longitude/latitude), or
-/// every feature for `None`.
+/// What a streamed layer's frame reads to draw its view ([`visit_within`]).
+enum ViewRead {
+    /// The features a request gives: those whose boxes meet its extent, or its box in the
+    /// source's own system.
+    Request(rustgis_data::source::Request),
+    /// The features with these ids, in order, found by their boxes as drawn (#2788).
+    Ids(Vec<u64>),
+}
+
+/// `e` rounded outward to f32, as an index of boxes keeps them.
+fn f32_box(e: &Extent) -> [f32; 4] {
+    let down = |v: f64| {
+        let f = v as f32;
+        if f64::from(f) > v { f.next_down() } else { f }
+    };
+    let up = |v: f64| {
+        let f = v as f32;
+        if f64::from(f) < v { f.next_up() } else { f }
+    };
+    [down(e.min_x), down(e.min_y), up(e.max_x), up(e.max_y)]
+}
+
+/// As [`visit_complete`], for the features a read gives, or every feature for `None`.
 fn visit_within(
     source: &dyn rustgis_data::source::FeatureSource,
-    extent: Option<Extent>,
+    read: Option<&ViewRead>,
     visit: &mut dyn FnMut(Vec<rustgis_data::Feature>) -> rustgis_data::Result<()>,
 ) -> rustgis_data::Result<rustgis_data::source::Batch> {
-    let result = source.visit_chunks(extent, COMPLETE_CHUNK_BYTES, visit)?;
+    let result = match read {
+        Some(ViewRead::Request(req)) => source.visit_request_chunks(req, COMPLETE_CHUNK_BYTES, visit)?,
+        Some(ViewRead::Ids(ids)) => source.visit_ids_chunks(ids, COMPLETE_CHUNK_BYTES, visit)?,
+        None => source.visit_chunks(None, COMPLETE_CHUNK_BYTES, visit)?,
+    };
     if !result.complete {
         return Err(rustgis_data::DataError::Format("source traversal was incomplete".into()));
     }
@@ -2643,6 +2675,9 @@ fn numbers_rows(layer: &rustgis_map::Layer) -> bool {
 #[derive(Clone, Debug)]
 struct Candidate {
     label: PlacedLabel,
+    /// Its class's weight (#2803), [`PLACED_FIRST`] for a label moved by hand or fixed: placed
+    /// before any lighter one, whatever its priority.
+    weight: u8,
     priority: f64,
     key: rustgis_map::LabelKey,
     // Ready slots and deferred curve positions are mutually exclusive. Slot 0 is the
@@ -2746,15 +2781,37 @@ impl LabelPlace {
 /// A label with no alternatives.
 impl From<(PlacedLabel, f64, rustgis_map::LabelKey)> for Candidate {
     fn from((label, priority, key): (PlacedLabel, f64, rustgis_map::LabelKey)) -> Candidate {
-        Candidate { label, priority, key, alternatives: Vec::new(), curves: None, line: None, row: usize::MAX }
+        let weight = rustgis_map::symbology::DEFAULT_LABEL_WEIGHT;
+        Candidate { label, weight, priority, key, alternatives: Vec::new(), curves: None, line: None, row: usize::MAX }
     }
+}
+
+/// The weight of a label moved by hand or fixed (a graphic's text): above any class's, so the
+/// others keep off it.
+const PLACED_FIRST: u8 = u8::MAX;
+
+/// A fixed label (a graphic's text) as a tilted view places it: before every other.
+fn fixed_candidate(label: PlacedLabel) -> Candidate {
+    Candidate { weight: PLACED_FIRST, ..(label, f64::MAX, (u32::MAX, u64::MAX, 0, 0)).into() }
+}
+
+/// A tile style's label, placed after every layer's own: the lightest weight, and a priority
+/// below any layer's.
+fn tile_candidate(label: PlacedLabel, priority: f64, i: usize) -> Candidate {
+    Candidate { weight: 0, ..(label, priority - 1e13, (u32::MAX, i as u64, 0, 0)).into() }
+}
+
+/// The order labels are placed in: the heavier first, then the higher priority; a priority of no
+/// number last, not first (`total_cmp` puts NaN above everything).
+fn placed_first(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
+    let rank = |p: f64| if p.is_nan() { f64::NEG_INFINITY } else { p };
+    b.weight.cmp(&a.weight).then_with(|| rank(b.priority).total_cmp(&rank(a.priority)))
 }
 
 /// Keep exactly the candidates the upstream placement limit can consider, with stable ties.
 fn compact_label_candidates(candidates: &mut Vec<Candidate>) {
     if candidates.len() > 40_000 {
-        let rank = |p: f64| if p.is_nan() { f64::NEG_INFINITY } else { p };
-        candidates.sort_by(|a, b| rank(b.priority).total_cmp(&rank(a.priority)));
+        candidates.sort_by(placed_first);
         candidates.truncate(20_000);
     }
 }
@@ -5126,7 +5183,7 @@ fn render_frame(
                     water: lake_light.as_deref(),
                 };
                 // Read in place: the part in view, at the level the view needs.
-                let address = rl.path.as_deref().filter(|_| rl.in_place);
+                let address = rl.path.as_deref().filter(|_| rl.reads_in_place());
                 let mut draw_it = |pm: &mut Pixmap, opacity: f32| match address {
                     // Drawn from less than the view needs (a coarser level, tiles that couldn't be
                     // read): shown, and said with the tile errors.
@@ -5318,6 +5375,10 @@ fn render_frame(
             if globe.is_some() {
                 // In longitude/latitude, which the globe draws (none for a layer held there).
                 layer.lonlat_in();
+            }
+            if display_only {
+                // A copy for the map it was drawn on before is of no use here.
+                layer.release_projected_other_than(&key);
             }
             if globe.is_none() && !display_only {
                 if complete_source {
@@ -6016,14 +6077,15 @@ fn render_frame(
                             };
                             let overrun = size;
                             // Off the line by its class's distance (#1187): above it as the text
-                            // reads, or below; its anchors stay on the line.
+                            // reads, or below; its anchors stay on the line. Trying other places,
+                            // each on both sides (`line_labels::both_sides`).
                             let off = line_labels::off_line(class.line_offset * 1.33 * label_factor, text::block_height(&text, size));
                             let positions = |width| match locked_at {
                                 Some(at) => {
                                     let won = lock.as_ref().and_then(|keys| keys.get(&key)).map_or(0, |won| won.place);
                                     vec![at; (usize::from(won) + 1).min(8)]
                                 }
-                                None => line_labels::positions(line.length(), width, overrun),
+                                None => line_labels::both_sides(line_labels::positions(line.length(), width, overrun), off),
                             };
                             let anchors = |positions: &[f32]| {
                                 // Back-project only while locking is requested, never on ordinary frames or replay.
@@ -6129,7 +6191,7 @@ fn render_frame(
                                 let first = locked_at.or_else(|| fitted.as_ref().and_then(|f| f.first().copied()));
                                 if try_others {
                                     let width = line_labels::curved_len(&advances, gap);
-                                    let positions = fitted.clone().unwrap_or_else(|| positions(width));
+                                    let positions = fitted.clone().map_or_else(|| positions(width), |f| line_labels::both_sides(f, off));
                                     // A saved slot the curve cannot take has no truthful preview either (as for a
                                     // straight line): never draw one at the anchor or the middle.
                                     if lock.as_ref().and_then(|k| k.get(&key)).is_some_and(|won| usize::from(won.place) >= positions.len())
@@ -6137,18 +6199,19 @@ fn render_frame(
                                         continue;
                                     }
                                     line_places = Some(LinePlaces { anchors: anchors(&positions), ..Default::default() });
+                                    let locked = lock.as_ref().and_then(|k| k.get(&key)).map(|won| usize::from(won.place));
                                     let Some((cx, cy)) = line.anchor(first.unwrap_or(line.length() / 2.0)) else { continue };
                                     let angle = line.parallel(width, overrun, first).map(|(_, _, a)| a);
                                     // Off the line as its curves will be (by the line's direction
                                     // where the text can't fit, as a tilted view's preview is).
                                     let (cx, cy) =
                                         angle.or_else(|| line.direction(first.unwrap_or(line.length() / 2.0))).map_or((cx, cy), |a| {
-                                            let (x, y, _) = line_labels::parallel_off((cx, cy, a), off);
+                                            let (x, y, _) =
+                                                line_labels::parallel_off((cx, cy, a), line_labels::side_off(off, locked.unwrap_or(0)));
                                             (x, y)
                                         });
                                     // The preview is also View Unplaced's middle when every curve fails.
                                     places.push((0, cx, cy, angle, Vec::new()));
-                                    let locked = lock.as_ref().and_then(|k| k.get(&key)).map(|won| usize::from(won.place));
                                     curves = Some(label_places::Curves::new(
                                         std::sync::Arc::new(label_places::CurveSpec {
                                             line: line.clone(),
@@ -6215,9 +6278,10 @@ fn render_frame(
                                 // range: if the middle cannot fit, none can. Keep it as place 0
                                 // so a lock's alternative indices do not change.
                                 for (i, at) in along {
-                                    if let Some((x, y, angle)) =
-                                        line.parallel(width, overrun, Some(at)).map(|p| line_labels::parallel_off(p, off))
-                                    {
+                                    if let Some((x, y, angle)) = line.parallel(width, overrun, Some(at)).map(|p| {
+                                        // Another place's side; a repeat's index is no place's.
+                                        line_labels::parallel_off(p, if try_others { line_labels::side_off(off, i) } else { off })
+                                    }) {
                                         if try_others && i > 0 {
                                             line_alternatives.push(LabelPlace { x, y, angle: Some(angle), glyphs: Vec::new() });
                                         } else {
@@ -6321,12 +6385,14 @@ fn render_frame(
                                 .filter(|a| *a != 0.0);
                             places.push((0, lx, ly, turned, Vec::new()));
                         }
-                        // Layers above first, then the classes listed first (#732), then bigger
-                        // polygons: a class (ci ≤ MAX_LABEL_CLASSES, 1e9 each) never outweighs a
-                        // layer (1e12), nor an area (≤ 1e8) a class. A line's repeats come after
-                        // its label at the middle, nearest first (lines have no area). Labels moved
-                        // by hand come before all of them (1e15), so the others keep off them.
-                        let pri = (n_layers - li) as f64 * 1e12 - ci as f64 * 1e9 + area + if moved.is_some() { 1e15 } else { 0.0 };
+                        // Heavier classes first (#2803; labels moved by hand before all of them,
+                        // so the others keep off them), then, among equals, layers above, the
+                        // classes listed first (#732), then bigger polygons: a class
+                        // (ci ≤ MAX_LABEL_CLASSES, 1e9 each) never outweighs a layer (1e12), nor
+                        // an area (≤ 1e8) a class. A line's repeats come after its label at the
+                        // middle, nearest first (lines have no area).
+                        let weight = if moved.is_some() { PLACED_FIRST } else { class.weight };
+                        let pri = (n_layers - li) as f64 * 1e12 - ci as f64 * 1e9 + area;
                         let last = places.len().saturating_sub(1);
                         for (n, (i, mut lx, mut ly, mut angle, mut glyphs)) in places.into_iter().enumerate() {
                             let key = (lid, label_id(row), ci, i);
@@ -6385,6 +6451,8 @@ fn render_frame(
                                     line_align: class.line_align,
                                     angle,
                                     collide: rustgis_tiles::Collide {
+                                        // Its class's room kept free of other labels (#2828).
+                                        text_padding: class.clearance,
                                         // Shown all: over the other labels where they crowd.
                                         text_allow_overlap: class.show_all,
                                         // Callouts: a label set by its feature (not along a line,
@@ -6409,6 +6477,7 @@ fn render_frame(
                                         .map(|b| b.scaled(label_factor)),
                                     glyphs,
                                 },
+                                weight,
                                 priority: pri - i as f64,
                                 key,
                                 alternatives,
@@ -6436,43 +6505,53 @@ fn render_frame(
             chunk.clear_cache();
             chunk.dataset.features = Vec::new().into();
             // Only the features near the view are read when nothing the layer draws comes from
-            // beyond them (#1065): those whose boxes meet the cull extent's box in
-            // longitude/latitude. Otherwise every feature: labels, shadows and other effects reach
-            // in from beyond the view. Web Mercator maps longitude and latitude each on its own,
-            // so a feature held in longitude/latitude whose box misses that box is drawn wholly
-            // outside the cull extent, straight edges and all, short of the latitudes it clamps
-            // (a view reaching them reads everything). In another projection, or from another
-            // system, an edge drawn straight between two places can cross the view while the
-            // feature's box misses it, so those read everything. So does a source whose reads by
-            // area leave some features out (a Shapefile's records without a usable box), and a GPU
-            // frame, whose meshes are made a batch at a time: which features share a batch decides
-            // which fall back to the CPU. And a box over most of the layer reads it all, in file
-            // order: asking the index which records nearly all of them are costs more than
-            // reading the few left over.
-            let partial = |e: &Extent| !covers_most(e, &source.info().extent);
-            let near = (globe.is_none()
+            // beyond them (#1065): those whose boxes meet the cull extent. Otherwise every
+            // feature: labels, shadows and other effects reach in from beyond the view. The box
+            // must hold every feature drawn in the cull extent, straight edges and all:
+            // - on a map drawn in the source's own system (a UTM file on a UTM map, a Web Mercator
+            //   file on Web Mercator), the cull extent itself, in the file's units (#2788): the
+            //   map draws its geometry as it is;
+            // - on Web Mercator, for a source in longitude/latitude, the cull extent's box in
+            //   longitude/latitude, short of the latitudes Web Mercator clamps (a view reaching
+            //   them reads everything): Web Mercator maps longitude and latitude each on its own,
+            //   so a feature whose box misses that box is drawn wholly outside the cull extent.
+            // In another projection, or from another system, an edge drawn straight between two
+            // places can cross the view while the feature's box misses it, so those read
+            // everything. So does a source whose reads by area leave some features out (a
+            // Shapefile's records without a usable box), and a GPU frame, whose meshes are made a
+            // batch at a time: which features share a batch decides which fall back to the CPU.
+            // And a box over most of the layer reads it all, in file order: asking the index which
+            // records nearly all of them are costs more than reading the few left over.
+            let crs = source.coord_crs();
+            let view_only = globe.is_none()
                 && !gpu
-                && matches!(flat, rustgis_map::projection::Flat::Mercator)
-                && within_mercator_lats(&ctx.cull)
-                && source.coord_crs() == rustgis_data::raster::Crs::LonLat
-                && source.finds_all_by_area()
                 && matches!(labels_to, Labels::Own | Labels::Turned(_))
-                && draws_in_view_only(&chunk, !display.paused, shore.is_some()))
-            .then(|| lonlat_box(&flat, &ctx.cull))
-            .flatten()
-            .filter(partial);
-            // The source's long loops that only look at Cancel see the frame's stop too.
-            let _stop = cancel::current().map(rustgis_data::progress::also_stop_when);
-            // A view read this way is kept with the geometry drawn from it, for the frames of the
-            // views inside it: the same view again, a short pan, a zoom in, a restyle, an export.
-            // It is read a margin wider than it draws, so a short pan still finds it, unless a view
-            // this coarse was too large to keep. It is kept for the projection and the datum grids
-            // the frame drew with, within what the source's share of the map's view memory leaves
-            // beside its interaction rows.
-            let res = view.camera.res;
+                && draws_in_view_only(&chunk, !display.paused, shore.is_some());
+            // On a map drawn in the file's own system.
+            let own_map = globe.is_none()
+                && crs != rustgis_data::raster::Crs::LonLat
+                && source.reads_own_box()
+                && flat.held(crs).is_ok_and(|held| held.is_identity());
+            let own_units = view_only && own_map;
+            let lonlat_box_holds = view_only
+                && !own_units
+                && crs == rustgis_data::raster::Crs::LonLat
+                && matches!(flat, rustgis_map::projection::Flat::Mercator)
+                && within_mercator_lats(&ctx.cull);
+            // Both read by the file's own boxes, once a whole read has found them holding their
+            // shapes.
+            let own = own_units && source.finds_all_by_area();
+            let lonlat = lonlat_box_holds && source.finds_all_by_area();
+            // Every other pairing reads by the features' boxes as drawn, once a frame that read
+            // them all has indexed them (#2788); not one the file's own boxes serve, even before
+            // they are found holding, which an index would only duplicate, nor a file in
+            // longitude/latitude on Web Mercator, which draws from its display copy, whose boxes
+            // aren't gathered (at the latitudes Web Mercator clamps it reads every feature).
+            let mercator_lonlat = crs == rustgis_data::raster::Crs::LonLat && matches!(flat, rustgis_map::projection::Flat::Mercator);
+            let drawn = view_only && !own_units && !lonlat_box_holds && !mercator_lonlat && source.visits_ids();
             // Only while the source is as it was opened: a file changed since reads again, and
             // one gone fails as a read of it would.
-            let unchanged = match near.map(|_| source.same_as_opened()) {
+            let unchanged = match (own || lonlat || drawn).then(|| source.same_as_opened()) {
                 Some(Err(e)) => {
                     if let Some(s) = &mut layer.source {
                         s.error = Some(e.to_string());
@@ -6485,19 +6564,90 @@ fn render_frame(
             };
             let owner = layer.source.as_ref();
             let grids = rustgis_data::raster::crs::grid_generation();
-            let kept_key = format!("{key} {grids}");
-            let room = owner.map_or(0, |o| o.budget().saturating_sub(layer.view_cache_bytes()).min(rustgis_map::source::KEPT_VIEW_BYTES));
-            let kept = near.filter(|_| unchanged).and_then(|n| owner?.kept_view(&kept_key, &n, room));
+            let path_key = format!(
+                "{key} {grids} {}",
+                if own {
+                    "own"
+                } else if lonlat {
+                    "lonlat"
+                } else {
+                    "drawn"
+                }
+            );
+            // Looked up for every frame that may read only its view, so that a packing for another
+            // key (a projection, datum grids or way of reading since left) no longer counts.
+            let index = view_only.then(|| owner?.drawn_index(&path_key)).flatten().filter(|_| drawn && unchanged);
+            // What a frame asks the source for to draw the map extent `e` (the cull extent, or a
+            // wider one to keep): `None` reads every feature. The box must hold every feature
+            // drawn in `e`, straight edges and all:
+            // - on a map drawn in the source's own system (a UTM file on a UTM map, a Web Mercator
+            //   file on Web Mercator), `e` itself, in the file's units: the map draws its geometry
+            //   as it is;
+            // - on Web Mercator, for a source in longitude/latitude, `e`'s box in
+            //   longitude/latitude, short of the latitudes Web Mercator clamps: Web Mercator maps
+            //   longitude and latitude each on its own, so a feature whose box misses that box is
+            //   drawn wholly outside `e`;
+            // - otherwise, the features whose boxes as drawn meet `e`, from the index (#2788): the
+            //   boxes the draw loop culls by.
+            // A box over most of the layer reads it all, in file order: asking for nearly every
+            // feature costs more than reading the few left over.
+            let read_of = |e: &Extent| -> Option<ViewRead> {
+                if own {
+                    let ll = lonlat_box(&flat, e);
+                    (!ll.is_some_and(|ll| covers_most(&ll, &source.info().extent)))
+                        .then_some(ViewRead::Request(rustgis_data::source::Request { extent: ll, limit: usize::MAX, own: Some((crs, *e)) }))
+                } else if lonlat {
+                    let b = lonlat_box(&flat, e).filter(|_| within_mercator_lats(e))?;
+                    (!covers_most(&b, &source.info().extent)).then_some(ViewRead::Request(rustgis_data::source::Request {
+                        extent: Some(b),
+                        limit: usize::MAX,
+                        own: None,
+                    }))
+                } else {
+                    let index = index.as_ref()?;
+                    // Under half of them, or a stopped frame, which reads no further.
+                    let ids = index.query(f32_box(e), index.len().saturating_sub(1) / 2, cancel::requested)?;
+                    Some(ViewRead::Ids(ids))
+                }
+            };
+            // The source's long loops that only look at Cancel see the frame's stop too.
+            let _stop = cancel::current().map(rustgis_data::progress::also_stop_when);
+            let near_read = read_of(&ctx.cull);
+            let near = near_read.is_some().then_some(ctx.cull);
+            // A view read this way is kept with the geometry drawn from it, for the frames of the
+            // views inside it: the same view again, a short pan, a zoom in, a restyle, an export.
+            // It is read a margin wider than it draws, so a short pan still finds it, unless a view
+            // this coarse was too large to keep. It is kept for the projection, the datum grids and
+            // the way the frame read, within what the source's share of the map's view memory
+            // leaves beside its interaction rows and its index; its boxes are in map units.
+            let res = view.camera.res;
+            let share = owner.map_or(0, |o| o.budget().saturating_sub(layer.view_cache_bytes()));
+            let room = share.saturating_sub(owner.map_or(0, |o| o.drawn_index_bytes())).min(rustgis_map::source::KEPT_VIEW_BYTES);
+            let kept = near.filter(|_| unchanged).and_then(|n| owner?.kept_view(&path_key, &n, room));
             let wide = cull_extent(view, KEEP_MARGIN);
-            let keep = (near.is_some()
-                && unchanged
-                && kept.is_none()
-                && within_mercator_lats(&wide)
-                && owner.is_some_and(|o| o.view_worth_keeping(&kept_key, res)))
-            .then(|| lonlat_box(&flat, &wide))
-            .flatten()
-            .filter(partial);
+            let keep = (near.is_some() && unchanged && kept.is_none() && owner.is_some_and(|o| o.view_worth_keeping(&path_key, res)))
+                .then(|| read_of(&wide).map(|r| (wide, r)))
+                .flatten();
             let mut keeping: Option<(Vec<rustgis_map::Layer>, usize)> = (keep.is_some() || kept.is_some()).then(|| (Vec::new(), 0));
+            // A frame reading every feature gathers their boxes as drawn, to index them, unless an
+            // index is kept or was too large for this key.
+            // Room for as many as the source says it holds, held at once and sorted where they lie
+            // to pack the index; none when that doesn't fit the source's share.
+            let wanted = drawn
+                && unchanged
+                && index.is_none()
+                && near_read.is_none()
+                && owner.is_some_and(|o| o.drawn_index_wanted(&path_key, share));
+            let count = source.info().count.and_then(|n| usize::try_from(n).ok());
+            let gathered_too_much = wanted && count.is_some_and(|n| n.saturating_mul(rustgis_map::source::PACKING_BYTES) > share);
+            let mut gathering: Option<Vec<(u32, [f32; 4])>> = count.filter(|_| wanted && !gathered_too_much).and_then(|n| {
+                let mut boxes = Vec::new();
+                boxes.try_reserve_exact(n).ok().map(|()| boxes)
+            });
+            // Records the read left out: one it couldn't read this time may read on another.
+            let mut skipped = 0usize;
+            // The view's own read isn't needed when a wider one is read to keep: its ids let go.
+            let near_read = near_read.filter(|_| keep.is_none());
             let mut draw_rows = |chunk: &mut rustgis_map::Layer| -> rustgis_data::Result<()> {
                 chunk.selection = chunk
                     .dataset
@@ -6515,6 +6665,29 @@ fn render_frame(
                         chunks.clear();
                     }
                 }
+                // Each row's box as the frame culled it; a chunk drawn without them (or an id an
+                // index can't hold) leaves the index unmade.
+                let gathered = gathering.as_mut().is_some_and(|boxes| {
+                    let extents = chunk.projected_extents();
+                    chunk.is_cached(&key)
+                        && extents.len() == chunk.dataset.features.len()
+                        && chunk.dataset.features.rows().zip(extents).all(|(row, e)| {
+                            // A shape of another kind than the layer's (a malformed file) may be
+                            // drawn past its box (a point's marker): no index.
+                            row.geometry().is_none_or(|g| g.kind() == chunk.dataset.geometry_type)
+                                && (e.is_empty()
+                                    // Never more than it has room for: a source that gives more
+                                    // than it said gets no index.
+                                    || (boxes.len() < boxes.capacity()
+                                        && u32::try_from(row.id()).is_ok_and(|id| {
+                                            boxes.push((id, f32_box(e)));
+                                            true
+                                        })))
+                        })
+                });
+                if !gathered {
+                    gathering = None;
+                }
                 chunk.clear_cache();
                 chunk.dataset.features = Vec::new().into();
                 Ok(())
@@ -6528,27 +6701,57 @@ fn render_frame(
                     chunk.draw_rows_of(rows);
                     draw_rows(&mut chunk)
                 }),
-                None => visit_within(source.as_ref(), keep.or(near), &mut |features| {
-                    // A frame no longer wanted reads no further (see `cancel`).
-                    if cancel::requested() {
-                        return Err(rustgis_data::DataError::Cancelled);
-                    }
-                    chunk.clear_cache();
-                    chunk.dataset.features = features.into();
-                    chunk.touch_geometry();
-                    draw_rows(&mut chunk)
-                })
-                .map(|_| ()),
+                None => {
+                    // A read of every feature on a map in the file's own system takes those
+                    // longitude/latitude can't place too, as a read of the view there does.
+                    let whole = own_map.then(|| {
+                        ViewRead::Request(rustgis_data::source::Request {
+                            extent: None,
+                            limit: usize::MAX,
+                            own: Some((crs, rustgis_data::source::whole_plane())),
+                        })
+                    });
+                    let read = keep.as_ref().map(|(_, r)| r).or(near_read.as_ref()).or(whole.as_ref());
+                    visit_within(source.as_ref(), read, &mut |features| {
+                        // A frame no longer wanted reads no further (see `cancel`).
+                        if cancel::requested() {
+                            return Err(rustgis_data::DataError::Cancelled);
+                        }
+                        chunk.clear_cache();
+                        chunk.dataset.features = features.into();
+                        chunk.touch_geometry();
+                        draw_rows(&mut chunk)
+                    })
+                    .map(|batch| skipped = batch.skipped)
+                }
             };
             // Kept only when drawn whole, for the datum grids there still are.
-            if let (Ok(()), Some(owner), Some((chunks, bytes))) = (&result, owner, keeping)
+            if let (Ok(()), Some(owner)) = (&result, owner)
                 && rustgis_data::raster::crs::grid_generation() == grids
             {
-                let fits = bytes <= room;
-                match (keep, &kept) {
-                    (Some(read), _) => owner.keep_view(&kept_key, read, res, fits.then_some((chunks, bytes))),
-                    (None, Some(drawn)) if fits => owner.refresh_kept_view(&kept_key, drawn, chunks, bytes),
-                    _ => {}
+                // Not a view a record was left out of: one it couldn't read this time may read on
+                // another.
+                if let Some((chunks, bytes)) = keeping.filter(|_| skipped == 0) {
+                    let fits = bytes <= room;
+                    match (keep, &kept) {
+                        (Some((read, _)), _) => owner.keep_view(&path_key, read, res, fits.then_some((chunks, bytes))),
+                        (None, Some(drawn)) if fits => owner.refresh_kept_view(&path_key, drawn, chunks, bytes),
+                        _ => {}
+                    }
+                }
+                // An index is made only from a read that gave every feature of a file as it was
+                // opened, in a frame still wanted: a feature left out of it would never be read.
+                if gathered_too_much {
+                    owner.refuse_drawn_index(&path_key, count.unwrap_or(0).saturating_mul(rustgis_map::source::PACKING_BYTES));
+                } else if let Some(boxes) = gathering.filter(|_| skipped == 0 && !cancel::requested())
+                    && source.same_as_opened().is_ok_and(|same| same)
+                {
+                    owner.index_drawn_boxes(&path_key, boxes, share);
+                } else if wanted && !cancel::requested() && source.same_as_opened().is_ok_and(|same| same) {
+                    // Gathered for nothing (a record left out, a row of another kind, more rows
+                    // than the source said): the next whole read would be the same, so none is
+                    // gathered again for this key, until the source is opened again.
+                    owner.refuse_drawn_index(&path_key, usize::MAX);
                 }
             }
             // Declined (`pictureless`): no frame, whatever the source made of the stop.
@@ -6657,10 +6860,10 @@ fn render_frame(
     if let Some(g) = &globe {
         globe_shading(pm.pixels(), g, water, space(view, map), view.pixels_per_point as f32);
     }
-    // Tile labels, after every layer's own.
+    // Tile labels, after every layer's own, the lightest included (#2803).
     if lock.is_none() {
         for (i, (l, pri)) in tile_out.labels.into_iter().enumerate() {
-            label_candidates.push((l, pri - 1e13, (u32::MAX, i as u64, 0, 0)).into());
+            label_candidates.push(tile_candidate(l, pri, i));
         }
     }
     if let Labels::Tilted(to, out) = &mut labels_to {
@@ -6675,7 +6878,7 @@ fn render_frame(
             let (sx, sy) = to.camera.try_to_screen(m, tw, th).filter(|_| near)?;
             (sy as f32 > sky_y).then_some((sx as f32, sy as f32))
         };
-        let fixed = fixed_labels.into_iter().map(|l| Candidate::from((l, f64::MAX, (u32::MAX, u64::MAX, 0, 0))));
+        let fixed = fixed_labels.into_iter().map(fixed_candidate);
         for c in fixed.chain(label_candidates) {
             out.extend(tilt_candidate(c, &at));
         }
@@ -6938,7 +7141,20 @@ fn layer_masks(
                         let crs = source.coord_crs();
                         let to_lonlat = crs.to(rustgis_data::raster::Crs::LonLat).ok();
                         let held = flat.held(crs).ok();
-                        let result = visit_complete(source.as_ref(), &mut |features| {
+                        // On a map drawn in the file's own system, every shape it draws, those
+                        // longitude/latitude can't place too, as the layer's own read takes them.
+                        let whole = (ctx.globe.is_none()
+                            && crs != rustgis_data::raster::Crs::LonLat
+                            && source.reads_own_box()
+                            && held.as_ref().is_some_and(|h| h.is_identity()))
+                        .then(|| {
+                            ViewRead::Request(rustgis_data::source::Request {
+                                extent: None,
+                                limit: usize::MAX,
+                                own: Some((crs, rustgis_data::source::whole_plane())),
+                            })
+                        });
+                        let result = visit_within(source.as_ref(), whole.as_ref(), &mut |features| {
                             for feature in features {
                                 if let Some(g) = feature.geometry {
                                     let g = match (ctx.globe.is_some(), crs == rustgis_data::raster::Crs::LonLat) {
@@ -7617,13 +7833,41 @@ fn square_lines(
             continue;
         }
         let Some(layer) = map.layer_by_name(&name) else { continue };
-        if layer.dataset.coord_crs() != rustgis_data::raster::Crs::LonLat {
+        let crs = layer.dataset.coord_crs();
+        let drawing = if ctx.globe.is_none() && crs != rustgis_data::raster::Crs::LonLat { flat.held(crs).ok() } else { None };
+        // A label squared to it reads its places in longitude/latitude, which count what can't be
+        // given there ([`note_held_read`]): not on a map in its own system, which reads none.
+        if crs != rustgis_data::raster::Crs::LonLat && !drawing.as_ref().is_some_and(|d| d.is_identity()) {
             held.insert(name.clone(), layer.id);
         }
         let mut runs = Vec::new();
-        // Read in longitude/latitude, whatever system the layer holds its coordinates in; a
-        // feature that can't be given there squares nothing (nor any, in a system that can't be
-        // converted), as the map draws none of it.
+        // On the flat map, a layer held in another system than longitude/latitude is read in map
+        // coordinates as the map draws it ([`rustgis_map::projection::Flat::held`]): as it is on
+        // a map in its own system, by the direct operation on one in another, so a label squares
+        // to the line where it is drawn; a place the map can't show breaks the line there.
+        if ctx.globe.is_none() && crs != rustgis_data::raster::Crs::LonLat {
+            // A system that can't be converted squares nothing, as the map draws none of it.
+            let Some(drawing) = &drawing else { continue };
+            for g in layer.dataset.features.rows().filter_map(|r| r.geometry()) {
+                // On a map in its own system, as it is, with no copy. A place that can't be given
+                // in longitude/latitude (`HeldDrawing::geometry`'s flag) is what the held read
+                // counts ([`note_held_read`]); one the map doesn't show breaks the line here, as
+                // the map's own drawing leaves it out, uncounted there too.
+                let drawn =
+                    if drawing.is_identity() { std::borrow::Cow::Borrowed(g) } else { std::borrow::Cow::Owned(drawing.geometry(g).0) };
+                for part in outline_parts(&drawn) {
+                    let points: Vec<Option<(f32, f32)>> =
+                        part.iter().map(|m| m.is_finite().then(|| ctx.view.to_screen(*m)).map(|(x, y)| (x as f32, y as f32))).collect();
+                    runs.extend(
+                        points.split(Option::is_none).map(|r| r.iter().flatten().copied().collect()).filter_map(square_labels::Run::new),
+                    );
+                }
+            }
+            out.insert(name, runs);
+            continue;
+        }
+        // Else read in longitude/latitude; a feature that can't be given there squares nothing
+        // (nor any, in a system that can't be converted), as the map draws none of it.
         let Ok(to) = layer.dataset.shown_conversion() else { continue };
         for g in layer.dataset.features.iter().filter_map(|f| rustgis_data::Dataset::converted_to_lonlat(&to, f.geometry.as_ref()?)) {
             let (parts, rings): (Vec<&Vec<Coord>>, bool) = match &*g {
@@ -7647,6 +7891,22 @@ fn square_lines(
         out.insert(name, runs);
     }
     out
+}
+
+/// A line's parts and a polygon's rings, each ring closed as its outline is drawn; none for points.
+fn outline_parts(g: &Geometry) -> Vec<std::borrow::Cow<'_, [Coord]>> {
+    match g {
+        Geometry::Line(parts) => parts.iter().map(|p| std::borrow::Cow::Borrowed(p.as_slice())).collect(),
+        Geometry::Polygon(polys) => polys
+            .iter()
+            .flatten()
+            .map(|r| match (r.first(), r.last()) {
+                (Some(a), Some(b)) if a != b => std::borrow::Cow::Owned(r.iter().chain([a]).copied().collect()),
+                _ => std::borrow::Cow::Borrowed(r.as_slice()),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// A line's runs on the globe in screen points: bent along great circles and cut at the horizon,
@@ -7855,10 +8115,17 @@ const MAX_CALLOUT_SEARCHES: usize = 500;
 /// Spots a placement tries for its callouts at most, all its searches together.
 const MAX_CALLOUT_SPOTS: usize = 200_000;
 
-/// A label's text's extent (points, `[x0, y0, x1, y1]`), as placement keeps it clear of the
-/// others: what the Move Label tool picks it by.
+/// A label's text's extent (points, `[x0, y0, x1, y1]`): what the Move Label tool picks it by.
 pub fn label_extent(l: &PlacedLabel) -> Option<[f32; 4]> {
-    boxes_extent(&label_boxes(l).0)
+    boxes_extent(&text_edges(l))
+}
+
+/// A label's text's boxes as its callout's line and the Move Label tool see them: with the room
+/// every label kept before clearances, whatever its class keeps clear of the others (#2828), so a
+/// clearance moves the others off without leaving the line short of the text or widening the pick.
+fn text_edges(l: &PlacedLabel) -> Vec<[f32; 4]> {
+    let text_padding = rustgis_map::symbology::DEFAULT_LABEL_CLEARANCE;
+    label_boxes(&PlacedLabel { collide: rustgis_tiles::Collide { text_padding, ..l.collide }, ..l.clone() }).0
 }
 
 /// The extent of boxes (`[x0, y0, x1, y1]` each); none for none.
@@ -7874,7 +8141,7 @@ fn boxes_extent(boxes: &[[f32; 4]]) -> Option<[f32; 4]> {
 /// For showing a label being moved by hand.
 pub fn callout_to(l: &PlacedLabel) -> Option<[f32; 4]> {
     let [ax, ay] = l.collide.callout_anchor.filter(|_| l.collide.callout_reach > 0.0)?;
-    let line = callout_line(&label_boxes(l).0, [l.x + ax, l.y + ay])?;
+    let line = callout_line(&text_edges(l), [l.x + ax, l.y + ay])?;
     Some([line[0] - l.x, line[1] - l.y, line[2] - l.x, line[3] - l.y])
 }
 
@@ -7890,11 +8157,13 @@ fn callout_line(text: &[[f32; 4]], anchor: [f32; 2]) -> Option<[f32; 4]> {
 }
 
 /// Where a crowded label with a callout goes: the nearest free spot for its text's boxes, inside
-/// the view, whose line from its feature at `anchor` to the nearest edge of its text is at most
-/// `reach` long (points), and which doesn't cover the feature. The offset that moves it there and
-/// that line (from, to), or none.
+/// the view, whose line from its feature at `anchor` to the nearest edge of its text (`edges`,
+/// [`text_edges`]) is at most `reach` long (points), and which doesn't cover the feature. The
+/// offset that moves it there and that line (from, to), or none.
+#[expect(clippy::too_many_arguments, reason = "the boxes that collide and the edges its line ends at, besides where and how far it may go")]
 fn callout_spot(
     text: &[[f32; 4]],
+    edges: &[[f32; 4]],
     anchor: [f32; 2],
     reach: f32,
     free: impl Fn(&[f32; 4]) -> bool,
@@ -7902,7 +8171,7 @@ fn callout_spot(
     h: f32,
     spots: &mut usize,
 ) -> Option<(f32, f32, [f32; 4])> {
-    let ext = boxes_extent(text)?;
+    let ext = boxes_extent(edges)?;
     if !(anchor[0].is_finite() && anchor[1].is_finite() && reach.is_finite()) {
         return None;
     }
@@ -7973,9 +8242,7 @@ fn place_labels_with_previews(
     show_unplaced: bool,
 ) -> Placement {
     let mut cands: Vec<Candidate> = cands.into_iter().map(Into::into).collect();
-    // A priority of no number places last, not first (`total_cmp` puts NaN above everything).
-    let rank = |p: f64| if p.is_nan() { f64::NEG_INFINITY } else { p };
-    cands.sort_by(|a, b| rank(b.priority).total_cmp(&rank(a.priority)));
+    cands.sort_by(placed_first);
     let mut grid = LabelGrid::new(w, h);
     for l in &fixed {
         let (text, icon) = label_boxes(l);
@@ -8069,7 +8336,7 @@ fn place_labels_with_previews(
                 // Locked after a callout moved it: there again, with its line.
                 moved_by = Some([dx, dy]);
                 if let Some(f) = feature.filter(|_| collide.callout_reach > 0.0)
-                    && let Some(line) = callout_line(&text, f)
+                    && let Some(line) = callout_line(&text_edges(&l), f)
                 {
                     l.collide.callout = Some(relative(&l, line));
                 }
@@ -8077,7 +8344,7 @@ fn place_labels_with_previews(
                 // Moved by hand: where it was put, a callout's line back to its feature when its class
                 // has callouts (however long: it was put there).
                 if let Some(f) = feature.filter(|_| collide.callout_reach > 0.0)
-                    && let Some(line) = callout_line(&text, f)
+                    && let Some(line) = callout_line(&text_edges(&l), f)
                 {
                     l.collide.callout = Some(relative(&l, line));
                 }
@@ -8093,7 +8360,9 @@ fn place_labels_with_previews(
                 // nearest free spot within its reach, a line drawn back to its feature. With no such
                 // spot it stays, and is left out, or shown over the others when its class shows all.
                 searches -= 1;
-                if let Some((dx, dy, line)) = callout_spot(&text, f, collide.callout_reach, |b| !grid.hits(b), w, h, &mut spots) {
+                if let Some((dx, dy, line)) =
+                    callout_spot(&text, &text_edges(&l), f, collide.callout_reach, |b| !grid.hits(b), w, h, &mut spots)
+                {
                     moved_by = Some([dx, dy]);
                     l.x += dx;
                     l.y += dy;
@@ -8184,6 +8453,9 @@ fn label_boxes(l: &PlacedLabel) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
         // padding across, and up and down.
         let halo = text::drawn_halo_reach(l);
         let [across, up_down] = text::background_reach(l).map(|r| l.collide.text_padding.clamp(0.0, 100.0) + halo.max(r));
+        // A class's clearance (#2828) reaches here as the padding, held to 100 points as a tile
+        // style's `text-padding` always was: at 100 a curved label's square is some 200 points
+        // across, about 7 × 7 grid cells, the bound placement already had for tile labels.
         let p = across.max(up_down);
         let cx = l.center_x();
         if !l.glyphs.is_empty() {
@@ -8878,6 +9150,49 @@ mod tests {
         assert!(p.labels[1].collide.callout.is_some());
     }
 
+    /// A class's clearance keeps other labels off (#2828), not its callout's line or the Move Label
+    /// tool: the line still ends at the text's edge, a crowded label's reach still counts to it, and
+    /// the label is still picked by its text, whatever the clearance.
+    #[test]
+    fn a_clearance_keeps_others_off_but_not_the_callout_or_the_pick() {
+        use rustgis_tiles::Collide;
+        let pinned = |padding: f32| PlacedLabel {
+            y: 50.0,
+            collide: Collide {
+                text_padding: padding,
+                pinned: true,
+                callout_reach: 40.0,
+                callout_anchor: Some([-80.0, 0.0]),
+                ..Default::default()
+            },
+            ..label("Moved", 150.0, None, 0.0)
+        };
+        let (plain, clear) = (pinned(2.0), pinned(12.0));
+        assert_eq!(label_extent(&clear), label_extent(&plain), "picked by its text, not its clearance");
+        assert_eq!(callout_to(&clear), callout_to(&plain), "a drag's line ends at the text");
+        let line =
+            |l: PlacedLabel| place_labels(vec![(l, 1e15, (u32::MAX, 1, 0, 0))], Vec::new(), 300.0, 120.0, false).labels[0].collide.callout;
+        assert_eq!(line(clear), line(plain), "a moved label's line ends at the text");
+        // Crowded off its spot: moved, its line from its feature to its text's nearest edge.
+        let at = |text: &str, collide: Collide| PlacedLabel {
+            y: 50.0,
+            collide: Collide { callout_anchor: Some([0.0, 10.0]), ..collide },
+            ..label(text, 100.0, None, 0.0)
+        };
+        let cands = vec![
+            (at("First", Collide::default()), 2.0, (u32::MAX, 0, 0, 0)),
+            (at("Second", Collide { text_padding: 12.0, callout_reach: 40.0, ..Default::default() }), 1.0, (u32::MAX, 1, 0, 0)),
+        ];
+        let p = place_labels(cands, Vec::new(), 300.0, 120.0, false);
+        let second = p.labels.iter().find(|l| l.text == "Second").expect("moved, not left out");
+        let [x0, y0, x1, y1] = second.collide.callout.expect("a callout's line");
+        let e = label_extent(second).unwrap();
+        let (fx, fy) = (second.x + x0, second.y + y0);
+        let to = [fx.clamp(e[0], e[2]), fy.clamp(e[1], e[3])];
+        assert!(((second.x + x1) - to[0]).abs() < 1e-3 && ((second.y + y1) - to[1]).abs() < 1e-3, "to the text's edge");
+        assert!((x1 - x0).hypot(y1 - y0) <= 40.0, "within its reach, counted to the text");
+    }
+
     /// A callout's line is drawn from its feature to the text, in the label's colour.
     #[test]
     fn a_callout_line_is_drawn() {
@@ -9104,6 +9419,7 @@ mod tests {
         let blocker = || Candidate::from((label("Blocker", 100.0, None, 0.0), 9.0, (u32::MAX, 0, 0, 0)));
         let taken = |alternatives: Vec<(f32, f32)>| Candidate {
             label: label("Taken", 100.0, None, 0.0),
+            weight: 5,
             priority: 1.0,
             key: (1, 0, 0, 0),
             alternatives: alternatives.into_iter().map(LabelPlace::from).collect(),
@@ -9146,6 +9462,7 @@ mod tests {
         };
         let candidate = Candidate {
             label: base.clone(),
+            weight: 5,
             priority: 1.0,
             key: (1, 0, 0, 0),
             curves: None,
@@ -9183,6 +9500,7 @@ mod tests {
         };
         let c = Candidate {
             label: base,
+            weight: 5,
             priority: 1.0,
             key: (1, 0, 0, 0),
             curves: None,
@@ -9208,6 +9526,7 @@ mod tests {
         let at = |x: f32, y: f32| (y > 100.0).then_some((x + 1000.0, y));
         let offer = |(x, y): (f32, f32), alternatives: Vec<(f32, f32)>| Candidate {
             label: PlacedLabel { x, y, ..label("Paris", 0.0, None, 0.0) },
+            weight: 5,
             priority: 1.0,
             key: (1, 0, 0, 0),
             alternatives: alternatives.into_iter().map(LabelPlace::from).collect(),
@@ -9263,6 +9582,7 @@ mod tests {
                     let alternatives = if others { round.map(|(dx, dy)| LabelPlace::from((x + dx, y + dy))).to_vec() } else { Vec::new() };
                     Candidate {
                         label: l,
+                        weight: 5,
                         priority: -f64::from(i),
                         key: (u32::MAX, i as u64, 0, 0),
                         alternatives,
@@ -9736,6 +10056,40 @@ mod tests {
         assert!(far.angle.is_none() && far.y < fy as f32, "as auto: {:?} {} {fy}", far.angle, far.y);
     }
 
+    /// On a map in a line layer's own system, a label squares to the line as the map holds it,
+    /// read in map coordinates with nothing converted: a slanting coast held in UTM 32N, on a map
+    /// in UTM 32N, turns the label square to it there.
+    #[test]
+    fn a_label_squares_to_a_line_held_in_the_maps_system() {
+        let utm = rustgis_data::raster::Crs::Epsg(32632);
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.set_projection(rustgis_map::Projection::Custom("EPSG:32632".into()));
+        // A coast slanting at 45° in UTM, a kilometre long.
+        let mut d = Dataset::new("coast", GeometryType::Polyline, vec![]);
+        d.push(Some(Geometry::Line(vec![vec![Coord::new(500_000.0, 5_300_000.0), Coord::new(501_000.0, 5_301_000.0)]])), vec![]);
+        d.held_in = utm;
+        m.add_dataset(d);
+        // A beach 50 m north-west of the coast's middle, held in UTM too.
+        let mut d = Dataset::new("beaches", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        d.push(Some(Geometry::Point(Coord::new(500_464.6, 5_300_535.4))), vec![Value::Text("Beach".into())]);
+        d.held_in = utm;
+        let pts = m.add_dataset(d);
+        let l = m.layer_mut(pts).unwrap();
+        l.labels.enabled = true;
+        l.labels.default.placement = LabelPlacement::Perpendicular;
+        l.labels.default.square_to =
+            Some(rustgis_map::SquareTo { layer: "coast".into(), within: 20.0, side: rustgis_map::SquareSide::Away });
+        let camera = Camera { center: Coord::new(500_500.0, 5_300_500.0), res: 5.0, bearing: 0.0, pitch: 0.0 };
+        m.camera = camera;
+        let view = View { width: 300.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let labels = render(&mut m, &view).unwrap().labels;
+        let beach = labels.iter().find(|l| l.text == "Beach").expect("labelled");
+        let a = beach.angle.expect("turned").to_degrees();
+        // The coast runs up to the right on the screen (y down: along -45°); square to it, 45°.
+        assert!((a.rem_euclid(180.0) - 45.0).abs() < 0.5, "{a}");
+    }
+
     /// A drawing that panics (a command's panic is caught) leaves nothing noted: reads outside a
     /// drawing are noted nowhere after it, as before it.
     #[test]
@@ -9840,15 +10194,16 @@ mod tests {
         // A small text by its feature at (100, 100); only spots 200 points right of it are free.
         let text = [[95.0, 98.0, 105.0, 102.0]];
         let free = |b: &[f32; 4]| b[0] > 300.0;
-        let (dx, _, [x0, y0, x1, y1]) = callout_spot(&text, [100.0, 100.0], 300.0, free, 1000.0, 200.0, &mut 100_000).expect("a spot");
+        let (dx, _, [x0, y0, x1, y1]) =
+            callout_spot(&text, &text, [100.0, 100.0], 300.0, free, 1000.0, 200.0, &mut 100_000).expect("a spot");
         assert!(dx > 195.0);
         let len = (x1 - x0).hypot(y1 - y0);
         assert!((150.0..=300.0).contains(&len), "{len} points");
         // Beyond its reach, none.
-        assert!(callout_spot(&text, [100.0, 100.0], 100.0, free, 1000.0, 200.0, &mut 100_000).is_none());
+        assert!(callout_spot(&text, &text, [100.0, 100.0], 100.0, free, 1000.0, 200.0, &mut 100_000).is_none());
         // The placement's spots used up: it stops looking, and says how many it tried.
         let mut spots = 5;
-        assert!(callout_spot(&text, [100.0, 100.0], 300.0, free, 1000.0, 200.0, &mut spots).is_none());
+        assert!(callout_spot(&text, &text, [100.0, 100.0], 300.0, free, 1000.0, 200.0, &mut spots).is_none());
         assert_eq!(spots, 0);
     }
 
@@ -9996,6 +10351,155 @@ mod tests {
         // A clause that doesn't read takes no feature.
         capitals(m.layer_mut(id).unwrap(), "gone = 1");
         assert_eq!(sizes(&mut m), both);
+    }
+
+    /// Where labels compete, the heavier class wins whatever its layer's place (#2803); with
+    /// equal weights the layer above wins, as before. A label moved by hand still comes first,
+    /// and Show All still draws every label.
+    #[test]
+    fn a_heavier_label_class_wins_over_the_layer_above() {
+        let mut m = Map::new("Map");
+        let layer = |m: &mut Map, name: &str| {
+            let mut d = Dataset::new(name, GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+            d.push(Some(Geometry::Point(Coord::new(2.35, 48.85))), vec![Value::Text(name.into())]);
+            let id = m.add_dataset(d);
+            let l = m.layer_mut(id).unwrap();
+            l.labels.enabled = true;
+            l.labels.default.field = "name".into();
+            l.labels.default.placement = rustgis_map::LabelPlacement::Center;
+            id
+        };
+        let (a, b) = (layer(&mut m, "Aaaa"), layer(&mut m, "Bbbb"));
+        let camera = Camera { center: lonlat_to_merc(Coord::new(2.35, 48.85)), res: 5000.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 800.0, height: 600.0, pixels_per_point: 1.0, camera, sky: false };
+        let shown = |m: &mut Map| {
+            let mut v: Vec<String> = render(m, &view).unwrap().labels.into_iter().map(|l| l.text).collect();
+            v.sort();
+            v
+        };
+        let first = shown(&mut m);
+        assert_eq!(first.len(), 1, "the two labels compete for one place: {first:?}");
+        let (above, below) = if first[0] == "Aaaa" { (a, b) } else { (b, a) };
+        let name = |id: u32| if id == a { "Aaaa".to_string() } else { "Bbbb".to_string() };
+        let weigh = |m: &mut Map, id: u32, w: u8| m.layer_mut(id).unwrap().labels.default.weight = w;
+        for w in [0, 5, 10] {
+            weigh(&mut m, above, w);
+            weigh(&mut m, below, w);
+            assert_eq!(shown(&mut m), first, "equal weights ({w}): the layer above, as before");
+        }
+        weigh(&mut m, above, 5);
+        weigh(&mut m, below, 6);
+        assert_eq!(shown(&mut m), [name(below)], "heavier, the layer below wins");
+        weigh(&mut m, above, 10);
+        weigh(&mut m, below, 0);
+        assert_eq!(shown(&mut m), [name(above)]);
+        // Moved by hand onto the heavy one's place, the lightest still comes first.
+        let fid = m.layer(below).unwrap().dataset.features[0].id;
+        m.layer_mut(below).unwrap().labels.default.moved = vec![rustgis_map::symbology::MovedLabel { id: fid, at: [2.35, 48.85] }];
+        assert_eq!(shown(&mut m), [name(below)], "a label moved by hand comes first");
+        m.layer_mut(below).unwrap().labels.default.moved.clear();
+        // Shown all, the lighter one is drawn too.
+        m.layer_mut(below).unwrap().labels.default.show_all = true;
+        assert_eq!(shown(&mut m).len(), 2, "Show All draws every label whatever its weight");
+    }
+
+    /// A class's clearance is the room its labels keep free of other labels (#2828): two labels
+    /// keep both their clearances apart, as the fixed padding did, a fraction honoured; 0 lets
+    /// them come as close as their halos allow. A label moved by hand keeps its class's.
+    #[test]
+    fn a_label_class_keeps_its_clearance_free_of_other_labels() {
+        let center = Coord::new(2.35, 48.85);
+        let camera = Camera { center: lonlat_to_merc(center), res: 5000.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 800.0, height: 600.0, pixels_per_point: 1.0, camera, sky: false };
+        // Two point layers, "Aaaa" above, "Bbbb" `apart` points to its right, with these
+        // clearances.
+        let map = |apart: f32, [ca, cb]: [f32; 2]| {
+            let mut m = Map::new("Map");
+            for (name, dx, clearance) in [("Bbbb", apart, cb), ("Aaaa", 0.0, ca)] {
+                let mut d = Dataset::new(name, GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+                let at = rustgis_geom::merc_to_lonlat(Coord::new(camera.center.x + f64::from(dx) * camera.res, camera.center.y));
+                d.push(Some(Geometry::Point(at)), vec![Value::Text(name.into())]);
+                let id = m.add_dataset(d);
+                let l = m.layer_mut(id).unwrap();
+                l.labels.enabled = true;
+                l.labels.default.field = "name".into();
+                l.labels.default.placement = rustgis_map::LabelPlacement::Center;
+                l.labels.default.clearance = clearance;
+            }
+            m
+        };
+        let drawn = |m: &mut Map| render(m, &view).unwrap().labels;
+        let shown = |m: &mut Map| {
+            let mut v: Vec<String> = drawn(m).into_iter().map(|l| l.text).collect();
+            v.sort();
+            v
+        };
+        // Far apart, how wide the texts are and how far their halos reach.
+        let far = drawn(&mut map(300.0, [2.0, 2.0]));
+        assert_eq!(far.len(), 2);
+        assert!(far.iter().all(|l| l.collide.text_padding == 2.0), "2 to start with, as before");
+        let reach = |l: &PlacedLabel| text::label_width(l) / 2.0 + text::drawn_halo_reach(l);
+        let (a, b) = (far.iter().find(|l| l.text == "Aaaa").unwrap(), far.iter().find(|l| l.text == "Bbbb").unwrap());
+        // Centres so far apart that `room` points lie between the halos.
+        let apart = |room: f32| reach(a) + reach(b) + room;
+        // Six points between them: 2 + 2 leave both in, as before.
+        assert_eq!(shown(&mut map(apart(6.0), [2.0, 2.0])), ["Aaaa", "Bbbb"]);
+        // Either one's clearance grown to 5 (5 + 2 > 6): the layer above keeps its place.
+        assert_eq!(shown(&mut map(apart(6.0), [5.0, 2.0])), ["Aaaa"], "the upper label's clearance");
+        assert_eq!(shown(&mut map(apart(6.0), [2.0, 5.0])), ["Aaaa"], "the lower label's clearance");
+        // A fraction is honoured: 3.9 + 2 < 6.
+        assert_eq!(shown(&mut map(apart(6.0), [3.9, 2.0])), ["Aaaa", "Bbbb"]);
+        // A point between them: 2 + 2 keep one out, 0 + 0 let both in.
+        assert_eq!(shown(&mut map(apart(1.0), [2.0, 2.0])), ["Aaaa"]);
+        let close = drawn(&mut map(apart(1.0), [0.0, 0.0]));
+        assert_eq!(close.len(), 2, "no clearance: only the halos keep them apart");
+        assert!(close.iter().all(|l| l.collide.text_padding == 0.0));
+        // Moved by hand, a label keeps its class's clearance.
+        let mut m = map(300.0, [9.0, 2.0]);
+        let id = m.layers.iter().find(|l| l.name == "Aaaa").unwrap().id;
+        let fid = m.layer(id).unwrap().dataset.features[0].id;
+        m.layer_mut(id).unwrap().labels.default.moved = vec![rustgis_map::symbology::MovedLabel { id: fid, at: [center.x, center.y] }];
+        let moved = drawn(&mut m).into_iter().find(|l| l.text == "Aaaa").unwrap();
+        assert_eq!(moved.collide.text_padding, 9.0);
+    }
+
+    /// A tile style's label still comes after every layer's own, the lightest included (#2803).
+    #[test]
+    fn tile_labels_come_after_the_lightest_layer_label() {
+        let at = |text: &str| label(text, 100.0, None, 0.0);
+        let layer = Candidate { weight: 0, ..(at("Layer"), 1e12, (1, 0, 0, 0)).into() };
+        let placed = place_labels(vec![tile_candidate(at("Tile"), 9.0, 0), layer], Vec::new(), 200.0, 40.0, false);
+        assert_eq!(placed.labels.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["Layer"]);
+    }
+
+    /// A fixed label (a graphic's text), placed with the others in a tilted view, still comes
+    /// first, the heaviest class included (#2803).
+    #[test]
+    fn fixed_labels_come_before_the_heaviest_layer_label() {
+        let at = |text: &str| label(text, 100.0, None, 0.0);
+        let layer = Candidate { weight: 10, ..(at("Layer"), 1e12, (1, 0, 0, 0)).into() };
+        let placed = place_labels(vec![layer, fixed_candidate(at("Fixed"))], Vec::new(), 200.0, 40.0, false);
+        assert_eq!(placed.labels.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["Fixed"]);
+    }
+
+    /// Within a layer, a heavier class wins over the class listed before it (#2803).
+    #[test]
+    fn a_heavier_label_class_wins_over_the_class_listed_first() {
+        let mut m = Map::new("Map");
+        let mut d = Dataset::new("pts", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        d.push(Some(Geometry::Point(Coord::new(2.35, 48.85))), vec![Value::Text("Paris".into())]);
+        let id = m.add_dataset(d);
+        let l = m.layer_mut(id).unwrap();
+        l.labels.enabled = true;
+        let base = l.labels.default.clone();
+        l.labels.classes = vec![rustgis_map::LabelClass { name: "Big".into(), size: 20.0, ..base }];
+        let camera = Camera { center: lonlat_to_merc(Coord::new(2.35, 48.85)), res: 5000.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 800.0, height: 600.0, pixels_per_point: 1.0, camera, sky: false };
+        let sizes = |m: &mut Map| render(m, &view).unwrap().labels.into_iter().map(|l| l.size).collect::<Vec<_>>();
+        let default = m.layer(id).unwrap().labels.default.size;
+        assert_eq!(sizes(&mut m), [20.0], "Big, listed first, takes the place");
+        m.layer_mut(id).unwrap().labels.default.weight = 6;
+        assert_eq!(sizes(&mut m), [default], "Default, heavier, takes it");
     }
 
     /// A class's text, size, colour and angle by expressions, per feature; null text: no label.
