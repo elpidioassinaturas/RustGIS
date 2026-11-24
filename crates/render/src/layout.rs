@@ -9,7 +9,8 @@ use rustgis_data::query::{Env, SeriesPage};
 use rustgis_geom::{Coord, Extent};
 use rustgis_map::layout::{
     ArrowStyle, ChartLook, ColorScale, ElementKind, FrameShape, GRID_LABEL_PT, Grid, GridKind, INK, Layout, LineHead, MAX_LEGEND_COLUMNS,
-    Orientation, PT_PER_MM, SCALE_BAR_TEXT_PT, ScaleBarStyle, ScaleUnits, TextAlign, TickSide, frame_camera, layout_text_scale,
+    Orientation, PT_PER_MM, SCALE_BAR_TEXT_PT, ScaleBarStyle, ScaleUnits, Section, SectionLine, TextAlign, TickSide, frame_camera,
+    layout_text_scale,
 };
 use rustgis_map::symbology::LegendEntry;
 use rustgis_map::{Map, Rgba};
@@ -686,7 +687,7 @@ fn draw_page(
             ((e.x * k - f64::from(bounds.x())) as f32, (e.y * k - f64::from(bounds.y())) as f32, (e.w * k) as f32, (e.h * k) as f32);
         let Some(r) = Rect::from_xywh(x, y, ew.max(1.0), eh.max(1.0)) else { continue };
         match &e.kind {
-            ElementKind::MapFrame { shape, grid, extent_of, extent_color, extent_width, border_color, border_width, .. } => {
+            ElementKind::MapFrame { shape, grid, sections, extent_of, extent_color, extent_width, border_color, border_width, .. } => {
                 let Some(&(_, mi, cam, fw, fh)) = frame(e.id) else {
                     placeholder(&mut pm, r, "Missing map", ppp);
                     continue;
@@ -698,8 +699,11 @@ fn draw_page(
                 // The grid is drawn with the frame's map, before its attribution, which keeps
                 // clear of the grid's labels.
                 let grid = grid.as_ref().map(|g| (g, layout.decimal_comma));
+                let sections: Vec<_> =
+                    sections.iter().filter_map(|s| Some((s, section_ends(map, &cam, (fw, fh), shape, s.line).ok()?))).collect();
+                let over = FrameOver { grid, sections: &sections };
                 let mut failed_source = None;
-                let Some(mut frame_pm) = frame_canvas(map, &view, pm.is_recording(), &mut pending.frames, grid, &mut failed_source, env)
+                let Some(mut frame_pm) = frame_canvas(map, &view, pm.is_recording(), &mut pending.frames, over, &mut failed_source, env)
                 else {
                     if frame_requires_complete(map, &view) {
                         *source_error = failed_source_error(map, failed_source);
@@ -714,7 +718,7 @@ fn draw_page(
                     frame_pm.overflowed() || pm.recorded_cost().saturating_add(frame_pm.recorded_cost()) > crate::vector::max_cost();
                 if frame_pm.is_recording()
                     && too_large
-                    && let Some(pixels) = frame_canvas(map, &view, false, &mut pending.frames, grid, &mut None, env)
+                    && let Some(pixels) = frame_canvas(map, &view, false, &mut pending.frames, over, &mut None, env)
                 {
                     frame_pm = pixels;
                     if let Some(list) = record.as_deref_mut() {
@@ -977,13 +981,23 @@ pub fn frame_map(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp
     let revisions = crate::archive_revisions([&*map]);
     let mut failed_source = None;
     let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
-    let result = frame_canvas(map, &view, false, &mut false, None, &mut failed_source, &Env::default()).map(Canvas::into_pixmap);
+    let over = FrameOver::default();
+    let result = frame_canvas(map, &view, false, &mut false, over, &mut failed_source, &Env::default()).map(Canvas::into_pixmap);
     revisions.finish(map, failed_source, result, "could not draw the map frame")
+}
+
+/// What a page draws over a map frame's map, under its attribution.
+#[derive(Clone, Copy, Default)]
+struct FrameOver<'a> {
+    /// The grid, and whether the layout writes a decimal comma.
+    grid: Option<(&'a Grid, bool)>,
+    /// The section lines drawn, each with its ends ([`section_ends`]).
+    sections: &'a [(&'a Section, SectionEnds)],
 }
 
 /// [`frame_map`] on a canvas: one that records (see [`crate::canvas`]) when `record` and the
 /// frame can be kept as vectors (flat, north up, without view effects), else its pixels; with
-/// `grid` (and whether the layout writes a decimal comma) drawn on it under the attribution.
+/// what goes `over` it drawn on it under the attribution.
 /// `pending` is set when some of its tiles, or a read of its streamed layers or rasters, were
 /// still on their way (in the browser, which doesn't wait for them).
 fn frame_canvas(
@@ -991,7 +1005,7 @@ fn frame_canvas(
     view: &View,
     record: bool,
     pending: &mut bool,
-    grid: Option<(&Grid, bool)>,
+    over: FrameOver,
     failed_source: &mut Option<u64>,
     env: &Env,
 ) -> Option<Canvas> {
@@ -1000,7 +1014,8 @@ fn frame_canvas(
     let (img, shadows) = crate::frame_with_shadows_to_come(|| crate::complete(map, view, record, failed_source, env));
     let img = img?;
     *pending |= img.tiles_pending || img.data_pending || shadows;
-    Some(finish_frame(img, view.pixels_per_point, grid.map(|(g, comma)| (&*map, view, g, comma))))
+    let grid = over.grid.map(|(g, comma)| (&*map, view, g, comma));
+    Some(finish_frame(img, view.pixels_per_point, grid, over.sections))
 }
 
 /// [`frame_map`] without waiting for tiles still on their way, for a preview drawn while the
@@ -1013,22 +1028,26 @@ pub fn frame_map_preview(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: 
 /// Map preview during a layout pan, using the same expression context as its page.
 pub fn frame_map_preview_with(map: &mut Map, camera: rustgis_map::Camera, w: f64, h: f64, ppp: f64, env: &Env) -> Option<Pixmap> {
     let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
-    crate::render_cpu(map, &view, false, false, &mut None, env).map(|img| finish_frame(img, ppp, None).into_pixmap())
+    crate::render_cpu(map, &view, false, false, &mut None, env).map(|img| finish_frame(img, ppp, None, &[]).into_pixmap())
 }
 
 /// A rendered frame map with its labels, its `grid` (drawn on `map` in `view`, with a decimal
-/// comma or not) and its attribution drawn on it: on its recording when it was recorded, else on
-/// its pixels. The attribution keeps clear of the grid's labels.
-fn finish_frame(img: crate::Rendered, ppp: f64, grid: Option<(&Map, &View, &Grid, bool)>) -> Canvas {
+/// comma or not), its section lines and its attribution drawn on it: on its recording when it was
+/// recorded, else on its pixels. The attribution keeps clear of the grid's labels and the sections'
+/// names.
+fn finish_frame(img: crate::Rendered, ppp: f64, grid: Option<(&Map, &View, &Grid, bool)>, sections: &[(&Section, SectionEnds)]) -> Canvas {
     let crate::Rendered { pixmap, recorded, labels, unplaced, label_layers, attribution, .. } = img;
     let mut pm = recorded.unwrap_or_else(|| Canvas::from_pixmap(pixmap));
     crate::draw_labels(&mut pm, (&unplaced, &labels, &label_layers), ppp as f32);
     // The grid is a layer of its own (#1815).
     pm.layer(grid.is_some().then_some("Grid"));
-    let grid_labels = grid.map(|(map, view, g, comma)| draw_grid(&mut pm, map, view, g, comma)).unwrap_or_default();
+    let mut kept_clear = grid.map(|(map, view, g, comma)| draw_grid(&mut pm, map, view, g, comma)).unwrap_or_default();
+    // So are the section lines (#2863).
+    pm.layer((!sections.is_empty()).then_some("Section lines"));
+    kept_clear.extend(draw_sections(&mut pm, sections, ppp));
     pm.layer(None);
     let (w, h) = (pm.width() as f32 / ppp as f32, pm.height() as f32 / ppp as f32);
-    let inset = crate::attribution_text(&attribution).map_or((0.0, 0.0), |(_, tw)| attribution_inset((w, h), tw, &grid_labels));
+    let inset = crate::attribution_text(&attribution).map_or((0.0, 0.0), |(_, tw)| attribution_inset((w, h), tw, &kept_clear));
     crate::draw_attribution(&mut pm, &attribution, ppp as f32, inset);
     pm
 }
@@ -1808,6 +1827,179 @@ pub(crate) fn nice_step(span: f64, smallest: f64) -> f64 {
     let rough = (span / 8.0).max(smallest);
     let p = 10f64.powf(rough.log10().floor());
     [1.0, 2.0, 5.0, 10.0].iter().map(|k| k * p).find(|s| *s >= rough).unwrap_or(10.0 * p)
+}
+
+/// A section line's ends in its frame's points, from its left or top.
+pub type SectionEnds = [(f64, f64); 2];
+
+/// Where `line` is drawn on a frame `w` × `h` points showing `map` through `cam`, within its
+/// `shape`: its ends, the outermost of where it meets the shape's outline (#2863). It is straight
+/// on the page whatever the frame's projection or bearing. On a tilted frame or the globe it runs
+/// through the place as the frame's grid puts it there (on the ground, without its relief), only as
+/// far as there is ground along it, to the horizon or the globe's limb; what it crosses there is no
+/// straight section of the ground. `Err` says why it isn't drawn: its place is outside the frame,
+/// or one the frame's map can't show (behind the globe or the eye, or outside its projection).
+pub fn section_ends(
+    map: &Map,
+    cam: &rustgis_map::Camera,
+    (w, h): (f64, f64),
+    shape: &FrameShape,
+    line: SectionLine,
+) -> Result<SectionEnds, &'static str> {
+    const NOT_SHOWN: &str = "its place isn't one the frame's map shows";
+    let globe = map.projection.is_globe().then(|| rustgis_map::globe::Globe::new(cam, w, h));
+    let mut at = line.at();
+    // On a map whose world repeats, the copy of the place nearest the frame's middle.
+    if let Some(mid) = map.to_lonlat(cam.center).filter(|c| c.x.is_finite()) {
+        at.x += 360.0 * ((mid.x - at.x) / 360.0).round();
+    }
+    let (px, py) = match &globe {
+        Some(g) => g.forward(at),
+        None => map.to_map(at).and_then(|m| cam.try_to_screen(m, w, h)),
+    }
+    .filter(|(x, y)| x.is_finite() && y.is_finite())
+    .ok_or(NOT_SHOWN)?;
+    // Along the line and across it: a vertical line is worked out with the axes swapped.
+    let vertical = matches!(line, SectionLine::Vertical(_));
+    let swap = |(x, y): (f64, f64)| if vertical { (y, x) } else { (x, y) };
+    let (along, across) = swap((px, py));
+    // Where the line meets the shape's outline, and which way the outline crosses it there: the
+    // place is inside as the shape is filled, by its winding number. A circle is as wide as the
+    // shorter side ([`shape_path`]).
+    let (bw, bh) = if *shape == FrameShape::Circle { (w.min(h), w.min(h)) } else { (w, h) };
+    let outline: Vec<(f64, f64)> =
+        shape.outline().into_iter().map(|(u, v)| swap(((w - bw) / 2.0 + u * bw, (h - bh) / 2.0 + v * bh))).collect();
+    let mut meets: Vec<(f64, i32)> = Vec::new();
+    for (a, b) in outline.iter().zip(outline.iter().cycle().skip(1)) {
+        if (a.1 <= across) != (b.1 <= across) {
+            meets.push((a.0 + (across - a.1) / (b.1 - a.1) * (b.0 - a.0), if a.1 <= across { 1 } else { -1 }));
+        }
+    }
+    let inside = meets.iter().filter(|m| m.0 <= along).map(|m| m.1).sum::<i32>() != 0;
+    let (from, to) = meets.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), m| (lo.min(m.0), hi.max(m.0)));
+    if !inside || from >= to {
+        return Err("its place is outside the frame");
+    }
+    let ground = |along: f64| {
+        let (x, y) = swap((along, across));
+        match &globe {
+            Some(g) => g.inverse(x, y).is_some(),
+            None => cam.pitch.abs() <= 1e-9 || cam.try_to_map(x, y, w, h).is_some(),
+        }
+    };
+    // The ground along the line is in one piece, which holds the place: 24 halvings find its end.
+    let reach = |end: f64| {
+        let (mut on, mut off) = (along, end);
+        if ground(end) {
+            return end;
+        }
+        for _ in 0..24 {
+            let mid = (on + off) / 2.0;
+            *(if ground(mid) { &mut on } else { &mut off }) = mid;
+        }
+        on
+    };
+    Ok([swap((reach(from), across)), swap((reach(to), across))])
+}
+
+/// A section line its frame doesn't draw ([`section_ends`]).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SectionGap {
+    pub frame: u32,
+    pub frame_name: String,
+    pub section: String,
+    pub why: &'static str,
+}
+
+/// The section lines of `layout`'s visible frames they don't draw, as the page is now.
+pub fn sections_not_drawn(layout: &Layout, maps: &[Map]) -> Vec<SectionGap> {
+    let mut gaps = Vec::new();
+    for e in layout.elements.iter().filter(|e| e.visible) {
+        if let ElementKind::MapFrame { map, center, scale, bearing, pitch, shape, sections, .. } = &e.kind
+            && let Some(m) = map_index(maps, map).and_then(|i| maps.get(i))
+        {
+            let cam = frame_camera(m, *center, *scale, *bearing, *pitch);
+            let size = (e.w * PT_PER_MM, e.h * PT_PER_MM);
+            gaps.extend(sections.iter().filter_map(|s| {
+                let why = section_ends(m, &cam, size, shape, s.line).err()?;
+                Some(SectionGap { frame: e.id, frame_name: e.name.clone(), section: s.name.clone(), why })
+            }));
+        }
+    }
+    gaps
+}
+
+/// What an export of `pages` pages says of the section lines not drawn, each with the pages it is
+/// missing from: one notice, counted, the first ten named; `None` for none.
+pub fn sections_notice(gaps: &BTreeMap<SectionGap, usize>, pages: usize) -> Option<String> {
+    if gaps.is_empty() {
+        return None;
+    }
+    let named = gaps.iter().take(10).map(|(g, on)| {
+        let on = if pages > 1 { format!(" on {on} of {pages} pages") } else { String::new() };
+        format!("'{}' of {} ({}){on}: {}", g.section, g.frame_name, g.frame, g.why)
+    });
+    let mut named = named.collect::<Vec<_>>().join("; ");
+    if gaps.len() > 10 {
+        named.push_str(&format!("; and {} more", gaps.len() - 10));
+    }
+    Some(format!("{} section line(s) not drawn: {named}", gaps.len()))
+}
+
+/// The size of a section's name at its ends, in points.
+const SECTION_NAME_PT: f32 = 8.0;
+
+/// A frame's section lines, each from end to end with its name in a box of its colour at both (A
+/// and A'), just inside them. Gives the names drawn, as [`draw_grid`] gives its labels.
+fn draw_sections(pm: &mut Canvas, sections: &[(&Section, SectionEnds)], ppp: f64) -> Vec<(Edge, [f32; 4])> {
+    let k = ppp as f32;
+    let mut drawn = Vec::new();
+    for (s, ends) in sections {
+        let [a, b] = ends.map(|(x, y)| (x as f32 * k, y as f32 * k));
+        let mut pb = PathBuilder::new();
+        pb.move_to(a.0, a.1);
+        pb.line_to(b.0, b.1);
+        if let Some(p) = pb.finish() {
+            let stroke = dashed(Stroke { width: s.width as f32 * k, ..Stroke::default() }, s.dash.as_ref(), ppp, &p);
+            pm.stroke_path(&p, &paint(s.color, 1.0), &stroke, Transform::identity(), None);
+        }
+    }
+    // The names over every line.
+    for (s, ends) in sections {
+        let [a, b] = ends.map(|(x, y)| (x as f32 * k, y as f32 * k));
+        let px = SECTION_NAME_PT * 1.33 * k;
+        let vertical = matches!(s.line, SectionLine::Vertical(_));
+        // Dark on a light colour, else white.
+        let [r, g, b_, _] = s.color.0.map(f32::from);
+        let ink = if 0.299 * r + 0.587 * g + 0.114 * b_ > 150.0 { INK } else { Rgba::rgb(255, 255, 255) };
+        let boxes = [(a, 1.0, s.name.clone()), (b, -1.0, format!("{}'", s.name))];
+        for ((x, y), inward, name) in boxes {
+            let hh = px * 0.8;
+            let hw = (text::measure(&name, px / 1.33, true) / 2.0 + px * 0.35).max(hh);
+            // Inside the end by a point, but never past the line's middle.
+            let length = (b.0 - a.0).max(b.1 - a.1);
+            let inset = inward * (k + if vertical { hh } else { hw }).min(length / 2.0);
+            let (cx, cy) = if vertical { (x, y + inset) } else { (x + inset, y) };
+            if let Some(path) = Rect::from_ltrb(cx - hw, cy - hh, cx + hw, cy + hh).and_then(|r| rounded_rect(r, hh)) {
+                pm.fill_path(
+                    &path,
+                    &paint(Rgba::rgb(s.color.0[0], s.color.0[1], s.color.0[2]), 1.0),
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
+            text::text_at(pm, &name, cx, cy, px, ink, true, text::Align::Center, false);
+            let edge = match (vertical, inward > 0.0) {
+                (true, true) => Edge::Top,
+                (true, false) => Edge::Bottom,
+                (false, true) => Edge::Left,
+                (false, false) => Edge::Right,
+            };
+            drawn.push((edge, [(cx - hw) / k, (cy - hh) / k, (cx + hw) / k, (cy + hh) / k]));
+        }
+    }
+    drawn
 }
 
 /// A grid over a frame: lines across it, ticks along its edges or both, labelled at the edges the
@@ -6344,6 +6536,7 @@ mod tests {
                 scale: 1e8,
                 shape: FrameShape::Rectangle,
                 grid: None,
+                sections: Vec::new(),
                 extent_of: None,
                 extent_color: rustgis_map::layout::INDICATOR_COLOR,
                 extent_width: rustgis_map::layout::INDICATOR_WIDTH,
@@ -6448,6 +6641,7 @@ mod tests {
                 scale: 1e7,
                 shape: FrameShape::Rectangle,
                 grid: None,
+                sections: Vec::new(),
                 extent_of: None,
                 extent_color: rustgis_map::layout::INDICATOR_COLOR,
                 extent_width: rustgis_map::layout::INDICATOR_WIDTH,
@@ -6596,6 +6790,7 @@ mod tests {
             scale,
             shape: FrameShape::Rectangle,
             grid: None,
+            sections: Vec::new(),
             extent_of,
             extent_color: color,
             extent_width: width,
@@ -7219,6 +7414,7 @@ Elaboração: RustGIS",
                     scale: 1e7,
                     shape,
                     grid: None,
+                    sections: Vec::new(),
                     extent_of: None,
                     extent_color: INDICATOR_COLOR,
                     extent_width: INDICATOR_WIDTH,
@@ -7281,6 +7477,7 @@ Elaboração: RustGIS",
             scale,
             shape: FrameShape::Rectangle,
             grid: None,
+            sections: Vec::new(),
             extent_of,
             extent_color: INDICATOR_COLOR,
             extent_width: INDICATOR_WIDTH,
@@ -7330,6 +7527,7 @@ Elaboração: RustGIS",
             scale,
             shape: FrameShape::Rectangle,
             grid: None,
+            sections: Vec::new(),
             extent_of,
             extent_color: INDICATOR_COLOR,
             extent_width: INDICATOR_WIDTH,
@@ -7384,6 +7582,7 @@ Elaboração: RustGIS",
             scale,
             shape: FrameShape::Rectangle,
             grid: None,
+            sections: Vec::new(),
             extent_of,
             extent_color: INDICATOR_COLOR,
             extent_width: INDICATOR_WIDTH,
@@ -7457,6 +7656,7 @@ Elaboração: RustGIS",
             scale,
             shape: FrameShape::Rectangle,
             grid: None,
+            sections: Vec::new(),
             extent_of,
             extent_color: INDICATOR_COLOR,
             extent_width: INDICATOR_WIDTH,
@@ -7502,6 +7702,7 @@ Elaboração: RustGIS",
             scale,
             shape: FrameShape::Rectangle,
             grid: None,
+            sections: Vec::new(),
             extent_of,
             extent_color: INDICATOR_COLOR,
             extent_width: INDICATOR_WIDTH,
@@ -7701,6 +7902,7 @@ Elaboração: RustGIS",
             scale,
             shape: FrameShape::Rectangle,
             grid: None,
+            sections: Vec::new(),
             extent_of,
             extent_color: INDICATOR_COLOR,
             extent_width: INDICATOR_WIDTH,
@@ -8022,6 +8224,7 @@ Elaboração: RustGIS",
                 scale: 1e8,
                 shape: FrameShape::Rectangle,
                 grid: None,
+                sections: Vec::new(),
                 extent_of: None,
                 extent_color: rustgis_map::layout::INDICATOR_COLOR,
                 extent_width: rustgis_map::layout::INDICATOR_WIDTH,
@@ -8148,6 +8351,7 @@ Elaboração: RustGIS",
                 scale: 2e8,
                 shape: FrameShape::Rectangle,
                 grid: Some(grid),
+                sections: Vec::new(),
                 extent_of: None,
                 extent_color: rustgis_map::layout::INDICATOR_COLOR,
                 extent_width: rustgis_map::layout::INDICATOR_WIDTH,
@@ -8189,6 +8393,7 @@ Elaboração: RustGIS",
                 scale: 25_000.0,
                 shape: FrameShape::Rectangle,
                 grid: Some(grid),
+                sections: Vec::new(),
                 extent_of: None,
                 extent_color: rustgis_map::layout::INDICATOR_COLOR,
                 extent_width: rustgis_map::layout::INDICATOR_WIDTH,
@@ -8447,6 +8652,7 @@ Elaboração: RustGIS",
                 scale: 2e8,
                 shape: FrameShape::Rectangle,
                 grid: Some(grid),
+                sections: Vec::new(),
                 extent_of: None,
                 extent_color: rustgis_map::layout::INDICATOR_COLOR,
                 extent_width: rustgis_map::layout::INDICATOR_WIDTH,
@@ -8481,6 +8687,7 @@ Elaboração: RustGIS",
                 scale: 2e8,
                 shape: FrameShape::Rectangle,
                 grid: Some(grid),
+                sections: Vec::new(),
                 extent_of: None,
                 extent_color: rustgis_map::layout::INDICATOR_COLOR,
                 extent_width: rustgis_map::layout::INDICATOR_WIDTH,
@@ -8666,7 +8873,7 @@ Elaboração: RustGIS",
             recorded: None,
             label_layers: Vec::new(),
         };
-        let framed = finish_frame(img, ppp, Some((&map, &view, &all, false)));
+        let framed = finish_frame(img, ppp, Some((&map, &view, &all, false)), &[]);
         let (a, b) = (labels_pm.pixmap(), framed.pixmap());
         assert_ne!(a.data(), b.data(), "the credit is drawn");
         for (_, [x0, y0, x1, y1]) in &labels {
@@ -9013,6 +9220,7 @@ Elaboração: RustGIS",
                 scale: 10_000_000.0,
                 shape: FrameShape::Rectangle,
                 grid: None,
+                sections: Vec::new(),
                 extent_of: None,
                 extent_color: rustgis_map::layout::INDICATOR_COLOR,
                 extent_width: rustgis_map::layout::INDICATOR_WIDTH,
@@ -10064,5 +10272,156 @@ Elaboração: RustGIS",
         // Alone, the element's picture holds no background.
         let (alone, _) = render_element(&l, id, &mut [], 96.0, (&PageInfo::default(), &Env::default()), &mut None).unwrap().unwrap();
         assert!(alone.pixels().iter().all(|c| c.alpha() == 0 || c.green() > 0), "no red in the element's own picture");
+    }
+
+    /// A section line (#2863) runs across its frame, straight on the page, through the place the
+    /// frame shows there whatever its projection, bearing or copy of the world, within the frame's
+    /// shape; on a tilted frame or the globe, only as far as there is ground. One whose place the
+    /// frame doesn't show says why.
+    #[test]
+    fn a_section_line_runs_across_its_frame_through_its_place() {
+        use rustgis_map::Projection;
+        let (w, h) = (400.0, 200.0);
+        let at = Coord::new(-44.66, -22.38);
+        let ends = |map: &Map, (c, scale, bearing, pitch): (Coord, f64, f64, f64), shape: &FrameShape, line| {
+            section_ends(map, &frame_camera(map, c, scale, bearing, pitch), (w, h), shape, line)
+        };
+        let near = |a: f64, b: f64| (a - b).abs() < 0.6;
+        let rect = FrameShape::Rectangle;
+        let mut albers = Map::new("albers");
+        albers.projection = Projection::Custom("EPSG:10857".into());
+        for (map, bearing) in [(Map::new("m"), 0.0), (Map::new("m"), 40.0), (albers, -30.0)] {
+            let view = (Coord::new(at.x - 0.1, at.y + 0.05), 1e6, bearing, 0.0);
+            let cam = frame_camera(&map, view.0, view.1, view.2, view.3);
+            let (x, y) = cam.try_to_screen(map.to_map(at).unwrap(), w, h).unwrap();
+            assert!((0.0..w).contains(&x) && (0.0..h).contains(&y), "{x} {y}");
+            assert_eq!(ends(&map, view, &rect, SectionLine::Horizontal(at)), Ok([(0.0, y), (w, y)]));
+            assert_eq!(ends(&map, view, &rect, SectionLine::Vertical(at)), Ok([(x, 0.0), (x, h)]));
+            // Panned away, its place is outside the frame; the line elsewhere isn't drawn.
+            let away = (Coord::new(at.x + 5.0, at.y), 1e6, bearing, 0.0);
+            assert!(ends(&map, away, &rect, SectionLine::Horizontal(at)).unwrap_err().contains("outside the frame"));
+        }
+        // The copy of the place a frame across 180° shows, and one a turn away from the frame's own.
+        let map = Map::new("m");
+        for (center, place) in [(179.5, -179.5), (-179.5, 179.5), (224.0, -136.0)] {
+            let got = ends(&map, (Coord::new(center, 0.0), 5e7, 0.0, 0.0), &rect, SectionLine::Vertical(Coord::new(place, 0.0)));
+            assert!(got.is_ok_and(|[a, _]| (a.0 - w / 2.0).abs() < w / 2.0), "{center} {got:?}");
+        }
+        // Within its shape: a circle is as wide as the shorter side, and a polygon's outermost
+        // edges count, a place in its notch being outside the frame.
+        let here = (at, 1e6, 0.0, 0.0);
+        let [a, b] = ends(&map, here, &FrameShape::Circle, SectionLine::Horizontal(at)).unwrap();
+        assert!(near(a.0, 100.0) && near(b.0, 300.0), "{a:?} {b:?}");
+        let [a, b] = ends(&map, here, &FrameShape::Ellipse, SectionLine::Vertical(at)).unwrap();
+        assert!(near(a.1, 0.0) && near(b.1, h), "{a:?} {b:?}");
+        let notched = FrameShape::Polygon(vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.5, 0.25), (0.0, 1.0)]);
+        assert!(ends(&map, here, &notched, SectionLine::Horizontal(at)).is_err(), "in the notch");
+        let left = map.to_lonlat(frame_camera(&map, at, 1e6, 0.0, 0.0).to_map(40.0, h / 2.0, w, h)).unwrap();
+        let [a, b] = ends(&map, here, &notched, SectionLine::Horizontal(left)).unwrap();
+        assert!(near(a.0, 0.0) && near(b.0, w), "{a:?} {b:?}");
+        // Tilted to see the horizon, a vertical line stops there, its middle on the ground.
+        let tilted = (at, 5e4, 0.0, 80.0);
+        let cam = frame_camera(&map, at, 5e4, 0.0, 80.0);
+        let [a, b] = ends(&map, tilted, &rect, SectionLine::Vertical(at)).unwrap();
+        assert!(a.1 > 1.0 && near(b.1, h), "{a:?} {b:?}");
+        assert!(cam.try_to_map(a.0, a.1 + 1.0, w, h).is_some() && cam.try_to_map(a.0, a.1 - 1.0, w, h).is_none());
+        // On the globe, it stops at the limb, and a place on the far side isn't shown.
+        let mut globe = Map::new("g");
+        globe.projection = Projection::Globe;
+        let whole = (at, 5e8, 0.0, 0.0);
+        let [a, b] = ends(&globe, whole, &rect, SectionLine::Horizontal(at)).unwrap();
+        assert!(a.0 > 1.0 && b.0 < w - 1.0 && near(a.0 + b.0, w), "{a:?} {b:?}");
+        let far = SectionLine::Vertical(Coord::new(at.x + 180.0, -at.y));
+        assert!(ends(&globe, whole, &rect, far).unwrap_err().contains("map shows"));
+    }
+
+    /// A frame's section lines are drawn over its map in their colour, dashed, with their names at
+    /// both ends, clipped to its shape, as pixels and as vectors in a layer of their own; a frame
+    /// without one draws the same page as before.
+    #[test]
+    fn section_lines_are_drawn_over_their_frame() {
+        use rustgis_map::layout::{FRAME_BORDER_COLOR, FRAME_BORDER_WIDTH, INDICATOR_COLOR, INDICATOR_WIDTH};
+        let blue = Rgba::rgb(0, 0, 255);
+        let page = |shape: FrameShape, sections: Vec<Section>| {
+            let mut map = Map::new("m");
+            (map.basemap, map.graticule) = (rustgis_map::Basemap::Blank, false);
+            let mut l = Layout::new("Layout", 100.0, 100.0);
+            let kind = ElementKind::MapFrame {
+                map: "m".into(),
+                center: Coord::new(0.0, 0.0),
+                scale: 1e7,
+                shape,
+                grid: None,
+                sections,
+                extent_of: None,
+                extent_color: INDICATOR_COLOR,
+                extent_width: INDICATOR_WIDTH,
+                border_color: FRAME_BORDER_COLOR,
+                border_width: FRAME_BORDER_WIDTH,
+                bearing: 0.0,
+                pitch: 0.0,
+            };
+            l.add("Frame", (20.0, 20.0, 60.0, 60.0), kind);
+            (l, map)
+        };
+        let section = |line| Section { color: blue, ..Section::new("A".into(), line) };
+        let middle = Coord::new(0.0, 0.0);
+        let blues = |shape: FrameShape, sections: Vec<Section>| {
+            let (l, map) = page(shape, sections);
+            let pm = render(&l, &mut [map], 254.0, &PageInfo::default()).unwrap();
+            // Ten pixels a millimetre; the share of the row (or column) through the middle, between
+            // two millimetres, in blue.
+            move |vertical: bool, from: u32, to: u32| {
+                let blue = (from * 10..to * 10).filter(|&i| {
+                    let (x, y) = if vertical { (500, i) } else { (i, 500) };
+                    let (r, g, b) = rgb(&pm, x, y);
+                    b > 200 && r < 100 && g < 100
+                });
+                blue.count() as f64 / f64::from((to - from) * 10)
+            }
+        };
+        let horizontal = blues(FrameShape::Rectangle, vec![section(SectionLine::Horizontal(middle))]);
+        assert!(horizontal(false, 30, 70) > 0.99 && horizontal(false, 0, 20) == 0.0 && horizontal(false, 81, 100) == 0.0);
+        assert!(horizontal(true, 21, 49) == 0.0, "no vertical one");
+        let vertical = blues(FrameShape::Rectangle, vec![section(SectionLine::Vertical(middle))]);
+        assert!(vertical(true, 30, 70) > 0.99 && vertical(false, 30, 49) == 0.0);
+        let dashed = Section { dash: rustgis_map::symbology::Dash::new(&[6.0, 6.0]), ..section(SectionLine::Horizontal(middle)) };
+        let share = blues(FrameShape::Rectangle, vec![dashed.clone()])(false, 30, 70);
+        assert!((0.4..0.6).contains(&share), "{share}");
+        // A name is in a box of its colour at each end: pixels off the line there, none mid-way.
+        let (l, map) = page(FrameShape::Rectangle, vec![section(SectionLine::Horizontal(middle))]);
+        let pm = render(&l, &mut [map], 254.0, &PageInfo::default()).unwrap();
+        let off = |x: u32| rgb(&pm, x, 512) == (0, 0, 255);
+        assert!((205..230).any(off) && (770..795).any(off) && !(300..700).any(off));
+        // Clipped to a round frame, whose corners stay clear.
+        let off_centre = Coord::new(0.0, 2.2);
+        let (l, map) = page(FrameShape::Circle, vec![section(SectionLine::Horizontal(off_centre))]);
+        assert!(sections_not_drawn(&l, &[map]).is_empty());
+        let round = blues(FrameShape::Circle, vec![section(SectionLine::Vertical(off_centre))]);
+        assert!(round(true, 30, 70) > 0.99 && round(true, 0, 20) == 0.0);
+        // As vectors, in a layer of their own; none without a section.
+        let layers = |sections| {
+            let (l, map) = page(FrameShape::Rectangle, sections);
+            let (drawing, pictured) = render_drawing(&l, &mut [map], 96.0, &PageInfo::default()).unwrap();
+            assert!(pictured.is_empty());
+            let page = crate::pdf::Page::drawing(drawing, l.width, l.height);
+            let (bytes, _) = crate::pdf::write_with(&[page], "p", crate::pdf::Options::default());
+            String::from_utf8_lossy(&bytes).contains("(Section lines)")
+        };
+        assert!(layers(vec![dashed]) && !layers(Vec::new()));
+        let plain = |sections| {
+            let (l, map) = page(FrameShape::Rectangle, sections);
+            render(&l, &mut [map], 96.0, &PageInfo::default()).unwrap().data().to_vec()
+        };
+        // One whose place is outside the frame draws nothing, and is said, with its frame.
+        let away = section(SectionLine::Vertical(Coord::new(90.0, 0.0)));
+        assert_eq!(plain(vec![away.clone()]), plain(Vec::new()));
+        let (l, map) = page(FrameShape::Rectangle, vec![away, section(SectionLine::Horizontal(middle))]);
+        let gaps = sections_not_drawn(&l, &[map]);
+        assert_eq!(gaps.iter().map(|g| (g.frame, g.section.as_str())).collect::<Vec<_>>(), vec![(1, "A")]);
+        let note = |pages| sections_notice(&gaps.iter().cloned().map(|g| (g, 2)).collect(), pages).unwrap();
+        assert_eq!(note(1), "1 section line(s) not drawn: 'A' of Frame (1): its place is outside the frame");
+        assert!(note(5).contains("'A' of Frame (1) on 2 of 5 pages: "), "{}", note(5));
+        assert_eq!(sections_notice(&BTreeMap::new(), 5), None);
     }
 }

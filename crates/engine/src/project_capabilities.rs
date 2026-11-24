@@ -149,6 +149,7 @@ const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] = &[
     ("layout-chart-facing", command_uses_chart_facing),
     ("blank-paper", command_uses_blank_paper),
     ("layout-frame-border", command_uses_frame_border),
+    ("layout-section", command_uses_section),
     ("layout-text-size", command_uses_text_size),
     ("dggs-system", command_uses_dggs_system),
     ("label-weight", command_weighs_labels),
@@ -252,6 +253,18 @@ fn command_uses_frame_border(id: &str, params: &Value) -> bool {
         "layout.update" => params.get("border").is_some_and(|b| !b.is_null()),
         "layout.import" => imported_layout_uses(params, &["\"border_"], |e| e.kind.has_custom_border()),
         "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_frame_border)),
+        _ => false,
+    }
+}
+
+/// A layout command that adds or changes a map frame's section lines (#2863): an older reader
+/// refuses the kind `section`, and warns that it ignores a frame's `section`, drawing none.
+fn command_uses_section(id: &str, params: &Value) -> bool {
+    match id {
+        "layout.addElement" => params.get("kind").and_then(Value::as_str).is_some_and(|k| k.trim().eq_ignore_ascii_case("section")),
+        "layout.update" => params.get("section").is_some_and(|v| !v.is_null()),
+        "layout.import" => imported_layout_uses(params, &["\"sections\""], |e| e.kind.has_sections()),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_section)),
         _ => false,
     }
 }
@@ -770,6 +783,7 @@ fn layout_capabilities(layouts: &[rustgis_map::layout::Layout]) -> Vec<&'static 
         (elements().any(charts_stack), "layout-chart-stack"),
         (elements().any(charts_facing), "layout-chart-facing"),
         (elements().any(|e| e.kind.has_custom_border()), "layout-frame-border"),
+        (elements().any(|e| e.kind.has_sections()), "layout-section"),
         (elements().any(|e| e.kind.has_custom_text_size()), "layout-text-size"),
     ]
     .into_iter()
