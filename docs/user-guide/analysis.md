@@ -1605,6 +1605,7 @@ click them on the map:
 | --- | --- |
 | Raster Functions | Slope in degrees or percent, aspect, hillshade (8-bit shades from 1 to 255, with 0 for no data), NDVI, band math (`(b4-b3)/(b4+b3)`), remapping, thresholds, resampling |
 | Function Editor | Chains raster functions, each on the previous output |
+| Process | Clips a raster to the view or to a polygon layer, or resamples it ([below](#imagery)) |
 | Suitability Modeler | Scores rasters 1–10 and adds them with weights |
 | Visibility Analysis | A viewshed from a point on an elevation raster, with the Earth's curvature and the refraction of visible light (1/7, as `gdal_viewshed`). The ground along each ray is the cell each point falls in by default; `heights: "bilinear"` (**Ground heights › Between cells (bilinear)** in the Workflows pane) reads it between the cells' centres instead. Both are estimates of the ground between cell centres; between cells is closer on ground that bulges (a hill seen from its top), where the nearest cell can hide cells just inside the horizon. With no radius, or one longer than the raster's diagonal, the viewshed covers the whole raster. The map's **Viewshed N km Here** reads the ground as the Workflows pane's **Ground heights** says. On a raster round the whole Earth the rays don't cross its east–west edge, which the analysis says when the radius reaches it and the way across is shorter: the ground just across the edge is left out, worked out the long way round where the radius reaches the far edge through the raster too (always with no radius), or partly both, near the observer's row and not farther from it. The observer's height must be from 0 to 10,000 m. Ground with no data hides nothing, and next to it bilinear heights take the nearest cell's height; the analysis says how many cells this touched, in a notice. The answer gives both counts (0 when there is nothing to say): `acrossNoData` counts the visible cells whose rays crossed ground with no data (a hidden cell stays hidden whatever that ground is, so it isn't counted, and 0 doesn't mean no ray crossed any); `readNearest` counts every cell, visible or hidden, whose ray took a nearest height next to no data in bilinear mode |
 | Exploratory 3D Analysis | A line of sight between two points, split into seen and hidden parts, with the same curvature and refraction |
@@ -1977,7 +1978,10 @@ save and run models without the canvas:
 ## Imagery
 
 The Imagery tab's groups open their tools in the Workflows pane. The tab belongs to the Imagery
-[extension](index.md#extensions): turn it on in Plugins › Extensions to show the tab:
+[extension](index.md#extensions): turn it on in Plugins › Extensions to show the tab. Four raster
+commands described here aren't part of the extension and run whether or not it is on: **Process**
+(the Raster group of the Analyze tab), **Mosaic Rasters**, **Project Raster** and **Polygons to
+Raster**.
 
 - **Ortho Mapping** and **Reality Mapping** workspaces mosaic georeferenced images into an
   orthomosaic, or elevation rasters into a surface model that exports as a 3D mesh (OBJ).
@@ -2046,9 +2050,10 @@ The Imagery tab's groups open their tools in the Workflows pane. The tab belongs
   every answer has the band names and, when the file gives any, `"wavelengths"` in nanometres.
   After GeoLibre's spectral profile.
 - **Change Detection** (difference, ratio, percent), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI,
-  EVI), **Process** (clip to the view, to a box, or to a polygon layer's selected or all polygons,
-  with the cells outside them no-data; resample) and the **Pixel Editor** (set the pixels inside a
-  polygon). As in Project Raster, the cells outside the polygons are see-through instead (0, with
+  EVI) and the **Pixel Editor** (set the pixels inside a polygon).
+- **Process** (`raster.process`, Analyze › Raster) clips to the view, to a box, or to a polygon
+  layer's selected or all polygons, with the cells outside them no-data, or resamples.
+  As in Project Raster, the cells outside the polygons are see-through instead (0, with
   alpha 0) in an image with an alpha band, and a three-band colour image with neither alpha nor
   no-data gains one for them, so an 8-bit image stays 8-bit when it is exported. A colour image
   with a fourth band of data and no alpha (RGB and near-infrared) gets no-data there as before
@@ -2058,7 +2063,8 @@ The Imagery tab's groups open their tools in the Workflows pane. The tab belongs
   has: clip the others the same way, or mosaic first and clip the result.
 - **Mosaic Rasters** (`raster.mosaic`) merges tiles of one grid, such as the 1 km tiles of a state
   elevation model, into one raster in their own coordinate system and cell size, optionally
-  written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. Inputs
+  written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. It has no
+  pane yet: run it from the Script pane, the AI Assistant, the command line or Python. Inputs
   are layers or file paths; where they overlap, the first one with data wins. Tiles in different
   coordinate systems or cell sizes, or opened from an overview, are refused rather than quietly
   resampled, as are tiles whose cells don't line up; the mosaic has to fit in memory (120 million
@@ -2394,8 +2400,9 @@ overlapping zones each require a separate pass over their raster window.
 
 For `raster.process` polygon clipping, `selectedOnly: true` requires a selection,
 `selectedOnly: false` uses every polygon, and omitting it uses the selection when present.
-The Process pane initially checks Selected only when the chosen layer has a selection, and sends
-the choice explicitly. Clipping and Zonal Statistics share
+The Process section of the Workflows pane (Analyze › Raster › Process) initially checks Selected
+only when the chosen layer has a selection, and sends the choice explicitly. Clipping and Zonal
+Statistics share
 polygon transformation rules so a failed hole cannot silently enlarge the sampled area.
 A malformed ring or a failed projection rejects its complete polygon part in all raster masking
 operations. Clipping skips invalid features and reports their count in the command result;
