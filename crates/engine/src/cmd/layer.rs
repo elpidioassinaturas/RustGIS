@@ -27,7 +27,7 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("info.fileLayers", "List Layers in File", "Home › Add › Add Data", file_layers).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
             .view()
-            .params(r#"{"path": string, "crs"?: "EPSG:… for a CityJSON model (.city.json, a .json, or in a zip) or a CityGML model (.gml, .xml, or in a zip): it replaces the system a model file names; in a zip, it is used for a model naming none RustGIS knows (as layer.addData)", "link"?: "bool: for a file Add Data can link instead of copying (GeoPackage, GeoParquet, FlatGeobuf, Shapefile, .geojson; desktop), also say how it would take it, as link: linked (what it does without stream; for a .geojson, by its size alone, so Add Data sends the answer, as layer.addData unasked also looks at its count) and copy (whether it can be read whole); it opens each table, so only when asked"}"#),
+            .params(r#"{"path": string, "crs"?: "EPSG:… for a CityJSON model (.city.json, a .json, or in a zip) or a CityGML model (.gml, .xml, or in a zip): it replaces the system a model file names; in a zip, it is used for a model naming none RustGIS knows (as layer.addData)", "link"?: "bool: for a file Add Data can link instead of copying (GeoPackage, GeoParquet, FlatGeobuf, Shapefile, .geojson; desktop), also say how it would take it, as link: linked (what it does without stream; for a .geojson, by its size alone, so Add Data sends the answer, as layer.addData unasked also looks at its count) and copy (whether it can be read whole); it opens the tables, up to the first read in place, so only when asked"}"#),
         C::new("info.fileColumns", "List Columns in File", "Home › Add › Add Data › Delimited Text", file_columns).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).view().params(
             r#"{"path": "a delimited text file (CSV, TSV, TXT, DAT, or gzip-compressed text) or a spreadsheet", "delimiter"?: ","|";"|"\\t"|"|", "layer"?: "a spreadsheet's sheet (the first by default)", "crs"?: "EPSG:… (or WKT), as layer.addData: a projected system keeps the columns found by name"}"#,
         ),
@@ -1997,7 +1997,7 @@ fn add_geodatabase(s: &mut Session, p: &Value, path: &str) -> CmdResult {
     // One result, as adding a single file gives it: every layer, the first, and the features.
     let layers: Vec<Value> = results.iter().filter_map(|r| r.get("layers").and_then(Value::as_array)).flatten().cloned().collect();
     let tables: Vec<Value> = results.iter().filter_map(|r| r.get("tables").and_then(Value::as_array)).flatten().cloned().collect();
-    let features: u64 = results.iter().filter_map(|r| r.get("features").and_then(Value::as_u64)).sum();
+    let features = results.iter().filter_map(|r| r.get("features").and_then(Value::as_u64)).fold(0, u64::saturating_add);
     let mut out = json!({"layers": layers, "tables": tables, "features": features});
     if let (Some(o), Some(first)) = (out.as_object_mut(), layers.first()) {
         o.insert("layer".into(), first.clone());
@@ -2525,12 +2525,13 @@ fn streams_by_count(count: Option<u64>) -> bool {
 /// before), files read whole, and those it can't open (`layer.addData` then says why).
 /// `linked` is what `layer.addData` does without `"stream"`, by the same rules
 /// ([`streams_geojson`], [`past_cap_shapefile`] and [`streams_shapefile`], [`streams_by_count`],
-/// linked when any table would be), except a `.geojson` file: by its size alone, as reading its
-/// count means parsing it, so Add Data always sends the answer (`layer.addData` unasked, once it
-/// reads such a file in place, also copies one of few features). A Cancel stops it between
-/// tables, with no question. `copy` is whether it can be read whole: a GeoJSON file or a
-/// Shapefile (and its `.dbf`) within [`rustgis_data::io::max_bytes`]; a source's whole read is
-/// bounded where it is read.
+/// linked when any table would be: the tables are opened in turn up to the first that would),
+/// except a `.geojson` file: by its size alone, as reading its count means parsing it, so Add
+/// Data always sends the answer (`layer.addData` unasked, once it reads such a file in place,
+/// also copies one of few features). A Cancel is looked at before each table is opened and after
+/// the last: the table being opened when it comes finishes, and no question is made. `copy` is
+/// whether it can be read whole: a GeoJSON file or a Shapefile (and its `.dbf`) within
+/// [`rustgis_data::io::max_bytes`]; a source's whole read is bounded where it is read.
 #[cfg(not(target_arch = "wasm32"))]
 fn link_choice(path: &str, tables: &[String]) -> Option<Value> {
     let lower = path.to_ascii_lowercase();
@@ -2546,11 +2547,17 @@ fn link_choice(path: &str, tables: &[String]) -> Option<Value> {
         let gpkg = lower.ends_with(".gpkg");
         let mut linked = false;
         for table in tables.iter().map(|t| gpkg.then_some(t.as_str())) {
-            // Cancel (the chooser closed) is looked at between tables: each open counts its rows.
+            // Cancel (the chooser closed) is looked at between tables: an open may count its rows.
             rustgis_data::progress::check().ok()?;
             let src = rustgis_data::source::open_path(Path::new(path), table).ok()?;
-            linked |= streams_by_count(src.info().count);
+            // One table read in place links them all, so those after it aren't opened.
+            if streams_by_count(src.info().count) {
+                linked = true;
+                break;
+            }
         }
+        // And after the last one opened: a Cancel that came while it opened gives no question.
+        rustgis_data::progress::check().ok()?;
         (linked, true)
     } else {
         return None;
@@ -2953,7 +2960,7 @@ fn add_reads(
     }
     let layers: Vec<Value> = added.iter().filter_map(|r| r.get("layer").cloned()).collect();
     let tables: Vec<Value> = added.iter().filter_map(|r| r.get("table").cloned()).collect();
-    let features: u64 = added.iter().filter_map(|r| r.get("features").and_then(Value::as_u64)).sum();
+    let features = added.iter().filter_map(|r| r.get("features").and_then(Value::as_u64)).fold(0, u64::saturating_add);
     let mut out = json!({"layers": layers, "tables": tables, "features": features});
     // The first layer, as the result of adding a single file says it.
     if let Some(first) = layers.first() {
@@ -3119,8 +3126,8 @@ fn apply_styles(s: &mut Session, id: u32, styles: &[(String, rustgis_data::kml::
 /// The layers a file holds, without adding them: a GeoPackage's feature tables, a GDAL dataset's
 /// layers, or the one layer of other files. `layer.addData` takes a name with `"layer"`. A file
 /// Add Data can link instead of copying says how it would take it, in `"link"`, when `"link": true`
-/// asks ([`link_choice`]): it opens each of a GeoPackage's tables, which the other callers (List
-/// Tables, Repair Data Source) don't need.
+/// asks ([`link_choice`]): it opens a GeoPackage's tables, up to the first read in place, which
+/// the other callers (List Tables, Repair Data Source) don't need.
 fn file_layers(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut v = listed_layers(s, p)?;
@@ -3491,7 +3498,8 @@ fn add_source_read(
             s.active_layer = Some(id);
             ids.push(id);
             streamed = true;
-            features += info.count.unwrap_or(0);
+            // A file may keep any count (a GeoPackage's `gpkg_ogr_contents`): past the largest total, that.
+            features = features.saturating_add(info.count.unwrap_or(0));
             s.notify(
                 format!(
                     "{unique}: {} features, read in place a view at a time (Load All Features loads them into memory)",
@@ -3503,7 +3511,7 @@ fn add_source_read(
             let (mut ds, report) = whole.take().unwrap_or_else(|| source::materialize(src.as_ref())).map_err(err)?;
             ds.name = name;
             ds.source = Some(label.clone());
-            features += ds.features.len() as u64;
+            features = features.saturating_add(ds.features.len() as u64);
             let id = add_dataset(s, ds);
             if let (Some(r), Some(l)) = (style.clone(), s.map_mut().layer_mut(id)) {
                 l.renderer = r;
@@ -4352,7 +4360,7 @@ fn add_live(s: &mut Session, p: &Value, db: &rustgis_data::source::duckdb::Datab
                 }
             };
             added = true;
-            features += r["features"].as_u64().unwrap_or(0);
+            features = features.saturating_add(r["features"].as_u64().unwrap_or(0));
             streamed |= r["streamed"].as_bool().unwrap_or(false);
             ids.extend(r["layers"].as_array().into_iter().flatten().filter_map(Value::as_u64).filter_map(|i| u32::try_from(i).ok()));
         }
@@ -4546,7 +4554,7 @@ pub(crate) fn add_converted(s: &mut Session, p: &Value, label: &str, original: &
             }
             Err(e) => return Err(e),
         };
-        features += r["features"].as_u64().unwrap_or(0);
+        features = features.saturating_add(r["features"].as_u64().unwrap_or(0));
         streamed |= r["streamed"].as_bool().unwrap_or(false);
         for id in r["layers"].as_array().into_iter().flatten().filter_map(Value::as_u64).filter_map(|i| u32::try_from(i).ok()) {
             if let Some(l) = s.map_mut().layer_mut(id) {
@@ -4669,8 +4677,15 @@ fn add_layer_file(s: &mut Session, path: &str) -> CmdResult {
     add_layer_text(s, &text)
 }
 
-/// Adds a layer from a layer file's JSON.
+/// Adds a layer from a layer file's JSON, read from the user's own disk or given by the user.
 pub(crate) fn add_layer_text(s: &mut Session, text: &str) -> CmdResult {
+    let reach = s.file_reach(&Value::Null);
+    add_layer_text_within(s, text, reach)
+}
+
+/// [`add_layer_text`] for a layer file whose addresses reach no wider than `reach`
+/// ([`Session::file_reach`]).
+pub(crate) fn add_layer_text_within(s: &mut Session, text: &str, reach: crate::render::rustgis_tiles::address::Reach) -> CmdResult {
     crate::project::check_format(text, "layer file")?;
     let mut layer: rustgis_map::Layer = serde_json::from_str(text).map_err(|e| format!("not a RustGIS layer file: {e}"))?;
     if layer.dataset.source.as_deref().is_some_and(|source| source.starts_with("geolibre-pending:")) {
@@ -4685,6 +4700,9 @@ pub(crate) fn add_layer_text(s: &mut Session, text: &str) -> CmdResult {
     // A binding in a file is no authority to use a login here.
     crate::s3_connections::clear_bindings(layer.addresses_mut());
     crate::project::clear_login_bindings(layer.addresses_mut());
+    // Before anything it names is read (the repair below reads it).
+    let named = crate::received::hold(layer.addresses_mut(), reach);
+    named.say(s, &format!("the layer file '{}'", layer.name));
     // A fresh id and a unique name in this map; the rest goes through project repair.
     let base = layer.name.clone();
     let mut i = 1;
@@ -6870,12 +6888,21 @@ fn add_download(s: &mut Session, p: &Value) -> CmdResult {
     let bounds = if service { super::service::bounds_of(p.get("bounds"))? } else { None };
     let i = s.downloaded.iter().position(|(d, _)| *d == id).ok_or("no such download (it was dropped when another project opened)")?;
     let (_, bytes) = s.downloaded.remove(i);
+    let read_at = s.downloaded_reach.iter().position(|(d, _)| *d == id).map(|i| s.downloaded_reach.remove(i).1);
     if p.get("geolibreProject").and_then(Value::as_bool) == Some(true) {
         if bytes.len() > rustgis_map::geolibre::MAX_TEXT {
             return Err("GeoLibre project exceeds 64 MiB".into());
         }
         let text = String::from_utf8(bytes).map_err(|_| "GeoLibre project must be UTF-8 JSON")?;
-        return s.run_part("project.importGeolibre", &json!({"text":text}));
+        // Received from where it was read: what it names reaches no wider ([`Session::file_reach`]).
+        // The app says where its download connected ([`Session::download_read_at`]; the browser's
+        // fetch, by its address's name); one that doesn't say reaches only the internet.
+        use crate::render::rustgis_tiles::{address::Reach, cache};
+        let reach = read_at.unwrap_or(Reach::Public).min(cache::ceiling_for(&url));
+        let was = s.receiving(Some(reach));
+        let r = s.run_part("project.importGeolibre", &json!({"text":text}));
+        s.receiving(was);
+        return r;
     }
     if p.get("geolibreLayer").is_some() {
         let name = if b(p, "geolibreZarr") == Some(true) { "zarr.tif".into() } else { url_file_name(&url, &bytes)? };

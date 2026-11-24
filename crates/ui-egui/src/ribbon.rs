@@ -255,6 +255,9 @@ pub(crate) fn arrow_scroll_area<R>(
 /// The collapse button at the right of the tab strip.
 const COLLAPSE_W: f32 = 24.0;
 
+/// The space between two tabs of the tab strip.
+const TAB_GAP: f32 = 2.0;
+
 /// The active tool indicator at the right of the tab strip, unless the Explore tool is on: its
 /// label and width.
 fn tool_indicator(app: &RustGisApp, ui: &Ui) -> Option<(String, f32)> {
@@ -288,22 +291,26 @@ fn tab_strip(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         let tool = tool_indicator(app, ui);
         let tool_w = tool.as_ref().map_or(0.0, |(_, w)| w + ui.spacing().item_spacing.x);
         let room = (ui.available_width() - COLLAPSE_W - 8.0 - tool_w).max(60.0);
-        // Tighter tabs when the window is too narrow for the usual padding.
-        let text: f32 = tabs.iter().map(|(_, c)| text_w(ui, c, semibold(12.5))).sum();
-        let pad = ((room - text) / tabs.len().max(1) as f32).clamp(8.0, 22.0);
+        // Each caption measured once, in semibold (the active tab's face) whichever tab is active, so
+        // the tabs don't move as another is chosen; the tabs take those widths. Tighter tabs when the
+        // window is too narrow for the usual padding, with the spacing between tabs left out of the room.
+        let widths: Vec<f32> = tabs.iter().map(|(_, c)| text_w(ui, c, semibold(12.5))).collect();
+        let text: f32 = widths.iter().sum();
+        let gaps = tabs.len().saturating_sub(1) as f32 * TAB_GAP;
+        let pad = ((room - gaps - text) / tabs.len().max(1) as f32).clamp(8.0, 22.0);
         let key = (app.ui.tab.clone(), room.round() as i32, text.round() as i32);
         let follow = follow_active(ui, egui::Id::unique("tab_strip_active"), key);
         let area = egui::ScrollArea::horizontal().id_salt("tab_strip").max_width(room);
         let tips = [tl!("Scroll the tabs left"), tl!("Scroll the tabs right")];
         arrow_scroll_area(ui, t, "tab_strip", area, tips, |ui| {
             ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
-                for (tab, caption) in &tabs {
+                ui.spacing_mut().item_spacing = vec2(TAB_GAP, 0.0);
+                for ((tab, caption), caption_w) in tabs.iter().zip(&widths) {
                     let tab = tab.as_str();
                     let active = app.ui.tab == tab;
                     let font = if active { semibold(12.5) } else { regular(12.5) };
                     let shown = caption.as_str();
-                    let w = text_w(ui, shown, font.clone()) + pad;
+                    let w = caption_w + pad;
                     let (r, resp) = ui.allocate_exact_size(vec2(w, 32.0), Sense::click());
                     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, active, shown));
                     let body = Rect::from_min_max(pos2(r.min.x, r.min.y + 3.0), r.max);
@@ -1192,6 +1199,12 @@ fn publication_layout(app: &mut RustGisApp, profile: &rustgis_engine::cmd::layou
     if let Some(style) = style {
         p["style"] = json!(style);
     }
+    make_publication(app, p);
+}
+
+/// Runs `layout.publication` with `p`, as the menu and the wizard make a publication layout: its
+/// warnings said and the Publish tab opened; true when the layout was made.
+pub(crate) fn make_publication(app: &mut RustGisApp, p: Value) -> bool {
     // The view's extent may not be known (an empty map): said, and the tab stays.
     match app.run("layout.publication", p) {
         Ok(r) => {
@@ -1201,14 +1214,18 @@ fn publication_layout(app: &mut RustGisApp, profile: &rustgis_engine::cmd::layou
                 app.session.notify(said.join("\n"), false);
             }
             app.ui.tab = "Publish".into();
+            true
         }
-        Err(e) => app.session.notify(e, true),
+        Err(e) => {
+            app.session.notify(e, true);
+            false
+        }
     }
 }
 
 /// A sheet style's name in the menu and what it looks like, `tl!` literals (as
 /// [`publication_label`]); `None` for a style added without them.
-fn publication_style(id: &str) -> Option<(&'static str, &'static str)> {
+pub(crate) fn publication_style(id: &str) -> Option<(&'static str, &'static str)> {
     Some(match id {
         "classic" => (tl!("Classic"), tl!("The title over the map, the sources and the reference in boxes under it.")),
         "banner" => (tl!("Banner"), tl!("The title and subtitle in a band of colour across the top.")),
@@ -1223,7 +1240,7 @@ fn publication_style(id: &str) -> Option<(&'static str, &'static str)> {
 /// A publication figure's name in the menu: a `tl!` literal each, so the catalogs find it (the
 /// engine's labels, which it matches in English); `None` for a figure added without one. Sheets
 /// are named by their page size, as New Layout names it.
-fn publication_label(id: &str) -> Option<&'static str> {
+pub(crate) fn publication_label(id: &str) -> Option<&'static str> {
     Some(match id {
         "figure-1col" => tl!("Journal figure, 1 column (90 mm)"),
         "figure-1.5col" => tl!("Journal figure, 1.5 columns (140 mm)"),
@@ -1240,8 +1257,14 @@ fn publication_sheet(size: &str, orientation: &str) -> Option<&'static rustgis_e
     rustgis_engine::cmd::layout::PUBLICATION_PROFILES.iter().find(|p| p.sheet && p.id == id)
 }
 
+/// A publication profile's name in the menu: its `tl!` literal, or the engine's label for a figure
+/// added without one. The wizard names its sizes with it too.
+pub(crate) fn profile_label(profile: &rustgis_engine::cmd::layout::PublicationProfile) -> &'static str {
+    publication_label(profile.id).unwrap_or_else(|| tl!(profile.label))
+}
+
 /// A page size as the menus name it: `A4 (210 × 297 mm)`, its name translated.
-fn page_label(label: &str, w: f64, h: f64) -> String {
+pub(crate) fn page_label(label: &str, w: f64, h: f64) -> String {
     format!("{} ({w:.0} × {h:.0} mm)", tl!(label))
 }
 
@@ -1286,11 +1309,16 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
                 }
                 ui.separator();
                 for profile in rustgis_engine::cmd::layout::PUBLICATION_PROFILES.iter().filter(|p| !p.sheet) {
-                    let label = publication_label(profile.id).unwrap_or_else(|| tl!(profile.label));
-                    if ui.button(label).clicked() {
+                    if ui.button(profile_label(profile)).clicked() {
                         publication_layout(app, profile, None);
                         ui.close();
                     }
+                }
+                // The same layout asked step by step: its texts and accent too (#2850).
+                ui.separator();
+                if ui.button(tl!("Publication Layout Wizard…")).clicked() {
+                    let _ = app.run("ui.dialog", json!({"name": "publicationWizard"}));
+                    ui.close();
                 }
             });
             ui.separator();
@@ -2843,7 +2871,7 @@ fn edit_tab(app: &mut RustGisApp, ui: &mut Ui) {
             _ => (Tool::CreatePoint, "point_tool"),
         };
         let checked = app.session.tool.creates();
-        let r = big(
+        let (r, options) = big_split_menu(
             ui,
             app,
             icon,
@@ -2852,8 +2880,14 @@ fn edit_tab(app: &mut RustGisApp, ui: &mut Ui) {
             "tool.set",
             json!({"tool": tool.code()}),
             checked,
-            false,
+            "Create options",
+            "Create a feature by drawing or by coordinates.",
+            true,
+            |ui, app| {
+                menu_item(ui, app, "goto_xy", "Point by Coordinates…", "ui.dialog", json!({"name":"createPointXY"}));
+            },
         );
+        crate::showme::ring(ui, app, options.rect, "ui.dialog", &json!({"name":"createPointXY"}));
         if r.clicked() {
             app.map.cancel_sketch();
         }
@@ -6867,6 +6901,36 @@ mod tests {
         assert_eq!(h.state().session.project.layouts.len(), before + 3);
         let l = h.state().session.project.layouts.last().unwrap();
         assert!(l.elements.iter().all(|e| e.name != "Panel Box" && e.name != "Title"), "a figure, its title left to the caption");
+    }
+
+    /// New Layout › Publication Layout › Publication Layout Wizard… opens the wizard and closes
+    /// the menu, with nothing made yet (#2850).
+    #[test]
+    fn the_publication_menu_opens_the_wizard() {
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                ui.horizontal(|ui| project_group(app, ui));
+            },
+            cities(),
+        );
+        h.run();
+        let before = h.state().session.project.layouts.len();
+        h.get_by_label("New Layout").click();
+        h.run();
+        h.get_by_label("Publication Layout").hover();
+        h.run();
+        h.get_by_label("Publication Layout Wizard…").click();
+        h.run();
+        assert_eq!(h.state().dialogs.open, Some("publicationWizard"));
+        assert!(h.state().dialogs.publication.is_some());
+        assert_eq!(h.state().session.project.layouts.len(), before, "nothing made yet");
+        assert!(h.query_by_label("Publication Layout Wizard…").is_none(), "the menu closed");
     }
 
     /// A submenu of short rows (a sheet's styles) opens at least SUBMENU_MIN_W wide, not as a

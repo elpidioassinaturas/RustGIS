@@ -115,6 +115,12 @@ pub fn usable() -> bool {
     available() && program("ogrinfo").is_some_and(|p| check_version(&p).is_ok())
 }
 
+/// Whether a test that needs GDAL runs: skipped without a [`usable`] GDAL, unless
+/// `RUSTGIS_REQUIRE_GDAL` is set, when it fails on the `Err` instead.
+pub fn test_runs() -> std::result::Result<bool, String> {
+    external::test_runs("RUSTGIS_REQUIRE_GDAL", "GDAL 3.8 or later (ogr2ogr and ogrinfo)", usable())
+}
+
 fn missing() -> DataError {
     DataError::Unsupported(missing_text(crate::no_programs_here()))
 }
@@ -437,7 +443,7 @@ struct Conversion {
     path: PathBuf,
     unprojected: bool,
     in_lonlat: bool,
-    notes: Vec<String>,
+    notes: crate::loss::Notes,
     empty: bool,
 }
 
@@ -473,7 +479,10 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
     )?
     .ok_or_else(|| DataError::Format(format!("layer '{layer}' has no compatible declared geometry")))?;
     if converted.unprojected {
-        converted.notes.push(format!("GDAL: '{layer}' has no declared coordinate system; its coordinates were left unprojected"));
+        converted.notes.push(crate::loss::Note::loss(
+            crate::loss::LossCode::AssumedCrs,
+            format!("GDAL: '{layer}' has no declared coordinate system; its coordinates were left unprojected"),
+        ));
     }
     if converted.in_lonlat {
         converted.notes.push(in_lonlat_note(layer));
@@ -519,20 +528,22 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
             }
         }
     }
-    let mut notes: crate::loss::Notes = converted.notes.into();
+    let mut notes: crate::loss::Notes = converted.notes;
     notes.extend(zm_note);
     Ok(FreshConverted { path: converted.path, notes, empty: converted.empty, zm_dropped, workspace })
 }
 
 /// A counted loss, or an honest diagnostic when a nonempty replacement's source count is unknown.
-fn conversion_count_note(layer: &str, expected: Option<u64>, actual: u64, nonempty: bool) -> Option<String> {
+fn conversion_count_note(layer: &str, expected: Option<u64>, actual: u64, nonempty: bool) -> Option<crate::loss::Note> {
     match expected {
-        Some(expected) if actual < expected => {
-            Some(format!("{layer}: GDAL conversion left out {} of {expected} source features", expected - actual))
-        }
-        None if nonempty => Some(format!(
-            "{layer}: couldn't check how many source features GDAL's conversion kept because the source count is unknown; features may have been left out"
+        Some(expected) if actual < expected => Some(crate::loss::Note::loss(
+            crate::loss::LossCode::DroppedFeature,
+            format!("{layer}: GDAL conversion left out {} of {expected} source features", expected - actual),
         )),
+        // Only a possible loss: said without a code.
+        None if nonempty => Some(crate::loss::Note::plain(format!(
+            "{layer}: couldn't check how many source features GDAL's conversion kept because the source count is unknown; features may have been left out"
+        ))),
         _ => None,
     }
 }
@@ -598,7 +609,13 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
     if !fresh && same && out.metadata().is_ok_and(|m| m.len() > 0) {
         touch(&out);
         touch(&keyfile);
-        return Ok(Some(Conversion { path: out, unprojected: was_unprojected, in_lonlat: was_in_lonlat, notes: Vec::new(), empty: false }));
+        return Ok(Some(Conversion {
+            path: out,
+            unprojected: was_unprojected,
+            in_lonlat: was_in_lonlat,
+            notes: crate::loss::Notes::new(),
+            empty: false,
+        }));
     }
     // A count of Z/M features kept for an earlier conversion with this tag isn't this one's.
     if !fresh {
@@ -711,19 +728,23 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
             let count = counts.entry(line.to_string()).or_default();
             *count = count.saturating_add(1);
         }
-        let mut notes: Vec<String> = counts.into_iter().map(|(line, count)| format!("GDAL: {line} ({count} occurrence(s))")).collect();
+        let mut notes: crate::loss::Notes =
+            counts.into_iter().map(|(line, count)| format!("GDAL: {line} ({count} occurrence(s))")).collect();
         // A layer declaring one geometry type holds no other; only a mixed layer is counted. A
         // count that fails doesn't undo a good conversion: the possible loss is said instead.
         if let Some(family) = family.filter(|_| kind.is_none()) {
             match count_other_families(&full, layer, family) {
                 Ok(0) => {}
-                Ok(other) => notes.push(format!("GDAL: {other} features of another geometry type were left out")),
-                Err(_) => notes.push("GDAL: an unknown number of features of another geometry type may have been left out".into()),
+                Ok(other) => notes.push(crate::loss::Note::loss(
+                    crate::loss::LossCode::DroppedFeature,
+                    format!("GDAL: {other} features of another geometry type were left out"),
+                )),
+                Err(_) => notes.push("GDAL: an unknown number of features of another geometry type may have been left out"),
             }
         }
         notes
     } else {
-        Vec::new()
+        crate::loss::Notes::new()
     };
     Ok(Some(Conversion { path: out, unprojected, in_lonlat, notes, empty: !any }))
 }
@@ -984,7 +1005,7 @@ mod tests {
     /// layer was before, and said. A conversion made before is not reused for one in its own.
     #[test]
     fn layers_are_converted_in_their_own_system_when_gdal_is_installed() {
-        if !available() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1077,7 +1098,7 @@ mod tests {
     /// A VRT renamed `.tab` isn't opened as a VRT, so the file it names isn't read.
     #[test]
     fn a_renamed_vrt_isnt_read_when_gdal_is_installed() {
-        if !available() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1125,7 +1146,7 @@ mod tests {
     /// keeps all five: the surfaces, the curves and the collection were left out before.
     #[test]
     fn keeps_surfaces_curves_and_collections_when_gdal_is_installed() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = std::env::temp_dir().join(format!("rustgis-gdal-surfaces-{}", std::process::id()));
@@ -1166,7 +1187,7 @@ mod tests {
     #[test]
     fn converts_a_mixed_kml_with_source_provenance_when_gdal_is_installed() {
         use crate::source::FeatureSource;
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = std::env::temp_dir().join(format!("rustgis-gdal-test-{}", std::process::id()));
@@ -1218,20 +1239,20 @@ mod tests {
     fn unknown_nonempty_conversion_counts_are_reported_and_known_clean_counts_are_silent() {
         let note = conversion_count_note("source", None, 1, true).unwrap();
         assert!(note.contains("source count is unknown") && note.contains("features may have been left out"));
+        assert_eq!(note.loss, None, "only a possible loss");
         assert!(conversion_count_note("source", Some(1), 1, true).is_none());
         assert!(conversion_count_note("source", Some(0), 0, false).is_none());
         assert!(conversion_count_note("source", None, 0, false).is_none());
-        assert_eq!(
-            conversion_count_note("source", Some(3), 1, true).as_deref(),
-            Some("source: GDAL conversion left out 2 of 3 source features")
-        );
+        let short = conversion_count_note("source", Some(3), 1, true).unwrap();
+        assert_eq!(short.as_str(), "source: GDAL conversion left out 2 of 3 source features");
+        assert_eq!(short.loss, Some(crate::loss::LossCode::DroppedFeature));
     }
 
     /// Indexed FlatGeobuf conversion drops empty polygons in GDAL, before RustGIS reads it.
     /// Both a new conversion and a cache hit must say how many source features were lost.
     #[test]
     fn conversion_reports_empty_polygons_left_out_but_not_clean_input() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1281,7 +1302,7 @@ mod tests {
     /// the conversion cache trusts while making the source unreadable by its allowed driver.
     #[test]
     fn reused_conversion_skips_listing_and_keeps_the_source_count() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1332,7 +1353,7 @@ mod tests {
 
     #[test]
     fn fresh_conversion_reports_dropped_dimensions_but_not_for_clean_xy_data() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = std::env::temp_dir().join(format!("rustgis-gdal-fresh-dimensions-{}", std::process::id()));
@@ -1389,7 +1410,7 @@ mod tests {
 
     #[test]
     fn fresh_csv_diagnostics_count_repeated_overflows_without_claiming_feature_loss() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1425,7 +1446,7 @@ mod tests {
 
     #[test]
     fn fresh_selected_family_reports_other_geometries_but_not_missing_or_matching_geometries() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1442,7 +1463,10 @@ mod tests {
             let fresh = convert_one_fresh_in(&dir.path().join("cache"), &path, "survey", Some(Family::Points), None).unwrap();
             let omitted = fresh.notes.iter().filter(|note| note.contains("another geometry type")).collect::<Vec<_>>();
             if mixed {
-                assert_eq!(omitted, vec!["GDAL: 2 features of another geometry type were left out"]);
+                assert_eq!(
+                    omitted.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+                    vec!["GDAL: 2 features of another geometry type were left out"]
+                );
             } else {
                 assert!(omitted.is_empty(), "{:?}", fresh.notes);
                 assert!(fresh.notes.is_empty(), "single-family input has no conversion losses: {:?}", fresh.notes);
@@ -1518,7 +1542,7 @@ mod tests {
 
     #[test]
     fn fresh_generic_layer_reports_only_selected_features_with_dropped_dimensions() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1553,7 +1577,7 @@ mod tests {
 
     #[test]
     fn generic_dimension_count_includes_measures_and_quotes_layer_names() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();

@@ -110,7 +110,9 @@ marked with a green ring, when adding and editing alike.
 **Edit**, beside **Add** at the top of the Capture sheet, changes shapes already on the map, again
 at the cross:
 
-- **Pick Feature at Cross** picks the feature under the cross and draws its vertices.
+- **Pick Feature at Cross** picks the feature under the cross and draws its vertices. A feature
+  with a place that can't be given in longitude/latitude can't be reshaped here: a notice names it
+  and the pick ends.
 - For a line or polygon, **Pick Vertex at Cross** picks the nearest vertex. Then **Move Here**
   moves it to the cross, **Add After** adds a vertex there after it, and **Delete Vertex** removes
   it.
@@ -215,7 +217,12 @@ Where a change meets one made on the computer since the package was made:
   given in longitude/latitude (one far past where that system reaches) stays as stored when it
   lies outside the area when the area is synced (**Sync**, or a package that goes back as a whole
   map); one the area holds can't be compared with the phone's, and the sync is refused, naming it.
-  A return by the list of changes is refused for any such feature of the layer, naming it.
+  Send Field Package can't list the changes of a layer holding such a feature the package gave:
+  the package goes back as a whole map, and the phone says why, naming it. Bring Back of a list of changes refuses
+  only for such a feature that the list changes, naming it: one of the computer's features that
+  the list edits or deletes, or one of the package's features that it adds or edits. The others
+  stay as stored. A change that would keep among the conflicts a version with such a place
+  refuses it too, naming the feature, as conflicts are kept in longitude/latitude.
 
 Each of these keeps the version that lost on the offline area: the computer's values and shape
 the phone's replaced, the phone's edits to a feature deleted on the computer, the computer's feature
