@@ -31,6 +31,7 @@ pub use peer::Peer;
 pub(crate) use roles::{Document, ParamRole, Role};
 mod parameters;
 pub mod project_log;
+mod received;
 pub use parameters::{params_envelope, script_line, split_script_id};
 pub use project_log::{LogCopy, log_identifier, log_params};
 pub mod s3_connections;
@@ -422,13 +423,14 @@ fn names_said(names: &[String]) -> String {
 
 /// What a raster layer read in place holds for its statistics and tools, when it holds an
 /// overview of the image the map draws. A file on this computer (`tools_read_file`) is read again
-/// by each geoprocessing tool, at the finest level it can hold ([`crate::cmd::gp`]).
+/// by each geoprocessing tool and each command that makes a raster in the background, at the
+/// finest level it can hold ([`crate::cmd::gp`], [`crate::cmd::workflows::Input`]).
 pub(crate) fn in_place_overview(d: &rustgis_data::raster::Raster, tools_read_file: bool) -> Option<String> {
     let (fw, fh) = d.overview?;
     let (w, h) = (d.width, d.height);
     Some(if tools_read_file {
         format!(
-            "read in place: the map draws its {fw} × {fh} pixels as it needs them, and geoprocessing tools read the file (built-in ones at the finest level they can hold, GeoLibre ones whole), while statistics, histograms, plugin tools and other raster commands read a {w} × {h} overview"
+            "read in place: the map draws its {fw} × {fh} pixels as it needs them, and geoprocessing tools and the commands that make a raster read the file (at the finest level they can hold, GeoLibre tools whole), while statistics, histograms, plugin tools, Build Mosaic, Train Deep Learning Model and other raster commands read a {w} × {h} overview"
         )
     } else {
         format!(
@@ -748,6 +750,7 @@ struct PutAside {
     plugin_runs: Vec<cmd::gp::StartedRun>,
     downloading: Vec<u64>,
     downloaded: Vec<(u64, Vec<u8>)>,
+    downloaded_reach: Vec<(u64, render::rustgis_tiles::address::Reach)>,
     url_requests: Vec<UrlRequest>,
     policy_work: policy::downloads::Work,
     landed_reads: Vec<(u64, LandedRead)>,
@@ -1080,6 +1083,8 @@ pub struct Session {
     downloading: Vec<u64>,
     /// Downloads that landed, waiting for `layer.addDownload`.
     pub(crate) downloaded: Vec<(u64, Vec<u8>)>,
+    /// Where downloads connected, as the front end saw it ([`Session::download_read_at`]).
+    pub(crate) downloaded_reach: Vec<(u64, render::rustgis_tiles::address::Reach)>,
     /// Downloads that landed already read (an ArcGIS layer's protocol buffer pages, joined),
     /// waiting for `layer.addDownload` too.
     pub(crate) landed_reads: Vec<(u64, LandedRead)>,
@@ -1099,6 +1104,8 @@ pub struct Session {
     /// Set by [`Session::request_url`] for [`Session::guarded`]: the command running changed
     /// nothing, it only left a request (a plugin's own answer can't claim that). Also set by a move
     /// that left everything where it was (`layout.arrange`, `layer.move`): no step to undo.
+    /// Each command has its own: [`Session::guarded`] clears it on entry and puts the enclosing
+    /// command's back on exit.
     request_only: bool,
     /// What the commands run as steps of the transaction running now did ([`Session::shared_step`]):
     /// the one account scripts, tasks and plugins decide their undo step from.
@@ -1106,6 +1113,10 @@ pub struct Session {
     /// Set by [`Session::run_leaving_downloads`]: `layer.addUrl` leaves what it would wait for
     /// to the front end ([`Session::request_url`]), as in the browser.
     leave_downloads: bool,
+    /// Set by [`Session::receiving`]: the files the commands run now open were downloaded from an
+    /// address reached at this reach, which what they name is held within
+    /// ([`Session::file_reach`]).
+    received: Option<crate::render::rustgis_tiles::address::Reach>,
     /// Set by [`prefs::opt_in`]: the command line and Python read the remembered Earthdata token
     /// for a command that names a data host, before it binds its accounts.
     saved_secrets_opted_in: bool,
@@ -1552,6 +1563,7 @@ impl Session {
             plugin_watch: Default::default(),
             downloading: Vec::new(),
             downloaded: Vec::new(),
+            downloaded_reach: Vec::new(),
             landed_reads: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             landed_windows: Vec::new(),
@@ -1565,6 +1577,7 @@ impl Session {
             request_only: false,
             shared_steps: StepTally::default(),
             leave_downloads: false,
+            received: None,
             saved_secrets_opted_in: false,
             plugin_retries: Vec::new(),
             url_waits: cmd::plugins::fetch::UrlWaits::default(),
@@ -1650,6 +1663,20 @@ impl Session {
             self.downloaded.push((id, bytes));
         }
         landed
+    }
+
+    /// Says where a download under way connected (`cache::Fetched::origin`), before its bytes are
+    /// handed over: a GeoLibre project downloaded so is read within that reach
+    /// (`layer.addDownload`), and one handed over without it reaches only the internet.
+    pub fn download_read_at(&mut self, id: u64, reach: render::rustgis_tiles::address::Reach) {
+        if !self.downloading.contains(&id) {
+            return;
+        }
+        // As many as downloads under way can be: past that, the oldest are forgotten.
+        if self.downloaded_reach.len() >= 64 {
+            self.downloaded_reach.remove(0);
+        }
+        self.downloaded_reach.push((id, reach));
     }
 
     /// Hands over a download read already (an ArcGIS layer's protocol buffer pages, joined, see
@@ -1931,6 +1958,7 @@ impl Session {
             // And the coordinate systems that needed a missing datum grid, after every command.
             self.say_grid_notes();
             self.say_unplaced();
+            self.say_public_only_full();
             // A plugin's command waiting for its fetches answers `pending` and runs again when they
             // land: logged then, once. (Another command's `pending`, a download the web app makes, is
             // logged as it is asked for: nothing runs it again.)
@@ -2370,7 +2398,8 @@ impl Session {
         self.restorable += u32::from(mutates);
         // Edit counts roll back with the project when a command fails part way.
         let counts = mutates.then(|| self.edit_counts.clone());
-        self.request_only = false;
+        // Its flag is its own: the enclosing command's comes back after it, whatever it left.
+        let outer_request_only = std::mem::take(&mut self.request_only);
         // Its steps' account is its own: an enclosing command's comes back after it.
         let outer_steps = std::mem::take(&mut self.shared_steps);
         self.quiet_failure = false;
@@ -2527,6 +2556,7 @@ impl Session {
             }
             _ => {}
         }
+        self.request_only = outer_request_only;
         if res.is_err() {
             self.restore_url_request_checkpoint(requests);
             (self.plugin_retries, self.url_waits) = retry_state;
@@ -2612,6 +2642,7 @@ impl Session {
             plugin_runs: take(&mut self.plugin_runs),
             downloading: take(&mut self.downloading),
             downloaded: take(&mut self.downloaded),
+            downloaded_reach: take(&mut self.downloaded_reach),
             landed_reads: take(&mut self.landed_reads),
             #[cfg(not(target_arch = "wasm32"))]
             landed_windows: take(&mut self.landed_windows),
@@ -2670,6 +2701,7 @@ impl Session {
             plugin_runs,
             downloading,
             downloaded,
+            downloaded_reach,
             landed_reads,
             #[cfg(not(target_arch = "wasm32"))]
             landed_windows,
@@ -2702,6 +2734,7 @@ impl Session {
         (self.pending, self.plugin_runs, self.plugin_retries, self.url_waits) = (pending, plugin_runs, plugin_retries, url_waits);
         self.file_outputs = file_outputs;
         (self.downloading, self.downloaded, self.url_requests) = (downloading, downloaded, url_requests);
+        self.downloaded_reach = downloaded_reach;
         self.restore_policy_work(policy_work);
         self.landed_reads = landed_reads;
         #[cfg(not(target_arch = "wasm32"))]
@@ -3291,6 +3324,7 @@ impl Session {
             self.grid_notes_checked = Some(web_time::Instant::now());
             self.say_grid_notes();
             self.say_unplaced();
+            self.say_public_only_full();
         }
     }
 
@@ -3300,6 +3334,24 @@ impl Session {
     pub fn note_shown_systems(&mut self) {
         for m in &mut self.project.maps {
             m.note_shown_system();
+        }
+    }
+
+    /// Says once that the table of web addresses held to the internet is full
+    /// ([`render::rustgis_tiles::cache::take_public_only_full`]): from then on, until RustGIS
+    /// restarts, an address it has no record of is read only from the internet, so the user's own
+    /// on this computer or the local network is refused.
+    fn say_public_only_full(&mut self) {
+        // A copy run ahead (`requests_into`, desktop only) leaves it for the session that takes
+        // its results.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.requests_into.is_some() {
+            return;
+        }
+        if render::rustgis_tiles::cache::take_public_only_full() {
+            self.warn(
+                "web addresses: RustGIS has recorded as many addresses that may reach only the internet as it can hold, so until it restarts an address it hasn't seen before is read only from the internet, not this computer or the local network",
+            );
         }
     }
 

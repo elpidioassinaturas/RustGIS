@@ -75,6 +75,11 @@ impl Project {
         {
             required.push("label-clearance");
         }
+        // And whether they remove duplicates (#2847), for the same reason.
+        if !required.contains(&"label-duplicates") && self.styles.iter().any(|s| s.labels.in_order().any(|c| c.remove_duplicates.is_some()))
+        {
+            required.push("label-duplicates");
+        }
         let commands: Vec<&'static str> =
             COMMAND_CAPABILITIES.iter().filter_map(|&(name, uses)| self.uses_commands(uses).then_some(name)).collect();
         required.extend(commands.into_iter().filter(|name| !required.contains(name)).collect::<Vec<_>>());
@@ -147,6 +152,7 @@ const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] = &[
     ("layout-chart-classes", command_uses_chart_classes),
     ("layout-chart-stack", command_uses_chart_stack),
     ("layout-chart-facing", command_uses_chart_facing),
+    ("layout-chart-outline", command_uses_chart_outline),
     ("blank-paper", command_uses_blank_paper),
     ("layout-frame-border", command_uses_frame_border),
     ("layout-section", command_uses_section),
@@ -154,7 +160,33 @@ const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] = &[
     ("dggs-system", command_uses_dggs_system),
     ("label-weight", command_weighs_labels),
     ("label-clearance", command_clears_labels),
+    ("label-duplicates", command_removes_duplicate_labels),
+    ("tile-resampling", command_resamples_tiles),
 ];
+
+/// A saved `labels.placement` that has a class remove duplicates, read as the command reads it
+/// (#2847): an older reader runs it without the key, saying nothing, so every label would show.
+/// False or null is what an older reader keeps.
+fn command_removes_duplicate_labels(id: &str, params: &Value) -> bool {
+    match id {
+        "labels.placement" => params.get("removeDuplicates").and_then(crate::cmd::labels::number).is_some(),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_removes_duplicate_labels)),
+        _ => false,
+    }
+}
+
+/// A saved `map.addTiles` or `map.setTiles` drawing a tile layer's pictures nearest (#2804), read as
+/// the command reads it: an older reader runs it without the key, saying nothing, so the layer would
+/// stay blended. `bilinear` is what an older reader keeps.
+fn command_resamples_tiles(id: &str, params: &Value) -> bool {
+    match id {
+        "map.addTiles" | "map.setTiles" => {
+            crate::cmd::tiles::resampling(params).ok().flatten() == Some(rustgis_map::raster::Resampling::Nearest)
+        }
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_resamples_tiles)),
+        _ => false,
+    }
+}
 
 /// A saved `labels.placement` that gives a class a clearance other than 2, read as the command
 /// reads it (#2828): an older reader runs it without the key, saying nothing, so the labels would
@@ -454,6 +486,32 @@ fn command_uses_chart_facing(id: &str, params: &Value) -> bool {
     }
 }
 
+fn charts_outlined(e: &rustgis_map::layout::Element) -> bool {
+    e.kind.chart_uses_outline()
+}
+
+/// A layout command that draws a line round a chart's bars (#2487 part 4b): an object without a
+/// width (the outline's, or the 0.5 points it is first given) or with one above 0. Null, or a
+/// width of 0, draws none, so it needs nothing.
+fn command_uses_chart_outline(id: &str, params: &Value) -> bool {
+    let outlined = || {
+        // The width read as the command reads it, a number or a number in text.
+        params.get("barOutline").filter(|o| o.is_object()).is_some_and(|o| match o.get("width") {
+            None | Some(Value::Null) => true,
+            Some(_) => crate::cmd::f(o, "width").is_some_and(|w| w > 0.0),
+        })
+    };
+    match id {
+        "layout.addElement" => {
+            params.get("kind").and_then(Value::as_str).is_some_and(|k| k.trim().eq_ignore_ascii_case("chart")) && outlined()
+        }
+        "layout.update" => outlined(),
+        "layout.import" => imported_layout_uses(params, &["\"bar_outline\""], charts_outlined),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_chart_outline)),
+        _ => false,
+    }
+}
+
 /// Whether a `layout.import` carries its layout as `"text"` with an element `uses`: an older
 /// reader reads it without the keys it doesn't know. One read from a `"path"` is a layout file,
 /// whose own header requires what it uses (#2277). Every save asks, so a text with none of the
@@ -636,6 +694,12 @@ fn label_clearance(layer: &Layer) -> bool {
     layer.labels.in_order().any(|c| c.clearance != rustgis_map::symbology::DEFAULT_LABEL_CLEARANCE)
 }
 
+/// Whether a layer's label classes remove duplicates (#2847): an older reader would drop the
+/// setting, and place and save every label.
+fn removes_duplicate_labels(layer: &Layer) -> bool {
+    layer.labels.in_order().any(|c| c.remove_duplicates.is_some())
+}
+
 /// The capabilities a layer needs, in [`map_capabilities`]'s order.
 fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
     [
@@ -648,6 +712,7 @@ fn layer_capabilities(layer: &Layer) -> Vec<&'static str> {
         (label_guide(layer), "label-guide"),
         (label_weight(layer), "label-weight"),
         (label_clearance(layer), "label-clearance"),
+        (removes_duplicate_labels(layer), "label-duplicates"),
         (held_natively(&layer.dataset), super::NATIVE_COORDINATES),
     ]
     .into_iter()
@@ -674,7 +739,9 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         mut grid_color,
     ) = (false, false, false, false, false, false, false, false, false, false, false, false, false, false, false);
     let (mut polygon, mut svg) = (false, false);
-    let (mut offline_area_id, mut paper, mut native, mut guided, mut weighed, mut cleared) = (false, false, false, false, false, false);
+    let (mut offline_area_id, mut paper, mut native, mut guided, mut weighed, mut cleared, mut deduped) =
+        (false, false, false, false, false, false, false);
+    let mut crisp = false;
     for map in maps {
         offline_area_id |= map.offline_area_id.is_some();
         // A blank basemap's paper colour (#2532), which an older reader would draw and save white.
@@ -682,6 +749,9 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         guided |= map.layers.iter().any(label_guide);
         weighed |= map.layers.iter().any(label_weight);
         cleared |= map.layers.iter().any(label_clearance);
+        deduped |= map.layers.iter().any(removes_duplicate_labels);
+        // A tile layer drawn nearest (#2804), which an older reader would draw and save blended.
+        crisp |= map.tiles.iter().any(|t| t.resampling != rustgis_map::raster::Resampling::Bilinear);
         // An older reader doesn't know the MGRS graticule (#1042 piece 8): it refuses the
         // project by name rather than failing to read the type.
         mgrs |= map.graticule_type == rustgis_map::graticule::GraticuleType::Mgrs;
@@ -731,6 +801,8 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         (guided, "label-guide"),
         (weighed, "label-weight"),
         (cleared, "label-clearance"),
+        (deduped, "label-duplicates"),
+        (crisp, "tile-resampling"),
         (offline_area_id, "offline-map-area-id"),
         (paper, "blank-paper"),
         (native, super::NATIVE_COORDINATES),
@@ -782,6 +854,7 @@ fn layout_capabilities(layouts: &[rustgis_map::layout::Layout]) -> Vec<&'static 
         (elements().any(charts_classes), "layout-chart-classes"),
         (elements().any(charts_stack), "layout-chart-stack"),
         (elements().any(charts_facing), "layout-chart-facing"),
+        (elements().any(charts_outlined), "layout-chart-outline"),
         (elements().any(|e| e.kind.has_custom_border()), "layout-frame-border"),
         (elements().any(|e| e.kind.has_sections()), "layout-section"),
         (elements().any(|e| e.kind.has_custom_text_size()), "layout-text-size"),
@@ -847,6 +920,24 @@ mod tests {
 
     fn json_bytes(bytes: &[u8]) -> Value {
         serde_json::from_slice(bytes).unwrap()
+    }
+
+    /// A tile layer drawn nearest (#2804) reads back as it was and saving names `tile-resampling`;
+    /// one drawn blended, as an older reader would, names nothing. So does a saved step setting it.
+    #[test]
+    fn tile_resampling_fixture_reads_its_setting() {
+        use rustgis_map::raster::Resampling;
+        let fixture = Project::from_json(include_str!("../../../schema/fixtures/tile_resampling.rgis")).unwrap();
+        let saved = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(saved["requires"], json!(["tile-resampling"]));
+        assert_eq!(fixture.maps[0].tiles[0].resampling, Resampling::Nearest);
+        let reopened = Project::from_json(&saved.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(&reopened).unwrap(), saved);
+        let mut plain = fixture;
+        plain.maps[0].tiles[0].resampling = Resampling::Bilinear;
+        assert!(serde_json::to_value(&plain).unwrap().get("requires").is_none());
+        assert!(command_resamples_tiles("map.setTiles", &json!({"index": 0, "resampling": "nearest"})));
+        assert!(!command_resamples_tiles("map.setTiles", &json!({"index": 0, "resampling": "bilinear"})));
     }
 
     /// A saved MGRS graticule drawn on top in a color of its own (#1042 piece 8) reads back as it
@@ -1559,6 +1650,63 @@ mod tests {
                 document["tasks"] = value;
                 let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
                 let expected = if required { json!(["layout-chart-facing"]) } else { Value::Null };
+                assert_eq!(saved.get("requires").cloned().unwrap_or(Value::Null), expected, "{id} {params}");
+            }
+        }
+    }
+
+    /// A line round a chart's bars (#2487 part 4b) requires `layout-chart-outline`, in a saved
+    /// layout and in the commands that give it one; none, null or a width of 0 need nothing.
+    #[test]
+    fn chart_outline_capability_follows_saved_layouts_and_commands() {
+        use rustgis_map::layout::ElementKind;
+        let fixture = Project::from_json(include_str!("../../../schema/fixtures/layout_chart_outline.rgis")).unwrap();
+        let saved = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(saved["requires"], json!(["layout-chart-outline"]));
+        let mut clean = fixture;
+        for e in &mut clean.layouts[0].elements {
+            if let ElementKind::Chart { bar_outline, .. } = &mut e.kind {
+                *bar_outline = None;
+            }
+        }
+        let base = serde_json::to_value(&clean).unwrap();
+        assert!(base.get("requires").is_none(), "a chart without an outline needs nothing");
+        assert!(!base["layouts"].to_string().contains("\"bar_outline\""), "nor writes it");
+        // One of no width, or below 0 (a hand-edited file), is let go on read: it needs nothing
+        // and isn't written back.
+        for width in [0.0, -1.0] {
+            let mut zero = base.clone();
+            zero["layouts"][0]["elements"][1]["kind"]["Chart"]["bar_outline"] = json!({"color": [0, 0, 0, 255], "width": width});
+            let saved_zero = serde_json::to_value(Project::from_json(&zero.to_string()).unwrap()).unwrap();
+            assert!(saved_zero.get("requires").is_none(), "{width}");
+            assert!(!saved_zero["layouts"].to_string().contains("\"bar_outline\""), "{width}");
+        }
+        let mut document = base.clone();
+        document["tasks"] = json!([{"name": "Task", "steps": [{"title": "Chart", "command": "layout.import", "params": {"text": saved["layouts"][0].to_string()}}]}]);
+        let imported = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+        assert_eq!(imported["requires"], json!(["layout-chart-outline"]));
+        for (id, params, required) in [
+            ("layout.addElement", json!({"kind": "chart", "barOutline": {}}), true),
+            ("layout.addElement", json!({"kind": "chart", "barOutline": {"color": "#000000", "width": 1}}), true),
+            ("layout.addElement", json!({"kind": "chart", "barOutline": {"width": 0}}), false),
+            ("layout.addElement", json!({"kind": "chart", "barOutline": null}), false),
+            ("layout.addElement", json!({"kind": "legend", "barOutline": {}}), false),
+            ("layout.update", json!({"element": 2, "barOutline": {"color": "#C2185B"}}), true),
+            ("layout.update", json!({"element": 2, "barOutline": {"width": 0}}), false),
+            ("layout.update", json!({"element": 2, "barOutline": {"width": "2"}}), true),
+            ("layout.update", json!({"element": 2, "barOutline": {"width": "0"}}), false),
+            ("layout.update", json!({"element": 2, "barOutline": null}), false),
+            ("layout.import", json!({"text": base["layouts"][0].to_string()}), false),
+        ] {
+            let script = format!("{id}= {params}");
+            for value in [
+                json!([{"name": "Task", "steps": [{"title": "Chart", "command": id, "params": params}]}]),
+                json!([{"name": "Script", "steps": [{"title": "Chart", "command": "script.run", "params": {"script": script}}]}]),
+            ] {
+                let mut document = base.clone();
+                document["tasks"] = value;
+                let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+                let expected = if required { json!(["layout-chart-outline"]) } else { Value::Null };
                 assert_eq!(saved.get("requires").cloned().unwrap_or(Value::Null), expected, "{id} {params}");
             }
         }

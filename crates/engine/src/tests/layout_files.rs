@@ -100,6 +100,7 @@ fn a_saved_layout_file_requires_what_its_elements_use_and_reads_back_the_same() 
         ("classes", include_str!("../../../../schema/fixtures/layout_chart_classes.rgis")),
         ("stack", include_str!("../../../../schema/fixtures/layout_chart_stack.rgis")),
         ("facing", include_str!("../../../../schema/fixtures/layout_chart_facing.rgis")),
+        ("outline", include_str!("../../../../schema/fixtures/layout_chart_outline.rgis")),
         ("border", include_str!("../../../../schema/fixtures/layout_frame_border.rgis")),
         ("section", include_str!("../../../../schema/fixtures/layout_section.rgis")),
         ("legend-text", include_str!("../../../../schema/fixtures/layout_legend_text.rgis")),
