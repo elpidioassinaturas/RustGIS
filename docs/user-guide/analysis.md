@@ -2402,9 +2402,8 @@ For `raster.process` polygon clipping, `selectedOnly: true` requires a selection
 `selectedOnly: false` uses every polygon, and omitting it uses the selection when present.
 The Process section of the Workflows pane (Analyze › Raster › Process) initially checks Selected
 only when the chosen layer has a selection, and sends the choice explicitly. Clipping and Zonal
-Statistics share
-polygon transformation rules so a failed hole cannot silently enlarge the sampled area.
-A malformed ring or a failed projection rejects its complete polygon part in all raster masking
+Statistics share polygon transformation rules so a failed hole cannot silently enlarge the sampled
+area. A malformed ring or a failed projection rejects its complete polygon part in all raster masking
 operations. Clipping skips invalid features and reports their count in the command result;
 its output bounds cover the valid polygons only.
 

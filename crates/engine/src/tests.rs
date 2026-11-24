@@ -20228,10 +20228,23 @@ fn clip_resample_and_mosaic_run_with_imagery_off() {
         forward(&mut s, "eng-imagery-off", id, p).unwrap();
     }
     check(&s, "plugin");
-    // The run the app makes on a thread.
+    // As the desktop app runs clip and resample: worked out on a thread, landed, then added by the
+    // command. A mosaic has no such run.
     #[cfg(not(target_arch = "wasm32"))]
-    for (id, p) in commands("thread").into_iter().take(2) {
-        s.start_raster(id, &p).unwrap();
+    {
+        use crate::cmd::workflows::{raster_land, raster_start};
+        for (id, p) in commands("app") {
+            if id == "raster.mosaic" {
+                s.run(id, &p).unwrap();
+                continue;
+            }
+            let run = raster_start(&mut s, id, &p).unwrap();
+            let ran = run.id;
+            let made = std::thread::spawn(move || run.run(&rustgis_analysis::control::Control::new())).join().unwrap().unwrap();
+            assert_eq!(raster_land(&mut s, ran, made), Ok(true));
+            s.finish_raster(id, ran, &p).unwrap();
+        }
+        check(&s, "app");
     }
 
     for id in ["raster.classify", "raster.index", "raster.change", "raster.editPixels"] {
