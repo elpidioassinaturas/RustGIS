@@ -143,7 +143,7 @@ fn search_notices(s: &mut Session, d: &emb::EmbeddingDataset, found: &emb::Found
     if !found.complete {
         s.notify(format!("{}: the area holds more tiles than one search reads; zoom in to list them all", d.name), false);
     }
-    if let Some(note) = emb::unusable_note(found.unusable) {
+    if let Some(note) = emb::unusable_note(found.unusable, found.complete) {
         s.notify(format!("{}: {note}", d.name), false);
     }
 }
@@ -430,7 +430,7 @@ fn series_notes(f: &emb::SeriesFound) -> Vec<String> {
     if f.duplicates > 0 {
         notes.push(format!("AlphaEarth: {} tile-years had a second file in the index; the first was taken", f.duplicates));
     }
-    notes.extend(emb::unusable_note(f.unusable).map(|n| format!("AlphaEarth: {n}")));
+    notes.extend(emb::unusable_note(f.unusable, f.complete).map(|n| format!("AlphaEarth: {n}")));
     notes
 }
 
@@ -761,7 +761,7 @@ fn pick_tile(found: &emb::SeriesFound, years: &[i32]) -> Result<(Vec<String>, St
         let none =
             if found.complete { none } else { format!("{none}, in the part of the index that was read: take a smaller box to read it whole") };
         // Or in a row left out.
-        emb::unusable_note(found.unusable).map_or_else(|| none.clone(), |n| format!("{none} ({n})"))
+        emb::unusable_note(found.unusable, found.complete).map_or_else(|| none.clone(), |n| format!("{none} ({n})"))
     })?;
     let files: Vec<String> = years.iter().filter_map(|y| tile.years.get(y).cloned()).collect();
     let place = files.first().and_then(|u| emb::aef_place(u)).unwrap_or_else(|| tile.tile.title.clone());
@@ -781,7 +781,7 @@ fn pick_tile(found: &emb::SeriesFound, years: &[i32]) -> Result<(Vec<String>, St
     if found.duplicates > 0 {
         notes.push(format!("{} tile-years had a second file in AlphaEarth's index; the first was taken", found.duplicates));
     }
-    notes.extend(emb::unusable_note(found.unusable));
+    notes.extend(emb::unusable_note(found.unusable, found.complete));
     if kept + dropped > 1 {
         notes.push(format!(
             "the area meets {} AlphaEarth tiles: one is read ({place}), the nearest its centre with files for {listed}; a box within one tile is read whole",
@@ -1073,7 +1073,11 @@ mod tests {
             let p = json!({"dataset": "alphaearth", "start": 2024, "found": some, "complete": complete, "unusable": 4});
             x.run("embeddings.addCube", &p).unwrap();
             let said: Vec<&str> = x.notices.iter().map(|n| n.text.as_str()).collect();
-            assert!(said.iter().any(|n| n.ends_with("left out, as their date, address or footprint can't be read: 4")), "{said:?}");
+            let note = if complete { "read: 4" } else { "read: 4 of those read" };
+            assert!(
+                said.iter().any(|n| n.ends_with(&format!("left out, as their date, address or footprint can't be {note}"))),
+                "{said:?}"
+            );
             assert!(said.iter().any(|n| n.ends_with(&gap(&end))), "{said:?}");
             x.notices.clear();
         }
@@ -1092,6 +1096,10 @@ mod tests {
             "{e}"
         );
         assert_eq!(empty(&mut x, 0), "AlphaEarth has no tiles there for 2024–2025");
+        // So is a part of the index read.
+        let part = json!({"dataset": "alphaearth", "start": 2024, "found": none, "complete": false, "unusable": 4});
+        let e = x.run("embeddings.addCube", &part).unwrap_err();
+        assert!(e.contains(PART_READ) && e.ends_with("can't be read: 4 of those read)"), "{e}");
         // An hourly slider widened over the years would be more steps than it lists: refused,
         // the slider and the map as they were.
         let mut h = Session::new(Project::default());
@@ -1135,7 +1143,10 @@ mod tests {
         let gaps = emb::SeriesFound { complete: false, dropped: 61, duplicates: 2, unusable: 4, ..Default::default() };
         let notes = series_notes(&gaps);
         assert_eq!(notes.len(), 4, "{notes:?}");
-        assert_eq!(notes[3], "AlphaEarth: rows of AlphaEarth's index left out, as their date, address or footprint can't be read: 4");
+        assert_eq!(
+            notes[3],
+            "AlphaEarth: rows of AlphaEarth's index left out, as their date, address or footprint can't be read: 4 of those read"
+        );
         assert!(notes.iter().any(|n| n == PART_READ), "{notes:?}");
         assert!(notes.iter().any(|n| n.contains("61 tiles past the 60 a search lists were left out")), "{notes:?}");
         assert!(notes.iter().any(|n| n.contains("2 tile-years had a second file in the index")), "{notes:?}");
@@ -1324,7 +1335,7 @@ mod tests {
         assert!(notes[0].contains("a tile nearer its centre may have been missed"), "{notes:?}");
         assert_eq!(notes[1], "3 AlphaEarth tiles past the 60 nearest the area's centre were left out, not looked at: take a smaller box");
         assert_eq!(notes[2], "2 tile-years had a second file in AlphaEarth's index; the first was taken");
-        assert_eq!(notes[3], "rows of AlphaEarth's index left out, as their date, address or footprint can't be read: 4");
+        assert_eq!(notes[3], "rows of AlphaEarth's index left out, as their date, address or footprint can't be read: 4 of those read");
         assert!(notes[4].starts_with("the area meets 5 AlphaEarth tiles: one is read (23S 0-1)"), "{notes:?}");
         // No tile with the years: tiles left out are said, not taken for none there, and so is a
         // part of the index read.
@@ -1332,7 +1343,7 @@ mod tests {
         assert!(e.contains("none of the 2 AlphaEarth tiles nearest the area's centre has files for 2018, and 3 more"), "{e}");
         assert!(
             e.ends_with(
-                "and 3 more were left out: take a smaller box, in the part of the index that was read: take a smaller box to read it whole (rows of AlphaEarth's index left out, as their date, address or footprint can't be read: 4)"
+                "and 3 more were left out: take a smaller box, in the part of the index that was read: take a smaller box to read it whole (rows of AlphaEarth's index left out, as their date, address or footprint can't be read: 4 of those read)"
             ),
             "{e}"
         );

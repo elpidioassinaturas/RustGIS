@@ -175,7 +175,8 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
                 if st.searched.is_some_and(|(_, d, o)| d != st.dataset || o != opened) {
                     return;
                 }
-                let mut info = if tiles.is_empty() {
+                // Nothing found in a part of the index read is said as one.
+                let mut info = if tiles.is_empty() && complete {
                     tl!("Nothing found where the map is").to_string()
                 } else if complete {
                     crate::i18n::fmt("{n} found where the map is", &[("n", &tiles.len().to_string())])
@@ -195,10 +196,18 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
                     ));
                 }
                 if unusable > 0 {
-                    info.push_str(&crate::i18n::fmt(
-                        " · rows of the index left out, as their date, address or footprint can't be read: {n}",
-                        &[("n", &unusable.to_string())],
-                    ));
+                    let n = unusable.to_string();
+                    info.push_str(&if complete {
+                        crate::i18n::fmt(
+                            " · rows of the index left out, as their date, address or footprint can't be read: {n}",
+                            &[("n", &n)],
+                        )
+                    } else {
+                        crate::i18n::fmt(
+                            " · rows of the index left out, as their date, address or footprint can't be read: {n} of those read",
+                            &[("n", &n)],
+                        )
+                    });
                 }
                 st.info = Some(info);
                 st.found = tiles;
@@ -732,5 +741,9 @@ mod tests {
                 assert_eq!(handed, unusable);
             }
         }
+        // Of a part of the index read: said as one, though nothing is found in it.
+        let part = Found { unusable: 4, ..Default::default() };
+        let (info, _) = said(Read::Search(std::sync::Arc::new(std::sync::Mutex::new(Some(Ok(part))))));
+        assert!(info.contains("more than one search reads") && info.ends_with("can't be read: 4 of those read"), "{info}");
     }
 }

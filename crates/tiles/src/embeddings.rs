@@ -303,14 +303,15 @@ fn row_parts(f: &Feature, date: Option<usize>, href: Option<usize>) -> Option<(i
 }
 
 /// How many rows of what the index read a search can't use ([`row_parts`], and those whose footprint
-/// the reader couldn't decode) and leaves out; an error when it can use none, as the search would
-/// answer that there are no tiles. A row without a footprint is in no box, so a search reads none.
+/// the reader couldn't decode) and leaves out; an error when it can use none of an index read whole,
+/// as the search would answer that there are no tiles (a read in part didn't see the others, and is
+/// said as one). A row without a footprint is in no box, so a search reads none.
 fn unusable(fields: &[Field], batch: &Batch) -> Result<usize, String> {
     let col = |n: &str| fields.iter().position(|f| f.name == n);
     let (date, href) = (col("datetime"), col(AEF_HREF));
     let usable = batch.features.iter().filter(|f| row_parts(f, date, href).is_some()).count();
     let n = (batch.features.len() - usable).saturating_add(batch.skipped);
-    if n > 0 && usable == 0 {
+    if n > 0 && usable == 0 && batch.complete {
         return Err(format!(
             "AlphaEarth's index has {n} rows there, none whose date, address and footprint can be read, so its tiles can't be listed"
         ));
@@ -319,9 +320,11 @@ fn unusable(fields: &[Field], batch: &Batch) -> Result<usize, String> {
 }
 
 /// What to say of the `n` rows of AlphaEarth's index a search left out, as it can't use them
-/// ([`Found::unusable`], [`SeriesFound::unusable`]): nothing when there were none.
-pub fn unusable_note(n: usize) -> Option<String> {
-    (n > 0).then(|| format!("rows of AlphaEarth's index left out, as their date, address or footprint can't be read: {n}"))
+/// ([`Found::unusable`], [`SeriesFound::unusable`]), of those it read when it read the index in part
+/// (not `complete`): nothing when there were none.
+pub fn unusable_note(n: usize, complete: bool) -> Option<String> {
+    let read = if complete { "" } else { " of those read" };
+    (n > 0).then(|| format!("rows of AlphaEarth's index left out, as their date, address or footprint can't be read: {n}{read}"))
 }
 
 /// The tiles of a year in what the index read, nearest the box's centre first (at most
@@ -1131,15 +1134,22 @@ mod tests {
         batch.features.clear();
         assert!(found(&fields, &batch, 2024, bbox).unwrap_err().contains("has 2 rows there"));
         assert_eq!(
-            unusable_note(1).as_deref(),
+            unusable_note(1, true).as_deref(),
             Some("rows of AlphaEarth's index left out, as their date, address or footprint can't be read: 1")
         );
-        assert_eq!(unusable_note(0), None);
+        assert!(unusable_note(1, false).unwrap().ends_with("can't be read: 1 of those read"));
+        assert_eq!((unusable_note(0, true), unusable_note(0, false)), (None, None));
         // Rows whose dates can't be read are said, not taken for no tiles; no rows are no tiles.
         let (fields, mut batch) = file(&|_| Value::Null);
         let e = found(&fields, &batch, 2024, bbox).unwrap_err();
         assert!(e.contains("has 3 rows there, none whose date, address and footprint can be read"), "{e}");
         assert_eq!(series_found(&fields, &batch, (2017, 2025), bbox).unwrap_err(), e);
+        // A read in part didn't see the others, which may be good: no error, the part read being said.
+        batch.complete = false;
+        let part = found(&fields, &batch, 2024, bbox).unwrap();
+        assert_eq!((part.tiles.len(), part.complete, part.unusable), (0, false, 3));
+        assert_eq!(series_found(&fields, &batch, (2017, 2025), bbox).unwrap().unusable, 3);
+        batch.complete = true;
         batch.features.clear();
         assert_eq!(found(&fields, &batch, 2024, bbox), Ok((Vec::new(), true).into()));
         assert_eq!(aef_year(&Value::Date(rustgis_data::Date::from_ymd(2024, 1, 1).unwrap())), Some(2024));
