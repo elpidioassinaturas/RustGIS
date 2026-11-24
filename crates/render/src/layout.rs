@@ -1911,20 +1911,21 @@ pub struct SectionGap {
     pub why: &'static str,
 }
 
-/// The section lines of `layout`'s visible frames they don't draw, as the page is now.
+/// The section lines of `layout`'s visible frames they don't draw, as the page is now: those
+/// [`section_ends`] gives no ends for, and every one of a frame whose map is missing.
 pub fn sections_not_drawn(layout: &Layout, maps: &[Map]) -> Vec<SectionGap> {
     let mut gaps = Vec::new();
     for e in layout.elements.iter().filter(|e| e.visible) {
-        if let ElementKind::MapFrame { map, center, scale, bearing, pitch, shape, sections, .. } = &e.kind
-            && let Some(m) = map_index(maps, map).and_then(|i| maps.get(i))
-        {
-            let cam = frame_camera(m, *center, *scale, *bearing, *pitch);
-            let size = (e.w * PT_PER_MM, e.h * PT_PER_MM);
-            gaps.extend(sections.iter().filter_map(|s| {
-                let why = section_ends(m, &cam, size, shape, s.line).err()?;
-                Some(SectionGap { frame: e.id, frame_name: e.name.clone(), section: s.name.clone(), why })
-            }));
-        }
+        let ElementKind::MapFrame { map, center, scale, bearing, pitch, shape, sections, .. } = &e.kind else { continue };
+        let shown = map_index(maps, map).and_then(|i| maps.get(i)).map(|m| (m, frame_camera(m, *center, *scale, *bearing, *pitch)));
+        let size = (e.w * PT_PER_MM, e.h * PT_PER_MM);
+        gaps.extend(sections.iter().filter_map(|s| {
+            let why = match &shown {
+                Some((m, cam)) => section_ends(m, cam, size, shape, s.line).err()?,
+                None => "its frame's map is missing",
+            };
+            Some(SectionGap { frame: e.id, frame_name: e.name.clone(), section: s.name.clone(), why })
+        }));
     }
     gaps
 }
@@ -1969,9 +1970,9 @@ fn draw_sections(pm: &mut Canvas, sections: &[(&Section, SectionEnds)], ppp: f64
         let [a, b] = ends.map(|(x, y)| (x as f32 * k, y as f32 * k));
         let px = SECTION_NAME_PT * 1.33 * k;
         let vertical = matches!(s.line, SectionLine::Vertical(_));
-        // Dark on a light colour, else white.
-        let [r, g, b_, _] = s.color.0.map(f32::from);
-        let ink = if 0.299 * r + 0.587 * g + 0.114 * b_ > 150.0 { INK } else { Rgba::rgb(255, 255, 255) };
+        // Dark on a light colour, or one the map shows through, else white.
+        let [r, g, b_, alpha] = s.color.0.map(f32::from);
+        let ink = if alpha < 128.0 || 0.299 * r + 0.587 * g + 0.114 * b_ > 150.0 { INK } else { Rgba::rgb(255, 255, 255) };
         let boxes = [(a, 1.0, s.name.clone()), (b, -1.0, format!("{}'", s.name))];
         for ((x, y), inward, name) in boxes {
             let hh = px * 0.8;
@@ -1981,13 +1982,7 @@ fn draw_sections(pm: &mut Canvas, sections: &[(&Section, SectionEnds)], ppp: f64
             let inset = inward * (k + if vertical { hh } else { hw }).min(length / 2.0);
             let (cx, cy) = if vertical { (x, y + inset) } else { (x + inset, y) };
             if let Some(path) = Rect::from_ltrb(cx - hw, cy - hh, cx + hw, cy + hh).and_then(|r| rounded_rect(r, hh)) {
-                pm.fill_path(
-                    &path,
-                    &paint(Rgba::rgb(s.color.0[0], s.color.0[1], s.color.0[2]), 1.0),
-                    FillRule::Winding,
-                    Transform::identity(),
-                    None,
-                );
+                pm.fill_path(&path, &paint(s.color, 1.0), FillRule::Winding, Transform::identity(), None);
             }
             text::text_at(pm, &name, cx, cy, px, ink, true, text::Align::Center, false);
             let edge = match (vertical, inward > 0.0) {
@@ -10423,5 +10418,19 @@ Elaboração: RustGIS",
         assert_eq!(note(1), "1 section line(s) not drawn: 'A' of Frame (1): its place is outside the frame");
         assert!(note(5).contains("'A' of Frame (1) on 2 of 5 pages: "), "{}", note(5));
         assert_eq!(sections_notice(&BTreeMap::new(), 5), None);
+        // A frame whose map is missing draws none of its own.
+        let gaps = sections_not_drawn(&l, &[]);
+        assert!(gaps.len() == 2 && gaps.iter().all(|g| g.why == "its frame's map is missing"), "{gaps:?}");
+        // Its colour's transparency is its name boxes' too: blended with the white map, and clear.
+        let faded = |alpha| {
+            let (l, map) = page(
+                FrameShape::Rectangle,
+                vec![Section { color: Rgba::new(0, 0, 255, alpha), ..section(SectionLine::Horizontal(middle)) }],
+            );
+            let pm = render(&l, &mut [map], 254.0, &PageInfo::default()).unwrap();
+            rgb(&pm, 209, 512)
+        };
+        let (solid, half) = (faded(255), faded(128));
+        assert!(solid == (0, 0, 255) && half.2 == 255 && (100..160).contains(&half.0), "{solid:?} {half:?}");
     }
 }
