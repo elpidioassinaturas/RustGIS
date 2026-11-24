@@ -86,6 +86,7 @@ mod pluginstart;
 mod pluginsui;
 mod popupmedia;
 mod portalsui;
+mod publicationwizard;
 #[cfg(not(target_arch = "wasm32"))]
 mod readjob;
 #[cfg(not(target_arch = "wasm32"))]
@@ -154,6 +155,7 @@ pub use chrome::{DoubleClick, TitlebarMetrics};
 pub use coordreadout::{CoordReadout, MapSystem};
 pub use rustgis_assistant;
 pub use rustgis_engine;
+pub use vertexedit::unplaced_feature_notice;
 pub use widgets::big_split_menu;
 
 /// Reconciles only command-result wrappers, not parameters or other arbitrary JSON.
@@ -314,6 +316,8 @@ pub struct Download {
     pub slot: Slot<Result<Vec<u8>, String>>,
     /// How far it has come (the status bar's).
     pub progress: std::sync::Arc<rustgis_engine::render::rustgis_tiles::cache::Progress>,
+    /// Where it connected, for a GeoLibre project ([`rustgis_engine::Session::download_read_at`]).
+    pub reach: Slot<Reach>,
 }
 
 /// A download or a window's read under way, for the status bar ([`RustGisApp::downloads_under_way`]).
@@ -1048,9 +1052,9 @@ pub struct UiState {
     /// Data downloading from web addresses (Home › Add › Add Data › From URL).
     pub downloads: Vec<Download>,
     /// A project downloading from its web address (`ui.openUrl`, a `?project=` link): the
-    /// session's download id, the address and where the download lands. A later one replaces it;
-    /// opening another project meanwhile drops it.
-    pub project_download: Option<(u64, String, Slot<Result<Vec<u8>, String>>)>,
+    /// session's download id, the address and where the download lands, with the reach it was
+    /// read at. A later one replaces it; opening another project meanwhile drops it.
+    pub project_download: Option<(u64, String, Slot<Result<(Vec<u8>, Reach), String>>)>,
     /// The SQL pane's editor, results and history.
     pub sql: sqlpane::State,
     /// GeoTIFFs, FlatGeobufs and GeoParquets by address whose headers are being read: those
@@ -3671,6 +3675,17 @@ impl RustGisApp {
         if id.starts_with("edit.") && params.get("table").is_some_and(|t| !t.is_null()) {
             return None;
         }
+        // Coordinate entry uses only a loaded point layer; a fallback must not record the
+        // incompatible selection as an explicit target that replay would refuse.
+        if id == "edit.addPoint"
+            && !self
+                .session
+                .active_layer
+                .and_then(|id| self.session.map().layer(id))
+                .is_some_and(rustgis_engine::cmd::edit::accepts_coordinate_point)
+        {
+            return None;
+        }
         let spec = self.session.registry.get(id).filter(|c| c.mutates && params.get("layer").is_none_or(Value::is_null)).copied()?;
         if !spec.param_keys().is_some_and(|k| k.contains(&"layer")) {
             return None;
@@ -4609,16 +4624,20 @@ impl RustGisApp {
                 let url = p.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).ok_or("url is required")?;
                 let url = rustgis_engine::map::geolibre::download_url(url);
                 let url = url.as_str();
-                let slot: Slot<Result<Vec<u8>, String>> = Slot::default();
+                let slot: Slot<Result<(Vec<u8>, Reach), String>> = Slot::default();
                 let land = slot.clone();
-                rustgis_engine::render::rustgis_tiles::cache::download_limited(
+                // With where it was read: what the project names reaches no wider.
+                rustgis_engine::render::rustgis_tiles::cache::download_detailed_with_origin(
                     url,
                     if rustgis_engine::map::geolibre::is_project_file(url) {
                         rustgis_engine::map::geolibre::MAX_TEXT
                     } else {
                         rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD
                     },
-                    Box::new(move |r| *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)),
+                    Box::new(move |r| {
+                        let r = r.map(|fetched| (fetched.bytes, fetched.origin.reach())).map_err(|failure| failure.message);
+                        *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                    }),
                 );
                 self.session.notify(i18n::fmt("Opening {url}…", &[("url", &rustgis_engine::sources::address_in_message(url))]), false);
                 let id = self.session.download_started();
@@ -5802,6 +5821,14 @@ impl RustGisApp {
                     self.dialogs = dialogs::Dialogs { open: Some("calculateGeometry"), geometry: Some(form), ..Default::default() };
                     return Ok(Value::Null);
                 }
+                if which == "publicationWizard" {
+                    // Opened again while open, it keeps what was entered.
+                    if self.dialogs.open != Some("publicationWizard") || self.dialogs.publication.is_none() {
+                        let draft = publicationwizard::Draft::new(&self.session);
+                        self.dialogs = dialogs::Dialogs { open: Some("publicationWizard"), publication: Some(draft), ..Default::default() };
+                    }
+                    return Ok(Value::Null);
+                }
                 if which == "offlineConflicts" {
                     let area = p.get("area").and_then(Value::as_str).ok_or_else(|| tl!("Name the offline area.").to_string())?;
                     let form = conflictsui::Form::new(&self.session, area)?;
@@ -5951,7 +5978,13 @@ impl RustGisApp {
                 }
                 return self.poll_data_downloads();
             }
-            if let Err(e) = r.and_then(|bytes| self.open_project_bytes(project_file_name(&url), &bytes)) {
+            // Opened as received from where it was read: what it names reaches no wider.
+            if let Err(e) = r.and_then(|(bytes, reach)| {
+                let was = self.session.receiving(Some(reach));
+                let r = self.open_project_bytes(project_file_name(&url), &bytes);
+                self.session.receiving(was);
+                r
+            }) {
                 self.session.notify(rustgis_engine::sources::message_with_address(&url, &e), true);
             }
         }
@@ -6221,9 +6254,31 @@ impl RustGisApp {
             let watch = std::sync::Arc::downgrade(&slot);
             let wanted: rustgis_engine::render::rustgis_tiles::cache::Still = std::sync::Arc::new(move || watch.strong_count() > 1);
             let progress = std::sync::Arc::<rustgis_engine::render::rustgis_tiles::cache::Progress>::default();
+            let reach: Slot<Reach> = Slot::default();
+            let read_at = reach.clone();
+            let project = q.get("geolibreProject").and_then(Value::as_bool) == Some(true);
             // A Shapefile address brings its companion parts under the same download owner.
             rustgis_engine::render::rustgis_tiles::cache::with_still(wanted, || {
                 rustgis_engine::render::rustgis_tiles::cache::with_progress(Some(progress.clone()), || {
+                    // A GeoLibre project, with where it was read: what it names reaches no wider.
+                    if project && !public {
+                        return rustgis_engine::render::rustgis_tiles::cache::download_detailed_with_origin(
+                            &url,
+                            rustgis_engine::map::geolibre::MAX_TEXT,
+                            Box::new(move |r| {
+                                let r = r
+                                    .map(|fetched| {
+                                        *read_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(fetched.origin.reach());
+                                        fetched.bytes
+                                    })
+                                    .map_err(|failure| failure.message);
+                                *land.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                            }),
+                        );
+                    }
+                    if project {
+                        *read_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Reach::Public);
+                    }
                     rustgis_engine::cmd::layer::download_data_from(
                         &url,
                         public,
@@ -6239,7 +6294,7 @@ impl RustGisApp {
                     )
                 })
             });
-            self.ui.downloads.push(Download { id, url, params: q, slot, progress });
+            self.ui.downloads.push(Download { id, url, params: q, slot, progress, reach });
 
             Ok(Value::Null)
         })
@@ -6322,13 +6377,20 @@ impl RustGisApp {
             }
         }
         let mut landed = Vec::new();
+        let mut read_at = Vec::new();
         self.ui.downloads.retain(|d| match d.slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
             Some(r) => {
                 landed.push((d.id, d.url.clone(), d.params.clone(), r));
+                if let Some(reach) = d.reach.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    read_at.push((d.id, reach));
+                }
                 false
             }
             None => true,
         });
+        for (id, reach) in read_at {
+            self.session.download_read_at(id, reach);
+        }
         for (id, url, mut p, r) in landed {
             let origin = connectiontree::take_origin_key(&mut p);
             // A range's answer shorter than the range is refused, never read as the record.
@@ -8376,6 +8438,7 @@ const MAX_STEP_BYTES: usize = 4 << 20;
 /// an optional `layer` that defaults to the active layer goes here, so a recorded step names it;
 /// `record_tests::every_optional_layer_is_classified` fails until it is placed here or there.
 const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
+    "edit.addPoint",
     "select.byAttributes",
     "stac.search",
     "select.rows",

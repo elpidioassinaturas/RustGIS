@@ -1562,7 +1562,7 @@ pub(crate) fn tiled_inputs(
     // reads no pixels through the run's inputs.
     let Some(spec) = spec.filter(|t| t.id != "rasterToPmtiles") else { return Ok(read) };
     let mut seen = std::collections::HashSet::new();
-    let (mut overviews, mut held_overviews, mut rounded) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut said, mut held_overviews) = (Vec::new(), Vec::new());
     for parameter in spec.params {
         let value = params.get(parameter.name).unwrap_or(&Value::Null);
         let names: Vec<&str> = match parameter.kind {
@@ -1613,47 +1613,9 @@ pub(crate) fn tiled_inputs(
                 }
                 continue;
             }
-            // A batch's read is used again only while the file is the revision it was read at.
-            let revision = file_revisions(std::path::Path::new(path));
-            let kept = BATCH_READS.with(|b| b.borrow().as_ref().and_then(|reads| reads.get(path).cloned()));
-            let (r, count) = match kept.filter(|(.., at)| revision.is_some() && *at == revision) {
-                Some((r, count, _)) => (r, count),
-                None => {
-                    #[cfg(test)]
-                    TILED_READS.with(|n| n.set(n.get() + 1));
-                    // The last file a batch read alone: let go before another is read, so a batch
-                    // over several files holds one, and doesn't hold it uncounted while the next
-                    // is planned.
-                    BATCH_READS.with(|b| {
-                        if let Some(reads) = b.borrow_mut().as_mut() {
-                            reads.clear();
-                        }
-                    });
-                    let _turn = tiled_turn().map_err(|e| format!("{}: {e}", l.name))?;
-                    let r = std::sync::Arc::new(
-                        rustgis_data::raster::read_path_with(std::path::Path::new(path), None, None)
-                            .map_err(|e| format!("{}: {e}", l.name))?,
-                    );
-                    // Counted as held from before the next run's turn, for as long as anything
-                    // (this run, the batch) holds it.
-                    let bytes: usize = r.bands.iter().map(|b| b.data.len().saturating_mul(4)).sum();
-                    let count = std::sync::Arc::new(rustgis_data::memory::Holding::of(bytes as u64));
-                    BATCH_READS.with(|b| {
-                        if let Some(reads) = b.borrow_mut().as_mut() {
-                            reads.insert(path.to_string(), (r.clone(), count.clone(), revision.clone()));
-                        }
-                    });
-                    (r, count)
-                }
-            };
+            let (r, count) = read_tiled(&l.name, path)?;
             held.push(count);
-            let n: u64 = r.rounded.iter().sum();
-            if n > 0 {
-                rounded.push(format!("{} {n}", l.name));
-            }
-            if let Some((fw, fh)) = r.overview {
-                overviews.push(format!("{} at its {} × {} overview of the {fw} × {fh} raster", l.name, r.width, r.height));
-            }
+            said.push(ReadNote::of(&l.name, &r));
             read.insert(key, r);
         }
     }
@@ -1664,16 +1626,133 @@ pub(crate) fn tiled_inputs(
             held_overviews.join("; ")
         ));
     }
+    messages.extend(tiled_read_notes(&said, "the tool's"));
+    Ok(read)
+}
+
+/// `part` of the raster file read in place at `path` (layer `name`'s, which holds `held`), read
+/// from the file at the finest level whose part fits `1 / share` of what a run can hold, in its
+/// turn ([`tiled_turn`]), with its count in [`rustgis_data::memory::held`]; `None` when the file
+/// can't be read by part, or is no longer the revision `held` was read from (read it whole with
+/// [`read_tiled`]). Never kept for a batch: another item's part is another part.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn read_tiled_part(
+    name: &str,
+    path: &str,
+    part: rustgis_data::raster::Part,
+    share: usize,
+    held: &rustgis_data::raster::Raster,
+) -> Result<Option<(rustgis_data::raster::PartRead, std::sync::Arc<rustgis_data::memory::Holding>)>, String> {
+    let _turn = tiled_turn().map_err(|e| format!("{name}: {e}"))?;
+    // Planned in its turn, with what the reads before it hold counted.
+    let max = rustgis_data::raster::max_samples() / share.max(1);
+    #[cfg(test)]
+    let max = PART_SAMPLES.with(std::cell::Cell::get).unwrap_or(max);
+    let read =
+        rustgis_data::raster::read_path_part(std::path::Path::new(path), part, max, Some(held)).map_err(|e| format!("{name}: {e}"))?;
+    let Some(read) = read else { return Ok(None) };
+    let bytes: usize = read.raster.bands.iter().map(|b| b.data.len().saturating_mul(4)).sum();
+    Ok(Some((read, std::sync::Arc::new(rustgis_data::memory::Holding::of(bytes as u64)))))
+}
+
+/// What a run says of a raster file read in place it read again from its file ([`read_tiled`]):
+/// its layer's name, how many of its values were rounded as it was read, and, read coarser than
+/// the file, the level's size and the file's, and for a part of the file
+/// ([`read_tiled_part`]) the part's size at that level.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub(crate) struct ReadNote {
+    name: String,
+    rounded: u64,
+    overview: Option<((u32, u32), (u32, u32))>,
+    part: Option<(u32, u32)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ReadNote {
+    pub(crate) fn of(name: &str, r: &rustgis_data::raster::Raster) -> ReadNote {
+        let overview = r.overview.map(|full| ((r.width, r.height), full));
+        ReadNote { name: name.to_string(), rounded: r.rounded.iter().sum(), overview, part: None }
+    }
+
+    /// Of a part of a file ([`read_tiled_part`]): read from a level `level` pixels in size of the
+    /// file's `full` image.
+    pub(crate) fn of_part(name: &str, r: &rustgis_data::raster::Raster, level: (u32, u32), full: (u32, u32)) -> ReadNote {
+        let overview = r.overview.map(|_| (level, full));
+        ReadNote { name: name.to_string(), rounded: r.rounded.iter().sum(), overview, part: Some((r.width, r.height)) }
+    }
+}
+
+/// What a run says of the raster files read in place it read again from their file
+/// ([`read_tiled`]): one notice of each kind, naming each raster. `whose` says whose results are
+/// built on values rounded as they were read.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn tiled_read_notes(read: &[ReadNote], whose: &str) -> Vec<String> {
+    let (mut rounded, mut overviews) = (Vec::new(), Vec::new());
+    for ReadNote { name, rounded: n, overview, part } in read {
+        if *n > 0 {
+            rounded.push(format!("{name} {n}"));
+        }
+        if let Some(((w, h), (fw, fh))) = overview {
+            let part = part.map_or_else(String::new, |(pw, ph)| format!(", a {pw} × {ph} part of it"));
+            overviews.push(format!("{name} at its {w} × {h} overview of the {fw} × {fh} raster{part}"));
+        }
+    }
+    let mut notes = Vec::new();
     if !rounded.is_empty() {
-        messages.push(format!(
-            "values rounded to 32-bit floats as the file was read for the run, the tool's results built on them: {}",
+        notes.push(format!(
+            "values rounded to 32-bit floats as the file was read for the run, {whose} results built on them: {}",
             rounded.join("; ")
         ));
     }
     if !overviews.is_empty() {
-        messages.push(format!("read at the finest level each can hold: {}", overviews.join("; ")));
+        notes.push(format!("read at the finest level each can hold: {}", overviews.join("; ")));
     }
-    Ok(read)
+    notes
+}
+
+/// The raster file read in place at `path` (layer `name`'s), read again from the file at the
+/// finest level the run can hold, with its count in [`rustgis_data::memory::held`]: a batch's
+/// read of it while the file is unchanged ([`BATCH_READS`]), else read now, in its turn
+/// ([`tiled_turn`]). The GeoTIFF reader looks at Cancel between its chunks through the progress
+/// probe the run installed.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn read_tiled(
+    name: &str,
+    path: &str,
+) -> Result<(std::sync::Arc<rustgis_data::raster::Raster>, std::sync::Arc<rustgis_data::memory::Holding>), String> {
+    // A batch's read is used again only while the file is the revision it was read at.
+    let revision = file_revisions(std::path::Path::new(path));
+    let kept = BATCH_READS.with(|b| b.borrow().as_ref().and_then(|reads| reads.get(path).cloned()));
+    let (r, count) = match kept.filter(|(.., at)| revision.is_some() && *at == revision) {
+        Some((r, count, _)) => (r, count),
+        None => {
+            #[cfg(test)]
+            TILED_READS.with(|n| n.set(n.get() + 1));
+            // The last file a batch read alone: let go before another is read, so a batch over
+            // several files holds one, and doesn't hold it uncounted while the next is planned.
+            BATCH_READS.with(|b| {
+                if let Some(reads) = b.borrow_mut().as_mut() {
+                    reads.clear();
+                }
+            });
+            let _turn = tiled_turn().map_err(|e| format!("{name}: {e}"))?;
+            let r = std::sync::Arc::new(
+                rustgis_data::raster::read_path_with(std::path::Path::new(path), None, None).map_err(|e| format!("{name}: {e}"))?,
+            );
+            // Counted as held from before the next run's turn, for as long as anything (this
+            // run, the batch) holds it.
+            let bytes: usize = r.bands.iter().map(|b| b.data.len().saturating_mul(4)).sum();
+            let count = std::sync::Arc::new(rustgis_data::memory::Holding::of(bytes as u64));
+            BATCH_READS.with(|b| {
+                if let Some(reads) = b.borrow_mut().as_mut() {
+                    reads.insert(path.to_string(), (r.clone(), count.clone(), revision.clone()));
+                }
+            });
+            (r, count)
+        }
+    };
+    Ok((r, count))
 }
 
 /// A raster file read in place for a run, its count in [`rustgis_data::memory::held`], which lasts
@@ -1735,6 +1814,9 @@ thread_local! {
     /// How many raster files read in place [`tiled_inputs`] has read from their file on this
     /// thread, under test.
     pub(crate) static TILED_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The most samples [`read_tiled_part`] reads of a part on this thread, under test: no small
+    /// fixture reaches the real limit.
+    pub(crate) static PART_SAMPLES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 /// Whether a batch's reads are kept on this thread now ([`BATCH_READS`]), under test.

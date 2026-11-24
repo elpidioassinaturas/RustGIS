@@ -112,12 +112,236 @@ fn feature_ds<'a>(s: &'a Session, p: &Value) -> Result<&'a Dataset, String> {
     Ok(&l.dataset)
 }
 
-fn raster_of(s: &Session, name: &str) -> Result<std::sync::Arc<Raster>, String> {
-    s.map()
-        .layer_by_name(name)
-        .and_then(|l| l.raster.as_ref())
-        .and_then(|r| r.data.clone())
-        .ok_or_else(|| format!("no raster layer '{name}'"))
+/// The raster layer named `name`, as a command that makes a raster reads it ([`Input`]).
+fn raster_of(s: &Session, name: &str) -> Result<Input, String> {
+    Input::of(s, name)
+}
+
+/// A raster layer a command that makes a raster reads ([`IN_BACKGROUND`]): the raster the layer
+/// holds, which the command's start checks its parameters against, and for a layer read in place
+/// from a file on this computer ([`rustgis_map::raster::RasterLayer::tiled`]), that file, read
+/// again as the work runs ([`Input::read`]). Such a layer holds only the small overview the map
+/// draws from zoomed out; the file has the same bands, extent and coordinate system, but more
+/// pixels (#2761).
+#[derive(Clone)]
+pub(crate) struct Input {
+    held: std::sync::Arc<Raster>,
+    /// The layer's name and its file, for one read in place from a file on this computer.
+    file: Option<(String, String)>,
+}
+
+impl Input {
+    /// The raster layer named `name`.
+    pub(crate) fn of(input: &impl super::InputSource, name: &str) -> Result<Input, String> {
+        let context = input.input_context();
+        let rl = context.map().layer_by_name(name).and_then(|l| Some((l, l.raster.as_ref()?)));
+        let (l, rl) = rl.ok_or_else(|| format!("no raster layer '{name}'"))?;
+        let held = rl.data.clone().ok_or_else(|| format!("no raster layer '{name}'"))?;
+        let file = rl.path.clone().filter(|_| rl.tiled).map(|path| (l.name.clone(), path));
+        Ok(Input { held, file })
+    }
+
+    /// The raster the layer holds: for one read in place from a file, its overview, with the
+    /// file's bands, extent and system but not its size. Checked as the command starts.
+    pub(crate) fn held(&self) -> &Raster {
+        &self.held
+    }
+
+    /// The raster the work reads: within a run ([`reading_files`]), a layer read in place from a
+    /// file on this computer is read again from it, at the finest level the run can hold (the
+    /// full image when it fits), once for the run however many inputs name it; otherwise, and for
+    /// any other layer, the raster the layer holds.
+    pub(crate) fn read(&self) -> Result<Read, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((name, path)) = &self.file
+            && RUN_READS.with(|r| r.borrow().is_some())
+        {
+            let kept = RUN_READS.with(|r| {
+                r.borrow().as_ref().and_then(|read| read.iter().find(|k| k.path.as_ref() == Some(path)).and_then(|k| k.kept.clone()))
+            });
+            let (raster, count) = match kept {
+                Some(k) => k,
+                None => {
+                    let (raster, count) = super::gp::read_tiled(name, path)?;
+                    let note = super::gp::ReadNote::of(name, &raster);
+                    RUN_READS.with(|r| {
+                        if let Some(read) = r.borrow_mut().as_mut() {
+                            read.push(RunRead { path: Some(path.clone()), kept: Some((raster.clone(), count.clone())), note });
+                        }
+                    });
+                    (raster, count)
+                }
+            };
+            return Ok(Read { raster, _count: Some(count), place: None });
+        }
+        // The browser has no files to read by path: none is read in place from one there.
+        #[cfg(target_arch = "wasm32")]
+        let _ = &self.file;
+        Ok(Read {
+            raster: self.held.clone(),
+            _count: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            place: None,
+        })
+    }
+
+    /// The raster the work reads, for work that uses only `part` of it: within a run, a layer read
+    /// in place from a GeoTIFF on this computer reads only that part of its file, out to whole
+    /// pixels, at the finest level whose part fits `1 / share` of what the run can hold, decoding
+    /// only the strips or tiles that hold it (`rustgis_data::raster::read_path_part`), with where
+    /// it lies in the grid read ([`Read::place`]). A part isn't kept for the run's other inputs,
+    /// and the run says what it says of it only once the work uses it ([`Read::used`]). A file
+    /// that can't be read by part, or that is no longer the one the layer was read from, and any
+    /// other layer, give [`Input::read`].
+    pub(crate) fn read_part(&self, part: rustgis_data::raster::Part, share: usize) -> Result<Read, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((name, path)) = &self.file
+            && RUN_READS.with(|r| r.borrow().is_some())
+            && let Some((read, count)) = super::gp::read_tiled_part(name, path, part, share, &self.held)?
+        {
+            let rustgis_data::raster::PartRead { raster, at, grid, bounds, full } = read;
+            let note = super::gp::ReadNote::of_part(name, &raster, (grid.1, grid.2), full);
+            return Ok(Read { raster: std::sync::Arc::new(raster), _count: Some(count), place: Some(Place { at, grid, bounds, note }) });
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (part, share);
+        self.read()
+    }
+}
+
+/// A raster a command's work reads ([`Input::read`]), counted in
+/// [`rustgis_data::memory::held`] while it is held when it was read from its file.
+pub(crate) struct Read {
+    raster: std::sync::Arc<Raster>,
+    _count: Option<std::sync::Arc<rustgis_data::memory::Holding>>,
+    /// For a part of a file ([`Input::read_part`]), where it lies in the grid it was read from.
+    #[cfg(not(target_arch = "wasm32"))]
+    place: Option<Place>,
+}
+
+/// Where a part of a raster file lies in the grid it was read from ([`Read::place`]), and what
+/// the run says of it once the work uses it ([`Read::used`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Place {
+    /// The part's first column and row in the grid.
+    pub(crate) at: (u32, u32),
+    /// The grid, whole: its transform, columns and rows.
+    pub(crate) grid: (rustgis_data::raster::GeoTransform, u32, u32),
+    /// The grid's longitude/latitude bounds.
+    pub(crate) bounds: rustgis_geom::Extent,
+    note: super::gp::ReadNote,
+}
+
+impl Read {
+    /// Where the raster lies in the grid it was read from, for a part of a file
+    /// ([`Input::read_part`]); `None` for a raster read whole.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn place(&self) -> Option<&Place> {
+        self.place.as_ref()
+    }
+
+    /// Says, once the run's raster is added, what is said of a part of a file the work went on to
+    /// use (read at a coarser level, values rounded as it was read): a part it put aside for the
+    /// whole file says nothing. A raster read whole says its own as it is read.
+    pub(crate) fn used(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(place) = &self.place {
+            RUN_READS.with(|r| {
+                if let Some(read) = r.borrow_mut().as_mut() {
+                    read.push(RunRead { path: None, kept: None, note: place.note.clone() });
+                }
+            });
+        }
+    }
+}
+
+impl std::ops::Deref for Read {
+    type Target = Raster;
+    fn deref(&self) -> &Raster {
+        &self.raster
+    }
+}
+
+/// A raster file read in place that a run read ([`RUN_READS`]): its path (`None` for a part of it,
+/// [`Input::read_part`], which no other input takes), the raster read and its count in
+/// [`rustgis_data::memory::held`], kept for the run's other inputs naming the file (not a part's),
+/// and what the run says of it.
+#[cfg(not(target_arch = "wasm32"))]
+struct RunRead {
+    path: Option<String>,
+    kept: Option<(std::sync::Arc<Raster>, std::sync::Arc<rustgis_data::memory::Holding>)>,
+    note: super::gp::ReadNote,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// The raster files read in place that a run's work read on this thread ([`Input::read`]),
+    /// each by its path with its layer's name and its count, kept while the run reads
+    /// ([`reading_files`]); `None` otherwise.
+    static RUN_READS: std::cell::RefCell<Option<Vec<RunRead>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// [`RUN_READS`] for one run while it lives: put back as it was before when the run ends
+/// ([`RunReads::end`]), or as it unwinds from a panic, so nothing a run read is kept, or read
+/// from its file, past it.
+#[cfg(not(target_arch = "wasm32"))]
+struct RunReads(Option<Option<Vec<RunRead>>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RunReads {
+    fn start() -> RunReads {
+        RunReads(Some(RUN_READS.with(|r| r.borrow_mut().replace(Vec::new()))))
+    }
+
+    /// What the run read, [`RUN_READS`] put back as it was.
+    fn end(&mut self) -> Vec<RunRead> {
+        let outer = self.0.take().flatten();
+        RUN_READS.with(|r| std::mem::replace(&mut *r.borrow_mut(), outer)).unwrap_or_default()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for RunReads {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            self.end();
+        }
+    }
+}
+
+/// Runs `work` (command `name`'s) so the raster layers read in place it reads are read from their
+/// file ([`Input::read`]), each file read once for the run, and adds to what is said once its
+/// raster is added each that was read from an overview, or with values rounded.
+pub(crate) fn reading_files(name: &str, work: impl FnOnce() -> Result<Made, String>) -> Result<Made, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = name;
+        work()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut run = RunReads::start();
+        let made = work();
+        let read = run.end();
+        let made = made?;
+        let read: Vec<super::gp::ReadNote> = read.into_iter().map(|r| r.note).collect();
+        let notes: Vec<String> = super::gp::tiled_read_notes(&read, "its").into_iter().map(|n| format!("{name}: {n}")).collect();
+        if notes.is_empty() {
+            return Ok(made);
+        }
+        let then = made.then;
+        Ok(Made {
+            then: Some(Box::new(move |s: &mut Session, v: &mut Value| {
+                for note in notes {
+                    s.notify(note, false);
+                }
+                if let Some(then) = then {
+                    then(s, v);
+                }
+            })),
+            ..made
+        })
+    }
 }
 
 fn band_of(p: &Value, r: &Raster) -> Result<usize, String> {
@@ -286,7 +510,7 @@ pub(crate) fn made_or_ran(s: &mut Session, p: &Value, command: &str) -> CmdResul
     let made = work(s, p)?;
     // Where a person at a terminal can stop it with Ctrl-C: no work cap, as on the app's thread.
     let control = if s.stoppable { rustgis_analysis::control::Control::stoppable() } else { rustgis_analysis::control::Control::new() };
-    let made = rustgis_analysis::run_under(name, &control, made)?;
+    let made = rustgis_analysis::run_under(name, &control, || reading_files(name, made))?;
     s.check_continuation(&owner)?;
     add_made(s, made)
 }
@@ -319,7 +543,9 @@ impl RasterRun {
         let still = std::sync::Arc::new(move || current.check().is_ok()) as crate::render::rustgis_tiles::cache::Still;
         // A bug in the work, as one in a tool, must not take the app down.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::render::rustgis_tiles::cache::with_still(still, || rustgis_analysis::run_under(name, control, work))
+            crate::render::rustgis_tiles::cache::with_still(still, || {
+                rustgis_analysis::run_under(name, control, || reading_files(name, work))
+            })
         }))
         .unwrap_or_else(|_| Err(format!("{name} failed unexpectedly")))
         .map(|m| Made {
@@ -1380,12 +1606,19 @@ fn apply_function(r: &Raster, p: &Value, target: Option<&Raster>, remaps: &mut R
     }
 }
 
-/// The raster a resample step (`p`) takes the grid of: none for another function.
-fn resample_target(s: &Session, p: &Value) -> Result<Option<std::sync::Arc<Raster>>, String> {
+/// The raster a resample step (`p`) takes the grid of: none for another function. Its size is
+/// checked as it is read ([`read_target`]).
+fn resample_target(s: &Session, p: &Value) -> Result<Option<Input>, String> {
     if ps(p, "function") != Some("resample") {
         return Ok(None);
     }
-    let t = raster_of(s, resample_target_name(p)?.ok_or("target (a raster to match) is required")?)?;
+    Ok(Some(raster_of(s, resample_target_name(p)?.ok_or("target (a raster to match) is required")?)?))
+}
+
+/// A resample's target ([`resample_target`]) read for the work, refused past this computer's cells.
+fn read_target(t: Option<&Input>) -> Result<Option<Read>, String> {
+    let Some(t) = t else { return Ok(None) };
+    let t = t.read()?;
     if t.width as usize * t.height as usize > rasterops::max_pixels() {
         return Err(format!("the target grid is larger than this computer's {} cells", rasterops::max_pixels()));
     }
@@ -1400,7 +1633,7 @@ fn raster_function(s: &mut Session, p: &Value) -> CmdResult {
 fn function_work(s: &Session, p: &Value) -> Result<Work, String> {
     let src = raster_of(s, ps(p, "layer").ok_or("layer is required")?)?;
     let target = resample_target(s, p)?;
-    let name = out_name(p, format!("{}_{}", src.name, ps(p, "function").unwrap_or("")))?;
+    let name = out_name(p, format!("{}_{}", src.held().name, ps(p, "function").unwrap_or("")))?;
     let defaults = s.raster_defaults.clone();
     let mut p = p.clone();
     // Read here, on the command's thread, where an unreadable value is said (#1600); only a remap
@@ -1409,6 +1642,8 @@ fn function_work(s: &Session, p: &Value) -> Result<Work, String> {
         super::settle_bool(&mut p, "keep");
     }
     Ok(Box::new(move || {
+        let src = src.read()?;
+        let target = read_target(target.as_ref())?;
         let mut remaps = Remaps::default();
         let pixels = apply_function(&src, &p, target.as_deref(), &mut remaps)?;
         // Only a resample takes another raster's grid.
@@ -1476,16 +1711,23 @@ fn function_chain_work(s: &Session, p: &Value) -> Result<Work, String> {
     let named = Some(out_name(p, String::new())?).filter(|n| !n.is_empty());
     let defaults = s.raster_defaults.clone();
     Ok(Box::new(move || {
-        let mut cur: Raster = (*src).clone();
+        let src = src.read()?;
+        // Each step's output, the next step's input; the first step reads the raster itself, not
+        // a copy of it.
+        let mut cur: Option<Raster> = None;
         let mut names = Vec::new();
         let mut remaps = Remaps::default();
         for (i, (st, target)) in steps.iter().zip(&targets).enumerate() {
             let f = func(st);
-            let pixels = apply_function(&cur, st, target.as_deref(), &mut remaps).map_err(|e| format!("step {} ({f}): {e}", i + 1))?;
+            let target = read_target(target.as_ref()).map_err(|e| format!("step {} ({f}): {e}", i + 1))?;
+            let input = cur.as_ref().unwrap_or(&src);
+            let pixels = apply_function(input, st, target.as_deref(), &mut remaps).map_err(|e| format!("step {} ({f}): {e}", i + 1))?;
             // Only a resample takes another raster's grid; otherwise the grid is the current one.
-            cur = derive_function(target.as_deref().unwrap_or(&cur), &cur.name, st, pixels)?;
+            let next = derive_function(target.as_deref().unwrap_or(input), &input.name, st, pixels)?;
+            cur = Some(next);
             names.push(f);
         }
+        let mut cur = cur.ok_or("the chain made no raster")?;
         cur.name = named.unwrap_or_else(|| format!("{}_{}", cur.name, names.join("_")));
         // A chain that ends in a hillshade is drawn as one.
         let mut m = match steps.last() {
@@ -1512,7 +1754,7 @@ fn suitability_work(s: &Session, p: &Value) -> Result<Work, String> {
     let mut criteria = Vec::new();
     for c in crit {
         let r = raster_of(s, criterion_layer(c)?)?;
-        let band = band_of(c, &r)?;
+        let band = band_of(c, r.held())?;
         let ranges: Vec<(f64, f64, f64)> = c
             .get("ranges")
             .and_then(Value::as_array)
@@ -1530,10 +1772,12 @@ fn suitability_work(s: &Session, p: &Value) -> Result<Work, String> {
     }
     let name = out_name(p, "Suitability".into())?;
     Ok(Box::new(move || {
+        let first = first.read()?;
         let mut scored = Vec::new();
         let mut empty = Vec::new();
         for (r, band, ranges, weight) in &criteria {
-            let on_grid = rasterops::resample_to(r, *band, &first)?;
+            let r = r.read()?;
+            let on_grid = rasterops::resample_to(&r, *band, &first)?;
             let remap = rasterops::remap(&rasterops::derive(&first, &r.name, vec![on_grid])?, 0, ranges, false)?;
             empty.extend(remap.empty.into_iter().map(|(lo, hi)| (r.name.clone(), lo, hi)));
             scored.push((remap.cells, *weight));
@@ -1557,46 +1801,11 @@ fn viewshed(s: &mut Session, p: &Value) -> CmdResult {
 fn viewshed_work(s: &Session, p: &Value) -> Result<Work, String> {
     let dem = raster_of(s, ps(p, "layer").ok_or("layer is required")?)?;
     let at = Coord::new(f(p, "lon").ok_or("lon is required")?, f(p, "lat").ok_or("lat is required")?);
-    let band = band_of(p, &dem)?;
-    let (cx, cy) = dem.cell_size_m();
-    // The whole raster by default, however large: its diagonal reaches every cell from any
-    // observer, and only the raster's cells are worked out. A radius given past the diagonal
-    // covers the same cells, so it is taken as the diagonal: nothing is left out.
-    let diagonal = (cx * dem.width as f64).hypot(cy * dem.height as f64).max(1.0);
-    let radius = match p.get("radius") {
-        None | Some(Value::Null) => diagonal,
-        Some(v) => {
-            f(p, "radius").filter(|r| *r > 0.0).ok_or_else(|| format!("radius must be a number of metres above 0, not {v}"))?.min(diagonal)
-        }
-    };
-    // A raster around the whole Earth (in longitude/latitude) has its east and west edges side
-    // by side, but rays don't cross from one to the other: said when the radius reaches an edge.
-    // (Within half a cell of 360°: a cell size stored rounded falls a little short.)
-    let pw = dem.transform.pixel_width.abs();
-    let round_the_earth = dem.crs.is_geographic() && pw * f64::from(dem.width) >= 360.0 - pw / 2.0;
-    let (oc, or) = dem.pixel_at(at).unwrap_or((0, 0));
-    let (w, h) = (i64::from(dem.width), i64::from(dem.height));
-    let (near, far) = (oc.min(w - 1 - oc), oc.max(w - 1 - oc));
-    // Only when the way across the edge is shorter than the way through the raster: the cell
-    // just across the near edge is `near + 1` cells away across it and `far` through the raster,
-    // and with no shorter way (the observer within a cell of the middle column) every cell is
-    // worked out as near as it is.
-    let seam = round_the_earth && near + 1 < far && (near as f64 + 1.0) * cx <= radius;
-    // The ground just across the edge is the far edge's column, reached only through the raster:
-    // worked out the long way round in the rows where the radius reaches it (cell centres, as the
-    // viewshed measures them). The rows with ground across the edge within the radius are those
-    // where it reaches a cell one past the near edge. All of them are worked out when the radius
-    // reaches the far column in the farthest of those rows, none when it doesn't reach the far
-    // column even on the observer's row.
-    let reaches = |dc: i64, dr: i64| (dc as f64 * cx).hypot(dr as f64 * cy) <= radius;
-    // The rows are walked only on a raster round the Earth, at most its height.
-    let last_row = if seam { (0..=or.max(h - 1 - or)).take_while(|dr| reaches(near + 1, *dr)).last().unwrap_or(0) } else { 0 };
-    let across = if !reaches(far, 0) {
-        "left out of the viewshed"
-    } else if reaches(far, last_row) {
-        "worked out the long way round"
-    } else {
-        "worked out the long way round near the observer's row and left out farther from it"
+    let band = band_of(p, dem.held())?;
+    // A radius given is checked here; the raster's own reach is taken as the work reads it.
+    let given = match p.get("radius") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(f(p, "radius").filter(|r| *r > 0.0).ok_or_else(|| format!("radius must be a number of metres above 0, not {v}"))?),
     };
     // Refused, naming it, when it isn't a height a viewshed takes: never another one used.
     let height = match p.get("height") {
@@ -1613,9 +1822,45 @@ fn viewshed_work(s: &Session, p: &Value) -> Result<Work, String> {
         }
         Some(other) => return Err(format!("heights must be \"nearest\" or \"bilinear\", not {other}")),
     };
-    let name = out_name(p, format!("{}_viewshed", dem.name))?;
-    let dem_name = dem.name.clone();
+    let name = out_name(p, format!("{}_viewshed", dem.held().name))?;
+    let dem_name = dem.held().name.clone();
     Ok(Box::new(move || {
+        let dem = dem.read()?;
+        let (cx, cy) = dem.cell_size_m();
+        // The whole raster by default, however large: its diagonal reaches every cell from any
+        // observer, and only the raster's cells are worked out. A radius given past the diagonal
+        // covers the same cells, so it is taken as the diagonal: nothing is left out.
+        let diagonal = (cx * dem.width as f64).hypot(cy * dem.height as f64).max(1.0);
+        let radius = given.map_or(diagonal, |r| r.min(diagonal));
+        // A raster around the whole Earth (in longitude/latitude) has its east and west edges side
+        // by side, but rays don't cross from one to the other: said when the radius reaches an edge.
+        // (Within half a cell of 360°: a cell size stored rounded falls a little short.)
+        let pw = dem.transform.pixel_width.abs();
+        let round_the_earth = dem.crs.is_geographic() && pw * f64::from(dem.width) >= 360.0 - pw / 2.0;
+        let (oc, or) = dem.pixel_at(at).unwrap_or((0, 0));
+        let (w, h) = (i64::from(dem.width), i64::from(dem.height));
+        let (near, far) = (oc.min(w - 1 - oc), oc.max(w - 1 - oc));
+        // Only when the way across the edge is shorter than the way through the raster: the cell
+        // just across the near edge is `near + 1` cells away across it and `far` through the raster,
+        // and with no shorter way (the observer within a cell of the middle column) every cell is
+        // worked out as near as it is.
+        let seam = round_the_earth && near + 1 < far && (near as f64 + 1.0) * cx <= radius;
+        // The ground just across the edge is the far edge's column, reached only through the raster:
+        // worked out the long way round in the rows where the radius reaches it (cell centres, as the
+        // viewshed measures them). The rows with ground across the edge within the radius are those
+        // where it reaches a cell one past the near edge. All of them are worked out when the radius
+        // reaches the far column in the farthest of those rows, none when it doesn't reach the far
+        // column even on the observer's row.
+        let reaches = |dc: i64, dr: i64| (dc as f64 * cx).hypot(dr as f64 * cy) <= radius;
+        // The rows are walked only on a raster round the Earth, at most its height.
+        let last_row = if seam { (0..=or.max(h - 1 - or)).take_while(|dr| reaches(near + 1, *dr)).last().unwrap_or(0) } else { 0 };
+        let across = if !reaches(far, 0) {
+            "left out of the viewshed"
+        } else if reaches(far, last_row) {
+            "worked out the long way round"
+        } else {
+            "worked out the long way round near the observer's row and left out farther from it"
+        };
         let vs = rasterops::viewshed(&dem, band, at, height, radius, heights)?;
         let seen = vs.cells.iter().filter(|v| **v == 1.0).count();
         let (through_gaps, read_nearest) = (vs.through_gaps, vs.read_nearest);
@@ -1655,8 +1900,11 @@ fn viewshed_work(s: &Session, p: &Value) -> Result<Work, String> {
     }))
 }
 
+/// `analysis.lineOfSight`: the line from `from` to `to` over the elevation raster's held pixels,
+/// split where it turns visible or hidden, with its profile. On the app's thread, so a layer read
+/// in place from a file is read from the overview it holds.
 fn line_of_sight(s: &mut Session, p: &Value) -> CmdResult {
-    let dem = raster_of(s, ps(p, "layer").ok_or("layer is required")?)?;
+    let dem = raster_of(s, ps(p, "layer").ok_or("layer is required")?)?.held;
     let name = out_name(p, "Line of Sight".into())?;
     let (a, b2) = (point(p, "from")?, point(p, "to")?);
     let band = band_of(p, &dem)?;

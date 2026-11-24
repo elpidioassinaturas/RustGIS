@@ -116,12 +116,13 @@ wherever it is). An arc is counted as the curves it is drawn with, more the larg
 one of more than 200 curves isn't taken, nor is a circle, an ellipse or a rounded corner whose
 radius is in em or ex, which may come to any size. A radius in % is counted as that share of the
 largest size the SVG gives itself; such a radius isn't taken either when the SVG's own width or
-height is in em or ex, or when the width or height of an `<svg>`, `<symbol>` or `<use>` inside it
-is in %, em or ex. Each image is decoded once until RustGIS restarts,
-and kept decoded, at most 700 pixels a side: in all at most 256 megapixels of different marker
-images and 128 MiB once decoded (as many images as it keeps, at 177 × 177 each), so that a
-crafted file can't hold it for minutes; past it a new image is refused, or drawn as a circle,
-with a notice saying so, until RustGIS is restarted. A vector
+height is in em or ex and it has no `viewBox`, or when the width or height of a `<symbol>` or
+`<use>` inside it, or of an `<svg>` inside it with no `viewBox`, is in em or ex or past 100%. An
+`<svg>` with a `viewBox` takes the % from it whatever its own size. Each image is decoded once
+until RustGIS restarts, and kept decoded, at most 700 pixels a side: in all at most 256
+megapixels of different marker images and 128 MiB once decoded (as many images as it keeps, at
+177 × 177 each), so that a crafted file can't hold it for minutes; past it a new image is
+refused, or drawn as a circle, with a notice saying so, until RustGIS is restarted. A vector
 export keeps a compressed copy of each image it draws, at most about as much again (some 256 MiB
 in all), which counts too and leaves less for new images.
 Its size is its width, and it is as tall as its proportions make it, as QGIS draws a raster image
@@ -663,6 +664,16 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
   only, not an icon; vector tile labels keep their style's own padding
   (`labels.placement={"layer": "Rivers", "clearance": 10}`; a number past 0 or 100 is brought to
   it, with a notice; `null` is 2).
+- **Remove duplicates** (Labeling pane › Position): one label of a text where features of a class
+  with the same text lie closer than a distance, in points (1 to 2000, 200 when ticked). A street
+  split into many features gets one name in that distance rather than one per piece. The label
+  placed first stays (the heavier class's, then the layer above); the others take no room, so
+  other labels can use it, and View Unplaced doesn't show them. Only labels of the same layer and
+  class are compared, by their text as drawn (case counts); a line's repeated labels aren't
+  duplicates, and a label moved by hand always shows. With labels locked, the locked labels all
+  show again, also where zooming out brings two of them closer (`labels.placement={"layer": "Streets",
+  "removeDuplicates": 300}`; a number past 1 or 2000 is brought to it, with a notice; `false` or
+  `null` turns it off).
 - **Callouts** (Labeling pane › Position): a label crowded off its spot moves to the nearest free
   spot nearby, and a line is drawn from its feature to the text, as QGIS's callouts. **at most**
   sets how long the line may be (5 to 500 points, 40 to start with): a label with no free spot
@@ -683,7 +694,8 @@ Turn labels on per layer (Labeling › Labels › **Label**), then:
   and undo restoration. Opening a project, importing a map or styles, or adding a layer file
   reports invalid, duplicate or excess moved-label entries that were ignored, callout lengths that
   were adjusted, label weights that were not a whole number from 0 to 10, label clearances that
-  were not a number from 0 to 100 points, and Show all labels settings that were not true or
+  were not a number from 0 to 100 points, label duplicate distances that were not a number from 1
+  to 2000 points, and Show all labels settings that were not true or
   false. A callout length given
   to `labels.placement` outside 5 to 500 points is brought within range with a notice. Clean
   settings give no such notice.
