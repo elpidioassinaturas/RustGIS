@@ -8,9 +8,8 @@ use egui::{Align2, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke,
 use rustgis_engine::map::layout::{
     Arrange, ArrowStyle, Background, ChartOrder, CoordFormat, Element, ElementKind, Grid, GridKind, GridStyle, INK, LAYOUT_TEXT_SIZE,
     Layout, LineHead, MAX_BACKGROUND_PADDING, MAX_BACKGROUND_RADIUS, MAX_BACKGROUND_WIDTH, MAX_CHART_BARS, MAX_CHART_DECIMALS,
-    MAX_COLORBAR_TICKS, MAX_FRAME_SCALE, MAX_GRID_WIDTH, MAX_LEGEND_COLUMNS, MAX_SCALE_DIVISIONS, MAX_SECTIONS, MAX_TICK_MM,
-    MIN_FRAME_SCALE, Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, Section, SectionLine, TextAlign, TickSide, chart_stack_refusal,
-    frame_camera, line_angle, line_length,
+    MAX_COLORBAR_TICKS, MAX_FRAME_SCALE, MAX_GRID_WIDTH, MAX_LEGEND_COLUMNS, MAX_SCALE_DIVISIONS, MAX_TICK_MM, MIN_FRAME_SCALE,
+    Orientation, PT_PER_MM, ScaleBarStyle, ScaleUnits, TextAlign, TickSide, chart_stack_refusal, frame_camera, line_angle, line_length,
 };
 use rustgis_engine::map::report::StatKind;
 use rustgis_engine::map::symbology::Dash;
@@ -1477,103 +1476,6 @@ fn outline_rows(
     });
 }
 
-/// A map frame's section lines (#2863), each with its name, direction, place and look, why it isn't
-/// drawn when it isn't, and Remove; below them, the buttons that add one, whose direction is given
-/// back when one is clicked. `update` sends a change.
-fn section_rows(
-    app: &mut RustGisApp,
-    ui: &mut Ui,
-    layout: &Layout,
-    id: u32,
-    sections: &[Section],
-    update: &dyn Fn(&mut RustGisApp, Value),
-) -> Option<&'static str> {
-    let gaps = rustgis_engine::render::layout::sections_not_drawn(layout, &app.session.project.maps);
-    for (i, s) in sections.iter().enumerate() {
-        let set = |app: &mut RustGisApp, mut p: Value| {
-            p["section"]["name"] = json!(s.name);
-            update(app, p);
-        };
-        ui.push_id(("section", id, i), |ui| {
-            egui::Grid::new("section_place").num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-                let label = ui.label(tl!("Name"));
-                // Typing is kept with the view until the field is left.
-                let key = egui::Id::unique(("section_name", id, i));
-                let mut name = ui.data_mut(|d| d.get_temp::<String>(key)).unwrap_or_else(|| s.name.clone());
-                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(60.0)).labelled_by(label.id);
-                if r.has_focus() {
-                    ui.data_mut(|d| d.insert_temp(key, name));
-                } else {
-                    ui.data_mut(|d| d.remove::<String>(key));
-                    if r.lost_focus() && name.trim() != s.name {
-                        set(app, json!({"section": {"newName": name}}));
-                    }
-                }
-                ui.end_row();
-                let label = ui.label(tl!("Direction"));
-                let shown = |line: SectionLine| match line {
-                    SectionLine::Horizontal(_) => tl!("Horizontal"),
-                    SectionLine::Vertical(_) => tl!("Vertical"),
-                };
-                let at = s.line.at();
-                let items = [SectionLine::Horizontal(at), SectionLine::Vertical(at)]
-                    .map(|l| (shown(l).to_string(), l == s.line, json!({"section": {"direction": l.code()}})));
-                if let Some(p) = choice(ui, ("section_direction", id), label.id, shown(s.line), &items) {
-                    set(app, p);
-                }
-                ui.end_row();
-                for (text, axis, current, most) in [("Longitude", 0, at.x, 180.0), ("Latitude", 1, at.y, 90.0)] {
-                    let label = ui.label(tl!(text));
-                    let mut v = current;
-                    let drag = Dragged::lend(ui, egui::Id::unique(("section_drag", id, i, text)), &mut v);
-                    let field = egui::DragValue::new(&mut v).update_while_editing(false).range(-most..=most).speed(0.01).max_decimals(5);
-                    let r = ui.add(field.suffix("°")).labelled_by(label.id);
-                    if drag.settled(ui, &r, &mut v) && (v - current).abs() > 1e-9 {
-                        let mut to = [at.x, at.y];
-                        to[axis] = v;
-                        set(app, json!({"section": {"at": to}}));
-                    }
-                    ui.end_row();
-                }
-                let label = ui.label(tl!("Dash"));
-                if let Some(dash) = dash_picked(ui, ("section_dash", id), s.dash, s.width, label.id) {
-                    set(app, json!({"section": {"dash": dash}}));
-                }
-                ui.end_row();
-            });
-            let (least, most) = rustgis_engine::map::layout::SECTION_WIDTHS;
-            let line = Outline {
-                key: "section",
-                drag: egui::Id::unique(("section_drag", id, i, "width")),
-                color: s.color,
-                width: s.width,
-                range: least..=most,
-            };
-            outline_rows(app, ui, "section_look", line, None, &set);
-            if let Some(gap) = gaps.iter().find(|g| g.frame == id && g.section == s.name) {
-                let why = crate::i18n::fmt("Not drawn: {why}", &[("why", tl_raw!(gap.why))]);
-                ui.label(egui::RichText::new(why).size(11.5).color(ui.visuals().warn_fg_color));
-            }
-            if ui.button(tl!("Remove Section Line")).clicked() {
-                set(app, json!({"section": {"remove": true}}));
-            }
-        });
-        ui.separator();
-    }
-    let mut add = None;
-    ui.add_enabled_ui(sections.len() < MAX_SECTIONS, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            for (text, direction) in [("Add Horizontal", "horizontal"), ("Add Vertical", "vertical")] {
-                let hint = tl!("A line across the frame through its centre's place, named at both ends.");
-                if ui.button(tl!(text)).on_hover_text(hint).clicked() {
-                    add = Some(direction);
-                }
-            }
-        });
-    });
-    add
-}
-
 /// A map frame's grid options; `set` sends the changed ones (`false` removes the grid).
 fn grid_properties(app: &mut RustGisApp, ui: &mut Ui, grid: Option<&Grid>, id: u32, set: &dyn Fn(&mut RustGisApp, Value)) {
     let mut on = grid.is_some();
@@ -2688,17 +2590,6 @@ fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
         egui::CollapsingHeader::new(tl!("Grid")).id_salt(("frame_grid", id)).default_open(grid.is_some()).show(ui, |ui| {
             grid_properties(app, ui, grid.as_ref(), id, &|app, g| update(app, json!({"grid": g})));
         });
-    }
-    if let ElementKind::MapFrame { sections, .. } = &e.kind {
-        ui.add_space(4.0);
-        egui::CollapsingHeader::new(tl!("Section Lines")).id_salt(("frame_sections", id)).default_open(!sections.is_empty()).show(
-            ui,
-            |ui| {
-                if let Some(direction) = section_rows(app, ui, layout, id, sections, &update) {
-                    let _ = app.run("layout.addElement", json!({"layout": li, "kind": "section", "frame": id, "direction": direction}));
-                }
-            },
-        );
     }
     // The extent indicator this frame draws (another frame's extent): its colour and width.
     if let ElementKind::MapFrame { extent_of: Some(of), extent_color, extent_width, .. } = &e.kind {
@@ -4193,63 +4084,6 @@ mod tests {
         assert!(matches!(kind, ElementKind::MapFrame { extent_of: None, .. }), "removed");
         h.run_steps(2);
         assert!(h.query_by_label("Remove Extent Indicator").is_none(), "and its section with it");
-    }
-
-    /// A frame's Section Lines section (#2863) adds one each way, renames it, says one isn't drawn
-    /// when its place is outside the frame, and removes it.
-    #[test]
-    fn a_frame_adds_names_and_removes_section_lines() {
-        use egui_kittest::kittest::Queryable;
-        let mut app = RustGisApp::with_sample();
-        app.run("layout.new", json!({"name": "Sections"})).unwrap();
-        let li = app.session.active_layout.unwrap();
-        let frame = app.session.project.layouts[li].first_frame().unwrap();
-        app.run("layout.update", json!({"element": frame, "center": [10, 50], "scale": 1e7})).unwrap();
-        app.layout.selected = Some(frame);
-        let mut fonts = false;
-        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 1800.0)).build_ui_state(
-            move |ui, app: &mut RustGisApp| {
-                if !fonts {
-                    crate::theme::install_fonts(ui.ctx(), &[], None);
-                    fonts = true;
-                    return;
-                }
-                with_format(app, ui);
-            },
-            app,
-        );
-        let held = |app: &RustGisApp| match &app.session.project.layouts[li].element(frame).unwrap().kind {
-            rustgis_engine::map::layout::ElementKind::MapFrame { sections, .. } => {
-                sections.iter().map(|s| (s.name.clone(), s.line.code())).collect::<Vec<_>>()
-            }
-            _ => panic!("a map frame"),
-        };
-        h.run_steps(3);
-        h.get_by_label("Section Lines").click();
-        h.run_steps(12);
-        h.get_by_label("Add Vertical").click();
-        h.run_steps(3);
-        assert_eq!(held(h.state()), [("A".to_string(), "vertical")]);
-        assert!(h.query_by_label_contains("Not drawn").is_none());
-        // Renamed when the field is left.
-        let name = h.get_all_by_role(egui::accesskit::Role::TextInput).find(|n| n.value().as_deref() == Some("A")).unwrap();
-        name.focus();
-        h.run_steps(2);
-        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-        h.run_steps(1);
-        h.event(egui::Event::Text("Serra".into()));
-        h.run_steps(2);
-        h.key_press(egui::Key::Enter);
-        h.run_steps(3);
-        assert_eq!(held(h.state()), [("Serra".to_string(), "vertical")]);
-        // Moved off the frame, it says so.
-        h.state_mut().run("layout.update", json!({"element": frame, "section": {"name": "Serra", "at": [-150, 0]}})).unwrap();
-        h.run_steps(3);
-        assert!(h.query_by_label("Not drawn: its place is outside the frame").is_some());
-        h.get_by_label("Remove Section Line").click();
-        h.run_steps(3);
-        assert!(held(h.state()).is_empty());
-        assert!(h.query_by_label("Remove Section Line").is_none());
     }
 
     /// A frame's Border section (#2557): Default Border shows only for a border of its own, and
