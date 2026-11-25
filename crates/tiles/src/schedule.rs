@@ -52,6 +52,8 @@ pub(crate) fn cap(host: &str) -> usize {
         LOCAL
     } else if name == "tile.openstreetmap.org" || name.ends_with(".tile.openstreetmap.org") {
         PER_HOST_OSM
+    } else if crate::copernicus::has_quota(name) {
+        crate::copernicus::PER_HOST
     } else {
         PER_HOST
     }
@@ -219,6 +221,8 @@ mod tests {
         assert_eq!(host("mbtiles:3/1/2@https://example.org/x.mbtiles"), "");
         assert_eq!(cap("a.tile.openstreetmap.org"), PER_HOST_OSM);
         assert_eq!(cap("tiles.example.com"), PER_HOST);
+        assert_eq!(cap("download.dataspace.copernicus.eu"), crate::copernicus::PER_HOST);
+        assert_eq!(cap("stac.dataspace.copernicus.eu"), PER_HOST);
         assert_eq!(cap(""), LOCAL);
     }
 
