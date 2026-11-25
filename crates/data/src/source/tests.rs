@@ -5102,3 +5102,262 @@ fn write_projected_parquet_fixture(ds: &Dataset, path: &Path, rows: usize, dicti
     writer.write(&batch).unwrap();
     writer.close().unwrap();
 }
+
+/// A GeoParquet field's range comes from its column statistics; text, missing and all-null
+/// fields have none (#2497).
+#[test]
+fn geoparquet_field_range_comes_from_column_statistics() {
+    let fields = vec![
+        Field::new("height", FieldType::Double),
+        Field::new("floors", FieldType::Integer),
+        Field::new("name", FieldType::Text),
+        Field::new("empty", FieldType::Double),
+    ];
+    let mut ds = Dataset::new("b", crate::GeometryType::Point, fields);
+    for (i, h) in [3.5, -2.0, 41.25].into_iter().enumerate() {
+        let floors = if i == 1 { Value::Null } else { Value::Int(i as i64 * 7 - 3) };
+        ds.push(Some(Geometry::Point(Coord::new(i as f64, 0.0))), vec![Value::Float(h), floors, Value::Text("x".into()), Value::Null]);
+    }
+    let source = parquet::ParquetSource::open_bytes(parquet::write(&ds).unwrap(), "b").unwrap();
+    assert_eq!(source.field_range("height"), Some((-2.0, 41.25)));
+    assert_eq!(source.field_range("floors"), Some((-3.0, 11.0)));
+    for none in ["name", "empty", "nope"] {
+        assert_eq!(source.field_range(none), None, "{none}");
+    }
+    // A wrapper says the same.
+    #[cfg(not(target_arch = "wasm32"))]
+    assert_eq!(Fetching(Arc::new(source)).field_range("height"), Some((-2.0, 41.25)));
+}
+
+/// The column statistics that can't give a field's range, and the ones scaled or rounded to
+/// hold every value: unsigned integers, a column without statistics, decimals, and Int64 past
+/// 2^53 (#2497).
+#[test]
+fn geoparquet_field_range_refuses_unsigned_and_missing_statistics() {
+    use ::parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int32Type, Int64Type};
+    use ::parquet::file::properties::{EnabledStatistics, WriterProperties};
+    use ::parquet::file::writer::SerializedFileWriter;
+    use ::parquet::schema::types::ColumnPath;
+    let schema = ::parquet::schema::parser::parse_message_type(
+        "message m { REQUIRED BINARY geometry; OPTIONAL INT32 count (UINT_32); OPTIONAL INT64 price (DECIMAL(10,2));          OPTIONAL INT64 big; OPTIONAL DOUBLE bare; }",
+    )
+    .unwrap();
+    let props = WriterProperties::builder().set_column_statistics_enabled(ColumnPath::from("bare"), EnabledStatistics::None).build();
+    let mut bytes = Vec::new();
+    let mut w = SerializedFileWriter::new(&mut bytes, Arc::new(schema), Arc::new(props)).unwrap();
+    let mut rg = w.next_row_group().unwrap();
+    let geom = ByteArray::from(wkb::encode(&Geometry::Point(Coord::new(0.0, 0.0))));
+    let mut col = rg.next_column().unwrap().unwrap();
+    col.typed::<ByteArrayType>().write_batch(&[geom.clone(), geom], None, None).unwrap();
+    col.close().unwrap();
+    let mut col = rg.next_column().unwrap().unwrap();
+    col.typed::<Int32Type>().write_batch(&[1, -1], Some(&[1, 1]), None).unwrap();
+    col.close().unwrap();
+    let big = (1i64 << 53) + 1;
+    for values in [[12_345, -50], [-big, big]] {
+        let mut col = rg.next_column().unwrap().unwrap();
+        col.typed::<Int64Type>().write_batch(&values, Some(&[1, 1]), None).unwrap();
+        col.close().unwrap();
+    }
+    let mut col = rg.next_column().unwrap().unwrap();
+    col.typed::<DoubleType>().write_batch(&[1.0, 2.0], Some(&[1, 1]), None).unwrap();
+    col.close().unwrap();
+    rg.close().unwrap();
+    w.close().unwrap();
+    let source = parquet::ParquetSource::open_bytes(bytes, "m").unwrap();
+    let kinds: Vec<_> = source.info().fields.iter().map(|f| (f.name.as_str(), f.ty)).collect();
+    assert!(kinds.contains(&("count", FieldType::Integer)) && kinds.contains(&("bare", FieldType::Double)), "{kinds:?}");
+    assert_eq!(source.field_range("count"), None);
+    assert_eq!(source.field_range("bare"), None);
+    assert_eq!(source.field_range("price"), Some((-50.0 * 10f64.powi(-2), 12_345.0 * 10f64.powi(-2))));
+    let (lo, hi) = source.field_range("big").unwrap();
+    assert!(i128::from(big) <= hi as i128 && lo as i128 <= -i128::from(big), "{lo} {hi}");
+}
+
+/// Row groups whose statistics hold their smallest and largest value in order are joined; one that
+/// gives them reversed leaves the range unknown, whatever the others give.
+#[test]
+fn geoparquet_field_range_checks_each_row_group() {
+    use ::parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
+    use ::parquet::file::statistics::Statistics;
+    use ::parquet::file::writer::SerializedFileWriter;
+    let schema = ::parquet::schema::parser::parse_message_type(
+        "message m { REQUIRED BINARY geometry; REQUIRED INT64 whole; REQUIRED DOUBLE real; }",
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    let mut w = SerializedFileWriter::new(&mut bytes, Arc::new(schema), Arc::default()).unwrap();
+    let geom = ByteArray::from(wkb::encode(&Geometry::Point(Coord::new(0.0, 0.0))));
+    for (lo, hi) in [(10, 20), (40, 50)] {
+        let mut rg = w.next_row_group().unwrap();
+        let mut col = rg.next_column().unwrap().unwrap();
+        col.typed::<ByteArrayType>().write_batch(&[geom.clone(), geom.clone()], None, None).unwrap();
+        col.close().unwrap();
+        let mut col = rg.next_column().unwrap().unwrap();
+        col.typed::<Int64Type>().write_batch(&[lo, hi], None, None).unwrap();
+        col.close().unwrap();
+        let mut col = rg.next_column().unwrap().unwrap();
+        col.typed::<DoubleType>().write_batch(&[lo as f64, hi as f64], None, None).unwrap();
+        col.close().unwrap();
+        rg.close().unwrap();
+    }
+    w.close().unwrap();
+    let open = |bytes| parquet::ParquetSource::open_bytes(bytes, "m").unwrap();
+    let source = open(bytes.clone());
+    assert_eq!((source.field_range("whole"), source.field_range("real")), (Some((10.0, 50.0)), Some((10.0, 50.0))));
+    // The second group's bounds, swapped where the footer holds them.
+    let len = u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    let footer = bytes.len() - 8 - len;
+    for (a, b) in [(40i64.to_le_bytes(), 50i64.to_le_bytes()), (40f64.to_le_bytes(), 50f64.to_le_bytes())] {
+        for at in footer..bytes.len() - 8 {
+            if bytes[at..at + 8] == a {
+                bytes[at..at + 8].copy_from_slice(&b);
+            } else if bytes[at..at + 8] == b {
+                bytes[at..at + 8].copy_from_slice(&a);
+            }
+        }
+    }
+    let md = ::parquet::file::metadata::ParquetMetaDataReader::new().parse_and_finish(&bytes::Bytes::from(bytes.clone())).unwrap();
+    let Some(Statistics::Int64(st)) = md.row_group(1).column(1).statistics() else { panic!() };
+    assert_eq!((st.min_opt(), st.max_opt()), (Some(&50), Some(&40)));
+    let source = open(bytes);
+    assert_eq!((source.field_range("whole"), source.field_range("real")), (None, None));
+}
+
+/// The spatial index, loaded after the rows in Hilbert order, holds one entry with the box of
+/// each feature that has a place (none for one without), and the same layer gives the same index
+/// nodes each time.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_index_holds_each_placed_feature_and_repeats() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut ds = Dataset::new("scatter", GeometryType::Point, vec![]);
+    let mut seed = 12345u64;
+    let mut next = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 33) as f64 / f64::from(1u32 << 31)
+    };
+    let mut places = Vec::new();
+    for _ in 0..3000 {
+        let c = Coord::new(next() * 360.0 - 180.0, next() * 170.0 - 85.0);
+        places.push(c);
+        ds.push(Some(Geometry::Point(c)), vec![]);
+    }
+    ds.push(None, vec![]);
+    let mut nodes = Vec::new();
+    for name in ["a.gpkg", "b.gpkg"] {
+        let path = folder.path().join(name);
+        gpkg::write(&ds, &path).unwrap();
+        let c = rusqlite::Connection::open(&path).unwrap();
+        let mut st = c.prepare("SELECT id, minx, maxx, miny, maxy FROM rtree_scatter_geom ORDER BY id").unwrap();
+        let rows: Vec<(i64, [f64; 4])> =
+            st.query_map([], |r| Ok((r.get(0)?, [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?]))).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(rows.len(), places.len(), "one entry for each feature with a place");
+        for ((id, [x0, x1, y0, y1]), p) in rows.iter().zip(&places) {
+            let sane = (*x0 as f32 as f64 - p.x).abs() < 1e-4 && (*x1 as f32 as f64 - p.x).abs() < 1e-4;
+            assert!(sane && (*y0 as f32 as f64 - p.y).abs() < 1e-4 && (*y1 as f32 as f64 - p.y).abs() < 1e-4, "box of {id}");
+        }
+        let nodes_of: Vec<(i64, Vec<u8>)> = c
+            .prepare("SELECT nodeno, data FROM rtree_scatter_geom_node ORDER BY nodeno")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        nodes.push(nodes_of);
+        let triggers: i64 = c
+            .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'rtree_scatter_geom_%'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(triggers, 7, "the index's triggers exist when the write ends");
+    }
+    assert_eq!(nodes[0], nodes[1], "the same layer builds the same index");
+}
+
+/// The spatial index of a GeoPackage lists exactly the features with a place, for a layer with
+/// none, one of only null and empty geometries, a table added to a file that has another, and one
+/// replaced there (and a point layer that turns out to hold multipoints, which restarts the export).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn geopackage_index_lists_only_features_with_a_place() {
+    use crate::io::{GpkgMode, GpkgTable};
+    let folder = tempfile::tempdir().unwrap();
+    let indexed = |path: &Path, table: &str| -> Vec<i64> {
+        let c = rusqlite::Connection::open(path).unwrap();
+        let mut st = c.prepare(&format!("SELECT id FROM rtree_{table}_geom ORDER BY id")).unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+    };
+    let layer = |name: &str, geoms: Vec<Option<Geometry>>| {
+        let mut ds = Dataset::new(name, GeometryType::Point, vec![]);
+        for g in geoms {
+            ds.push(g, vec![]);
+        }
+        ds
+    };
+    let at = |x: f64| Some(Geometry::Point(Coord::new(x, -x)));
+    for (name, geoms, want) in [
+        ("empty", vec![], vec![]),
+        ("none", vec![None, None], vec![]),
+        ("empty_multi", vec![None, Some(Geometry::MultiPoint(vec![]))], vec![]),
+        ("some", vec![at(3.0), None, at(1.0), Some(Geometry::MultiPoint(vec![])), at(2.0)], vec![1, 3, 5]),
+        (
+            "multi",
+            vec![at(3.0), None, Some(Geometry::MultiPoint(vec![Coord::new(1.0, 1.0), Coord::new(2.0, 2.0)])), at(2.0)],
+            vec![1, 3, 4],
+        ),
+    ] {
+        let path = folder.path().join(format!("{name}.gpkg"));
+        gpkg::write(&layer(name, geoms), &path).unwrap();
+        assert_eq!(indexed(&path, name), want, "{name}");
+    }
+    // A table added to a file that has another, then replaced by one with fewer features.
+    let path = folder.path().join("two.gpkg");
+    let to = |mode, name: &str| GpkgTable { mode, name: Some(name.into()) };
+    gpkg::write(&layer("first", vec![at(5.0), at(4.0)]), &path).unwrap();
+    gpkg::write_table_in(&layer("x", vec![at(9.0), None, at(8.0), at(7.0)]), &path, Crs::LonLat, &to(GpkgMode::AddTable, "second"))
+        .unwrap();
+    assert_eq!((indexed(&path, "first"), indexed(&path, "second")), (vec![1, 2], vec![1, 3, 4]));
+    gpkg::write_table_in(&layer("x", vec![None, at(6.0)]), &path, Crs::LonLat, &to(GpkgMode::ReplaceTable, "second")).unwrap();
+    assert_eq!((indexed(&path, "first"), indexed(&path, "second")), (vec![1, 2], vec![2]));
+}
+
+/// A streamed export loads the spatial index in several runs once it holds enough boxes: every
+/// feature with a place is still indexed with its box, and the same layer builds the same index.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_streamed_geopackage_loads_its_index_in_runs() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut ds = Dataset::new("runs", GeometryType::Point, vec![]);
+    for i in 0..2500 {
+        let (x, y) = (f64::from((i * 7919) % 360) - 180.0, f64::from((i * 104_729) % 170) - 85.0);
+        ds.push((i % 10 != 0).then(|| Geometry::Point(Coord::new(x, y))), vec![]);
+    }
+    let mut files = Vec::new();
+    for name in ["a.gpkg", "b.gpkg"] {
+        let path = folder.path().join(name);
+        let mut feed = |put: &mut dyn FnMut(&[crate::Feature]) -> crate::Result<()>| ds.features.chunks(400).try_for_each(&mut *put);
+        gpkg::write_features_in("runs", GeometryType::Point, &[], &path, Crs::LonLat, &crate::io::GpkgTable::default(), &mut feed).unwrap();
+        files.push(path);
+    }
+    let read = |path: &Path| -> (Vec<(i64, [f64; 4])>, Vec<(i64, Vec<u8>)>) {
+        let c = rusqlite::Connection::open(path).unwrap();
+        let rows = c
+            .prepare("SELECT id, minx, maxx, miny, maxy FROM rtree_runs_geom ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?])))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let nodes = c
+            .prepare("SELECT nodeno, data FROM rtree_runs_geom_node ORDER BY nodeno")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        (rows, nodes)
+    };
+    let (rows, nodes) = read(&files[0]);
+    let placed: Vec<i64> = (1..=2500).filter(|i| (i - 1) % 10 != 0).collect();
+    assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), placed, "one entry for each feature with a place");
+    assert_eq!(nodes, read(&files[1]).1, "the same layer builds the same index");
+}

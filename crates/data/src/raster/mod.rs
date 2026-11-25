@@ -715,7 +715,8 @@ pub struct Raster {
     /// The original local GeoTIFF's revision or capture failure, retained with these pixels and never serialized.
     #[cfg(not(target_arch = "wasm32"))]
     source_file: Option<std::result::Result<file_revision::FileRevision, String>>,
-    /// Whether the pixels come from a reduced-resolution overview.
+    /// Whether the pixels come from a reduced-resolution overview: the size, in the file's pixels,
+    /// of what was read (the file's, or a part's, [`read_path_part`]).
     pub overview: Option<(u32, u32)>,
     /// With `overview`, whether the pixels are every `step`-th of the file's, from its top-left
     /// corner (a picture too large to read whole): each then spans exactly `step` of its pixels,
@@ -1109,7 +1110,8 @@ impl Raster {
 
     /// How many of the file's pixels one pixel read spans, across and down: exactly `step` for
     /// every `step`-th pixel, an overview's size over the file's, else 1. (`overview` stays the
-    /// file's own size, which `step` needn't divide, so a reader at a step goes by `step`.)
+    /// size of what was read in the file's pixels, the file's or a part's, which `step` needn't
+    /// divide, so a reader at a step goes by `step`.)
     pub fn file_pixels(&self) -> (f64, f64) {
         if self.step > 1 {
             return (f64::from(self.step), f64::from(self.step));
@@ -1423,6 +1425,130 @@ fn read_path_placing(path: &Path, world: bool) -> Result<Raster> {
     }
     r.source = Some(path.display().to_string());
     Ok(r)
+}
+
+/// Part of a raster file's image: its left, top, right and bottom edges as fractions of the
+/// image's width and height from its top-left corner, 0 to 1. Every level of a file (its full
+/// image and its overviews) covers the same ground, so a part is the same ground at each.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Part {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+    /// For a part given in whole pixels of the full image ([`Part::pixels`]): its columns and
+    /// rows (half-open), and the full image's size they are of.
+    pixels: Option<((u32, u32), (u32, u32), (u32, u32))>,
+}
+
+impl Part {
+    /// The part between these edges, each cut to the image; `None` when they aren't numbers or
+    /// leave nothing of it.
+    pub fn new(left: f64, top: f64, right: f64, bottom: f64) -> Option<Part> {
+        let [left, top, right, bottom] = [left, top, right, bottom].map(|v| v.clamp(0.0, 1.0));
+        ([left, top, right, bottom].iter().all(|v| v.is_finite()) && left < right && top < bottom).then_some(Part {
+            left,
+            top,
+            right,
+            bottom,
+            pixels: None,
+        })
+    }
+
+    /// The part of columns `cols` and rows `rows` (half-open) of a full image `full` in size: at
+    /// the full size, exactly those pixels, which fractions can't always say (`53248 / 83517` of
+    /// the width multiplies back to `53247.99999999999`), so parts next to each other share none;
+    /// at a coarser level, the pixels covering them, as [`Part::new`]'s. `None` when they leave
+    /// nothing of the image.
+    pub fn pixels(cols: (u32, u32), rows: (u32, u32), full: (u32, u32)) -> Option<Part> {
+        let cols = (cols.0.min(full.0), cols.1.min(full.0));
+        let rows = (rows.0.min(full.1), rows.1.min(full.1));
+        let f = |v: u32, n: u32| f64::from(v) / f64::from(n.max(1));
+        let mut part = Part::new(f(cols.0, full.0), f(rows.0, full.1), f(cols.1, full.0), f(rows.1, full.1))?;
+        part.pixels = Some((cols, rows, full));
+        Some(part)
+    }
+
+    /// The columns and rows of a grid `w` × `h` the part covers, out to whole pixels: one at
+    /// least, of a grid that has any. The image spans `extent` of the grid's pixels each way:
+    /// its size, or for every k-th pixel of it its size over k, which the grid's last pixel
+    /// passes when k doesn't divide it.
+    fn span(self, (w, h): (u32, u32), extent: (f64, f64)) -> geotiff::Span {
+        // Whole pixels of the full image, read at the full size: those pixels.
+        if let Some((cols, rows, full)) = self.pixels
+            && full == (w, h)
+            && extent == (f64::from(w), f64::from(h))
+        {
+            return geotiff::Span { cols, rows };
+        }
+        let edges = |a: f64, b: f64, n: u32, units: f64| {
+            let start = ((a * units).floor() as u32).min(n.saturating_sub(1));
+            (start, ((b * units).ceil() as u32).min(n).max(start.saturating_add(1).min(n)))
+        };
+        geotiff::Span { cols: edges(self.left, self.right, w, extent.0), rows: edges(self.top, self.bottom, h, extent.1) }
+    }
+}
+
+/// A part of a raster file read ([`read_path_part`]): its pixels, and where they lie in the grid
+/// they were read from, so a window found on that grid ([`GeoTransform::to_pixel`]) is placed on
+/// the part in whole pixels, without rounding again.
+pub struct PartRead {
+    pub raster: Raster,
+    /// The part's first column and row in the grid read.
+    pub at: (u32, u32),
+    /// The grid read (the full image, an overview, or every k-th pixel of it), whole: its
+    /// transform, columns and rows, as a read of all of it places them.
+    pub grid: (GeoTransform, u32, u32),
+    /// That grid's longitude/latitude bounds, as [`Raster::extent`] finds a raster's: every k-th
+    /// pixel's grid can pass the image's edge.
+    pub bounds: Extent,
+    /// The file's full image, its columns and rows (the raster's `overview` is the part's).
+    pub full: (u32, u32),
+}
+
+/// `part` of the GeoTIFF at `path`, as [`read_path`] reads the file but holding only that part,
+/// at the finest level whose part fits `max` samples: the full image when it does, read from the
+/// strips or tiles that hold it alone. The `.aux.xml` beside it is applied as it is to the whole
+/// file. `Ok(None)` when the file isn't read so: not a GeoTIFF, one with a world file beside it,
+/// one [`geotiff`] can't read by part (rotated, skewed or without coordinates), or, with
+/// `same_as`, no longer the revision of the file that raster was read from, which the part was
+/// found on. Read the whole file then. A part read at a coarser level says it with `overview`,
+/// the part's size in the file's pixels.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_path_part(path: &Path, part: Part, max: usize, same_as: Option<&Raster>) -> Result<Option<PartRead>> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !matches!(ext.as_str(), "tif" | "tiff") {
+        return Ok(None);
+    }
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(DataError::Format(format!("{} is not a regular file", path.display())));
+    }
+    // A world file is compared with the file's whole grid as it is read: read whole.
+    if world::beside(path).is_some() {
+        return Ok(None);
+    }
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("raster").to_string();
+    let pam = pam::read(path);
+    let sidecar_nodata = pam.as_ref().and_then(pam::Pam::nodata);
+    let Some(mut read) = geotiff::read_file_part(path, &name, sidecar_nodata, part, max, same_as)? else { return Ok(None) };
+    let r = &mut read.raster;
+    // As [`read_path_placing`]: read again with the no-data the bands it has give, so the
+    // rounded count leaves out just its pixels.
+    let applied = pam.as_ref().map(|p| p.nodata_within(r.bands.len()));
+    if let Some(nd) = applied
+        && nd != sidecar_nodata
+        && r.nodata.is_none()
+        && matches!(r.data_type.as_str(), "UInt32" | "Int32" | "UInt64" | "Int64" | "Float64")
+    {
+        drop(read);
+        let Some(again) = geotiff::read_file_part(path, &name, nd, part, max, same_as)? else { return Ok(None) };
+        read = again;
+    }
+    if let Some(p) = &pam {
+        read.raster.apply_pam(p, pam::SIDECAR);
+    }
+    read.raster.source = Some(path.display().to_string());
+    Ok(Some(read))
 }
 
 /// A picture at `path` with the world file beside it applied (#2075). A scan is placed by it, in
@@ -2060,6 +2186,26 @@ fn extent_of(transform: &GeoTransform, transformer: &Transformer, width: u32, he
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A part given in whole pixels of the full image is those pixels at the full size, whatever
+    /// its fractions round to: blocks of a file next to each other share no pixel (#2865). A part
+    /// given in fractions takes every pixel it touches, however little of one, and a part in
+    /// pixels read at a coarser level the pixels covering them.
+    #[test]
+    fn a_part_of_whole_pixels_is_those_pixels() {
+        let (w, h) = (83_517u32, 78_739u32);
+        let full = (f64::from(w), f64::from(h));
+        for (c0, c1, r0, r1) in [(53_248u32, 57_344u32, 512u32, 1024u32), (0, 4096, 78_336, 78_739), (81_920, 83_517, 0, 512)] {
+            let span = Part::pixels((c0, c1), (r0, r1), (w, h)).unwrap().span((w, h), full);
+            assert_eq!((span.cols, span.rows), ((c0, c1), (r0, r1)));
+        }
+        let half =
+            Part::pixels((53_248, 57_344), (512, 1024), (w, h)).unwrap().span((w.div_ceil(2), h.div_ceil(2)), (full.0 / 2.0, full.1 / 2.0));
+        assert!(half.cols.0 <= 26_624 && half.cols.1 >= 28_672 && half.rows == (256, 512), "the pixels covering it: {half:?}");
+        let tiny = 2f64.powi(-32);
+        let between = Part::new(0.5 - tiny, 0.25, 0.5 + tiny, 0.5).unwrap().span((1024, 1024), (1024.0, 1024.0));
+        assert_eq!((between.cols, between.rows), ((511, 513), (256, 512)), "both pixels it touches");
+    }
 
     #[test]
     fn elevation_files_are_raster_names() {

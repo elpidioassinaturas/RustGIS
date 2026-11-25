@@ -8117,6 +8117,11 @@ fn hostile_junk() -> Vec<Value> {
         json!({"type": "albers", "lon_0": f64::MAX, "lat_1": "x", "lat_2": -1e308}),
         json!({"kind": "legend", "element": 1, "exclude": [null, 7, "", {"x": 1}]}),
         json!({"kind": "text", "element": 1, "font": {"family": "serif"}, "italic": [], "align": 7}),
+        json!({"kind": "scaleBar", "element": 1, "subdivisions": [null], "divisionsBeforeZero": {}, "labelPosition": 7, "unitLabel": 7}),
+        json!({"kind": "scaleBar", "element": 1, "unitLabelPosition": "", "decimals": "x", "textSize": "NaN", "fit": {"x": 1}}),
+        json!({"kind": "scaleBar", "element": 1, "subdivisions": 1e308, "divisionsBeforeZero": -1e308, "decimals": f64::MAX, "textSize": -1e308, "unitLabel": null}),
+        json!({"kind": "scaleBar", "element": 1, "unitLabel": "x".repeat(5000), "fit": "adjustWidth", "labelPosition": "below", "unitLabelPosition": "afterBar"}),
+        json!({"kind": "legend", "element": 1, "decimals": 2, "textSize": f64::INFINITY, "fit": "adjustDivision", "unitLabel": "m"}),
         // A QGIS project and style whose web layer and scale range are junk.
         json!({"text": "<qgis><projectlayers><maplayer type=\"raster\" hasScaleBasedVisibilityFlag=\"1\" minScale=\"NaN\" maxScale=\"-1e308\"><datasource>type=xyz&amp;url=&amp;zmax=999</datasource><layername></layername><provider>wms</provider><pipe><rasterrenderer opacity=\"inf\"/></pipe></maplayer></projectlayers></qgis>"}),
         // A label class placed along lines, with junk the placement and style read after it.
@@ -12488,6 +12493,249 @@ fn layout_surrounds_take_cartographic_options() {
     assert_eq!(back, s.project.layouts[0]);
 }
 
+/// A scale bar's details through layout.addElement and layout.update: names and numbers checked
+/// before anything changes, refused for other elements, one undo step, saved with the layout.
+#[test]
+fn layout_scale_bars_take_their_details() {
+    use rustgis_map::layout::{ElementKind, LAYOUT_TEXT_SIZE, SCALE_BAR_TEXT_PT, ScaleBarFit, ScaleLabelPosition, UnitLabelPosition};
+    let mut s = world();
+    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "map"})).unwrap();
+    let find = |s: &Session, code: &str| s.project.layouts[0].elements.iter().find(|e| e.kind.code() == code).unwrap().clone();
+    let bar = find(&s, "scaleBar").id;
+    let details = |s: &Session, id: u32| match &s.project.layouts[0].element(id).unwrap().kind {
+        ElementKind::ScaleBar {
+            subdivisions,
+            divisions_before_zero,
+            label_position,
+            unit_label,
+            unit_label_position,
+            decimals,
+            text_size,
+            fit,
+            ..
+        } => {
+            (*subdivisions, *divisions_before_zero, *label_position, unit_label.clone(), *unit_label_position, *decimals, *text_size, *fit)
+        }
+        k => panic!("{k:?}"),
+    };
+    let plain =
+        (0, 0, ScaleLabelPosition::Above, None, UnitLabelPosition::AfterLabels, None, SCALE_BAR_TEXT_PT, ScaleBarFit::AdjustDivisionValue);
+    assert_eq!(details(&s, bar), plain);
+    s.run(
+        "layout.update",
+        &json!({"element": bar, "subdivisions": 3, "divisionsBeforeZero": 1, "labelPosition": "below", "unitLabel": "Feet",
+            "unitLabelPosition": "afterBar", "decimals": 2, "textSize": 10.5, "fit": "adjustDivision"}),
+    )
+    .unwrap();
+    let all = (
+        3,
+        1,
+        ScaleLabelPosition::Below,
+        Some("Feet".to_string()),
+        UnitLabelPosition::AfterBar,
+        Some(2),
+        10.5,
+        ScaleBarFit::AdjustDivision,
+    );
+    assert_eq!(details(&s, bar), all);
+    // One undo step brings the whole bar back.
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(details(&s, bar), plain);
+    s.run("edit.redo", &Value::Null).unwrap();
+    assert_eq!(details(&s, bar), all);
+    // One changed keeps the others; names ignore case and spaces; a count may come as text.
+    s.run("layout.update", &json!({"element": bar, "units": "feet", "textSize": 12, "fit": " AdjustWidth "})).unwrap();
+    assert_eq!((details(&s, bar).6, details(&s, bar).7), (12.0, ScaleBarFit::AdjustWidth));
+    // Null keeps a value, except a unit label's: the abbreviation again. "" prints none. 1 subdivision is none.
+    s.run("layout.update", &json!({"element": bar, "decimals": null, "fit": null, "unitLabel": "", "subdivisions": 1})).unwrap();
+    assert_eq!((details(&s, bar).0, details(&s, bar).3.clone(), details(&s, bar).5), (0, Some(String::new()), Some(2)));
+    // Decimals as a chart's: "auto" gives each label the decimals it needs again; 0 is fixed.
+    s.run("layout.update", &json!({"element": bar, "decimals": " Auto "})).unwrap();
+    assert_eq!(details(&s, bar).5, None);
+    s.run("layout.update", &json!({"element": bar, "decimals": 0})).unwrap();
+    assert_eq!(details(&s, bar).5, Some(0));
+    // A whole number as the counts take it: a numeric string or a float with no fraction.
+    s.run("layout.update", &json!({"element": bar, "decimals": "2"})).unwrap();
+    assert_eq!(details(&s, bar).5, Some(2));
+    s.run("layout.update", &json!({"element": bar, "decimals": 1.0})).unwrap();
+    assert_eq!(details(&s, bar).5, Some(1));
+    s.run("layout.update", &json!({"element": bar, "decimals": 0})).unwrap();
+    s.run("layout.update", &json!({"element": bar, "unitLabel": null})).unwrap();
+    assert_eq!(details(&s, bar).3, None);
+    // The limits themselves are taken.
+    s.run(
+        "layout.update",
+        &json!({"element": bar, "subdivisions": 10, "divisionsBeforeZero": 2, "decimals": 3, "textSize": 4, "unitLabel": "x".repeat(100)}),
+    )
+    .unwrap();
+    s.run("layout.update", &json!({"element": bar, "textSize": 100})).unwrap();
+    assert_eq!(details(&s, bar).6, *LAYOUT_TEXT_SIZE.end());
+    // Divisions and divisions before zero are at most ten together: refused past it, as given
+    // together or against what the bar has (it has two before zero), and nothing changes.
+    let before = details(&s, bar);
+    for bad in [json!({"divisions": 10, "divisionsBeforeZero": 2}), json!({"divisions": 9})] {
+        let mut p = bad.clone();
+        p["element"] = json!(bar);
+        let err = s.run("layout.update", &p).unwrap_err().to_string();
+        assert!(err.contains("at most 10 together"), "{bad}: {err}");
+        assert_eq!(details(&s, bar), before, "{bad}");
+        assert!(matches!(find(&s, "scaleBar").kind, ElementKind::ScaleBar { divisions: 4, .. }), "{bad}");
+    }
+    let count = s.project.layouts[0].elements.len();
+    assert!(s.run("layout.addElement", &json!({"kind": "scaleBar", "divisions": 10, "divisionsBeforeZero": 2})).is_err());
+    assert_eq!(s.project.layouts[0].elements.len(), count);
+    // Ten in all is taken, and so is a lower count against the same bar.
+    s.run("layout.update", &json!({"element": bar, "divisions": 8, "divisionsBeforeZero": 2})).unwrap();
+    assert!(matches!(find(&s, "scaleBar").kind, ElementKind::ScaleBar { divisions: 8, divisions_before_zero: 2, .. }));
+    s.run("layout.update", &json!({"element": bar, "divisions": 4})).unwrap();
+    // A bad value changes nothing, not even the good values given with it.
+    let before = details(&s, bar);
+    for bad in [
+        json!({"subdivisions": 11}),
+        json!({"subdivisions": -1}),
+        json!({"subdivisions": 2.5}),
+        json!({"subdivisions": "many"}),
+        json!({"divisionsBeforeZero": 3}),
+        json!({"divisionsBeforeZero": []}),
+        json!({"decimals": 4}),
+        json!({"decimals": -1}),
+        json!({"decimals": 2.5}),
+        json!({"decimals": "two"}),
+        json!({"decimals": {}}),
+        json!({"textSize": 3.9}),
+        json!({"textSize": 100.1}),
+        json!({"textSize": "12"}),
+        json!({"textSize": "big"}),
+        json!({"textSize": "1e309"}),
+        json!({"labelPosition": "left"}),
+        json!({"labelPosition": 7}),
+        json!({"unitLabelPosition": "beside"}),
+        json!({"unitLabel": 7}),
+        json!({"unitLabel": ["ft"]}),
+        json!({"unitLabel": "a\nb"}),
+        json!({"unitLabel": "a\rb"}),
+        json!({"unitLabel": "x".repeat(101)}),
+        json!({"fit": "manual"}),
+        json!({"fit": 3}),
+    ] {
+        let mut p = bad.clone();
+        p["element"] = json!(bar);
+        p["divisions"] = json!(3);
+        p["style"] = json!("line");
+        assert!(s.run("layout.update", &p).is_err(), "{bad}");
+        assert_eq!(details(&s, bar), before, "{bad}");
+        assert!(
+            matches!(
+                find(&s, "scaleBar").kind,
+                ElementKind::ScaleBar { divisions: 4, style: rustgis_map::layout::ScaleBarStyle::Alternating, .. }
+            ),
+            "{bad}"
+        );
+    }
+    // Added with them; refused on adding when bad, or for another kind.
+    let added = s
+        .run(
+            "layout.addElement",
+            &json!({"kind": "scaleBar", "subdivisions": 2, "divisionsBeforeZero": 2, "labelPosition": "below",
+                "unitLabel": "Kilometres", "unitLabelPosition": "above", "decimals": 1, "textSize": 9, "fit": "adjustWidth"}),
+        )
+        .unwrap()["element"]
+        .as_u64()
+        .unwrap() as u32;
+    assert_eq!(
+        details(&s, added),
+        (2, 2, ScaleLabelPosition::Below, Some("Kilometres".into()), UnitLabelPosition::Above, Some(1), 9.0, ScaleBarFit::AdjustWidth)
+    );
+    let count = s.project.layouts[0].elements.len();
+    for bad in [
+        json!({"kind": "scaleBar", "labelPosition": "middle"}),
+        json!({"kind": "scaleBar", "decimals": 9}),
+        json!({"kind": "northArrow", "decimals": 2}),
+        json!({"kind": "legend", "unitLabel": "m"}),
+        json!({"kind": "legend", "unitLabel": null}),
+        json!({"kind": "text", "text": "T", "subdivisions": 2}),
+        json!({"kind": "colorbar", "fit": "adjustWidth"}),
+    ] {
+        assert!(s.run("layout.addElement", &bad).is_err(), "{bad}");
+        assert_eq!(s.project.layouts[0].elements.len(), count, "{bad}");
+    }
+    let arrow = find(&s, "northArrow").id;
+    for bad in [json!({"unitLabel": null}), json!({"fit": "adjustWidth"})] {
+        let mut p = bad.clone();
+        p["element"] = json!(arrow);
+        let err = s.run("layout.update", &p).unwrap_err();
+        assert!(err.contains("only scale bars"), "{err}");
+    }
+    // Decimals, which a chart takes too, are refused for the other elements still.
+    assert!(s.run("layout.update", &json!({"element": arrow, "decimals": 2})).is_err());
+    // A locked bar takes no change, a null unit label included.
+    s.run("layout.update", &json!({"element": bar, "locked": true})).unwrap();
+    for p in [json!({"decimals": 1}), json!({"unitLabel": null})] {
+        let mut p = p.clone();
+        p["element"] = json!(bar);
+        assert!(s.run("layout.update", &p).is_err(), "{p}");
+    }
+    s.run("layout.update", &json!({"element": bar, "locked": false})).unwrap();
+    // The page draws with them, and they survive a save.
+    let out = std::env::temp_dir().join(format!("rustgis-bar-details-{}.png", std::process::id()));
+    s.run("layout.export", &json!({"path": out.to_string_lossy()})).unwrap();
+    let _ = std::fs::remove_file(&out);
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&serde_json::to_string(&s.project.layouts[0]).unwrap()).unwrap();
+    assert_eq!(back, s.project.layouts[0]);
+}
+
+/// A publication's scale bar box is measured from every setting its bar has (#1379), as the
+/// renderer draws it: a detail given measures it again for the detailed bar, its frame drawn at
+/// another scale measures it again, and made plain again it is the plain bar's box once more. A
+/// width set by hand is kept, as for a plain bar.
+#[test]
+fn a_publication_scale_box_follows_a_detailed_bar() {
+    use rustgis_map::layout::ElementKind;
+    let mut s = world();
+    // The profile and extent publication_layouts_fit_their_pages uses.
+    s.run("layout.publication", &json!({"profile": "thesis-half", "extent": [-46.8, -11.6, -38.5, -2.2]})).unwrap();
+    let li = s.project.layouts.len() - 1;
+    let named = |s: &Session, n: &str| s.project.layouts[li].elements.iter().find(|e| e.name == n).unwrap().clone();
+    let (bar, frame) = (named(&s, "Scale Bar").id, s.project.layouts[li].first_frame().unwrap());
+    let auto = |s: &Session| crate::cmd::layout::scale_box_auto(s, li).expect("an automatic box");
+    let boxed = |s: &Session| named(s, "Scale Box").w;
+    let plain = boxed(&s);
+    assert!((plain - auto(&s)).abs() < 0.01, "{plain} vs {}", auto(&s));
+    // A unit after the bar takes room beside it: the box is measured again for it, and wider.
+    s.run("layout.update", &json!({"layout": li, "element": bar, "unitLabel": "Kilometres", "unitLabelPosition": "afterBar"})).unwrap();
+    let detailed = boxed(&s);
+    assert!((detailed - auto(&s)).abs() < 0.01, "measured for the detailed bar: {detailed} vs {}", auto(&s));
+    assert!((detailed - plain).abs() > 0.5, "the detailed bar's box: {detailed} vs {plain}");
+    // Each of its details measures it again: a division before zero needs room for its label.
+    s.run("layout.update", &json!({"layout": li, "element": bar, "divisionsBeforeZero": 1})).unwrap();
+    assert!((boxed(&s) - auto(&s)).abs() < 0.01, "{} vs {}", boxed(&s), auto(&s));
+    // Its frame drawn at another scale: measured again, details and all.
+    let scale = match &s.project.layouts[li].element(frame).unwrap().kind {
+        ElementKind::MapFrame { scale, .. } => *scale,
+        k => panic!("{k:?}"),
+    };
+    s.run("layout.update", &json!({"layout": li, "element": frame, "scale": scale * 2.0})).unwrap();
+    assert!((boxed(&s) - auto(&s)).abs() < 0.01, "refitted: {} vs {}", boxed(&s), auto(&s));
+    // Plain again: the plain bar's box at that scale.
+    s.run(
+        "layout.update",
+        &json!({"layout": li, "element": bar, "unitLabel": null, "unitLabelPosition": "afterLabels", "divisionsBeforeZero": 0}),
+    )
+    .unwrap();
+    assert!(!named(&s, "Scale Bar").kind.scale_bar_uses_details());
+    assert!((boxed(&s) - auto(&s)).abs() < 0.01, "plain again, measured again: {} vs {}", boxed(&s), auto(&s));
+    // A width set by hand (the box, its bar and the text under it, as the box moves together)
+    // is kept whatever the bar is given, as for a plain bar.
+    let hand = auto(&s) + 7.0;
+    for n in ["Scale Box", "Scale Bar", "Scale"] {
+        s.run("layout.update", &json!({"layout": li, "element": named(&s, n).id, "w": hand})).unwrap();
+    }
+    s.run("layout.update", &json!({"layout": li, "element": bar, "subdivisions": 4})).unwrap();
+    assert!((boxed(&s) - hand).abs() < 1e-9, "set by hand, kept with a detail: {} vs {hand}", boxed(&s));
+    s.run("layout.update", &json!({"layout": li, "element": bar, "subdivisions": 0})).unwrap();
+    assert!((boxed(&s) - hand).abs() < 1e-9, "set by hand, kept plain again: {} vs {hand}", boxed(&s));
+}
+
 /// A layout element refuses a colour, fill or outline its kind doesn't draw, before anything
 /// changes: added and edited through commands, with the layouts unchanged after a refusal.
 #[test]
@@ -15147,6 +15395,52 @@ fn a_legend_takes_columns_from_one_to_three() {
         l.clamp();
         assert!(matches!(l.element(id as u32).map(|e| &e.kind), Some(ElementKind::Legend { columns, .. }) if *columns == kept), "{given}");
     }
+}
+
+/// A scale bar's unit label too long for its box is said when it is given: shortened with an
+/// ellipsis to fit, as a cut text is; one that fits says nothing.
+#[test]
+fn a_scale_bars_unit_label_shortened_to_fit_is_said() {
+    let mut s = Session::new(Project::default());
+    s.run("layout.new", &json!({"template": "map"})).unwrap();
+    let bar = s.project.layouts[0].elements.iter().find(|e| e.kind.code() == "scaleBar").unwrap().id;
+    let said = |s: &Session, mark: u64| s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>().join(" | ");
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": bar, "unitLabel": "Km"})).unwrap();
+    assert_eq!(said(&s, mark), "", "a short unit label fits");
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": bar, "unitLabel": "k".repeat(100)})).unwrap();
+    assert!(said(&s, mark).contains("its unit label is shortened to fit"), "{}", said(&s, mark));
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": bar, "unitLabel": null})).unwrap();
+    assert_eq!(said(&s, mark), "", "the abbreviation is never shortened");
+}
+
+/// A layout file whose scale bar has a unit label past the 100 characters a command takes is read
+/// with it cut, and the notice names a scale bar's unit label among what is cut.
+#[test]
+fn a_loaded_scale_bars_long_unit_label_is_cut_and_said() {
+    let mut s = Session::new(Project::default());
+    s.run("layout.new", &json!({"template": "map"})).unwrap();
+    let bar = s.project.layouts[0].elements.iter().find(|e| e.kind.code() == "scaleBar").unwrap().id;
+    s.run("layout.update", &json!({"element": bar, "unitLabel": "Kilometres"})).unwrap();
+    let dir = std::env::temp_dir().join(format!("rustgis-unit-label-cut-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("bar.rgislayout");
+    s.run("layout.save", &json!({"path": file.display().to_string()})).unwrap();
+    let mut text: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let saved = text["elements"].as_array_mut().unwrap().iter_mut().find(|e| e["id"] == json!(bar)).unwrap();
+    saved["kind"]["ScaleBar"]["unit_label"] = json!("k".repeat(150));
+    let mark = s.notice_mark();
+    s.run("layout.import", &json!({"text": text.to_string()})).unwrap();
+    let cut: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("cut to their limits")).collect();
+    assert_eq!(cut.len(), 1, "{cut:?}");
+    assert!(cut[0].contains("1 layout element(s)") && cut[0].contains("scale bar unit labels"), "{}", cut[0]);
+    assert!(matches!(
+        s.project.layouts[1].element(bar).map(|e| &e.kind),
+        Some(rustgis_map::layout::ElementKind::ScaleBar { unit_label: Some(l), .. }) if l.chars().count() == rustgis_map::layout::MAX_UNIT_LABEL_CHARS
+    ));
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A scale bar's `textSize` and a grid's `labelSize` (#2581): 8 points unless given, the edges 4
@@ -48347,6 +48641,182 @@ fn manual_breaks_on_a_layer_read_in_place_are_open_at_both_ends() {
     assert_eq!(opened.renderer, saved);
 }
 
+/// On a GeoParquet read in place, manual classes close at the field's range from the column
+/// statistics, and classes worked out from the view say so (#2497).
+#[test]
+fn classes_on_a_geoparquet_read_in_place_close_at_its_statistics_and_say_what_comes_from_the_view() {
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_map::Renderer;
+    let mut ds = Dataset::new("buildings", GeometryType::Point, vec![Field::new("height", FieldType::Double)]);
+    for h in 1..=40 {
+        ds.push(Some(Geometry::Point(Coord::new(f64::from(h), 0.0))), vec![V::Float(f64::from(h))]);
+    }
+    let dir = std::env::temp_dir().join(format!("rustgis-classes-in-view-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("buildings.parquet");
+    rustgis_data::io::write_path(&ds, &path).unwrap();
+    let mut s = Session::new(Project::default());
+    let id =
+        s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+    assert!(s.map().layer(id).unwrap().is_streamed());
+    let classes = |s: &Session| match &s.map().layer(id).unwrap().renderer {
+        Renderer::Graduated { breaks, min, .. } => (breaks.clone(), *min),
+        r => panic!("{r:?}"),
+    };
+    // What a run said about the view.
+    let run = |s: &mut Session, mut p: Value| {
+        p["layer"] = json!(id);
+        if p.get("field").is_none() {
+            p["field"] = json!("height");
+        }
+        let mark = s.notice_mark();
+        s.run("layer.symbology", &p).unwrap();
+        s.notices_since(mark).iter().filter(|n| n.text.contains("of the view read so far")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    // Manual breaks close at the file's smallest and largest values, before any view is read.
+    assert!(run(&mut s, json!({"type": "graduated", "breaks": [4, 7, 10, 15, 25]})).is_empty());
+    assert_eq!(classes(&s), (vec![4.0, 7.0, 10.0, 15.0, 25.0, 40.0], 1.0));
+    // Kept, they stay as they are; a bound past the largest value is one of its own.
+    run(&mut s, json!({"type": "graduated", "method": "manual"}));
+    assert_eq!(classes(&s).0, [4.0, 7.0, 10.0, 15.0, 25.0, 40.0]);
+    run(&mut s, json!({"type": "graduated", "breaks": [5, 50]}));
+    run(&mut s, json!({"type": "graduated", "method": "manual"}));
+    assert_eq!(classes(&s).0, [5.0, 50.0]);
+    // A view of low heights is read: quantiles and unique values come from it, and say so.
+    let v = view_of(&mut s, rustgis_geom::Extent::new(0.5, -1.0, 3.5, 1.0));
+    crate::render::render_png(s.map_mut(), &v).unwrap();
+    let n = s.map().layer(id).unwrap().dataset.features.len();
+    assert!(n > 0 && n < 40, "{n}");
+    // One notice: the layer, the count of features read, and where values elsewhere go.
+    let says = |said: &[String], then: &str| {
+        let [one] = said else { panic!("{said:?}") };
+        assert!(one.starts_with("buildings: ") && one.contains(&format!(" {n} features of the view read so far")), "{one}");
+        assert!(one.contains(then), "{one}");
+    };
+    says(&run(&mut s, json!({"type": "graduated", "method": "quantile", "classes": 2})), "first or last class");
+    says(&run(&mut s, json!({"type": "unique"})), "<all other values>");
+    // Manual from the view's classes: its inner bounds come from the view, its ends from the file.
+    run(&mut s, json!({"type": "single"}));
+    says(&run(&mut s, json!({"type": "graduated", "method": "manual", "classes": 2})), "file's smallest and largest values");
+    let (breaks, min) = classes(&s);
+    assert_eq!((breaks.len(), breaks.last(), min), (2, Some(&40.0), 1.0));
+    // The field named in another case finds the file's range too; a bound below it keeps the
+    // first class open.
+    run(&mut s, json!({"type": "graduated", "field": "HEIGHT", "breaks": [0.5, 4]}));
+    assert_eq!(classes(&s), (vec![0.5, 4.0, 40.0], rustgis_map::symbology::OPEN_BELOW));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// On a GeoParquet read in place, with a view of part of the file, a label and colour set by hand
+/// on the view's classes stay when Manual closes them at the file's range, and only while the
+/// inner bounds stay; the notice of the view is for a view that isn't the whole source (#2497).
+#[test]
+fn hand_edits_and_the_notice_on_a_geoparquet_read_in_place_follow_the_view() {
+    use rustgis_data::source::{Batch, FeatureSource, Request, SourceInfo};
+    use rustgis_data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_map::source::{PostgisOrigin, SourceLayer};
+    // A source that counts its features as told.
+    struct Says(SourceInfo);
+    impl FeatureSource for Says {
+        fn info(&self) -> &SourceInfo {
+            &self.0
+        }
+        fn read(&self, _: &Request) -> rustgis_data::Result<Batch> {
+            Ok(Batch::default())
+        }
+    }
+    let mut ds = Dataset::new("buildings", GeometryType::Point, vec![Field::new("height", FieldType::Double)]);
+    for h in 1..=40 {
+        ds.push(Some(Geometry::Point(Coord::new(f64::from(h), 0.0))), vec![V::Float(f64::from(h))]);
+    }
+    let dir = std::env::temp_dir().join(format!("rustgis-hand-edits-in-view-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("buildings.parquet");
+    rustgis_data::io::write_path(&ds, &path).unwrap();
+    let mut s = Session::new(Project::default());
+    let id =
+        s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap()["layer"].as_u64().unwrap() as u32;
+    let run = |s: &mut Session, mut p: Value| {
+        p["layer"] = json!(id);
+        p["type"] = json!("graduated");
+        p["field"] = json!("height");
+        let mark = s.notice_mark();
+        s.run("layer.symbology", &p).unwrap();
+        s.notices_since(mark).iter().filter(|n| n.text.contains("of the view read so far")).count()
+    };
+    let red = rustgis_map::Rgba::rgb(255, 0, 0);
+    let legend = |s: &Session| s.map().layer(id).unwrap().renderer.legend();
+    let kept = |s: &Session| {
+        legend(s).iter().enumerate().filter(|(_, c)| c.label == "Tall" || c.symbol.fill == red).map(|(i, _)| i).collect::<Vec<_>>()
+    };
+    // Both edits, on the class they were made on.
+    let both = |s: &Session| legend(s)[1].label == "Tall" && legend(s)[1].symbol.fill == red;
+    // Part of the file: three classes of the view's, the middle one edited by hand.
+    let edited = |s: &mut Session| {
+        run(s, json!({"type": "graduated", "breaks": [99]}));
+        assert_eq!(run(s, json!({"method": "equalInterval", "classes": 3})), 1);
+        s.run("layer.classStyle", &json!({"layer": id, "index": 1, "label": "Tall", "color": "#ff0000"})).unwrap();
+        assert_eq!(kept(s), [1]);
+        match &s.map().layer(id).unwrap().renderer {
+            rustgis_map::Renderer::Graduated { breaks, .. } => breaks.clone(),
+            r => panic!("{r:?}"),
+        }
+    };
+    let v = view_of(&mut s, rustgis_geom::Extent::new(0.5, -1.0, 3.5, 1.0));
+    crate::render::render_png(s.map_mut(), &v).unwrap();
+    assert!(s.map().layer(id).unwrap().dataset.features.len() < 40);
+    let b = edited(&mut s);
+    run(&mut s, json!({"method": "manual"}));
+    assert_eq!((kept(&s), both(&s), legend(&s)[2].label.ends_with("40")), (vec![1], true, true));
+    // The same inner bounds, typed.
+    edited(&mut s);
+    run(&mut s, json!({"breaks": [b[0], b[1]]}));
+    assert_eq!((kept(&s), both(&s)), (vec![1], true));
+    // Other inner bounds, one fewer, one more, or a closing bound of one's own: none is kept.
+    for other in [vec![b[0], b[1] + 1.0], vec![b[0]], vec![b[0], b[1], b[2]], vec![b[0], b[1], 50.0]] {
+        edited(&mut s);
+        run(&mut s, json!({"breaks": other}));
+        assert!(kept(&s).is_empty(), "{other:?}: {:?}", kept(&s));
+    }
+    // Nor those of a class past the file's largest value, once its bound is taken out.
+    run(&mut s, json!({"breaks": [5, 50]}));
+    s.run("layer.classStyle", &json!({"layer": id, "index": 1, "label": "Tall", "color": "#ff0000"})).unwrap();
+    run(&mut s, json!({"breaks": [5]}));
+    assert!(kept(&s).is_empty());
+    // Open classes a project saved before they closed at the file's range keep theirs too.
+    edited(&mut s);
+    let l = s.map_mut().layer_mut(id).unwrap();
+    l.renderer = l.renderer.opened().unwrap();
+    run(&mut s, json!({"method": "manual"}));
+    assert_eq!((kept(&s), both(&s), legend(&s)[2].label.ends_with("40")), (vec![1], true, true));
+    // Nor when the classes are worked out again from another view.
+    edited(&mut s);
+    let v = view_of(&mut s, rustgis_geom::Extent::new(-5.0, -5.0, 45.0, 5.0));
+    crate::render::render_png(s.map_mut(), &v).unwrap();
+    let l = s.map().layer(id).unwrap();
+    assert_eq!((l.dataset.features.len(), l.feature_count()), (40, Some(40)));
+    // The view now holds the whole source: nothing to say.
+    let classes = json!({"method": "equalInterval", "classes": 3});
+    assert_eq!(run(&mut s, classes.clone()), 0);
+    assert!(kept(&s).is_empty());
+    // The same 40 features of a source that doesn't count them, counts more, or whose count can
+    // be an estimate (a database's): the notice stays.
+    let source = s.map().layer(id).unwrap().source.as_ref().unwrap();
+    let info = source.info().unwrap().clone();
+    let says = |count| Box::new(Says(SourceInfo { count, ..info.clone() }));
+    let origin = PostgisOrigin { database: "postgres:host=h".into(), table: "t".into(), family: None, crs: None };
+    for (source, said) in [
+        (SourceLayer::from_path("b.parquet", None, says(None)), 1),
+        (SourceLayer::from_path("b.parquet", None, says(Some(41))), 1),
+        (SourceLayer::from_postgis(origin, says(Some(40))), 1),
+        (SourceLayer::from_path("b.parquet", None, says(Some(40))), 0),
+    ] {
+        s.map_mut().layer_mut(id).unwrap().source = Some(source);
+        assert_eq!(run(&mut s, classes.clone()), said);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Raster-side projection failures retain good multipart coverage and reach both command results.
 #[test]
 fn raster_projection_failures_are_reported_for_zonal_statistics_and_clipping() {
@@ -52375,6 +52845,116 @@ fn calculate_field_bulk_edit_keeps_validation_archive_and_undo() {
     assert!(s.map().layer_by_name("calc").unwrap().design.archive.as_ref().unwrap().is_empty());
     s.run("edit.redo", &Value::Null).unwrap();
     assert_eq!(values(&s), [V::Int(2), V::Int(2), V::Int(4)]);
+}
+
+/// Calculate Field's preview refuses a row exactly when Calculate on that row alone is refused,
+/// with its error word for word (#2837): a domain, an allowed combination and a constraint rule,
+/// checked after the calculation rules (a rule writing a field the domain then refuses), and a rule
+/// reading `@row_number`, which the preview's one-row copy reads as the layer's row. A field the
+/// calculation doesn't change isn't checked against its domain, so a layer with only such a domain
+/// refuses none.
+#[test]
+fn calculate_field_preview_refuses_what_calculate_refuses() {
+    let layer = || {
+        let mut s = Session::new(Project::default());
+        let features: Vec<Value> = [1, 2, 3]
+            .map(|n| {
+                json!({"type": "Feature", "properties": {"n": n, "m": 0, "kind": "a", "legacy": 9}, "geometry": {"type": "Point", "coordinates": [n, 0]}})
+            })
+            .to_vec();
+        let points = json!({"type": "FeatureCollection", "features": features});
+        s.run("layer.addDataText", &json!({"fileName": "calc.geojson", "text": points.to_string()})).unwrap();
+        // A value set before its domain: not checked while the calculation leaves it alone.
+        s.run("data.domain", &json!({"layer": "calc", "field": "legacy", "min": 1, "max": 5, "force": true})).unwrap();
+        s
+    };
+    // Each case: its check, the expression, and the row index (0 to 2) it refuses, if any.
+    let cases: Vec<(&str, Value, &str, Option<usize>)> = vec![
+        ("untouched domain", Value::Null, "n + 10", None),
+        ("domain", json!({"cmd": "data.domain", "p": {"layer": "calc", "field": "n", "min": 0, "max": 4}}), "n + 2", Some(2)),
+        (
+            "combination",
+            json!({"cmd": "data.contingentValues", "p": {"layer": "calc", "name": "N by kind", "fields": ["n", "kind"], "combos": [[2, "a"], [4, "a"]]}}),
+            "n + 1",
+            Some(1),
+        ),
+        (
+            "constraint",
+            json!({"cmd": "data.attributeRule", "p": {"layer": "calc", "name": "Not two", "kind": "constraint", "expression": "n <> 2"}}),
+            "n + 1",
+            Some(0),
+        ),
+        (
+            "row number",
+            json!({"cmd": "data.attributeRule", "p": {"layer": "calc", "name": "Second", "kind": "constraint", "expression": "@row_number <> 2"}}),
+            "n",
+            Some(1),
+        ),
+    ];
+    for (name, check, expression, refuses) in cases {
+        let mut s = layer();
+        if let Some(cmd) = check["cmd"].as_str() {
+            s.run(cmd, &check["p"]).unwrap();
+        }
+        let id = s.map().layer_by_name("calc").unwrap().id;
+        let l = s.map().layer(id).unwrap();
+        let n = l.dataset.field_index("n").unwrap();
+        let previewed = crate::cmd::edit::preview_calculation(expression, &l.dataset, n, &[0, 1, 2], Some(&l.design)).unwrap();
+        let refused: Vec<Option<String>> = previewed.into_iter().map(|p| p.refused).collect();
+        let ran: Vec<Option<String>> = (0..3)
+            .map(|row| {
+                let mut s = layer();
+                if let Some(cmd) = check["cmd"].as_str() {
+                    s.run(cmd, &check["p"]).unwrap();
+                }
+                s.run("select.rows", &json!({"layer": "calc", "rows": [row]})).unwrap();
+                s.run("edit.calculateField", &json!({"layer": "calc", "field": "n", "expression": expression})).err()
+            })
+            .collect();
+        assert_eq!(refused, ran, "{name}");
+        let refused_rows: Vec<usize> = (0..3).filter(|r| ran[*r].is_some()).collect();
+        assert_eq!(refused_rows, refuses.into_iter().collect::<Vec<usize>>(), "{name}: the row refused");
+    }
+    // A calculation rule writing a field whose domain then refuses it: checked after the rule.
+    let mut s = layer();
+    s.run("data.domain", &json!({"layer": "calc", "field": "m", "min": 0, "max": 25})).unwrap();
+    s.run("data.attributeRule", &json!({"layer": "calc", "name": "Tens", "kind": "calculation", "field": "m", "expression": "n * 10"}))
+        .unwrap();
+    let l = s.map().layer_by_name("calc").unwrap();
+    let n = l.dataset.field_index("n").unwrap();
+    let previewed = crate::cmd::edit::preview_calculation("n + 1", &l.dataset, n, &[0, 1], Some(&l.design)).unwrap();
+    assert_eq!(previewed[0].refused, None, "2 makes 20");
+    s.run("select.rows", &json!({"layer": "calc", "rows": [1]})).unwrap();
+    let ran = s.run("edit.calculateField", &json!({"layer": "calc", "field": "n", "expression": "n + 1"})).unwrap_err();
+    assert_eq!(previewed[1].refused.as_deref(), Some(ran.as_str()), "3 makes 30");
+    // A calculation rule reading `@row_number` reads the layer's row in the preview's copy too.
+    let ruled = || {
+        let mut s = layer();
+        s.run("data.domain", &json!({"layer": "calc", "field": "m", "min": 0, "max": 15})).unwrap();
+        s.run(
+            "data.attributeRule",
+            &json!({"layer": "calc", "name": "Place", "kind": "calculation", "field": "m", "expression": "@row_number * 10"}),
+        )
+        .unwrap();
+        s
+    };
+    let s = ruled();
+    let l = s.map().layer_by_name("calc").unwrap();
+    let n = l.dataset.field_index("n").unwrap();
+    let refused: Vec<Option<String>> = crate::cmd::edit::preview_calculation("n", &l.dataset, n, &[0, 1], Some(&l.design))
+        .unwrap()
+        .into_iter()
+        .map(|p| p.refused)
+        .collect();
+    let ran: Vec<Option<String>> = (0..2)
+        .map(|row| {
+            let mut s = ruled();
+            s.run("select.rows", &json!({"layer": "calc", "rows": [row]})).unwrap();
+            s.run("edit.calculateField", &json!({"layer": "calc", "field": "n", "expression": "n"})).err()
+        })
+        .collect();
+    assert_eq!(refused, ran, "the rule reads the row's place");
+    assert_eq!(ran.iter().map(Option::is_some).collect::<Vec<_>>(), [false, true], "row 1 makes 10, row 2 makes 20");
 }
 
 /// Calculate Field keeps a decimal result as it is in a decimal field, rather than rounding it to
