@@ -4273,6 +4273,9 @@ fn sections_updated(v: &Value, sections: &[Section]) -> Result<(Vec<Section>, Op
     if let Some(remove) = v.get("remove").filter(|v| !v.is_null())
         && super::bool_value(remove).ok_or("remove must be true or false")?
     {
+        if let Some(k) = SECTION_KEYS.iter().find(|k| !matches!(**k, "name" | "remove") && gives(v, k)) {
+            return Err(format!("a removed section line takes no \"{k}\""));
+        }
         out.remove(i);
         return Ok((out, None));
     }
