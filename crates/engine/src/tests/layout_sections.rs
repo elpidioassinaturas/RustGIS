@@ -37,7 +37,7 @@ fn section_lines_are_added_changed_removed_and_undone() {
     let r = s
         .run(
             "layout.addElement",
-            &json!({"kind": "section", "frame": frame, "name": "a2", "direction": "vertical", "at": [11, 49], "color": "#1F5C84", "width": 1, "dash": [6, 3]}),
+            &json!({"kind": "section", "frame": frame, "name": "a2", "direction": "vertical", "at": [11, 49], "color": "#1F5C84", "width": 1, "dash": [6, 3], "layout": 0, "text": null}),
         )
         .unwrap();
     assert_eq!(r["section"], json!("a2"));
@@ -85,6 +85,11 @@ fn section_lines_are_added_changed_removed_and_undone() {
         (json!({"direction": "line"}), "direction is"),
         (json!({"at": [0]}), "at is"),
         (json!({"background": {}}), "takes no background"),
+        // What it doesn't read, a box or a text's, is refused rather than dropped.
+        (json!({"x": 10}), "a section takes no \"x\""),
+        (json!({"text": "hi"}), "a section takes no \"text\""),
+        (json!({"angle": 30}), "a section takes no \"angle\""),
+        (json!({"newName": "b"}), "a section takes no \"newName\""),
     ] {
         let mut p = bad.clone();
         p["kind"] = json!("section");
