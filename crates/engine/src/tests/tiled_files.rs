@@ -358,3 +358,238 @@ fn a_run_that_panics_reads_no_file_after_it() {
     assert_eq!(within, 1024, "the file, within the run");
     assert_eq!(input.read().unwrap().width, 512, "the overview the layer holds, after the run");
 }
+
+/// A 1000-pixel RGB tiled GeoTIFF over 10°–11° E, 45°–46° N, its pixels a thousandth of a degree
+/// (which binary fractions don't hold exactly, so a window found from another origin can round
+/// another way), with its 500 overview: values vary across, down, and pixel by pixel.
+fn thousandths(dir: &std::path::Path) -> String {
+    const N: u32 = 1000;
+    let at = |f: fn(u32, u32) -> f32| (0..N * N).map(|i| f(i % N, i / N)).collect::<Vec<f32>>();
+    let bands = vec![at(|x, y| ((x * 7 + y * 13) % 256) as f32), at(|x, _| (x / 4) as f32), at(|_, y| (y / 4) as f32)];
+    let gt = GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: 0.001, pixel_height: -0.001 };
+    let r = Raster::new("checks", N, N, bands, gt, Crs::LonLat, None, ColorHint::Rgb { alpha: false }, "UInt8").unwrap();
+    let path = dir.join("checks.tif");
+    let info = rustgis_data::raster::cogwrite::write_file(&r, 0, &path).unwrap();
+    assert_eq!(info.levels, vec![(N, N), (N / 2, N / 2)], "the fixture's levels");
+    path.display().to_string()
+}
+
+/// Clip by extent of a layer read in place reads only the part of its file under the extent
+/// (#2865): the clip is the one made of the file held whole, to the pixel, and the file isn't
+/// read whole for it. A file replaced since the layer read it is read whole, so the clip is of the
+/// file as it is.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_clip_by_extent_reads_only_its_part_of_a_tiled_file() {
+    let d = dir("clip");
+    let path = thousandths(&d);
+    let clip = |extent: [f64; 4]| json!({"layer": "checks", "operation": "clip", "extent": extent, "name": "clip"});
+    // The same clip of the file held whole, as a file this size is.
+    let whole = |extent: [f64; 4]| {
+        // Held whole, whatever limit this thread has set meanwhile.
+        let limit = HELD_WHOLE.with(|c| c.replace(None));
+        let mut whole = Session::new(Project::default());
+        whole.run("layer.addData", &json!({"path": path})).unwrap();
+        assert!(!raster(&whole, "checks").tiled);
+        whole.run("raster.process", &clip(extent)).unwrap();
+        HELD_WHOLE.with(|c| c.set(limit));
+        raster(&whole, "clip").data.clone().unwrap()
+    };
+    let _held = HeldWhole::at(1_000_000);
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path})).unwrap();
+    assert!(raster(&s, "checks").tiled);
+    let reads = || crate::cmd::gp::TILED_READS.with(std::cell::Cell::get);
+    let extents =
+        [[10.3, 45.55, 10.42, 45.9], [10.123, 45.456, 10.789, 45.9], [10.007, 45.003, 10.509, 45.611], [10.25, 45.5, 10.5, 45.75]];
+    for extent in extents {
+        let (before, mark) = (reads(), s.notice_mark());
+        s.run("layer.remove", &json!({"layer": "clip"})).ok();
+        s.run("raster.process", &clip(extent)).unwrap();
+        assert_eq!(reads(), before, "the file isn't read whole");
+        let (got, want) = (raster(&s, "clip").data.clone().unwrap(), whole(extent));
+        assert_eq!(got.overview, None, "{extent:?}: at the file's full size");
+        assert_eq!((got.width, got.height, got.transform), (want.width, want.height, want.transform), "{extent:?}");
+        for (g, w) in got.bands.iter().zip(&want.bands) {
+            assert!(g.data == w.data, "{extent:?}: band {}", g.name);
+        }
+        let notes = said(&s, mark);
+        assert!(!notes.iter().any(|n| n.contains("finest level")), "{notes:?}");
+    }
+    // A part too large for what the run holds is read from an overview, and said, with its size.
+    crate::cmd::gp::PART_SAMPLES.with(|c| c.set(Some(40_000)));
+    let mark = s.notice_mark();
+    s.run("layer.remove", &json!({"layer": "clip"})).ok();
+    s.run("raster.process", &clip([10.3, 45.55, 10.42, 45.9])).unwrap();
+    crate::cmd::gp::PART_SAMPLES.with(|c| c.set(None));
+    let got = raster(&s, "clip").data.clone().unwrap();
+    assert_eq!((got.width, got.height), (60, 176), "the part at the 500 overview");
+    let notes = said(&s, mark);
+    let note = "Process: read at the finest level each can hold: checks at its 500 × 500 overview of the 1000 × 1000 raster, a 62 × 177 part of it";
+    assert!(notes.iter().any(|n| n == note), "{notes:?}");
+    // The file replaced by one a twentieth of a degree east: read whole, and clipped where it is.
+    const N: u32 = 1000;
+    let shifted = Raster::new(
+        "checks",
+        N,
+        N,
+        vec![(0..N * N).map(|i| (i % 251) as f32).collect()],
+        GeoTransform { origin_x: 10.05, origin_y: 46.0, pixel_width: 0.001, pixel_height: -0.001 },
+        Crs::LonLat,
+        None,
+        ColorHint::Gray,
+        "UInt8",
+    )
+    .unwrap();
+    rustgis_data::raster::cogwrite::write_file(&shifted, 0, std::path::Path::new(&path)).unwrap();
+    let extent = [10.3, 45.55, 10.42, 45.9];
+    s.run("layer.remove", &json!({"layer": "clip"})).ok();
+    let before = reads();
+    s.run("raster.process", &clip(extent)).unwrap();
+    assert_eq!(reads(), before + 1, "a replaced file is read whole");
+    let (got, want) = (raster(&s, "clip").data.clone().unwrap(), whole(extent));
+    assert_eq!((got.width, got.height, got.transform), (want.width, want.height, want.transform));
+    assert!(got.bands[0].data == want.bands[0].data, "the clip is of the file as it is now");
+}
+
+/// Holds files whole for a cell-by-cell command up to `max` samples on this thread while it
+/// lives ([`crate::cmd::in_blocks::BLOCKS_PAST`]), then as before.
+struct BlocksPast;
+
+impl BlocksPast {
+    fn at(max: usize) -> BlocksPast {
+        crate::cmd::in_blocks::BLOCKS_PAST.with(|c| c.set(Some(max)));
+        BlocksPast
+    }
+}
+
+impl Drop for BlocksPast {
+    fn drop(&mut self) {
+        crate::cmd::in_blocks::BLOCKS_PAST.with(|c| c.set(None));
+    }
+}
+
+/// Indices over a layer read in place whose file is too large to read whole at its full size run
+/// a block at a time (#2865): the result is the index of the file held whole, pixel for pixel, at
+/// its full size. One too large to hold is written to a tiled GeoTIFF in the project's results
+/// folder, which the new layer reads in place and another command can read at once, and said; the
+/// Assistant asks before such a run, as it writes a file. A run cancelled at any of its checks, or
+/// never added, leaves nothing behind, the folder included, and one run again makes it. A result
+/// that fits is held, with no file. A script step that can't be stopped is refused.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn indices_over_a_file_too_large_to_read_whole_run_a_block_at_a_time() {
+    use crate::cmd::workflows::{raster_abandon, raster_land, raster_start};
+    use crate::policy::{Call, Effects, Outcome, Revocation, Scope};
+    struct Live;
+    impl Revocation for Live {
+        fn allows(&self, _: Effects) -> bool {
+            true
+        }
+    }
+    let d = dir("blocks");
+    let path = thousandths(&d);
+    let ndvi = json!({"layer": "checks", "index": "ndvi", "red": 1, "nir": 2, "name": "index"});
+    // The index of the file held whole.
+    let want = {
+        let mut whole = Session::new(Project::default());
+        whole.run("layer.addData", &json!({"path": path})).unwrap();
+        whole.run("raster.index", &ndvi).unwrap();
+        raster(&whole, "index").data.clone().unwrap()
+    };
+    let same = |got: &Raster, why: &str| {
+        assert_eq!((got.width, got.height, got.transform, got.nodata), (want.width, want.height, want.transform, want.nodata), "{why}");
+        assert!(got.bands[0].data == want.bands[0].data, "{why}: the index of the file held whole");
+    };
+    let _held = HeldWhole::at(1_000_000);
+    let mut s = Session::new(Project::default());
+    s.path = Some(d.join("Survey.rgis"));
+    s.run("layer.addData", &json!({"path": path})).unwrap();
+    let folder = d.join("Survey.rgis.data");
+    {
+        // Read in blocks, but a result of a million pixels fits: held, with no file.
+        let _blocks = BlocksPast::at(1_000_000);
+        let mark = s.notice_mark();
+        s.run("raster.index", &ndvi).unwrap();
+        let rl = raster(&s, "index");
+        assert!(!rl.tiled && rl.path.is_none(), "held, with no file");
+        same(rl.data.as_ref().unwrap(), "held");
+        assert!(!folder.exists(), "no folder for a result held");
+        assert!(!said(&s, mark).iter().any(|n| n.contains("written to")));
+        s.run("layer.remove", &json!({"layer": "index"})).unwrap();
+    }
+    let _blocks = BlocksPast::at(900_000);
+    // The Assistant asks before a run that writes a file.
+    let scope = Scope::assistant(7, std::sync::Arc::new(Live));
+    assert!(matches!(s.review(&scope, &Call::command("raster.index", ndvi.clone())), Outcome::NeedsApproval(_)));
+    // A script step on the app's window thread is refused, with what to do.
+    let script = format!("raster.index {ndvi}");
+    s.on_window_thread = true;
+    let e = s.run("script.run", &json!({"script": script})).unwrap_err();
+    s.on_window_thread = false;
+    assert!(e.contains("a block at a time") && e.contains("run it on its own"), "{e}");
+    let run = |s: &mut Session, p: &serde_json::Value, control: &std::sync::Arc<rustgis_analysis::control::Control>| {
+        let run = raster_start(s, "raster.index", p).unwrap();
+        let id = run.id;
+        (id, run.run(control))
+    };
+    let count = rustgis_analysis::control::Control::cancelled_at_look(u64::MAX);
+    let (id, made) = run(&mut s, &ndvi, &count);
+    let looks = count.looked();
+    assert!(looks > 6, "{looks} checks: it looks at Cancel between its blocks");
+    // Made but never added: its file and the folder made for it go with it.
+    drop(made);
+    raster_abandon(&mut s, id);
+    assert!(!folder.exists(), "a result never added left {folder:?}");
+    // Cancelled at its checks (a spread of them, and its last ones): nothing left. Its threads
+    // share the count, so a run can end with fewer checks than the count's: one that never got to
+    // check `n` makes its result, which goes when it isn't added.
+    let checks: std::collections::BTreeSet<u64> =
+        (1..=looks).step_by((looks as usize / 64).max(1)).chain(looks.saturating_sub(10)..=looks).collect();
+    for n in checks {
+        let control = rustgis_analysis::control::Control::cancelled_at_look(n);
+        let (id, made) = run(&mut s, &ndvi, &control);
+        match made {
+            Err(e) => assert!(e.starts_with("Indices was cancelled"), "check {n}: {e}"),
+            Ok(m) => {
+                assert!(control.looked() < n, "check {n} of {}: not cancelled", control.looked());
+                drop(m);
+            }
+        }
+        raster_abandon(&mut s, id);
+        assert!(!folder.exists(), "check {n}: left {folder:?}");
+    }
+    // Run to the end, and added as the app adds it.
+    let mark = s.notice_mark();
+    let (id, made) = run(&mut s, &ndvi, &rustgis_analysis::control::Control::new());
+    assert!(raster_land(&mut s, id, made.unwrap()).unwrap());
+    let v = s.run("raster.index", &json!({"ran": id})).unwrap();
+    let file = folder.join("index.tif");
+    assert_eq!(v["path"], json!(file.display().to_string()));
+    let rl = raster(&s, "index");
+    assert!(rl.tiled, "the result is read in place from its file");
+    assert_eq!(rl.path.as_deref(), Some(file.display().to_string().as_str()));
+    // It holds the file's overview the reader picks, as when the project is opened again.
+    assert_eq!(rl.data.as_ref().map(|r| (r.width, r.overview)), Some((500, Some((1000, 1000)))));
+    same(&rustgis_data::raster::read_path(&file).unwrap(), "written");
+    let notes = said(&s, mark);
+    assert!(
+        notes.iter().any(|n| n.contains("a block at a time") && n.contains("1000 × 1000") && n.contains("Survey.rgis.data")),
+        "{notes:?}"
+    );
+    // The result read in place feeds another run at once, a block at a time too.
+    let again = json!({"layer": "index", "index": "ndvi", "red": 1, "nir": 1, "name": "again"});
+    let (id, made) = run(&mut s, &again, &rustgis_analysis::control::Control::new());
+    assert!(raster_land(&mut s, id, made.unwrap()).unwrap());
+    s.run("raster.index", &json!({"ran": id})).unwrap();
+    assert!(folder.join("again.tif").is_file());
+    // Made again, it takes a name of its own.
+    let (id, made) = run(&mut s, &ndvi, &rustgis_analysis::control::Control::new());
+    assert!(raster_land(&mut s, id, made.unwrap()).unwrap());
+    s.run("raster.index", &json!({"ran": id})).unwrap();
+    assert!(folder.join("index 2.tif").is_file());
+    // A script step off any window (the command line's, Python's) runs it.
+    let scripted = json!({"layer": "checks", "index": "ndvi", "red": 1, "nir": 2, "name": "scripted"});
+    s.run("script.run", &json!({"script": format!("raster.index {scripted}")})).unwrap();
+    assert!(folder.join("scripted.tif").is_file());
+}
