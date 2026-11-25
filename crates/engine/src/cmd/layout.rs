@@ -4035,6 +4035,11 @@ fn add_element(s: &mut Session, p: &Value) -> CmdResult {
             return Ok(json!({"element": frame}));
         }
         "section" => {
+            // The frame's box is its own, and a line has no text: refused rather than dropped.
+            let given = p.as_object().and_then(|o| o.keys().find(|k| !ADDED_SECTION_KEYS.contains(&k.as_str()) && gives(p, k)));
+            if let Some(k) = given {
+                return Err(format!("a section takes no \"{k}\" (it reads {})", ADDED_SECTION_KEYS.join(", ")));
+            }
             let frame = frame_of(l, p)?;
             unlocked(l, frame)?;
             let Some(ElementKind::MapFrame { sections, center, .. }) = l.element(frame).map(|e| &e.kind) else {
@@ -4207,6 +4212,8 @@ fn say_name_ignored(s: &mut Session, p: &Value, kind: &str) {
 
 /// What a `direction` or an `at` given for an element that isn't a section is told.
 const ONLY_SECTION: &str = "only sections take a direction and a place (at)";
+/// What `layout.addElement` takes for a section.
+const ADDED_SECTION_KEYS: [&str; 9] = ["layout", "kind", "frame", "name", "direction", "at", "color", "width", "dash"];
 /// What a map frame's `"section"` object takes in `layout.update`.
 const SECTION_KEYS: [&str; 8] = ["name", "newName", "direction", "at", "color", "width", "dash", "remove"];
 
