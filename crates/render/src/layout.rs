@@ -1980,20 +1980,23 @@ pub fn sections_not_drawn(layout: &Layout, maps: &[Map]) -> Vec<SectionGap> {
 }
 
 /// What an export of `pages` pages says of the section lines not drawn, each with the pages it is
-/// missing from: one notice, counted, the first ten named; `None` for none.
+/// missing from, by reason: one notice, the lines counted, the first ten named; `None` for none.
 pub fn sections_notice(gaps: &BTreeMap<SectionGap, usize>, pages: usize) -> Option<String> {
     if gaps.is_empty() {
         return None;
     }
-    let named = gaps.iter().take(10).map(|(g, on)| {
+    // A line can be missing for one reason on some pages and another on others: one line still.
+    let mut lines: BTreeMap<(u32, &str, &str), Vec<String>> = BTreeMap::new();
+    for (g, on) in gaps {
         let on = if pages > 1 { format!(" on {on} of {pages} pages") } else { String::new() };
-        format!("'{}' of {} ({}){on}: {}", g.section, g.frame_name, g.frame, g.why)
-    });
-    let mut named = named.collect::<Vec<_>>().join("; ");
-    if gaps.len() > 10 {
-        named.push_str(&format!("; and {} more", gaps.len() - 10));
+        lines.entry((g.frame, &g.frame_name, &g.section)).or_default().push(format!("{on}: {}", g.why));
     }
-    Some(format!("{} section line(s) not drawn: {named}", gaps.len()))
+    let named = lines.iter().take(10).map(|((frame, name, section), why)| format!("'{section}' of {name} ({frame}){}", why.join(",")));
+    let mut named = named.collect::<Vec<_>>().join("; ");
+    if lines.len() > 10 {
+        named.push_str(&format!("; and {} more", lines.len() - 10));
+    }
+    Some(format!("{} section line(s) not drawn: {named}", lines.len()))
 }
 
 /// The size of a section's name at its ends, in points.

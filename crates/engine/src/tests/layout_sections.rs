@@ -72,6 +72,9 @@ fn section_lines_are_added_changed_removed_and_undone() {
         (json!({"name": "A", "newName": "n".repeat(21)}), "at most 20"),
         (json!({"name": "A", "rows": 3}), "rows"),
         (json!({"name": "A", "remove": "x"}), "remove"),
+        // A line being removed has no place or width to change: refused rather than dropped.
+        (json!({"name": "A", "remove": true, "at": [1, 2]}), "a removed section line takes no \"at\""),
+        (json!({"name": "A", "width": 3, "remove": true}), "a removed section line takes no \"width\""),
         (json!({"name": "Z"}), "no section line 'Z'"),
         (json!({"at": [0, 0]}), "name"),
         (json!(false), "section is an object"),
@@ -171,6 +174,15 @@ fn a_section_line_not_drawn_is_said() {
     let note = said_of(&mut s, &mut |s| drop(crate::cmd::layout::layout_bytes(s, 0, true, 36.0, true).unwrap()));
     assert!(note.len() == 1 && note[0].contains("'A' of ") && note[0].contains(" pages: its place"), "{note:?}");
     assert_eq!(s.project.layouts[0], before);
+    // On the globe some pages are too far round for its place, others only beside it: one line all
+    // the same, each reason with its pages.
+    s.project.maps[0].projection = rustgis_map::Projection::Globe;
+    let note = said_of(&mut s, &mut |s| drop(crate::cmd::layout::layout_bytes(s, 0, true, 36.0, true).unwrap()));
+    assert_eq!(note.len(), 1, "{note:?}");
+    assert!(note[0].starts_with("1 section line(s) not drawn: 'A' of ") && note[0].matches("'A' of ").count() == 1, "{note:?}");
+    for why in [" pages: its place is outside the frame", " pages: its place isn't one the frame's map shows"] {
+        assert!(note[0].contains(why), "{note:?}");
+    }
 }
 
 /// Section lines are required where they are saved, so an older reader refuses the project instead
