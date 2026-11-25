@@ -214,7 +214,7 @@ impl Section {
         let mut cut = sections.len() > MAX_SECTIONS;
         sections.truncate(MAX_SECTIONS);
         for s in sections.iter_mut() {
-            cut |= s.name.chars().nth(MAX_SECTION_NAME).is_some();
+            cut |= s.name.trim().chars().nth(MAX_SECTION_NAME).is_some();
             s.name = s.name.trim().chars().take(MAX_SECTION_NAME).collect::<String>().trim_end().to_string();
             s.width = finite_or(s.width, SECTION_WIDTH).clamp(SECTION_WIDTHS.0, SECTION_WIDTHS.1);
             let at = s.line.at();
@@ -4840,6 +4840,11 @@ mod tests {
         assert!(l.clamp().is_empty() && l.elements[0].kind.has_sections());
         assert_eq!(held(&l)[0].line, SectionLine::Vertical(Coord::new(1.0, 2.0)));
         assert_eq!(serde_json::from_str::<Layout>(&serde_json::to_string(&l).unwrap()).unwrap(), l);
+        // Spaces round a name are trimmed, which adjusts the frame; nothing of the name is cut.
+        let padded = format!("  {}  ", "n".repeat(MAX_SECTION_NAME));
+        let mut l = frame(&format!(r#","sections":[{}]"#, one(&padded)));
+        let repairs = l.clamp();
+        assert_eq!((repairs.elements_adjusted, repairs.elements_cut, held(&l)[0].name.as_str()), (1, 0, padded.trim()));
         let hostile = r#"{"name":" a ","line":{"Horizontal":{"x":1e300,"y":-200}},"color":[0,0,0,255],"width":1e9}"#;
         let long = "n".repeat(50);
         let list = [hostile.to_string(), one("A"), one(""), one(&long)].into_iter().chain((0..40).map(|i| one(&format!("s{i}"))));
