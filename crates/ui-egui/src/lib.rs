@@ -13,6 +13,7 @@ mod agentthreads;
 mod analysispane;
 mod approvalcard;
 mod arcgisui;
+pub mod assistant;
 #[cfg(not(target_arch = "wasm32"))]
 mod assistantkeys;
 mod assistantpane;
@@ -1392,6 +1393,20 @@ impl RustGisApp {
         }
         self.fixes.push_back(fix);
     }
+
+    /// The system is short of memory (a phone says so): drops what is kept only to draw again
+    /// sooner ([`Session::release_memory`], the map's drapes, and its textures and buffers on the
+    /// graphics card), and says so the first time.
+    pub fn release_memory(&mut self) {
+        // The map first: it stops the frames being drawn, which would keep more.
+        self.map.release_memory();
+        self.session.release_memory();
+        if !std::mem::replace(&mut self.said_low_memory, true) {
+            self.session.warn(tl!(
+                "The device is low on memory: RustGIS dropped the map tiles and drawings it kept to draw faster. They are made or downloaded again when needed."
+            ));
+        }
+    }
 }
 
 /// Whether `fix` replaces the shown position: not when it is older, nor when it is much less
@@ -1477,6 +1492,8 @@ pub struct RustGisApp {
     /// How many positions were dropped from [`RustGisApp::fixes`] past [`FIXES_KEPT`] since an
     /// interface last took them: the interface says so when a track or an average missed them.
     pub fixes_dropped: usize,
+    /// Whether [`RustGisApp::release_memory`] has said so, which it does once.
+    said_low_memory: bool,
     /// Watches linked local files for changes made outside RustGIS and offers Reload Data
     /// (the desktop app; see [`diskwatch`]). Off for tests, unless one turns it on (as `ui_shot`'s
     /// `watchFiles` does).
@@ -1501,7 +1518,7 @@ pub struct RustGisApp {
     pub reports: reportpane::ReportState,
     pub docs: docpanes::DocState,
     /// The AI Assistant's conversation and settings.
-    pub assistant: assistantpane::AssistantState,
+    pub assistant: assistant::AssistantState,
     /// "Let your Agents Control RustGIS" (desktop).
     #[cfg(not(target_arch = "wasm32"))]
     pub connect: connectui::ConnectState,
@@ -1783,6 +1800,7 @@ impl RustGisApp {
             keep_locating: false,
             photos: Vec::new(),
             fixes_dropped: 0,
+            said_low_memory: false,
             #[cfg(not(target_arch = "wasm32"))]
             watch_files: false,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1797,7 +1815,7 @@ impl RustGisApp {
             update: update::UpdateState::default(),
             reports: reportpane::ReportState::default(),
             docs: docpanes::DocState::default(),
-            assistant: assistantpane::AssistantState::default(),
+            assistant: assistant::AssistantState::default(),
             fonts_frames: 0,
             frame_start: None,
             applied_theme: None,
@@ -2746,7 +2764,7 @@ impl RustGisApp {
         self.session.notify(offered, false);
         report.notify(&mut self.session);
         for note in construction_notes {
-            self.session.notify(note, false);
+            self.session.say(note);
         }
         self.ui.web_file = Some(file);
         Ok(())
@@ -3264,7 +3282,7 @@ impl RustGisApp {
     /// Imports a peer's project without going through User command dispatch or restore memory.
     pub fn open_peer_text(&mut self, text: &str) -> Result<(), String> {
         let report = self.session.open_peer_text(rustgis_engine::Peer::Embedder, text)?;
-        assistantpane::peer_replaced(self);
+        assistant::peer_replaced(self);
         self.ui.web_file = None;
         self.map.deleting = None;
         // A spectral profile's points were read on the old project's rasters.
@@ -5328,7 +5346,10 @@ impl RustGisApp {
             "ui.pane.assistant" => match p.get("ask").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()) {
                 Some(text) => {
                     self.ui.open_right(RightPane::Assistant);
+                    // A message still waiting isn't lost to this one: it goes back to the box.
+                    assistant::unqueue(&mut self.assistant);
                     self.assistant.queued = Some(text.to_string());
+                    self.assistant.queued_from_box = false;
                 }
                 None => toggle_right(&mut self.ui, RightPane::Assistant),
             },
@@ -5626,25 +5647,26 @@ impl RustGisApp {
                 dbf_notes.extend(io::dates_as_text_note(&ds.fields, &name));
                 dbf_notes.extend(rustgis_engine::cmd::share::gpkg_dates_note(&ds, &ext, &name));
                 if lost.rows > 0 {
-                    dbf_notes.push(rustgis_engine::cmd::whole::unread_notice(&name, lost.rows));
+                    dbf_notes.push(rustgis_engine::cmd::whole::unread_note(&name, lost.rows));
                 }
                 dbf_notes.extend(rustgis_engine::cmd::share::read_notes(&name, &l.name, &lost));
                 // CSV holds a point a row, GPX a name for each feature and no areas; reading text back, CSV reads blanks as null and KML and GPX trim it.
                 dbf_notes.extend(io::export_losses_notes(&ds, &ext, io::name_field(&ds), &name).map_err(|e| e.to_string())?);
+                // NaN and infinities, which GeoJSON can't hold, written as null.
+                let null_numbers = rustgis_engine::data::export::numbers_written_as_null(&ds.features, &ds.fields, &ext);
                 drop(ds);
-                if let Some(note) = io::left_out_note(&name, &ext, left_out) {
-                    self.session.notify(note, false);
-                }
+                // Said only once the download is taken, as the other notes are.
+                dbf_notes.extend(io::left_out_note(&name, &ext, left_out));
                 if ext == "zip" && rustgis_engine::data::raster::wkt::to_wkt(crs).is_none() {
-                    self.session.notify(format!("{name}: no .prj written, as {} has no WKT form", crs.label()), false);
+                    dbf_notes.push(rustgis_engine::data::loss::Note::loss(
+                        rustgis_engine::data::loss::LossCode::DroppedCrsName,
+                        format!("{name}: no .prj written, as {} has no WKT form", crs.label()),
+                    ));
                 }
                 if self.download(&name, bytes) {
                     rustgis_engine::cmd::share::notify_export_query(&mut self.session, &name, &layer_name, &query_report);
-                    for note in notes
-                        .into_iter()
-                        .chain(dbf_notes)
-                        .chain(construction_notes.into_iter().map(rustgis_engine::data::loss::Note::plain))
-                    {
+                    rustgis_engine::cmd::share::notify_null_numbers(&mut self.session, &name, null_numbers);
+                    for note in notes.into_iter().chain(dbf_notes).chain(construction_notes) {
                         self.session.say(note);
                     }
                 }
@@ -7208,7 +7230,7 @@ impl RustGisApp {
         geolibreui::poll(self, ctx);
         pluginsui::poll(self, ctx);
         extensionsui::persist(self);
-        assistantpane::poll(self, ctx);
+        assistant::poll(self, ctx);
         // A project the MCP relay, the assistant or a plugin opened or saved this frame (they run
         // on the session directly) becomes Last Project now, not a frame later the app may not
         // reach.
@@ -9807,6 +9829,33 @@ mod download_service_tests {
                     format!("Cities.geojson: the definition query on Cities left out {} of the source features", total - 1)
                 );
             }
+        }
+    }
+
+    /// The web download says the numbers GeoJSON can't hold, written as null, with their code, once
+    /// the browser takes the file; a refused download says nothing of them.
+    #[test]
+    fn feature_download_says_numbers_written_as_null() {
+        use rustgis_engine::data::{Dataset, Field, FieldType, Geometry, GeometryType, Value};
+        use rustgis_engine::geom::Coord;
+        // A NaN accepted, a NaN refused, and finite numbers only (nothing to say).
+        for (accept, first) in [(true, f64::NAN), (false, f64::NAN), (true, 2.5)] {
+            let download: Box<dyn Fn(&str, Vec<u8>) -> Result<(), String>> =
+                if accept { Box::new(|_, _| Ok(())) } else { Box::new(|_, _| Err("browser rejected download".into())) };
+            let mut app = RustGisApp::with_sample().with_services(Services { download: Some(download), ..Default::default() });
+            let mut ds = Dataset::new("Gauges", GeometryType::Point, vec![Field::new("level", FieldType::Double)]);
+            ds.push(Some(Geometry::Point(Coord::new(1.0, 2.0))), vec![Value::Float(first)]);
+            ds.push(Some(Geometry::Point(Coord::new(3.0, 4.0))), vec![Value::Float(1.5)]);
+            let id = app.session.map_mut().add_dataset(ds);
+            let mark = app.session.notice_mark();
+            let run = app.run("ui.exportLayer", json!({"layer": id, "format": "geojson"}));
+            if accept {
+                run.unwrap();
+            }
+            let said: Vec<_> =
+                app.session.notices_since(mark).iter().filter(|n| n.text.contains("written as null")).map(|n| n.loss()).collect();
+            let expected = if accept && first.is_nan() { vec![Some(rustgis_engine::data::loss::LossCode::DroppedValue)] } else { vec![] };
+            assert_eq!(said, expected, "accepted: {accept}, first: {first}");
         }
     }
 

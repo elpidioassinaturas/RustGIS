@@ -518,6 +518,7 @@ pub(crate) const IN_BACKGROUND: &[(&str, &str, Start)] = &[
     ("stac.addIndex", "Add STAC Index", super::stac_bands::index_work),
     ("raster.process", "Process", super::imagery::process_work),
     ("raster.rasterize", "Polygons to Raster", super::imagery::rasterize_work),
+    ("raster.mosaic", "Mosaic Rasters", super::imagery::mosaic_rasters_work),
     ("imagery.mosaic", "Build Mosaic", super::imagery::mosaic_work),
     ("dl.classify", "Deep Learning", super::deeplearning::classify_work),
     ("embeddings.similarity", "Satellite Embedding Similarity", super::embeddings::similarity_work),
@@ -2322,10 +2323,10 @@ fn route(s: &mut Session, p: &Value) -> CmdResult {
         s.notify_text(notice, false);
     }
     if r.skipped_segments > 0 {
-        s.notify(
+        s.say(rustgis_data::loss::Note::loss(
+            rustgis_data::loss::LossCode::DroppedGeometry,
             format!("{source_name}: {} segments with invalid coordinates were omitted from the route network", r.skipped_segments),
-            false,
-        );
+        ));
     }
     if r.overflowing > 0 {
         s.notify(
@@ -2497,9 +2498,12 @@ fn simulate(s: &mut Session, p: &Value) -> CmdResult {
         s.notify_text(notice, false);
     }
     if unplaced > 0 {
-        s.warn(format!(
-            "{}: {unplaced} polygon(s) of {source} have a place that can't be given in longitude/latitude, so no points are simulated in them",
-            ds.name
+        s.say(rustgis_data::loss::Note::loss(
+            rustgis_data::loss::LossCode::DroppedFeature,
+            format!(
+                "{}: {unplaced} polygon(s) of {source} have a place that can't be given in longitude/latitude, so no points are simulated in them",
+                ds.name
+            ),
         ));
     }
     let nid = super::layer::add_dataset(s, ds);
@@ -2626,7 +2630,7 @@ fn convert(s: &mut Session, p: &Value) -> CmdResult {
     let target = ds.name.clone();
     let query_note = super::share::query_export_note(&target, &layer.name, &report);
     drop(ds);
-    for note in notes.into_iter().chain(construction_notes.into_iter().map(rustgis_data::loss::Note::plain)) {
+    for note in notes.into_iter().chain(construction_notes) {
         s.say(note);
     }
     super::share::notify_null_numbers(s, &target, null_numbers);
@@ -2672,7 +2676,7 @@ pub(crate) fn convert_work(s: &Session, p: &Value) -> Result<super::exports::Wor
                 notes.extend(result.text.notes(&ds.fields, &path));
             }
             if result.skipped > 0 {
-                notes.push(format!("{path}: {} rows couldn't be read and were left out", result.skipped));
+                notes.push(super::whole::unread_note(&path, result.skipped));
             }
             notes.extend(rustgis_data::io::unplaced_export_note(&path, &ds.name, result.unplaced, rustgis_data::raster::Crs::LonLat));
             notes.extend(
@@ -2709,7 +2713,7 @@ pub(crate) fn convert_work(s: &Session, p: &Value) -> Result<super::exports::Wor
             super::share::coalesce_read_zm(&mut notes, &path, &ds, &unreadable);
             rustgis_data::io::write_atomic(std::path::Path::new(&path), text.as_bytes()).map_err(|e| format!("{path}: {e}"))?;
             if unreadable.rows > 0 {
-                notes.push(format!("{path}: {} rows couldn't be read and were left out", unreadable.rows));
+                notes.push(super::whole::unread_note(&path, unreadable.rows));
             }
             notes.extend(super::share::read_notes(&path, &ds.name, &unreadable));
             (notes, rustgis_data::export::numbers_written_as_null(&ds.features, &ds.fields, format), report)

@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, Transformer};
+use rustgis_data::raster::{BandStats, ColorHint, Crs, GeoTransform, Raster, Transformer};
 use rustgis_geom::{Coord, Extent};
 
 /// The no-data value written by these operations.
@@ -43,6 +43,10 @@ pub fn derive(r: &Raster, name: &str, bands: Vec<Vec<f32>>) -> Result<Raster, St
 
 /// [`derive`] for a [`hillshade`]'s pixels: one band of whole numbers 1–255 stored as bytes
 /// (`UInt8`), with 0 as no-data, so it is written as 8-bit samples, not 32-bit floats.
+///
+/// Its statistics come from how many cells hold each value, counted on several threads
+/// ([`BandStats::of_byte_counts`]), the same as [`Raster::new`] makes by reading the cells twice,
+/// one of the passes on one thread; cells that aren't whole numbers to 255 take that way instead.
 pub fn derive_hillshade(r: &Raster, name: &str, mut shade: Vec<f32>) -> Result<Raster, String> {
     r.require_coordinates()?;
     for v in &mut shade {
@@ -50,7 +54,53 @@ pub fn derive_hillshade(r: &Raster, name: &str, mut shade: Vec<f32>) -> Result<R
             *v = 0.0;
         }
     }
-    Raster::new(name, r.width, r.height, vec![shade], r.transform, r.crs, Some(0.0), ColorHint::Gray, "UInt8").map_err(|e| e.to_string())
+    let Some(stats) = byte_stats(&shade)? else {
+        return Raster::new(name, r.width, r.height, vec![shade], r.transform, r.crs, Some(0.0), ColorHint::Gray, "UInt8")
+            .map_err(|e| e.to_string());
+    };
+    let mut out = Raster::unmeasured(name, r.width, r.height, vec![shade], r.transform, r.crs, Some(0.0), ColorHint::Gray, "UInt8")
+        .map_err(|e| e.to_string())?;
+    if let Some(band) = out.bands.first_mut() {
+        band.stats = stats;
+    }
+    Ok(out)
+}
+
+/// The cells [`byte_stats`] counts at a time: its 2 KB of counts for each are 0.05% of their cells.
+const BYTE_COUNT_CHUNK: usize = 1 << 20;
+
+/// The statistics of `cells` with 0 as no-data, from how many hold each value, when every one is
+/// a whole number from 0 to 255; `None` when one isn't.
+fn byte_stats(cells: &[f32]) -> Result<Option<BandStats>, String> {
+    let chunks: Vec<&[f32]> = cells.chunks(BYTE_COUNT_CHUNK).collect();
+    crate::control::begin(chunks.len());
+    // Two chunks, two million cells, before threads pay off; each thread takes one at a time, as
+    // there are few of them.
+    let threads = crate::parallel::threads_for_each(chunks.len(), 2, 0);
+    let counted = crate::parallel::try_map_each_on(
+        &chunks,
+        threads,
+        || (),
+        |_, _, chunk: &&[f32]| {
+            let mut counts = [0u64; 256];
+            for &v in *chunk {
+                let byte = v as u8;
+                if f32::from(byte) != v {
+                    return Ok::<_, String>(None);
+                }
+                if let Some(c) = counts.get_mut(usize::from(byte)) {
+                    *c += 1;
+                }
+            }
+            Ok(Some(counts))
+        },
+    )?;
+    let mut counts = [0u64; 256];
+    for chunk in counted {
+        let Some(chunk) = chunk else { return Ok(None) };
+        counts.iter_mut().zip(chunk).for_each(|(a, b)| *a += b);
+    }
+    Ok(BandStats::of_byte_counts(&counts, Some(0)))
 }
 
 fn band(r: &Raster, b: usize) -> Result<&[f32], String> {
@@ -291,7 +341,7 @@ pub fn hillshade_on(r: &Raster, b: usize, azimuth: f64, altitude: f64, zf: f64, 
             let aspect = (-gx).atan2(-gy);
             cos_zen * slope.cos() + sin_zen * slope.sin() * (az - aspect).cos()
         };
-        (v.max(0.0) * 255.0).round().max(1.0)
+        rustgis_data::raster::round_positive(v.max(0.0) * 255.0).max(1.0)
     })
 }
 
@@ -848,6 +898,16 @@ const IDW_SAFE_SCALE: f64 = 1e-200;
 /// are added in the same order on any thread, and enough for the compiler to add them in vectors.
 const IDW_LANES: usize = 8;
 
+/// The points a run of cells takes at a time at a power of 2: their x, dy² and values stay in
+/// the processor's nearest cache while each cell of the run goes over them, so they aren't fetched
+/// again for every cell. A multiple of [`IDW_LANES`], so a point's lane is the same whatever the
+/// block.
+const IDW_BLOCK: usize = 512;
+const _: () = assert!(IDW_BLOCK.is_multiple_of(IDW_LANES));
+
+/// The cells of a row weighed together at a power of 2.
+const IDW_CELLS: usize = 16;
+
 /// The points of an [`idw`] from every point as separate x, y and value columns, which a cell's
 /// pass reads in step, and so in vectors.
 struct IdwColumns {
@@ -868,33 +928,40 @@ impl IdwColumns {
         }
     }
 
-    /// The value at `c`, east-west distances times `kx`: that of the first point within
-    /// [`IDW_EXACT_D2`] of it, else the mean of every point's value weighted by 1/dᵖ.
+    /// At a power of 2, the values of a run of cells at `y`, one at each of `xs` (at most
+    /// [`IDW_CELLS`]; the rest of the array is not a cell's), east-west distances times `kx`.
     ///
-    /// At a power of 2 that is one pass, with w = 1/d², at most 1e24 once no point is within
-    /// [`IDW_EXACT_D2`]. At any other power, or should the sums overflow (from huge values) or
-    /// their terms underflow (from tiny values or distances near f64's limit, below
-    /// [`IDW_SAFE_SCALE`]), a first pass finds the nearest point and a second weighs each by
-    /// (dₙ²/d²)^(p/2): the same ratios, which keep the nearest point's weight at 1 and can't
-    /// overflow for a high power.
-    fn at(&self, c: Coord, kx: f64, power: f64) -> f64 {
-        let nearest = if power == 2.0 {
-            let (num, den, nearest) = self.sums(c, kx, |d2| 1.0 / d2);
+    /// Each is one pass with w = 1/d², at most 1e24 once no point is within [`IDW_EXACT_D2`].
+    /// A cell on a point, or one whose sums overflow (from huge values) or whose terms underflow
+    /// (from tiny values or distances near f64's limit, below [`IDW_SAFE_SCALE`]), goes
+    /// [`Self::by_nearest`].
+    fn at_power_two(&self, xs: &[f64], y: f64, kx: f64, dy2: &mut [f64; IDW_BLOCK]) -> [f64; IDW_CELLS] {
+        let sums = self.run_sums(xs, y, kx, dy2);
+        let mut values = [f64::NAN; IDW_CELLS];
+        for ((value, x), (num, den)) in values.iter_mut().zip(xs).zip(sums) {
+            let c = Coord::new(*x, y);
             // With every value 0 the sum is exactly 0, whatever underflowed.
             let scaled = den >= IDW_SAFE_SCALE && (self.largest == 0.0 || den * self.largest >= IDW_SAFE_SCALE);
-            if nearest >= IDW_EXACT_D2 && num.is_finite() && den.is_finite() && scaled {
-                return num / den;
-            }
-            nearest
-        } else {
-            self.nearest(c, kx)
-        };
+            // A point within `IDW_EXACT_D2` alone weighs 1/`IDW_EXACT_D2` or more: with a smaller
+            // sum there is none, and no need to look for the nearest.
+            let stands = scaled && num.is_finite() && den.is_finite() && (den < 1.0 / IDW_EXACT_D2 || self.nearest(c, kx) >= IDW_EXACT_D2);
+            *value = if stands { num / den } else { self.by_nearest(c, kx, 2.0) };
+        }
+        values
+    }
+
+    /// The value at `c` at any power: that of the first point within [`IDW_EXACT_D2`] of it, else
+    /// the mean of every point's value weighted by 1/dᵖ. A first pass finds the nearest point and
+    /// a second weighs each by (dₙ²/d²)^(p/2): the same ratios, which keep the nearest point's
+    /// weight at 1 and can't overflow for a high power.
+    fn by_nearest(&self, c: Coord, kx: f64, power: f64) -> f64 {
+        let nearest = self.nearest(c, kx);
         if nearest < IDW_EXACT_D2 {
             let on = self.x.iter().zip(&self.y).zip(&self.v).find(|((x, y), _)| d2(c, kx, **x, **y) < IDW_EXACT_D2);
             return on.map_or(f64::NAN, |(_, v)| *v);
         }
         let half = power / 2.0;
-        let (num, den, _) = self.sums(c, kx, |d2| {
+        let (num, den) = self.sums(c, kx, |d2| {
             // Past f64's range the squared ratio would vanish where the ratio of distances, raised
             // to a small power, still weighs something: then the distances are taken.
             let ratio = nearest / d2;
@@ -920,18 +987,16 @@ impl IdwColumns {
     }
 
     /// Over every point, the sums of w·v and of w, w the `weight` of its squared distance from
-    /// `c`, and the smallest squared distance: in [`IDW_LANES`] lanes, each sum in an array of its
-    /// own so they go in vectors, added up in a fixed order.
+    /// `c`: in [`IDW_LANES`] lanes, each sum in an array of its own so they go in vectors, added up
+    /// in a fixed order.
     #[inline(always)]
-    fn sums(&self, c: Coord, kx: f64, weight: impl Fn(f64) -> f64) -> (f64, f64, f64) {
-        let (mut num, mut den, mut near) = ([0.0; IDW_LANES], [0.0; IDW_LANES], [f64::INFINITY; IDW_LANES]);
+    fn sums(&self, c: Coord, kx: f64, weight: impl Fn(f64) -> f64) -> (f64, f64) {
+        let (mut num, mut den) = ([0.0; IDW_LANES], [0.0; IDW_LANES]);
         let mut add = |x: &[f64], y: &[f64], v: &[f64]| {
-            for (((((n, dn), m), x), y), v) in num.iter_mut().zip(den.iter_mut()).zip(near.iter_mut()).zip(x).zip(y).zip(v) {
-                let d = d2(c, kx, *x, *y);
-                let w = weight(d);
+            for ((((n, dn), x), y), v) in num.iter_mut().zip(den.iter_mut()).zip(x).zip(y).zip(v) {
+                let w = weight(d2(c, kx, *x, *y));
                 *n += w * v;
                 *dn += w;
-                *m = smaller(*m, d);
             }
         };
         let (xs, x_rest) = self.x.as_chunks::<IDW_LANES>();
@@ -941,7 +1006,47 @@ impl IdwColumns {
             add(x, y, v);
         }
         add(x_rest, y_rest, v_rest);
-        (num.into_iter().sum(), den.into_iter().sum(), near.into_iter().fold(f64::INFINITY, smaller))
+        (num.into_iter().sum(), den.into_iter().sum())
+    }
+
+    /// [`Self::sums`] with w = 1/d² for each of up to [`IDW_CELLS`] cells at `y`, one at each of
+    /// `xs`, bit for bit. The points go a block at a time through all the cells, each point's dy²
+    /// (the same along the row) made once into `dy2`.
+    fn run_sums(&self, xs: &[f64], y: f64, kx: f64, dy2: &mut [f64; IDW_BLOCK]) -> [(f64, f64); IDW_CELLS] {
+        let (mut num, mut den) = ([[0.0; IDW_LANES]; IDW_CELLS], [[0.0; IDW_LANES]; IDW_CELLS]);
+        for ((x, py), v) in self.x.chunks(IDW_BLOCK).zip(self.y.chunks(IDW_BLOCK)).zip(self.v.chunks(IDW_BLOCK)) {
+            for (d, py) in dy2.iter_mut().zip(py) {
+                let dy = py - y;
+                *d = dy * dy;
+            }
+            let (x, x_rest) = x.as_chunks::<IDW_LANES>();
+            let (v, v_rest) = v.as_chunks::<IDW_LANES>();
+            let (dy, _) = dy2.as_chunks::<IDW_LANES>();
+            // The points past the last whole set of lanes, only ever in the last block.
+            let dy_rest = dy2.get(x.len() * IDW_LANES..).unwrap_or_default();
+            for ((cx, num), den) in xs.iter().zip(&mut num).zip(&mut den) {
+                // Copies, which the compiler keeps in registers over the block.
+                let (mut n, mut dn) = (*num, *den);
+                let mut add = |x: &[f64], dy2: &[f64], v: &[f64]| {
+                    for ((((n, dn), x), dy2), v) in n.iter_mut().zip(dn.iter_mut()).zip(x).zip(dy2).zip(v) {
+                        let dx = (x - cx) * kx;
+                        let w = 1.0 / (dx * dx + dy2);
+                        *n += w * v;
+                        *dn += w;
+                    }
+                };
+                for ((x, dy2), v) in x.iter().zip(dy).zip(v) {
+                    add(x, dy2, v);
+                }
+                add(x_rest, dy_rest, v_rest);
+                (*num, *den) = (n, dn);
+            }
+        }
+        let mut sums = [(0.0, 0.0); IDW_CELLS];
+        for ((sum, num), den) in sums.iter_mut().zip(num).zip(den) {
+            *sum = (num.into_iter().sum(), den.into_iter().sum());
+        }
+        sums
     }
 }
 
@@ -1000,7 +1105,7 @@ fn idw_on(
     let squared = power == 2.0;
     let geographic = crs.is_geographic();
     let exact = if squared { IDW_EXACT_D2 } else { 1e-12 };
-    // With every point weighed, each cell takes one pass over them as columns, with no buffer.
+    // With every point weighed, the cells pass over them as columns, with no buffer of distances.
     let every_point = k == points.len();
     // Each row on its own, on several threads when the work is large (#1252); a thread's
     // distances for the nearest few go into its own buffer.
@@ -1019,24 +1124,37 @@ fn idw_on(
     let every = every_point.then(|| IdwColumns::new(points));
     let mut data = new_band(w, h, NODATA)?;
     crate::control::begin(h);
+    let stored = |v: f64| if v.is_finite() { v as f32 } else { NODATA };
     crate::parallel::for_each_row(
         data.chunks_mut(w),
         threads,
-        || (Vec::with_capacity(if every_point { 0 } else { points.len() }), crate::control::Pace::default()),
-        |(near, pace): &mut (Vec<(f64, f64)>, crate::control::Pace), row, out: &mut [f32]| {
+        || (Vec::with_capacity(if every_point { 0 } else { points.len() }), crate::control::Pace::default(), [0.0; IDW_BLOCK]),
+        |(near, pace, dy2): &mut (Vec<(f64, f64)>, crate::control::Pace, [f64; IDW_BLOCK]), row, out: &mut [f32]| {
+            let y = extent.max_y - (row as f64 + 0.5) * cell;
+            let x = |col: usize| extent.min_x + (col as f64 + 0.5) * cell;
             // East-west degrees shrink with latitude, which only changes by row; a projected
             // system's units don't.
-            let kx = if geographic { (extent.max_y - (row as f64 + 0.5) * cell).to_radians().cos() } else { 1.0 };
+            let kx = if geographic { y.to_radians().cos() } else { 1.0 };
+            // Each cell weighs every point, so a wide row of many points takes long without a cap:
+            // Cancel is looked at within it, between runs of cells or single cells.
+            if let Some(every) = every.as_ref().filter(|_| squared) {
+                for (run, out) in out.chunks_mut(IDW_CELLS).enumerate() {
+                    if pace.stop(points.len().saturating_mul(out.len())) {
+                        return;
+                    }
+                    let xs: [f64; IDW_CELLS] = std::array::from_fn(|i| x(run * IDW_CELLS + i));
+                    let values = every.at_power_two(xs.get(..out.len()).unwrap_or(&xs), y, kx, dy2);
+                    out.iter_mut().zip(values).for_each(|(o, v)| *o = stored(v));
+                }
+                return;
+            }
             for (col, o) in out.iter_mut().enumerate() {
-                // Each cell weighs every point, so a wide row of many points takes long without a
-                // cap: Cancel is looked at within it.
                 if pace.stop(points.len()) {
                     return;
                 }
-                let c = Coord::new(extent.min_x + (col as f64 + 0.5) * cell, extent.max_y - (row as f64 + 0.5) * cell);
+                let c = Coord::new(x(col), y);
                 if let Some(every) = &every {
-                    let v = every.at(c, kx, power);
-                    *o = if v.is_finite() { v as f32 } else { NODATA };
+                    *o = stored(every.by_nearest(c, kx, power));
                     continue;
                 }
                 near.clear();
@@ -1062,7 +1180,7 @@ fn idw_on(
                     });
                     num / den
                 };
-                *o = if v.is_finite() { v as f32 } else { NODATA };
+                *o = stored(v);
             }
         },
     )?;
@@ -2962,9 +3080,10 @@ mod tests {
     /// the nearest few, and a cell on a point still takes its value.
     #[test]
     fn idw_at_power_two_is_the_general_paths_surface() {
-        let pts: Vec<(Coord, f64)> = (0..400)
+        // More than two blocks of points, with some past the last whole set of lanes.
+        let pts: Vec<(Coord, f64)> = (0..1100)
             .map(|i| {
-                let (x, y) = ((i * 37 % 400) as f64 / 40.0, (i * 91 % 400) as f64 / 40.0);
+                let (x, y) = ((i * 37 % 1100) as f64 / 110.0, (i * 91 % 1100) as f64 / 110.0);
                 (Coord::new(x, 40.0 + y), (x * 1.3).sin() * 100.0 + y * 7.0)
             })
             .chain([(Coord::new(0.05, 49.95), 1234.5)])
@@ -3097,6 +3216,44 @@ mod tests {
             hillshade(&r, 0, 315.0, 45.0, 1.5).unwrap_or_default(),
             [182.0, 184.0, 185.0, 183.0, 186.0, NODATA, 178.0, 175.0, 183.0, 178.0, 175.0, 174.0]
         );
+    }
+
+    /// A hillshade's bytes take the statistics [`Raster::new`] makes of them, counted instead of
+    /// read twice: over a ridged surface lit from several sides, with no-data in it, past a million
+    /// cells (on several threads); cells that aren't whole numbers to 255 take [`Raster::new`]'s.
+    #[test]
+    fn hillshade_bytes_take_the_statistics_of_their_cells() {
+        let gt = GeoTransform { origin_x: 500_000.0, origin_y: 4_800_000.0, pixel_width: 10.0, pixel_height: -10.0 };
+        let utm = Crs::Epsg(32616);
+        let (w, h) = (1200usize, 1000usize);
+        let cells: Vec<f32> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                if (x - 600.0).hypot(y - 500.0) < 40.0 { -9999.0 } else { (x / 37.0).sin() * 80.0 + (y / 23.0).cos() * 50.0 }
+            })
+            .collect();
+        let dem = Raster::new("dem", w as u32, h as u32, vec![cells], gt, utm, Some(-9999.0), ColorHint::Gray, "Float32")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let measured = |cells: Vec<f32>| {
+            Raster::new("shade", dem.width, dem.height, vec![cells], gt, utm, Some(0.0), ColorHint::Gray, "UInt8")
+                .unwrap_or_else(|e| panic!("{e}"))
+                .bands[0]
+                .stats
+                .clone()
+        };
+        for azimuth in [0.0, 135.0, 315.0] {
+            let shade = hillshade(&dem, 0, azimuth, 45.0, 1.0).unwrap_or_else(|e| panic!("{e}"));
+            let mut bytes = shade.clone();
+            bytes.iter_mut().filter(|v| !v.is_finite() || **v < 1.0).for_each(|v| *v = 0.0);
+            assert!(matches!(byte_stats(&bytes), Ok(Some(_))), "azimuth {azimuth}: not counted as bytes");
+            let out = derive_hillshade(&dem, "shade", shade).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(out.bands[0].stats, measured(out.bands[0].data.clone()), "azimuth {azimuth}");
+        }
+        let mut fractions = vec![3.5_f32; w * h];
+        fractions[0] = 300.0;
+        assert!(matches!(byte_stats(&fractions), Ok(None)), "fractions counted as bytes");
+        let out = derive_hillshade(&dem, "shade", fractions.clone()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(out.bands[0].stats, measured(fractions));
     }
 
     /// A cell in full shadow is 1, not 0, so that the bytes made of a hillshade keep 0 for its

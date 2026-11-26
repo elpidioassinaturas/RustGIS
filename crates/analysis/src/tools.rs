@@ -1618,8 +1618,11 @@ fn union_all<'a>(polys: impl IntoIterator<Item = &'a geo::Polygon<f64>>) -> Mult
 const MAX_BUFFER_VERTICES: usize = 2_000_000;
 /// Retained ordinary output/selector storage, separate from overlay complexity. Temporary
 /// geometry on each worker and the already loaded input are additional to this allowance. The
-/// browser's budget, and the fewest bytes [`max_buffer_bytes`] allows on the desktop.
-const MAX_BUFFER_BYTES: usize = if cfg!(target_arch = "wasm32") { 128 << 20 } else { 512 << 20 };
+/// browser's budget, and the fewest bytes [`max_buffer_bytes`] allows on the desktop (a phone:
+/// [`BROWSER_BUFFER_BYTES`]).
+const MAX_BUFFER_BYTES: usize = if cfg!(target_arch = "wasm32") { BROWSER_BUFFER_BYTES } else { 512 << 20 };
+/// The budget in the browser, and the fewest bytes [`max_buffer_bytes`] allows on a phone.
+const BROWSER_BUFFER_BYTES: usize = 128 << 20;
 /// The most bytes [`max_buffer_bytes`] allows, however much memory the computer has.
 const BUFFER_BYTES_CEILING: usize = 8 << 30;
 /// Drain results regularly instead of keeping a second whole-layer result array.
@@ -1630,10 +1633,12 @@ const MAX_SELECTOR_CHECKS: usize = 50_000_000;
 const BUFFER_STORAGE_ERROR: &str = "Buffer output or distance selectors exceed their memory budget; select fewer features";
 
 /// Buffer's retained-storage budget on this computer: on the desktop a quarter of its memory, from
-/// [`MAX_BUFFER_BYTES`] up to [`BUFFER_BYTES_CEILING`] (#1291 step 2); fixed in the browser.
+/// [`MAX_BUFFER_BYTES`] (a phone: [`BROWSER_BUFFER_BYTES`]) up to [`BUFFER_BYTES_CEILING`]
+/// (#1291 step 2); fixed in the browser.
 /// Less once RustGIS holds more than half the memory, never below the floor ([`rustgis_data::memory::planned`], #2431).
 pub fn max_buffer_bytes() -> usize {
-    rustgis_data::memory::planned(MAX_BUFFER_BYTES, BUFFER_BYTES_CEILING, 1)
+    let floor = if rustgis_data::memory::on_phone() { BROWSER_BUFFER_BYTES } else { MAX_BUFFER_BYTES };
+    rustgis_data::memory::planned(floor, BUFFER_BYTES_CEILING, 1)
 }
 
 /// [`BUFFER_STORAGE_ERROR`] with the budget it ran out of, so a run refused here but not on a
@@ -3355,7 +3360,9 @@ fn dissolve(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
             "Dissolve: {not_polygons} feature(s) left out, with their values: no geometry, an empty polygon, or a point or line rather than a polygon"
         ) });
     }
-    messages.extend(rounded_notice(&rounded, out.fields.get(first_added..).unwrap_or_default()));
+    let (said, rounded) = rounded_notice(&rounded, out.fields.get(first_added..).unwrap_or_default());
+    messages.extend(said);
+    losses.extend(rounded);
     Ok(ToolResult { losses, output: Output::Layer(out), messages })
 }
 
@@ -6054,8 +6061,9 @@ fn count_points_on(inp: &dyn Inputs, p: &Json, threads: Option<usize>) -> Result
         }
     }
     let mut messages = vec![format!("Summarize Within: {total} points counted")];
-    messages.extend(rounded_notice(&rounded, out.fields.get(first..).unwrap_or_default()));
-    Ok(ToolResult { losses: Vec::new(), output: Output::Layer(out), messages })
+    let (said, losses) = rounded_notice(&rounded, out.fields.get(first..).unwrap_or_default());
+    messages.extend(said);
+    Ok(ToolResult { losses, output: Output::Layer(out), messages })
 }
 
 /// A lon/lat line or ring as a `geo` line string, in degrees.
@@ -6471,8 +6479,9 @@ fn summary_statistics(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> 
     }
     let n = out.features.len();
     let mut messages = vec![format!("Summary Statistics: {n} rows")];
-    messages.extend(rounded_notice(&rounded, out.fields.get(first_added..).unwrap_or_default()));
-    Ok(ToolResult { losses: Vec::new(), output: Output::Table(out), messages })
+    let (said, losses) = rounded_notice(&rounded, out.fields.get(first_added..).unwrap_or_default());
+    messages.extend(said);
+    Ok(ToolResult { losses, output: Output::Table(out), messages })
 }
 
 /// The output fields of a statistics list over `ds`: `<STAT>_<field>` for each request, typed by
@@ -6581,17 +6590,23 @@ fn statistic_values(
 /// naming their output fields `fields` (one per request, as `rounded` counts them), as a decimal
 /// field holds whole numbers exactly only up to 2^53; and the whole numbers written as text past
 /// the i64 range that were read as decimals, whose statistics aren't checked, naming their input
-/// fields. Empty when nothing was rounded.
-fn rounded_notice(rounded: &Rounded, fields: &[Field]) -> Vec<String> {
+/// fields. The first is a loss, with its code; the second says they may be rounded, so it is a
+/// plain notice. Both empty when nothing was rounded.
+fn rounded_notice(rounded: &Rounded, fields: &[Field]) -> (Vec<String>, Vec<rustgis_data::loss::LossMessage>) {
     let mut notices = Vec::new();
+    let mut losses = Vec::new();
+    // Each counted result came out rounded: a value changed.
     let total: usize = rounded.results.iter().sum();
     if total > 0 {
         let names: Vec<&str> = rounded.results.iter().zip(fields).filter(|(n, _)| **n > 0).map(|(_, f)| f.name.as_str()).collect();
         let results = if total == 1 { "result" } else { "results" };
-        notices.push(format!(
-            "{total} {results} rounded in {}: a decimal field holds whole numbers exactly only up to 2^53 (9007199254740992)",
-            names.join(", ")
-        ));
+        losses.push(rustgis_data::loss::LossMessage {
+            code: rustgis_data::loss::LossCode::ChangedRounded,
+            text: format!(
+                "{total} {results} rounded in {}: a decimal field holds whole numbers exactly only up to 2^53 (9007199254740992)",
+                names.join(", ")
+            ),
+        });
     }
     let total: usize = rounded.texts.iter().map(|(_, n)| n).sum();
     if total > 0 {
@@ -6603,7 +6618,7 @@ fn rounded_notice(rounded: &Rounded, fields: &[Field]) -> Vec<String> {
             names.join(", ")
         ));
     }
-    notices
+    (notices, losses)
 }
 
 /// The statistics list of a tool that adds statistics to its own output (Dissolve, Summarize
@@ -6810,8 +6825,9 @@ fn pivot_table(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     }
     let n = out.features.len();
     let mut messages = vec![format!("Pivot Table: {n} rows, {} pivot fields", columns.len())];
-    messages.extend(rounded_notice(&rounded, out.fields.get(first_pivot_field..).unwrap_or_default()));
-    Ok(ToolResult { losses: Vec::new(), output: Output::Table(out), messages })
+    let (said, losses) = rounded_notice(&rounded, out.fields.get(first_pivot_field..).unwrap_or_default());
+    messages.extend(said);
+    Ok(ToolResult { losses, output: Output::Table(out), messages })
 }
 
 /// Whether a pivot value is missing: null, or a number that isn't one.
@@ -8380,7 +8396,9 @@ fn spatial_join_on(inp: &dyn Inputs, p: &Json, threads: Option<usize>) -> Result
             "{total} matched {numbers} in {names} {were} left out: a whole-number sum takes whole numbers in the 64-bit range, the other rules numbers a decimal holds"
         ) });
     }
-    messages.extend(rounded_notice(&rounded, &merged_fields));
+    let (said, rounded) = rounded_notice(&rounded, &merged_fields);
+    messages.extend(said);
+    losses.extend(rounded);
     Ok(ToolResult { losses, output: Output::Layer(out), messages })
 }
 

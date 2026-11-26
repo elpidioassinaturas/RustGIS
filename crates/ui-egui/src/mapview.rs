@@ -600,6 +600,34 @@ impl MapView {
         let live = self.frame_times.back().is_some_and(|t| *t > now - 0.5);
         live.then(|| self.frame_times.iter().filter(|t| **t > now - 1.0).count())
     }
+    /// Drops what the map keeps only to draw sooner, for a system short of memory: the moving
+    /// globe's and tilted map's drapes, and what [`MapView::drop_gpu`] does.
+    pub(crate) fn release_memory(&mut self) {
+        self.drape.clear();
+        self.tilt_drape.clear();
+        self.drop_gpu();
+        // A frame drawn mid-motion, finished or stopped, would put back the drawing copies of
+        // its map when taken: it is let go untaken.
+        let relay = self.motion_frame.relay.clone();
+        self.motion_frame = Default::default();
+        self.motion_frame.relay = relay;
+        self.motion_dropped = false;
+    }
+
+    /// Drops the GPU renderer's scenes, textures and buffers (the renderer itself too): a frame
+    /// drawn on the GPU after this makes them again.
+    pub(crate) fn drop_gpu(&mut self) {
+        self.gpu_renderer = None;
+        self.gpu_frame = None;
+        // (No live GPU scene is left to keep the tile key for.)
+        self.live_rev = None;
+        self.split_gpu = None;
+        for target in [&self.gpu_target, &self.gpu_target_split] {
+            *target.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        self.invalidate();
+    }
+
     /// Forces a re-render on the next frame; also drops the GPU frame (the backend toggle
     /// relies on it).
     pub fn invalidate(&mut self) {
@@ -799,15 +827,7 @@ pub(crate) fn leave_gpu_if_out_of_memory(app: &mut RustGisApp) {
         return;
     }
     app.map.gpu_enabled = false;
-    app.map.gpu_renderer = None;
-    app.map.gpu_frame = None;
-    // (No live GPU scene is left to keep the tile key for.)
-    app.map.live_rev = None;
-    app.map.split_gpu = None;
-    for target in [&app.map.gpu_target, &app.map.gpu_target_split] {
-        *target.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    }
-    app.map.invalidate();
+    app.map.drop_gpu();
     app.session.notify(
         tl!(
             "The graphics card ran out of memory, so the map is now drawn without it (CPU), which is slower. Click CPU in the status bar to try the graphics card again, with a smaller window or fewer layers."
@@ -3841,8 +3861,9 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
             let cam = app.session.map().camera;
             let key = [c.x, c.y, cam.center.x + cam.center.y * 1e-3, cam.res, app.session.revision as f64];
             match (&app.map.vertex_drag, &app.map.snap) {
-                // A dragged vertex has snapped already (leaving its own feature out).
-                (Some(d), _) => d.snapped.then_some(d.at),
+                // A dragged vertex has snapped already (leaving its own feature out), in view
+                // coordinates.
+                (Some(d), _) => d.snapped_lonlat,
                 (None, Some((k, at))) if *k == key => *at,
                 _ => {
                     // Asked directly, not as a command: commands mark the map changed.
@@ -4996,6 +5017,25 @@ pub(crate) fn drag_tab(ui: &Ui, resp: &egui::Response, layout: bool, name: &str)
     egui::DragAndDrop::payload::<DraggedTab>(ui.ctx()).is_some_and(|d| d.layout == layout && d.name == name)
 }
 
+/// While an item is dragged over a list that scrolls (the view tabs, the Browser or the Layers
+/// pane), scrolls the list `ui` is in when the `pointer` is near its edge along the axis
+/// (`vertical`, else horizontal), faster the closer it is, and asks for a frame to go on (#2957).
+/// `view` is the list's visible rectangle: a `pointer` outside it scrolls nothing.
+pub(crate) fn edge_scroll(ui: &Ui, view: Rect, pointer: egui::Pos2, vertical: bool) {
+    if !view.contains(pointer) {
+        return;
+    }
+    let a = usize::from(vertical);
+    let edge = 28.0;
+    let push = ((view.min[a] + edge - pointer[a]).max(0.0) - (pointer[a] - (view.max[a] - edge)).max(0.0)) / edge;
+    if push != 0.0 {
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        let step = push * 600.0 * dt;
+        ui.scroll_with_delta_animation(if vertical { vec2(0.0, step) } else { vec2(step, 0.0) }, egui::style::ScrollAnimation::none());
+        ui.ctx().request_repaint();
+    }
+}
+
 /// While a map or layout tab is dragged over the strip, or its row over the Browser's list
 /// (`vertical`): a mark where it would land among the others of its kind (`tabs`, named `names`;
 /// layouts with `layout`, else maps), which `map.move` or `layout.move` takes it to when let go;
@@ -5009,14 +5049,7 @@ pub(crate) fn tab_drop(app: &mut RustGisApp, ui: &Ui, t: &Tokens, tabs: &[Rect],
     let Some(pointer) = ui.ctx().pointer_interact_pos().filter(|p| view.contains(*p)) else { return };
     // Along the row (x) or the list (y).
     let a = usize::from(vertical);
-    let edge = 28.0;
-    let push = ((view.min[a] + edge - pointer[a]).max(0.0) - (pointer[a] - (view.max[a] - edge)).max(0.0)) / edge;
-    if push != 0.0 {
-        let dt = ui.input(|i| i.stable_dt).min(0.1);
-        let step = push * 600.0 * dt;
-        ui.scroll_with_delta_animation(if vertical { vec2(0.0, step) } else { vec2(step, 0.0) }, egui::style::ScrollAnimation::none());
-        ui.ctx().request_repaint();
-    }
+    edge_scroll(ui, view, pointer, vertical);
     let (Some(from), Some(first), Some(last)) = (names.iter().position(|n| *n == dragged.name), tabs.first(), tabs.last()) else {
         return;
     };
