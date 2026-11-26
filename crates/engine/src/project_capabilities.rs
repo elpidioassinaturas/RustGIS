@@ -1268,6 +1268,7 @@ mod tests {
             (&["layout-scale-bar-details"], "layout.update", json!({"element": 1, "subdivisions": 2})),
             (&["blank-paper"], "map.basemap", json!({"name": "blank", "color": "#112233"})),
             (&["layout-frame-border"], "layout.update", json!({"element": 1, "border": {}})),
+            (&["layout-section"], "layout.update", json!({"element": 1, "section": {"name": "A", "y": 0}})),
             (&["layout-text-size"], "layout.update", json!({"element": 1, "textSize": 12})),
             (&["dggs-system"], "a5Grid", json!({"system": "H3"})),
             (&["dggs-system"], "a5Aggregate", json!({"system": "S2"})),
