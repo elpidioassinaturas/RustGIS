@@ -88,6 +88,15 @@ pub struct Converted {
     /// GDAL couldn't reproject it (the file doesn't say its coordinate system): its coordinates
     /// are the file's own.
     pub unprojected: bool,
+    /// Its coordinate system is one RustGIS can't read, so GDAL converted it to longitude/latitude
+    /// (as every conversion did before layers kept their own system).
+    pub in_lonlat: bool,
+    /// Its features whose Z or M values the conversion dropped, as it keeps x and y only.
+    pub zm_dropped: u64,
+    /// Its features couldn't be checked for Z or M values: any it had were dropped.
+    pub zm_unknown: bool,
+    /// Its layer declares Z or M values: one whose count failed most likely lost them.
+    pub zm_declared: bool,
 }
 
 /// A GDAL program (`ogr2ogr`, `ogrinfo`): from `RUSTGIS_GDAL_BIN` (a folder), else on the `PATH`.
@@ -104,6 +113,12 @@ pub fn available() -> bool {
 /// refused by every conversion.
 pub fn usable() -> bool {
     available() && program("ogrinfo").is_some_and(|p| check_version(&p).is_ok())
+}
+
+/// Whether a test that needs GDAL runs: skipped without a [`usable`] GDAL, unless
+/// `RUSTGIS_REQUIRE_GDAL` is set, when it fails on the `Err` instead.
+pub fn test_runs() -> std::result::Result<bool, String> {
+    external::test_runs("RUSTGIS_REQUIRE_GDAL", "GDAL 3.8 or later (ogr2ogr and ogrinfo)", usable())
 }
 
 fn missing() -> DataError {
@@ -314,18 +329,43 @@ fn convert_in(dir: &Path, src: &Path, layer: Option<&str>, crs: Option<&str>) ->
                 Ok(Some(converted)) => out.push(Converted {
                     path: converted.path,
                     unprojected: converted.unprojected,
+                    in_lonlat: converted.in_lonlat,
                     name: match family {
                         Some(f) => format!("{} ({})", l.name, f.label()),
                         None => l.name.clone(),
                     },
                     layer: l.name.clone(),
                     family,
+                    zm_dropped: 0,
+                    zm_unknown: false,
+                    zm_declared: l.has_zm,
                 }),
                 // A family the layer doesn't have.
                 Ok(None) => {}
                 // A layer (or a family filter the driver can't apply) that fails doesn't stop the
                 // others; the file fails only if nothing converts.
                 Err(e) => errors.push(e),
+            }
+        }
+        // The features of each part that had Z or M values, which the conversion drops (`-dim
+        // XY`), as a fresh conversion counts them: counted once, with the conversion, and kept
+        // beside it, so a cache hit doesn't scan the source again. A count that fails is said
+        // without a code (the layer may hold only x and y) and isn't kept: its cause may pass, and
+        // a query GDAL refuses fails before scanning anything.
+        if l.has_zm || l.family.is_none() {
+            for part in out.iter_mut().skip(before) {
+                // A count read is touched with its conversion, so pruning keeps it as long.
+                let count = kept_zm_count(&part.path).inspect(|_| touch(&part.path.with_extension("zm"))).or_else(|| {
+                    let count = count_zm_features(src, &l, part.family).ok().flatten()?;
+                    // Kept beside the conversion, so a cache hit reads it instead of scanning the
+                    // source again; a write that fails only means it is counted again next time.
+                    let _ = std::fs::write(part.path.with_extension("zm"), format!("{count}\n"));
+                    Some(count)
+                });
+                match count {
+                    Some(n) => part.zm_dropped = n,
+                    None => part.zm_unknown = true,
+                }
             }
         }
         // Count all converted families together: splitting a mixed layer isn't a loss. Read
@@ -390,7 +430,7 @@ pub fn convert_one(src: &Path, layer: &str, family: Option<Family>, crs: Option<
 #[derive(Debug)]
 pub struct FreshConverted {
     pub path: PathBuf,
-    pub notes: Vec<String>,
+    pub notes: crate::loss::Notes,
     /// A successful read confirmed that this declared layer contains no features.
     pub empty: bool,
     pub zm_dropped: bool,
@@ -402,7 +442,8 @@ pub struct FreshConverted {
 struct Conversion {
     path: PathBuf,
     unprojected: bool,
-    notes: Vec<String>,
+    in_lonlat: bool,
+    notes: crate::loss::Notes,
     empty: bool,
 }
 
@@ -438,7 +479,13 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
     )?
     .ok_or_else(|| DataError::Format(format!("layer '{layer}' has no compatible declared geometry")))?;
     if converted.unprojected {
-        converted.notes.push(format!("GDAL: '{layer}' has no declared coordinate system; its coordinates were left unprojected"));
+        converted.notes.push(crate::loss::Note::loss(
+            crate::loss::LossCode::AssumedCrs,
+            format!("GDAL: '{layer}' has no declared coordinate system; its coordinates were left unprojected"),
+        ));
+    }
+    if converted.in_lonlat {
+        converted.notes.push(in_lonlat_note(layer));
     }
     // A repair/reload reports the same conversion loss as Add. For a mixed layer, compare
     // only the selected family; the other families have their own counted notice.
@@ -455,38 +502,48 @@ fn convert_one_fresh_in(dir: &Path, src: &Path, layer: &str, family: Option<Fami
         Err(error) => converted.notes.push(format!("{}: couldn't check how many features GDAL's conversion kept ({error})", info.name)),
     }
     let mut zm_dropped = false;
+    let mut zm_note = None;
     // A layer declaring Z or M may still hold features with only XY: those that carry them are
     // counted, as for a layer of several types.
     if (info.has_zm || info.family.is_none()) && !converted.empty {
-        match count_zm_features(src, info, family) {
-            Ok(0) => {}
-            Ok(count) => {
+        match count_zm_features(src, info, family).ok().flatten() {
+            Some(0) => {}
+            Some(count) => {
                 zm_dropped = true;
-                converted.notes.push(format!(
-                    "GDAL: '{layer}' contains Z or M coordinates on {count} source feature(s); conversion keeps only XY coordinates"
+                zm_note = Some(crate::loss::Note::loss(
+                    crate::loss::LossCode::DroppedZm,
+                    format!(
+                        "GDAL: '{layer}' contains Z or M coordinates on {count} source feature(s); conversion keeps only XY coordinates"
+                    ),
                 ));
             }
-            Err(_) => {
-                // A layer that declares them had them dropped, though how many is unknown.
+            None => {
+                // A layer that declares them may still hold only x and y: said without a code, as
+                // the count isn't known. Still marked as having lost them when it declares them, so
+                // its exports don't pass over what was most likely dropped.
                 zm_dropped = info.has_zm;
-                converted.notes.push(format!(
+                zm_note = Some(crate::loss::Note::plain(format!(
                     "GDAL: '{layer}': an unknown number of source feature(s) may have had Z or M coordinates dropped; conversion keeps only XY coordinates"
-                ));
+                )));
             }
         }
     }
-    Ok(FreshConverted { path: converted.path, notes: converted.notes, empty: converted.empty, zm_dropped, workspace })
+    let mut notes: crate::loss::Notes = converted.notes;
+    notes.extend(zm_note);
+    Ok(FreshConverted { path: converted.path, notes, empty: converted.empty, zm_dropped, workspace })
 }
 
 /// A counted loss, or an honest diagnostic when a nonempty replacement's source count is unknown.
-fn conversion_count_note(layer: &str, expected: Option<u64>, actual: u64, nonempty: bool) -> Option<String> {
+fn conversion_count_note(layer: &str, expected: Option<u64>, actual: u64, nonempty: bool) -> Option<crate::loss::Note> {
     match expected {
-        Some(expected) if actual < expected => {
-            Some(format!("{layer}: GDAL conversion left out {} of {expected} source features", expected - actual))
-        }
-        None if nonempty => Some(format!(
-            "{layer}: couldn't check how many source features GDAL's conversion kept because the source count is unknown; features may have been left out"
+        Some(expected) if actual < expected => Some(crate::loss::Note::loss(
+            crate::loss::LossCode::DroppedFeature,
+            format!("{layer}: GDAL conversion left out {} of {expected} source features", expected - actual),
         )),
+        // Only a possible loss: said without a code.
+        None if nonempty => Some(crate::loss::Note::plain(format!(
+            "{layer}: couldn't check how many source features GDAL's conversion kept because the source count is unknown; features may have been left out"
+        ))),
         _ => None,
     }
 }
@@ -524,7 +581,9 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
     // can't hand back another file's layer.
     let nlt = family.or(kind).map_or("PROMOTE_TO_MULTI", Family::ogr_type);
     // The type is part of the key: conversions made before surfaces were kept are made again.
-    let key = format!("{}\n{layer}\n{:?}\n{:?}\n{nlt}\n{len}\n{modified}", full.display(), family.map(Family::label), crs);
+    // Kept in its own system since #2032: a conversion made before, in longitude/latitude, isn't
+    // reused as one in its own.
+    let key = format!("{}\n{layer}\n{:?}\n{:?}\n{nlt}\n{len}\n{modified}\nown system", full.display(), family.map(Family::label), crs);
     // Fresh replacements have their own private directory, so retained readers never share a
     // file with a later conversion, even when its source's signature hasn't changed.
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -536,9 +595,11 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
     // The key file holds the key, then whether the conversion is unprojected: one file, so the two
     // can't disagree.
     const UNPROJECTED: &str = "\nunprojected";
+    const IN_LONLAT: &str = "\nin longitude/latitude";
     let stored = std::fs::read_to_string(&keyfile).unwrap_or_default();
-    let same = stored == key || stored.strip_suffix(UNPROJECTED) == Some(key.as_str());
+    let same = stored == key || [UNPROJECTED, IN_LONLAT].iter().any(|flag| stored.strip_suffix(flag) == Some(key.as_str()));
     let was_unprojected = stored.ends_with(UNPROJECTED);
+    let was_in_lonlat = stored.ends_with(IN_LONLAT);
     // A hit is touched, so pruning removes what isn't used rather than what is old.
     if !fresh && same && empty.exists() {
         touch(&empty);
@@ -548,32 +609,70 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
     if !fresh && same && out.metadata().is_ok_and(|m| m.len() > 0) {
         touch(&out);
         touch(&keyfile);
-        return Ok(Some(Conversion { path: out, unprojected: was_unprojected, notes: Vec::new(), empty: false }));
+        return Ok(Some(Conversion {
+            path: out,
+            unprojected: was_unprojected,
+            in_lonlat: was_in_lonlat,
+            notes: crate::loss::Notes::new(),
+            empty: false,
+        }));
+    }
+    // A count of Z/M features kept for an earlier conversion with this tag isn't this one's.
+    if !fresh {
+        let _ = std::fs::remove_file(dir.join(format!("{tag}.zm")));
     }
     // Unique to this conversion, even with others of the same layer running in this process.
     let tmp = dir.join(format!("{tag}.{}{n:04}.tmp.fgb", std::process::id()));
-    // Reprojected to WGS 84 from its own coordinate system, or from the one given; a layer with
-    // neither is taken as it is.
+    // Kept in its own coordinate system, or the one given, which the FlatGeobuf says; one RustGIS
+    // can't read is converted to WGS 84 instead, as before. A layer with neither is taken as it
+    // is.
     let unprojected = crs.is_none() && !has_srs;
-    let mut c = command(ogr2ogr, drivers(&full)?);
-    c.args(["-f", "FlatGeobuf", "-nlt", nlt, "-dim", "XY", "-lco", "SPATIAL_INDEX=YES"]);
-    // Fresh replacements must fail rather than install a partial conversion.
-    if !fresh {
-        c.arg("-skipfailures");
-    }
-    if let Some(crs) = crs {
-        c.args(["-s_srs", crs]);
-    }
-    if !unprojected {
-        c.args(["-t_srs", "EPSG:4326"]);
-    }
-    if let Some(f) = family {
-        c.args(["-where", f.filter()]);
-    }
-    c.arg(&tmp).arg(&full).arg(layer);
+    let drivers = drivers(&full)?;
+    let run = |to_lonlat: bool| -> std::io::Result<std::process::Output> {
+        let mut c = command(ogr2ogr.clone(), drivers);
+        c.args(["-f", "FlatGeobuf", "-nlt", nlt, "-dim", "XY", "-lco", "SPATIAL_INDEX=YES"]);
+        // Fresh replacements must fail rather than install a partial conversion.
+        if !fresh {
+            c.arg("-skipfailures");
+        }
+        // The system given is assigned when kept, and converted from when not.
+        match (crs, to_lonlat) {
+            (Some(crs), false) => {
+                c.args(["-a_srs", crs]);
+            }
+            (Some(crs), true) => {
+                c.args(["-s_srs", crs, "-t_srs", "EPSG:4326"]);
+            }
+            (None, true) => {
+                c.args(["-t_srs", "EPSG:4326"]);
+            }
+            (None, false) => {}
+        }
+        if let Some(f) = family {
+            c.args(["-where", f.filter()]);
+        }
+        c.arg(&tmp).arg(&full).arg(layer);
+        output(c, CONVERT_TIMEOUT, &format!("GDAL conversion of {}, layer '{layer}'", full.display()))
+    };
     // The temp file goes whatever happens, unless it becomes the conversion.
     let mut tmp_guard = TempFile(Some(tmp.clone()));
-    let res = output(c, CONVERT_TIMEOUT, &format!("GDAL conversion of {}, layer '{layer}'", full.display()))?;
+    let mut res = run(false)?;
+    let mut in_lonlat = false;
+    if res.status.success() && !unprojected && tmp.exists() {
+        let placement = placement(&tmp);
+        // Another body's system RustGIS refuses can't go to WGS 84 either (GDAL won't convert
+        // between bodies): refused, saying why, rather than left out as empty.
+        if let Placement::Refused(why) = &placement {
+            return Err(DataError::Format(format!("GDAL: '{layer}': {why}")));
+        }
+        if placement != Placement::Own {
+            crate::progress::check()?;
+            // GDAL can't write over a FlatGeobuf: the first conversion goes first.
+            std::fs::remove_file(&tmp)?;
+            res = run(true)?;
+            in_lonlat = placement == Placement::Unreadable;
+        }
+    }
     if !res.status.success() {
         let text = String::from_utf8_lossy(&res.stderr);
         // The ERROR lines say what went wrong (the rest is the usage text); else the first line.
@@ -591,12 +690,12 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
             // A read failure is not an empty dataset. Never install a corrupt or partially readable
             // conversion as a successful replacement.
             let source = super::open_path(&tmp, None)?;
-            Ok::<_, DataError>(!source.read(&super::Request { extent: None, limit: 1 })?.features.is_empty())
+            Ok::<_, DataError>(!source.read(&super::Request { extent: None, limit: 1, own: None })?.features.is_empty())
         } else {
             Ok(tmp.exists()
                 && super::open_path(&tmp, None)
                     .ok()
-                    .is_some_and(|s| s.read(&super::Request { extent: None, limit: 1 }).is_ok_and(|b| !b.features.is_empty())))
+                    .is_some_and(|s| s.read(&super::Request { extent: None, limit: 1, own: None }).is_ok_and(|b| !b.features.is_empty())))
         }
     })?;
     // The entry is replaced in an order that never leaves it naming a missing file: the new state
@@ -615,28 +714,106 @@ fn convert_one_in(dir: &Path, src: &Path, layer: &str, request: ConversionReques
     std::fs::rename(&tmp, &out)?;
     tmp_guard.0 = None;
     let _ = std::fs::remove_file(&empty);
-    std::fs::write(&keyfile, if unprojected { format!("{key}{UNPROJECTED}") } else { key.clone() })?;
+    let flag = if unprojected {
+        UNPROJECTED
+    } else if in_lonlat {
+        IN_LONLAT
+    } else {
+        ""
+    };
+    std::fs::write(&keyfile, format!("{key}{flag}"))?;
     let notes = if fresh {
         let mut counts = std::collections::BTreeMap::<String, u64>::new();
         for line in String::from_utf8_lossy(&res.stderr).lines().map(str::trim).filter(|line| !line.is_empty()) {
             let count = counts.entry(line.to_string()).or_default();
             *count = count.saturating_add(1);
         }
-        let mut notes: Vec<String> = counts.into_iter().map(|(line, count)| format!("GDAL: {line} ({count} occurrence(s))")).collect();
+        let mut notes: crate::loss::Notes =
+            counts.into_iter().map(|(line, count)| format!("GDAL: {line} ({count} occurrence(s))")).collect();
         // A layer declaring one geometry type holds no other; only a mixed layer is counted. A
         // count that fails doesn't undo a good conversion: the possible loss is said instead.
         if let Some(family) = family.filter(|_| kind.is_none()) {
             match count_other_families(&full, layer, family) {
                 Ok(0) => {}
-                Ok(other) => notes.push(format!("GDAL: {other} features of another geometry type were left out")),
-                Err(_) => notes.push("GDAL: an unknown number of features of another geometry type may have been left out".into()),
+                Ok(other) => notes.push(crate::loss::Note::loss(
+                    crate::loss::LossCode::DroppedFeature,
+                    format!("GDAL: {other} features of another geometry type were left out"),
+                )),
+                Err(_) => notes.push("GDAL: an unknown number of features of another geometry type may have been left out"),
             }
         }
         notes
     } else {
-        Vec::new()
+        crate::loss::Notes::new()
     };
-    Ok(Some(Conversion { path: out, unprojected, notes, empty: !any }))
+    Ok(Some(Conversion { path: out, unprojected, in_lonlat, notes, empty: !any }))
+}
+
+/// How RustGIS reads a FlatGeobuf GDAL wrote in the source's own system.
+#[derive(Clone, Debug, PartialEq)]
+enum Placement {
+    /// In that system, which it reads and converts itself (WGS 84 longitude/latitude among them).
+    Own,
+    /// A geographic system that places coordinates as WGS 84 longitude/latitude does under
+    /// another name (WGS 84 in 3D, whose heights the conversion drops): written in EPSG:4326, as
+    /// before.
+    LonLat,
+    /// A system it can't read, which it would take for longitude/latitude: converted to it.
+    Unreadable,
+    /// Another body's system it refuses, and why: not converted at all.
+    Refused(String),
+}
+
+/// How RustGIS reads `fgb` ([`Placement`]), from its header alone. One it reads as
+/// longitude/latitude must say WGS 84 (by code or definition), and is kept as GDAL wrote it; one
+/// that doesn't would have its coordinates taken for degrees. One whose header can't be read is
+/// converted as before.
+fn placement(fgb: &Path) -> Placement {
+    use crate::raster::Crs;
+    crate::provenance::without(|| {
+        // A header that can't be read says nothing of the system: converted as before, unsaid. A
+        // system it says that RustGIS refuses can't be read, and is said.
+        let crs = match super::fgb::header_coord_crs(fgb) {
+            Err(_) => return Placement::LonLat,
+            Ok(Err(e)) => return Placement::Refused(e.to_string()),
+            Ok(Ok(crs)) => crs,
+        };
+        if crs == Crs::LonLat {
+            return if super::fgb::header_says_wgs84(fgb) { Placement::Own } else { Placement::Unreadable };
+        }
+        // Longitude/latitude by another name: the same places, to a nanodegree.
+        let same = crs.is_geographic()
+            && crs.to(Crs::LonLat).is_ok_and(|t| {
+                [(12.0, 48.0), (-120.5, -33.25), (179.0, 80.0), (0.0, 0.0)]
+                    .into_iter()
+                    .all(|(x, y)| t.point(rustgis_geom::Coord::new(x, y)).is_some_and(|c| (c.x - x).abs() < 1e-9 && (c.y - y).abs() < 1e-9))
+            });
+        if same { Placement::LonLat } else { Placement::Own }
+    })
+}
+
+/// The notice for a layer converted to longitude/latitude because its system can't be read.
+pub fn in_lonlat_note(layer: &str) -> String {
+    in_lonlat_notes(&[layer])
+}
+
+/// One notice for the layers of a file converted to longitude/latitude because their systems
+/// can't be read: their count, and their names (the first ten).
+pub fn in_lonlat_notes(layers: &[&str]) -> String {
+    match layers {
+        [one] => format!("GDAL: '{one}': RustGIS can't read its coordinate system, so GDAL converted it to longitude/latitude (WGS 84)"),
+        _ => {
+            let mut named: Vec<String> = layers.iter().take(10).map(|l| format!("'{l}'")).collect();
+            if layers.len() > 10 {
+                named.push(format!("{} more", layers.len() - 10));
+            }
+            format!(
+                "GDAL: {} layers ({}): RustGIS can't read their coordinate systems, so GDAL converted them to longitude/latitude (WGS 84)",
+                layers.len(),
+                named.join(", ")
+            )
+        }
+    }
 }
 
 /// Count only the other supported geometry families, not geometry-less rows. Reuse exactly the
@@ -669,10 +846,28 @@ fn count_geometry_filter(src: &Path, layer: &str, filter: &str) -> Result<u64> {
         .ok_or_else(|| DataError::Format("GDAL: could not count features of other geometry types".into()))
 }
 
+/// The count of Z/M features kept beside the conversion at `path` ([`convert_in`]), when there is
+/// one: written whole, with its line's end, or not taken. Read no further than a count's length,
+/// so a damaged file costs nothing.
+fn kept_zm_count(path: &Path) -> Option<u64> {
+    use std::io::Read;
+    let mut text = String::new();
+    // The longest a count is (`u64::MAX` and its line's end), and a byte more to tell a longer file.
+    const LONGEST: u64 = 21;
+    std::fs::File::open(path.with_extension("zm")).ok()?.take(LONGEST + 1).read_to_string(&mut text).ok()?;
+    if text.len() as u64 > LONGEST {
+        return None;
+    }
+    text.strip_suffix('\n')?.parse().ok()
+}
+
 /// Generic layers don't declare the dimensions of their features. Count the selected family's
 /// actual Z/M geometries that conversion flattens; SQLite's spatial functions aren't present in every
-/// GDAL build, so the caller reports possible loss if this diagnostic query fails.
-fn count_zm_features(src: &Path, layer: &LayerInfo, family: Option<Family>) -> Result<u64> {
+/// GDAL build, so the caller reports possible loss if this diagnostic query fails. One `ogrinfo`
+/// scan of the source, as long as the conversion's, with no Cancel check inside it. `Ok(None)` when
+/// GDAL refuses the query or its answer can't be read, as it will every time; an error when the
+/// program couldn't run it (missing, timed out), which may not happen again.
+fn count_zm_features(src: &Path, layer: &LayerInfo, family: Option<Family>) -> Result<Option<u64>> {
     let src = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
     let geometry = format!("\"{}\"", layer.geometry_column.replace('"', "\"\""));
     let name = format!("\"{}\"", layer.name.replace('"', "\"\""));
@@ -686,11 +881,11 @@ fn count_zm_features(src: &Path, layer: &LayerInfo, family: Option<Family>) -> R
     c.args(["-json", "-ro", "-features", "-nomd", "-dialect", "SQLite", "-sql", &sql]).arg(&src);
     let out = output(c, CONVERT_TIMEOUT, &format!("GDAL dimension count for {}, layer '{}'", src.display(), layer.name))?;
     if !out.status.success() {
-        return Err(DataError::Format(format!("GDAL: {}", String::from_utf8_lossy(&out.stderr).trim())));
+        return Ok(None);
     }
-    let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| DataError::Format(format!("GDAL: unreadable dimension count ({e})")))?;
-    json.get("layers")
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return Ok(None) };
+    Ok(json
+        .get("layers")
         .and_then(|layers| layers.as_array())
         .and_then(|layers| layers.first())
         .and_then(|layer| layer.get("features"))
@@ -698,8 +893,7 @@ fn count_zm_features(src: &Path, layer: &LayerInfo, family: Option<Family>) -> R
         .and_then(|features| features.first())
         .and_then(|feature| feature.get("properties"))
         .and_then(|properties| properties.get("zm_count"))
-        .and_then(|count| count.as_u64())
-        .ok_or_else(|| DataError::Format("GDAL: could not count features with Z or M coordinates".into()))
+        .and_then(|count| count.as_u64()))
 }
 
 /// The longest a conversion may run, and the longest a layer listing may.
@@ -718,7 +912,7 @@ fn ours(name: &str) -> bool {
         rest.strip_suffix(".tmp.layers").is_some_and(|nonce| !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_alphanumeric()));
     tag.len() == 16
         && tag.bytes().all(|b| b.is_ascii_hexdigit())
-        && (matches!(rest, "fgb" | "key" | "empty" | "layers") || tmp || listing_tmp)
+        && (matches!(rest, "fgb" | "key" | "empty" | "layers" | "zm") || tmp || listing_tmp)
 }
 
 #[cfg(test)]
@@ -781,17 +975,130 @@ mod tests {
         assert_eq!(version("ogrinfo: command not found"), None);
         // Pruning touches only the cache's own files.
         assert!(ours("0123456789abcdef.fgb") && ours("0123456789abcdef.key") && ours("0123456789abcdef.empty"));
-        assert!(ours("0123456789abcdef.4242.tmp.fgb"));
+        assert!(ours("0123456789abcdef.4242.tmp.fgb") && ours("0123456789abcdef.zm"));
+    }
+
+    /// A kept Z/M count is taken only whole: a count with its line's end, or `unknown`.
+    #[test]
+    fn a_kept_zm_count_is_taken_only_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let fgb = dir.path().join("0123456789abcdef.fgb");
+        let kept = |text: &str| {
+            std::fs::write(fgb.with_extension("zm"), text).unwrap();
+            kept_zm_count(&fgb)
+        };
+        assert_eq!(kept("7\n"), Some(7));
+        assert_eq!(kept(&format!("{}\n", u64::MAX)), Some(u64::MAX));
+        assert_eq!(kept("unknown\n"), None);
+        assert_eq!(kept("7"), None, "cut short");
+        assert_eq!(kept(&format!("{}\n", "0".repeat(30))), None, "longer than any count");
+        assert_eq!(kept("18446744073709551616\n"), None, "past u64");
         assert!(!ours("notes.fgb") && !ours("0123456789abcdef.txt") && !ours("photo.jpg") && !ours("0123456789abcdef.x.tmp.fgb"));
-        // The cache key's hash is stable.
-        assert_eq!(fnv1a(b"rustgis"), fnv1a(b"rustgis"));
+        // The cache key's hash is stable: a cached file is found again by its name, so a changed
+        // hash orphans every cache already on disk. FNV-1a (64-bit) of "rustgis".
+        assert_eq!(fnv1a(b"rustgis"), 0xde69_1e62_2dd6_7b88);
         assert_ne!(fnv1a(b"a"), fnv1a(b"b"));
+    }
+
+    /// A layer in a system RustGIS reads is converted in it, its coordinates as the file holds
+    /// them; one in a system RustGIS can't read is converted to longitude/latitude, as every
+    /// layer was before, and said. A conversion made before is not reused for one in its own.
+    #[test]
+    fn layers_are_converted_in_their_own_system_when_gdal_is_installed() {
+        if !test_runs().unwrap() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let made = |name: &str, (driver, ext): (&str, &str), srs: &str| {
+            let csv = dir.path().join(format!("{name}.csv"));
+            std::fs::write(&csv, "WKT,name\n\"POINT (2600000 1200000)\",Bern\n").unwrap();
+            let file = dir.path().join(format!("{name}.{ext}"));
+            let out = Command::new(program("ogr2ogr").unwrap()).args(["-f", driver, "-a_srs", srs]).arg(&file).arg(&csv).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            file
+        };
+        let first = |path: &Path| {
+            let source = super::super::open_path(path, None).unwrap();
+            let batch = source.read(&super::super::Request { extent: None, limit: 1, own: None }).unwrap();
+            let Some(crate::Geometry::Point(c)) = batch.features.into_iter().next().unwrap().geometry else { panic!() };
+            (source.coord_crs(), c)
+        };
+        let cache = dir.path().join("cache");
+        let lv95 = made("lv95", ("MapInfo File", "tab"), "EPSG:2056");
+        // Where GDAL itself puts the point in longitude/latitude, from the file's definition (which
+        // in MapInfo leaves out LV95's datum shift).
+        let gdal_lonlat = {
+            let json = dir.path().join("lv95.geojson");
+            let out = Command::new(program("ogr2ogr").unwrap())
+                .args(["-f", "GeoJSON", "-t_srs", "EPSG:4326"])
+                .arg(&json)
+                .arg(&lv95)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&json).unwrap()).unwrap();
+            let c = &v["features"][0]["geometry"]["coordinates"];
+            (c[0].as_f64().unwrap(), c[1].as_f64().unwrap())
+        };
+        let (converted, failed) = convert_in(&cache, &lv95, None, None).unwrap();
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(!converted[0].in_lonlat && !converted[0].unprojected);
+        // MapInfo keeps the definition, not the code: held in that system, where LV95 is.
+        let (crs, c) = first(&converted[0].path);
+        assert_ne!(crs, crate::raster::Crs::LonLat);
+        assert!((c.x - 2_600_000.0).abs() < 0.01 && (c.y - 1_200_000.0).abs() < 0.01, "{c:?}");
+        let Some(crate::Geometry::Point(ll)) = crs.to(crate::raster::Crs::LonLat).unwrap().whole_geometry(&crate::Geometry::Point(c))
+        else {
+            panic!()
+        };
+        assert!((ll.x - gdal_lonlat.0).abs() < 1e-6 && (ll.y - gdal_lonlat.1).abs() < 1e-6, "{ll:?} vs {gdal_lonlat:?}");
+        // Taken from the cache the same way.
+        let (again, _) = convert_in(&cache, &lv95, None, None).unwrap();
+        assert!(!again[0].in_lonlat);
+        assert_eq!(first(&again[0].path).0, crs);
+        // A system RustGIS can't read (Nell's projection, which a GMT file keeps): converted to
+        // longitude/latitude, as before, and said; the same from the cache.
+        let nell = made("nell", ("GMT", "gmt"), "+proj=nell +datum=WGS84 +units=m");
+        for _ in 0..2 {
+            let (converted, failed) = convert_in(&cache, &nell, None, None).unwrap();
+            assert!(failed.is_empty() && converted[0].in_lonlat, "{failed:?}");
+            let (crs, c) = first(&converted[0].path);
+            assert_eq!(crs, crate::raster::Crs::LonLat);
+            assert!(c.x.abs() <= 180.0 && c.y.abs() <= 90.0, "{c:?}");
+        }
+        assert!(in_lonlat_note("nell").contains("converted it to longitude/latitude"));
+        // A system RustGIS refuses (another body's, in a projection it doesn't convert) is refused,
+        // saying why, not converted; a header that can't be read says nothing, so is converted.
+        let mars = dir.path().join("mars.fgb");
+        let out = Command::new(program("ogr2ogr").unwrap())
+            .args(["-f", "FlatGeobuf", "-a_srs", "+proj=nell +R=3396190 +units=m +no_defs +type=crs"])
+            .arg(&mars)
+            .arg(dir.path().join("lv95.csv"))
+            .output()
+            .unwrap();
+        if out.status.success() {
+            assert!(matches!(placement(&mars), Placement::Refused(why) if why.contains("another body")));
+            let gmt = made("mars", ("GMT", "gmt"), "+proj=nell +R=3396190 +units=m +no_defs +type=crs");
+            let e = convert_in(&cache, &gmt, None, None).unwrap_err().to_string();
+            assert!(e.contains("another body") && e.contains("nell"), "{e}");
+        }
+        let broken = dir.path().join("broken.fgb");
+        std::fs::write(&broken, b"not a flatgeobuf").unwrap();
+        assert_eq!(placement(&broken), Placement::LonLat);
+        // Several layers of a file: one notice, with their count and names.
+        let many: Vec<String> = (1..=12).map(|i| format!("l{i}")).collect();
+        let names: Vec<&str> = many.iter().map(String::as_str).collect();
+        let note = in_lonlat_notes(&names);
+        assert!(
+            note.starts_with("GDAL: 12 layers ('l1', 'l2',") && note.contains("'l10', 2 more)") && note.contains("converted them"),
+            "{note}"
+        );
     }
 
     /// A VRT renamed `.tab` isn't opened as a VRT, so the file it names isn't read.
     #[test]
     fn a_renamed_vrt_isnt_read_when_gdal_is_installed() {
-        if !available() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -839,7 +1146,7 @@ mod tests {
     /// keeps all five: the surfaces, the curves and the collection were left out before.
     #[test]
     fn keeps_surfaces_curves_and_collections_when_gdal_is_installed() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = std::env::temp_dir().join(format!("rustgis-gdal-surfaces-{}", std::process::id()));
@@ -880,7 +1187,7 @@ mod tests {
     #[test]
     fn converts_a_mixed_kml_with_source_provenance_when_gdal_is_installed() {
         use crate::source::FeatureSource;
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = std::env::temp_dir().join(format!("rustgis-gdal-test-{}", std::process::id()));
@@ -920,7 +1227,7 @@ mod tests {
         for (path, workspace) in [(&again[0].path, None), (&fresh.path, Some(fresh.workspace.clone()))] {
             let source = super::super::fgb::FgbSource::open_converted_path(path, "mixed", &kml, workspace).unwrap();
             let captured = crate::provenance::Capture::start();
-            source.read(&super::super::Request { extent: None, limit: 1 }).unwrap();
+            source.read(&super::super::Request { extent: None, limit: 1, own: None }).unwrap();
             source.visit_chunks(None, 1024, &mut |_| Ok(())).unwrap();
             assert_eq!(captured.inputs().iter().map(|i| &i.path).collect::<Vec<_>>(), vec![&kml.display().to_string()]);
         }
@@ -932,20 +1239,20 @@ mod tests {
     fn unknown_nonempty_conversion_counts_are_reported_and_known_clean_counts_are_silent() {
         let note = conversion_count_note("source", None, 1, true).unwrap();
         assert!(note.contains("source count is unknown") && note.contains("features may have been left out"));
+        assert_eq!(note.loss, None, "only a possible loss");
         assert!(conversion_count_note("source", Some(1), 1, true).is_none());
         assert!(conversion_count_note("source", Some(0), 0, false).is_none());
         assert!(conversion_count_note("source", None, 0, false).is_none());
-        assert_eq!(
-            conversion_count_note("source", Some(3), 1, true).as_deref(),
-            Some("source: GDAL conversion left out 2 of 3 source features")
-        );
+        let short = conversion_count_note("source", Some(3), 1, true).unwrap();
+        assert_eq!(short.as_str(), "source: GDAL conversion left out 2 of 3 source features");
+        assert_eq!(short.loss, Some(crate::loss::LossCode::DroppedFeature));
     }
 
     /// Indexed FlatGeobuf conversion drops empty polygons in GDAL, before RustGIS reads it.
     /// Both a new conversion and a cache hit must say how many source features were lost.
     #[test]
     fn conversion_reports_empty_polygons_left_out_but_not_clean_input() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -958,7 +1265,7 @@ mod tests {
                 let (converted, notes) = convert_in(&dir.path().join("cache"), &path, None, None).unwrap();
                 assert_eq!(converted.len(), 1);
                 let source = super::super::open_path(&converted[0].path, None).unwrap();
-                let batch = source.read(&super::super::Request { extent: None, limit: 10 }).unwrap();
+                let batch = source.read(&super::super::Request { extent: None, limit: 10, own: None }).unwrap();
                 assert_eq!(batch.features.len(), 1);
                 assert_eq!(batch.skipped, 0, "GDAL dropped the feature before RustGIS read it");
                 if lossy {
@@ -995,7 +1302,7 @@ mod tests {
     /// the conversion cache trusts while making the source unreadable by its allowed driver.
     #[test]
     fn reused_conversion_skips_listing_and_keeps_the_source_count() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1046,7 +1353,7 @@ mod tests {
 
     #[test]
     fn fresh_conversion_reports_dropped_dimensions_but_not_for_clean_xy_data() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = std::env::temp_dir().join(format!("rustgis-gdal-fresh-dimensions-{}", std::process::id()));
@@ -1058,10 +1365,34 @@ mod tests {
                 format!(r#"{{"type":"Feature","properties":{{"rank":1}},"geometry":{{"type":"Point","coordinates":{coordinates}}}}}"#);
             std::fs::write(&path, input).unwrap();
             let fresh = convert_one_fresh_in(&dir.join("cache"), &path, "points", None, None).unwrap();
-            assert_eq!(fresh.notes.iter().any(|n| n.contains("Z or M coordinates on 1 source feature")), lossy);
+            assert_eq!(
+                fresh
+                    .notes
+                    .iter()
+                    .any(|n| n.loss == Some(crate::loss::LossCode::DroppedZm) && n.contains("Z or M coordinates on 1 source feature")),
+                lossy
+            );
             assert_eq!(fresh.zm_dropped, lossy);
+            // A first conversion, as Add Data makes it, counts them too.
+            let (parts, _) = convert_in(&dir.join(format!("added-{lossy}")), &path, None, None).unwrap();
+            assert_eq!(parts.iter().map(|p| p.zm_dropped).sum::<u64>(), u64::from(lossy));
+            // A cache hit takes the count kept beside the conversion, without scanning the source.
+            if lossy {
+                for part in &parts {
+                    std::fs::write(part.path.with_extension("zm"), "7\n").unwrap();
+                }
+                let (hit, _) = convert_in(&dir.join(format!("added-{lossy}")), &path, None, None).unwrap();
+                assert_eq!(hit.iter().map(|p| p.zm_dropped).collect::<Vec<_>>(), vec![7; parts.len()]);
+                // A kept count that can't be read is counted again, and kept.
+                for part in &parts {
+                    std::fs::write(part.path.with_extension("zm"), "junk").unwrap();
+                }
+                let (hit, _) = convert_in(&dir.join(format!("added-{lossy}")), &path, None, None).unwrap();
+                assert_eq!(hit.iter().map(|p| p.zm_dropped).sum::<u64>(), 1, "{hit:?}");
+                assert!(parts.iter().all(|p| std::fs::read_to_string(p.path.with_extension("zm")).is_ok_and(|t| t != "junk")));
+            }
             let source = crate::source::open_path(&fresh.path, None).unwrap();
-            let batch = source.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+            let batch = source.read(&crate::source::Request { extent: None, limit: 10, own: None }).unwrap();
             assert_eq!(batch.features[0].geometry.as_ref().unwrap().extent().center().x, if lossy { 2.0 } else { 8.0 });
         }
         // A layer of points with Z, two of its three features with only XY: the one with Z is
@@ -1079,7 +1410,7 @@ mod tests {
 
     #[test]
     fn fresh_csv_diagnostics_count_repeated_overflows_without_claiming_feature_loss() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1090,7 +1421,7 @@ mod tests {
             std::fs::write(&path, format!("WKT,rank\n\"POINT(2 48)\",{value}\n\"POINT(3 48)\",{value}\n\"POINT(4 48)\",{value}\n"))
                 .unwrap();
             let fresh = convert_one_fresh_in(&cache, &path, "points", Some(Family::Points), Some("EPSG:4326")).unwrap();
-            let overflow: Vec<_> = fresh.notes.iter().filter(|n| n.to_ascii_lowercase().contains("integer overflow")).collect();
+            let overflow: Vec<_> = fresh.notes.iter().filter(|n| n.text.to_ascii_lowercase().contains("integer overflow")).collect();
             if lossy {
                 assert_eq!(overflow.len(), 1, "{:?}", fresh.notes);
                 assert!(overflow[0].ends_with("(3 occurrence(s))"), "{overflow:?}");
@@ -1098,7 +1429,7 @@ mod tests {
                 assert!(fresh.notes.is_empty(), "{:?}", fresh.notes);
             }
             let source = crate::source::open_path(&fresh.path, None).unwrap();
-            let batch = source.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+            let batch = source.read(&crate::source::Request { extent: None, limit: 10, own: None }).unwrap();
             assert_eq!(batch.features.len(), 3);
             assert_eq!(batch.skipped, 0, "diagnostic occurrences are not skipped-feature counts");
             assert!(batch.features.iter().all(|f| f.geometry.as_ref().unwrap().kind() == GeometryType::Point));
@@ -1115,7 +1446,7 @@ mod tests {
 
     #[test]
     fn fresh_selected_family_reports_other_geometries_but_not_missing_or_matching_geometries() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1132,13 +1463,16 @@ mod tests {
             let fresh = convert_one_fresh_in(&dir.path().join("cache"), &path, "survey", Some(Family::Points), None).unwrap();
             let omitted = fresh.notes.iter().filter(|note| note.contains("another geometry type")).collect::<Vec<_>>();
             if mixed {
-                assert_eq!(omitted, vec!["GDAL: 2 features of another geometry type were left out"]);
+                assert_eq!(
+                    omitted.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+                    vec!["GDAL: 2 features of another geometry type were left out"]
+                );
             } else {
                 assert!(omitted.is_empty(), "{:?}", fresh.notes);
                 assert!(fresh.notes.is_empty(), "single-family input has no conversion losses: {:?}", fresh.notes);
             }
             let source = crate::source::open_path(&fresh.path, None).unwrap();
-            let batch = source.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+            let batch = source.read(&crate::source::Request { extent: None, limit: 10, own: None }).unwrap();
             assert_eq!(batch.features.len(), 1);
             assert_eq!(batch.features[0].geometry.as_ref().unwrap().kind(), GeometryType::Point);
         }
@@ -1208,7 +1542,7 @@ mod tests {
 
     #[test]
     fn fresh_generic_layer_reports_only_selected_features_with_dropped_dimensions() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1235,7 +1569,7 @@ mod tests {
             }
             assert_eq!(fresh.zm_dropped, lossy);
             let source = crate::source::open_path(&fresh.path, None).unwrap();
-            let batch = source.read(&crate::source::Request { extent: None, limit: 10 }).unwrap();
+            let batch = source.read(&crate::source::Request { extent: None, limit: 10, own: None }).unwrap();
             assert_eq!(batch.features.len(), 2);
             assert!(batch.features.iter().all(|f| f.geometry.as_ref().unwrap().kind() == GeometryType::Point));
         }
@@ -1243,7 +1577,7 @@ mod tests {
 
     #[test]
     fn generic_dimension_count_includes_measures_and_quotes_layer_names() {
-        if !usable() {
+        if !test_runs().unwrap() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1251,7 +1585,7 @@ mod tests {
         for (point, expected) in [("POINT M (2 48 100)", 1), ("POINT ZM (2 48 100 200)", 1), ("POINT (2 48)", 0)] {
             std::fs::write(&path, format!("WKT,name\n\"{point}\",point\n\"LINESTRING Z (2 48 100,3 48 100)\",line\n")).unwrap();
             let info = list(&path).unwrap().remove(0);
-            assert_eq!(count_zm_features(&path, &info, Some(Family::Points)).unwrap(), expected);
+            assert_eq!(count_zm_features(&path, &info, Some(Family::Points)).unwrap(), Some(expected));
         }
     }
 }

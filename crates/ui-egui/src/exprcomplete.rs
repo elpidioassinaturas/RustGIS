@@ -346,7 +346,8 @@ pub(crate) fn expr_edit_lines(
     let icon = |offer: &Offer, item: &str| names_field(offer, item).then_some("field");
     let describe = |offer: &Offer, item: &str| describe_item(offer, item, ds);
     let draw = |ui: &mut Ui, offer: &Offer, item: &str, width: f32| draw_item(ui, offer, item, ds, width);
-    let clicked = state.list.show(ui, id.with("expr_list"), &out, visible, work, icon, describe, draw);
+    // What a row says is read from the offer, which holds its fields (`fields_key`): no other key.
+    let clicked = state.list.show(ui, id.with("expr_list"), &out, visible, work, icon, |_| 0, describe, draw);
     // The call the cursor is in, kept with the offer `work` worked out for the list this frame
     // (it works one out for the cursor whenever the box has the focus). Shown while no list is open: one open only hides
     // it, so what Escape closed stays closed until the cursor leaves the call.
@@ -1216,9 +1217,7 @@ mod tests {
         h.run();
         h.ctx.memory_mut(|m| m.request_focus(id));
         let at = |h: &mut egui_kittest::Harness<'_, String>, i: usize| {
-            let mut state = TextEditState::load(&h.ctx, id).unwrap_or_default();
-            state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(i))));
-            state.store(&h.ctx, id);
+            crate::widgets::set_cursor_range(&h.ctx, id, CCursorRange::one(CCursor::new(i)));
             h.run();
         };
         let shows = |h: &egui_kittest::Harness<'_, String>, sig: &str| h.query_by_role_and_label(Role::Label, sig).is_some();
@@ -1240,9 +1239,7 @@ mod tests {
         // Text selected in the call, then the cursor back in it: still closed.
         h.key_press(Key::Escape);
         h.run();
-        let mut state = TextEditState::load(&h.ctx, id).unwrap_or_default();
-        state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(6), CCursor::new(7))));
-        state.store(&h.ctx, id);
+        crate::widgets::set_cursor_range(&h.ctx, id, CCursorRange::two(CCursor::new(6), CCursor::new(7)));
         h.run();
         at(&mut h, 7);
         assert!(!shows(&h, round), "a selection in the call keeps it closed");
@@ -1492,9 +1489,7 @@ mod tests {
         let mut h = boxed(id, Some(ds()), &start);
         h.run();
         h.ctx.memory_mut(|m| m.request_focus(id));
-        let mut state = TextEditState::load(&h.ctx, id).unwrap_or_default();
-        state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(start.chars().count()))));
-        state.store(&h.ctx, id);
+        crate::widgets::set_cursor_range(&h.ctx, id, CCursorRange::one(CCursor::new(start.chars().count())));
         h.run();
         h.event(egui::Event::Text("o".into()));
         h.run();
@@ -1603,9 +1598,7 @@ mod tests {
         let mut h = boxed(id, None, "x");
         h.run();
         h.ctx.memory_mut(|m| m.request_focus(id));
-        let mut state = TextEditState::load(&h.ctx, id).unwrap_or_default();
-        state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(1))));
-        state.store(&h.ctx, id);
+        crate::widgets::set_cursor_range(&h.ctx, id, CCursorRange::one(CCursor::new(1)));
         h.run();
         h.event(egui::Event::Text("(".into()));
         h.run();

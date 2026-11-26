@@ -21,6 +21,8 @@ struct Network<'a> {
     unit_m: f64,
     snap_m: f64,
     notes: Vec<String>,
+    /// What building it lost, with codes: segments it couldn't read.
+    losses: Vec<rustgis_data::loss::LossMessage>,
 }
 
 /// Reads the `network`, `costField`, `units` and `snapDistance` parameters and builds (or reuses)
@@ -88,19 +90,25 @@ fn network<'a>(inp: &'a dyn Inputs, p: &Json, tool: &str) -> Result<Network<'a>,
             ds.name
         ));
     }
+    // Left out of the network, as the route command leaves them out of its own.
+    let mut losses = Vec::new();
     if graph.skipped_segments() > 0 {
-        notes.push(format!(
-            "{tool}: {} segment(s) of '{}' with invalid coordinates were left out of the network",
-            graph.skipped_segments(),
-            ds.name
-        ));
+        losses.push(rustgis_data::loss::LossMessage {
+            code: rustgis_data::loss::LossCode::DroppedGeometry,
+            text: format!(
+                "{tool}: {} segment(s) of '{}' with invalid coordinates were left out of the network",
+                graph.skipped_segments(),
+                ds.name
+            ),
+        });
     }
     if graph.segments() == 0 {
         // What left no lines is said with it: the notes would be lost with the run.
-        let why = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
+        let said: Vec<&str> = notes.iter().map(String::as_str).chain(losses.iter().map(|l| l.text.as_str())).collect();
+        let why = if said.is_empty() { String::new() } else { format!(" ({})", said.join("; ")) };
         return Err(format!("'{}' has no lines to search{why}", ds.name));
     }
-    Ok(Network { ds, graph, unit_m, snap_m, notes })
+    Ok(Network { ds, graph, unit_m, snap_m, notes, losses })
 }
 
 /// The features of a point layer moved onto the network, in layer order, as (feature id, place),
@@ -121,6 +129,10 @@ fn place(inp: &dyn Inputs, p: &Json, key: &str, net: &mut Network<'_>, tool: &st
         Far,
     }
     let (graph, snap_m) = (&net.graph, net.snap_m);
+    // The graph is in longitude/latitude: each point is given there from the system its layer
+    // holds it in (the one the run works in, [`Inputs::work_crs`]); one that can't be has no
+    // usable point.
+    let to = ds.lonlat_conversion()?;
     crate::control::begin(rows.len());
     let got = crate::parallel::try_map(
         &rows,
@@ -137,9 +149,7 @@ fn place(inp: &dyn Inputs, p: &Json, key: &str, net: &mut Network<'_>, tool: &st
                 },
                 _ => return Ok(Got::NoPoint),
             };
-            if !at.is_finite() || at.y.abs() > 90.0 {
-                return Ok(Got::NoPoint);
-            }
+            let Some(at) = to.point(at).filter(|c| c.is_finite() && c.y.abs() <= 90.0) else { return Ok(Got::NoPoint) };
             Ok::<_, String>(graph.place(at, snap_m)?.map_or(Got::Far, |placed| Got::Placed(f.id, placed)))
         },
     )?;
@@ -303,12 +313,31 @@ pub(super) fn service_area(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, Str
 
     let ds = net.ds;
     let mut out = copy_schema(ds, out_name(p, format!("{}_ServiceArea", ds.name)), GeometryType::Polyline);
-    out.crs = ds.crs;
     for (name, ty) in [("facility_fid", FieldType::Integer), ("from_break", FieldType::Double), ("to_break", FieldType::Double)] {
         let name = unique_field(&out, name);
         out.fields.push(Field::new(name, ty));
     }
     let mut reached = HashSet::new();
+    // Made in longitude/latitude, on the graph; each line held as the network is, in the system
+    // the run works in, as it is added (the output is never made twice).
+    let to_own = Crs::LonLat.to(ds.coord_crs())?;
+    let held = |lines: Vec<Vec<Coord>>| -> Result<Vec<Vec<Coord>>, String> {
+        if to_own.is_identity() {
+            return Ok(lines);
+        }
+        lines
+            .into_iter()
+            .map(|part| {
+                part.into_iter()
+                    .map(|c| {
+                        to_own.point(c).filter(|c| c.is_finite()).ok_or_else(|| {
+                            format!("{TOOL}: a place it reached can't be held in {}, the system of '{}'", ds.coord_crs().label(), ds.name)
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    };
     for ((row, band, facility), lines) in parts {
         crate::control::check()?;
         let Some(f) = ds.features.get(row) else { continue };
@@ -317,8 +346,10 @@ pub(super) fn service_area(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, Str
         let fid = facilities.get(facility).map_or(Value::Null, |(id, _)| Value::Int(id.cast_signed()));
         let from = if band == 0 { 0.0 } else { breaks.get(band - 1).copied().unwrap_or(0.0) };
         attrs.extend([fid, Value::Float(from), Value::Float(breaks.get(band).copied().unwrap_or(0.0))]);
-        out.push(Some(Geometry::Line(lines)), attrs);
+        out.push(Some(Geometry::Line(held(lines)?)), attrs);
     }
+    out.held_in = ds.coord_crs();
+    out.crs = ds.crs;
     let units = if s(p, "units").is_empty() { "Kilometers" } else { s(p, "units") };
     let mut messages = vec![format!(
         "{TOOL}: {} line part(s) reached from {} of {} facilities, in {units}",
@@ -327,7 +358,7 @@ pub(super) fn service_area(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, Str
         facilities.len()
     )];
     messages.append(&mut net.notes);
-    Ok(ToolResult { losses: Vec::new(), output: Output::Layer(out), messages })
+    Ok(ToolResult { losses: std::mem::take(&mut net.losses), output: Output::Layer(out), messages })
 }
 
 /// OD Cost Matrix: the cost and length of the cheapest way from each origin to each destination,
@@ -471,7 +502,7 @@ pub(super) fn od_cost_matrix_on(inp: &dyn Inputs, p: &Json, threads: Option<usiz
         });
     }
     messages.append(&mut net.notes);
-    Ok(ToolResult { losses: Vec::new(), output: Output::Table(out), messages })
+    Ok(ToolResult { losses: std::mem::take(&mut net.losses), output: Output::Table(out), messages })
 }
 
 #[cfg(test)]

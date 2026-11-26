@@ -840,12 +840,19 @@ pub struct PostgisSource {
     /// The table's single-column integer primary key, which gives the ids: rows can be told
     /// apart to be edited only with one.
     key: Option<String>,
-    /// The expression of each column read: the id, the geometry (as WKB, longitude/latitude),
+    /// The expression of each column read: the id, the geometry (as WKB, in [`Self::held`]),
     /// then the fields.
     select: Vec<String>,
     /// Converts a request's extent to the table's coordinates, when RustGIS knows the coordinate
     /// system itself; else the server does.
     reproject: Option<Reproject>,
+    /// The system its geometry is read and written in: the table's own when RustGIS knows it (as
+    /// a file's is kept), else longitude/latitude, which the server converts to and from.
+    held: Crs,
+    /// The geometry's WKB in longitude/latitude, converted by the server as releases before
+    /// RustGIS kept a table's own coordinates read it: what [`Self::save`] compares the rows of
+    /// a layer held so with.
+    lonlat_wkb: String,
 }
 
 impl std::fmt::Debug for PostgisSource {
@@ -875,7 +882,7 @@ impl PostgisSource {
     /// Opens a table's geometry column (`family`: the one family to read of a column of mixed
     /// types). `crs` (`EPSG:…`) is the coordinate system of a geometry that doesn't say its own.
     pub fn open(conn: Arc<Conn>, table: Table, family: Option<Family>, crs: Option<&str>) -> Result<Self> {
-        let mut notes = Vec::new();
+        let mut notes = crate::loss::Notes::new();
         let g = table.geom();
         // The SRID: the column's, else its rows', else the one given.
         let mut srid = if table.geography && table.srid == 0 { 4326 } else { table.srid };
@@ -897,17 +904,34 @@ impl PostgisSource {
                     native = format!("ST_SetSRID({g}, {srid})");
                     notes.extend(note);
                 }
-                None => notes.push(
-                    "the geometry doesn't say its coordinate system; read as longitude/latitude (add it again with \"crs\", such as EPSG:2263)".into(),
-                ),
+                None => notes.push(crate::loss::Note::loss(
+                    crate::loss::LossCode::AssumedCrs,
+                    "the geometry doesn't say its coordinate system; read as longitude/latitude (add it again with \"crs\", such as EPSG:2263)",
+                )),
             }
         }
         if let Some(note) = tls_note(&conn.tls, conn.is_plain()) {
-            notes.push(note.into());
+            notes.push(note);
         }
-        let lonlat = if srid == 0 || srid == 4326 { native.clone() } else { format!("ST_Transform({native}, 4326)") };
+        let reproject = match srid {
+            0 | 4326 => Some(Reproject::from_crs(Crs::LonLat, &mut crate::loss::Notes::new())),
+            // A coordinate system RustGIS can't convert itself is left to the server.
+            s => u32::try_from(s)
+                .ok()
+                .and_then(Crs::from_epsg)
+                .map(|c| Reproject::from_crs(c, &mut crate::loss::Notes::new()))
+                .filter(|r| !r.is_lonlat()),
+        };
+        // Read as the table holds it in a system RustGIS converts itself; otherwise the server
+        // gives it in longitude/latitude.
+        // A geography column is written as longitude/latitude, so it stays on the server's path.
+        let held = if table.geography { Crs::LonLat } else { reproject.as_ref().map_or(Crs::LonLat, Reproject::crs) };
+        let read_in =
+            if held != Crs::LonLat || srid == 0 || srid == 4326 { native.clone() } else { format!("ST_Transform({native}, 4326)") };
         // Curves become lines; Z and M are dropped by the reader (opening notes them, below).
-        let wkb = format!("ST_AsBinary(ST_CurveToLine({lonlat}))");
+        let wkb = format!("ST_AsBinary(ST_CurveToLine({read_in}))");
+        let lonlat_wkb =
+            if srid == 0 || srid == 4326 { wkb.clone() } else { format!("ST_AsBinary(ST_CurveToLine(ST_Transform({native}, 4326)))") };
 
         // The columns: a single integer primary key gives the ids.
         let rel = format!("{}.{}", ident(&table.schema), ident(&table.name));
@@ -954,11 +978,10 @@ impl PostgisSource {
             _ => "(row_number() OVER ())::int8".to_string(),
         };
         if pk.is_none() && !matches!(relkind.as_str(), "r" | "m") {
-            notes.push("a view or partitioned table without a single-column key: its features are numbered as read, so their ids can change from one read to the next".into());
+            notes.push("a view or partitioned table without a single-column key: its features are numbered as read, so their ids can change from one read to the next");
         } else if pk.is_none() {
             notes.push(
-                "no single-column integer key: features are numbered by their place in the table, which changes when rows are updated"
-                    .into(),
+                "no single-column integer key: features are numbered by their place in the table, which changes when rows are updated",
             );
         }
         let mut select = vec![id, wkb];
@@ -966,11 +989,6 @@ impl PostgisSource {
         let key = pk;
 
         let family = family.or(table.declared_family());
-        let reproject = match srid {
-            0 | 4326 => Some(Reproject::from_crs(Crs::LonLat, &mut Vec::new())),
-            // A coordinate system RustGIS can't convert itself is left to the server.
-            s => u32::try_from(s).ok().and_then(Crs::from_epsg).map(|c| Reproject::from_crs(c, &mut Vec::new())).filter(|r| !r.is_lonlat()),
-        };
         let mut src = PostgisSource {
             info: SourceInfo {
                 name: table.label(),
@@ -993,6 +1011,8 @@ impl PostgisSource {
             key,
             select,
             reproject,
+            held,
+            lonlat_wkb,
         };
         src.info.indexed = src.has_index();
         src.info.count = src.count_rows();
@@ -1018,7 +1038,7 @@ impl PostgisSource {
         match zm {
             Some(true) => src.info.drop_zm(None),
             Some(false) => {}
-            None => src.info.notes.push("couldn't tell whether it has Z or M values, which RustGIS doesn't keep".into()),
+            None => src.info.notes.push("couldn't tell whether it has Z or M values, which RustGIS doesn't keep"),
         }
         Ok(src)
     }
@@ -1334,38 +1354,49 @@ fn count_offset(saved: &mut Saved, field: usize, column: &str, v: &Value) {
 /// What saving to `table` says of the date-times its columns didn't keep as they were
 /// ([`Saved::utc_dates`], [`Saved::zoneless_dates`], [`Saved::assumed_utc`]), naming the fields
 /// of `fields` they were in.
-pub fn saved_dates_notes(fields: &[Field], saved: &Saved, table: &str) -> Vec<String> {
+pub fn saved_dates_notes(fields: &[Field], saved: &Saved, table: &str) -> Vec<crate::loss::Note> {
     let table: String = table.chars().map(crate::io::dbf_notice_char).collect();
-    let kinds: [(&[usize], &str, &str); 3] = [
-        (&saved.utc_dates, "1 date-time was saved in UTC, without its offset", "date-times were saved in UTC, without their offsets"),
+    // An offset left out is a value lost; a date-time without one saved as UTC keeps its clock time.
+    let kinds: [(&[usize], &str, &str, bool); 3] = [
+        (&saved.utc_dates, "1 date-time was saved in UTC, without its offset", "date-times were saved in UTC, without their offsets", true),
         (
             &saved.zoneless_dates,
             "1 date-time was saved at the clock time shown, without its offset",
             "date-times were saved at the clock time shown, without their offsets",
+            true,
         ),
-        (&saved.assumed_utc, "1 date-time without a time zone was saved as UTC", "date-times without a time zone were saved as UTC"),
+        (&saved.assumed_utc, "1 date-time without a time zone was saved as UTC", "date-times without a time zone were saved as UTC", false),
     ];
     let why =
         ["(a timestamptz column holds only the moment)", "(a timestamp column has no time zone)", "(a timestamptz column holds a moment)"];
     kinds
         .iter()
         .zip(why)
-        .filter_map(|((counts, one, many), why)| {
+        .filter_map(|((counts, one, many, lost), why)| {
             let total: usize = counts.iter().sum();
             let what = if total == 1 { (*one).to_string() } else { format!("{total} {many}") };
-            (total > 0).then(|| format!("{table}: {what} {why}, in {}", crate::io::named_fields(fields, counts)))
+            (total > 0).then(|| {
+                let text = format!("{table}: {what} {why}, in {}", crate::io::named_fields(fields, counts));
+                if *lost { crate::loss::Note::loss(crate::loss::LossCode::DroppedValue, text) } else { crate::loss::Note::plain(text) }
+            })
         })
         .collect()
 }
 
 impl PostgisSource {
-    /// The geometry of parameter `$n` (WKB in longitude/latitude) as the column holds it: in its
-    /// coordinate system, its single or multi type, and its dimensions.
-    fn geometry_in(&self, n: usize, dims: i32) -> String {
+    /// The geometry of parameter `$n` (WKB in [`Self::held`], or in longitude/latitude when not
+    /// `own`) as the column holds it: in its coordinate system, its single or multi type, and its
+    /// dimensions.
+    fn geometry_in(&self, n: usize, dims: i32, own: bool) -> String {
         let t = &self.table;
-        let mut e = format!("ST_SetSRID(ST_GeomFromWKB(${n}::bytea), 4326)");
+        let own = own && self.held != Crs::LonLat && !t.geography;
+        let mut e = if own {
+            format!("ST_SetSRID(ST_GeomFromWKB(${n}::bytea), {})", self.srid)
+        } else {
+            format!("ST_SetSRID(ST_GeomFromWKB(${n}::bytea), 4326)")
+        };
         if !t.geography {
-            if self.srid != 0 && self.srid != 4326 {
+            if !own && self.srid != 0 && self.srid != 4326 {
                 e = format!("ST_Transform({e}, {})", self.srid);
             }
             // A column without a coordinate system of its own: the rows' (or none).
@@ -1397,8 +1428,59 @@ impl PostgisSource {
     /// saved and the conflicts are the answer. Only the columns whose values changed are
     /// written (a value read through a cast, such as a `numeric` as a number, is left as it is
     /// unless it changed). `fields` are the layer's, matched to the table's columns by name.
-    /// Needs a connection from [`connect_writable`].
-    pub fn save(&self, edits: &Edits, fields: &[Field]) -> Result<std::result::Result<Saved, Vec<Conflict>>> {
+    /// `held` is the system the edits' geometry is in: the one the table is read in
+    /// ([`FeatureSource::coord_crs`]), or longitude/latitude, as a layer a project saved before
+    /// RustGIS kept a table's own coordinates holds it, which the server converts; or another (a
+    /// table whose column was given another SRID since the layer was loaded), converted here
+    /// straight to the one the table is read in. A geometry is written only when it differs from
+    /// the stored one in `held`, so an attribute edit leaves it as stored. Needs a connection
+    /// from [`connect_writable`].
+    pub fn save(&self, edits: &Edits, fields: &[Field], held: Crs) -> Result<std::result::Result<Saved, Vec<Conflict>>> {
+        let other = held != self.held && held != Crs::LonLat;
+        // Read and written as the table is read: in its own system, or in another converted here.
+        let own = held == self.held || other;
+        let failed = |e: String| {
+            DataError::Format(format!(
+                "{}: the edits are in {}, which can't be converted to {}: {e}",
+                self.table.label(),
+                held.label(),
+                self.held.label()
+            ))
+        };
+        let (to_held, to_table) =
+            if other { (Some(self.held.to(held).map_err(failed)?), Some(held.to(self.held).map_err(failed)?)) } else { (None, None) };
+        // Each edited geometry checked before anything is written, in every system: one with a
+        // coordinate that isn't a number, or one that can't be converted to the system the table
+        // is read in, refuses the save. Nothing is kept: it is converted again as it is written.
+        // Longitude/latitude goes to the server as before.
+        let what = |n: usize, update: bool, f: &Feature| {
+            if update { format!("row {}", f.id.cast_signed()) } else { format!("new feature {}", n + 1) }
+        };
+        {
+            let updates = edits.updates.iter().map(|(f, _)| f).enumerate().map(|(n, f)| (true, n, f));
+            for (update, n, f) in updates.chain(edits.inserts.iter().enumerate().map(|(n, f)| (false, n, f))) {
+                crate::progress::check()?;
+                let Some(g) = &f.geometry else { continue };
+                // Checked before converting: an infinite coordinate could convert to a pole.
+                let mut finite = true;
+                g.for_each_coord(|c| finite &= c.is_finite());
+                if !finite {
+                    return Err(DataError::Format(format!(
+                        "{}: its geometry has a coordinate that isn't a number, so it can't be saved",
+                        what(n, update, f)
+                    )));
+                }
+                if let Some(to) = &to_table
+                    && to.whole_geometry(g).is_none()
+                {
+                    return Err(DataError::Format(format!(
+                        "{}: its geometry can't be converted to {}",
+                        what(n, update, f),
+                        self.held.label()
+                    )));
+                }
+            }
+        }
         let key = self.key.as_deref().ok_or_else(|| {
             DataError::Format(format!(
                 "{}: no single-column integer primary key, so its rows can't be told apart to save",
@@ -1496,13 +1578,32 @@ impl PostgisSource {
             // Updates: the columns whose values differ from the rows as they are (as they were
             // read, since their versions match).
             let mut written: Vec<i64> = Vec::new();
+            // As checked above, so it converts; were it not to, nothing is saved (rolled back),
+            // the row given as a conflict, rather than writing it unconverted.
+            let encode = |g: &crate::Geometry| match &to_table {
+                Some(to) => to.whole_geometry(g).map(|placed| wkb::encode(&placed)),
+                None => Some(wkb::encode(g)),
+            };
             let ids: Vec<i64> = edits.updates.iter().map(|(f, _)| f.id.cast_signed()).collect();
-            let cols: Vec<String> = self.select.iter().enumerate().map(|(i, e)| format!("{e} AS c{i}")).collect();
+            // In the system the edits are in, so an unchanged geometry compares equal.
+            let cols: Vec<String> = self
+                .select
+                .iter()
+                .enumerate()
+                .map(|(i, e)| if i == 1 && !own { format!("{} AS c{i}", self.lonlat_wkb) } else { format!("{e} AS c{i}") })
+                .collect();
             let current: std::collections::HashMap<u64, Feature> = t
                 .query(format!("SELECT {} FROM {from} WHERE {k} = ANY($1::int8[])", cols.join(", ")).as_str(), &[&ids])?
                 .iter()
                 .filter_map(|r| self.feature(r, &mut Vec::new()))
-                .map(|f| (f.id, f))
+                .map(|mut f| {
+                    // In the edits' system; one that can't be converted there differs, and the
+                    // edit's is written.
+                    if let Some(to) = &to_held {
+                        f.geometry = f.geometry.as_ref().and_then(|g| to.whole_geometry(g));
+                    }
+                    (f.id, f)
+                })
                 .collect();
             for (f, _) in &edits.updates {
                 let was = current.get(&f.id);
@@ -1520,8 +1621,9 @@ impl PostgisSource {
                 if let Some(g) = &f.geometry
                     && was.and_then(|w| w.geometry.as_ref()) != Some(g)
                 {
-                    params.push(Box::new(wkb::encode(g)));
-                    sets.push(format!("{column} = {}", self.geometry_in(params.len(), dims)));
+                    let Some(bytes) = encode(g) else { return Ok(Err(vec![Conflict::Changed(f.id)])) };
+                    params.push(Box::new(bytes));
+                    sets.push(format!("{column} = {}", self.geometry_in(params.len(), dims, own)));
                 }
                 if sets.is_empty() {
                     saved.unchanged += 1;
@@ -1553,9 +1655,10 @@ impl PostgisSource {
                     values.push(format!("CAST(${}::text AS {})", params.len(), tg.ty));
                 }
                 if let Some(g) = &f.geometry {
-                    params.push(Box::new(wkb::encode(g)));
+                    let Some(bytes) = encode(g) else { return Ok(Err(vec![Conflict::Changed(f.id)])) };
+                    params.push(Box::new(bytes));
                     names.push(column.clone());
-                    values.push(self.geometry_in(params.len(), dims));
+                    values.push(self.geometry_in(params.len(), dims, own));
                 }
                 let sql = if names.is_empty() {
                     format!("INSERT INTO {from} DEFAULT VALUES RETURNING {k}::int8")
@@ -1590,16 +1693,38 @@ fn row_extent(r: &postgres::Row) -> Option<Extent> {
     }
 }
 
+/// The box a read narrows its query by when the request gives it in the table's own system
+/// ([`Request::own`], [`Reproject::own_box`]); `None` otherwise, for the extent to be converted.
+fn own_query_box(reproject: Option<&Reproject>, req: &Request) -> Option<Extent> {
+    reproject.and_then(|r| r.own_box(req))
+}
+
 impl FeatureSource for PostgisSource {
     fn info(&self) -> &SourceInfo {
         &self.info
+    }
+
+    fn reads_own_box(&self) -> bool {
+        true
+    }
+
+    /// The table's own system when RustGIS converts it itself, else longitude/latitude, which
+    /// the server gives.
+    fn coord_crs(&self) -> Crs {
+        self.held
     }
 
     /// Refuses an unbounded view before the server counts or samples the query.
     fn read(&self, req: &Request) -> Result<Batch> {
         let limit = clamp_limit(req.limit);
         let mut out = Batch::default();
-        let native = req.extent.map(|e| self.lonlat_to_native(&e)).transpose()?;
+        // In the table's own system: the box the request gives there ([`Request::own`]), which
+        // a feature reaching past where longitude/latitude goes meets too, else its extent
+        // converted (refused when it can't be bounded).
+        let native = match own_query_box(self.reproject.as_ref(), req) {
+            Some(own) => Some(own),
+            None => req.extent.map(|e| self.lonlat_to_native(&e)).transpose()?,
+        };
         if limit == 0 {
             return Ok(out);
         }
@@ -1633,13 +1758,25 @@ impl FeatureSource for PostgisSource {
         for r in &rows {
             // Dates that aren't ones are counted in the rows kept.
             let mut unread = Vec::new();
-            let Some(feature) = self.feature(r, &mut unread) else {
+            let Some(mut feature) = self.feature(r, &mut unread) else {
                 out.skipped += 1;
                 continue;
             };
             // The index matched the request's box in the table's coordinates, which holds more
-            // than the request when they are projected.
-            if let Some(geometry) = &feature.geometry
+            // than the request when they are projected. Held in its own system, a geometry is
+            // compared in the request's box there when it gives one, else placed in
+            // longitude/latitude to be compared, and kept as the table holds it.
+            if self.held != Crs::LonLat {
+                let placed = feature.geometry.take().and_then(|g| self.reproject.as_ref().and_then(|r| r.place(g, req)));
+                let Some(placed) = placed else {
+                    out.skipped += 1;
+                    continue;
+                };
+                if !placed.inside {
+                    continue;
+                }
+                feature.geometry = Some(placed.geometry);
+            } else if let Some(geometry) = &feature.geometry
                 && !in_request(geometry, req)
             {
                 continue;
@@ -1652,9 +1789,28 @@ impl FeatureSource for PostgisSource {
     }
 }
 
+#[expect(clippy::disallowed_methods, reason = "a thread the system refuses fails the test, as it should")]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read given its box in the table's own system narrows the query by it, not by its
+    /// longitude/latitude extent converted; one in another system, or a table in
+    /// longitude/latitude, goes by the extent as before.
+    #[test]
+    fn a_read_in_the_tables_own_system_queries_by_its_box() {
+        let utm = Crs::from_epsg(32631).unwrap();
+        let own = Extent::new(440_000.0, 5_400_000.0, 470_000.0, 5_420_000.0);
+        let lonlat = Some(Extent::new(2.2, 48.75, 2.5, 48.95));
+        let table = Reproject::from_crs(utm, &mut crate::loss::Notes::new());
+        assert_eq!(own_query_box(Some(&table), &Request { extent: lonlat, limit: 10, own: Some((utm, own)) }), Some(own));
+        let swiss = Crs::from_epsg(2056).unwrap();
+        assert_eq!(own_query_box(Some(&table), &Request { extent: lonlat, limit: 10, own: Some((swiss, own)) }), None);
+        assert_eq!(own_query_box(Some(&table), &Request { extent: lonlat, limit: 10, own: None }), None);
+        let geographic = Reproject::from_crs(Crs::LonLat, &mut crate::loss::Notes::new());
+        assert_eq!(own_query_box(Some(&geographic), &Request { extent: lonlat, limit: 10, own: Some((Crs::LonLat, own)) }), None);
+        assert_eq!(own_query_box(None, &Request { extent: lonlat, limit: 10, own: Some((utm, own)) }), None);
+    }
 
     #[test]
     fn families_of_declared_types() {
@@ -1679,7 +1835,7 @@ mod tests {
                 count: None,
                 crs: "EPSG:4326".into(),
                 indexed: false,
-                notes: Vec::new(),
+                notes: Default::default(),
                 zm_dropped: false,
             },
             conn: Arc::new(Conn {
@@ -1705,28 +1861,65 @@ mod tests {
             key: None,
             select: Vec::new(),
             reproject: None,
+            held: Crs::LonLat,
+            lonlat_wkb: String::new(),
         }
     }
 
     #[test]
     fn refused_database_view_does_not_reach_the_connection() {
         let mut source = source("POINT");
-        source.reproject = Some(Reproject::from_crs(Crs::from_epsg(32617).unwrap(), &mut Vec::new()));
+        source.reproject = Some(Reproject::from_crs(Crs::from_epsg(32617).unwrap(), &mut crate::loss::Notes::new()));
         for limit in [0, 10] {
-            let req = Request { extent: Some(Extent::new(-120.0, -30.0, 10.0, 30.0)), limit };
+            let req = Request { extent: Some(Extent::new(-120.0, -30.0, 10.0, 30.0)), limit, own: None };
             let error = source.read(&req).unwrap_err().to_string();
             assert!(error.contains("can't be bounded in the database"), "{error}");
         }
-        let clean = Request { extent: Some(Extent::new(-84.0, 30.0, -78.0, 40.0)), limit: 0 };
+        let clean = Request { extent: Some(Extent::new(-84.0, 30.0, -78.0, 40.0)), limit: 0, own: None };
         assert!(source.read(&clean).unwrap().features.is_empty());
-        assert!(source.read(&Request { extent: None, limit: 0 }).is_ok());
+        assert!(source.read(&Request { extent: None, limit: 0, own: None }).is_ok());
+    }
+
+    /// A table in a system RustGIS converts itself is written as the layer holds it, in that
+    /// system; a layer held in longitude/latitude (saved by an older release) is converted by the
+    /// server as before; edits in another system are converted to the table's as they are
+    /// written, and refused when one can't be converted or has a coordinate that isn't a number.
+    #[test]
+    fn edits_are_written_in_the_system_the_layer_holds_them_in() {
+        let mut held = source("GEOMETRY");
+        let lv95 = Crs::from_epsg(2056).unwrap();
+        (held.srid, held.raw_srid, held.held) = (2056, 2056, lv95);
+        held.table.srid = 2056;
+        assert_eq!(held.geometry_in(1, 2, true), "ST_SetSRID(ST_GeomFromWKB($1::bytea), 2056)");
+        assert_eq!(held.geometry_in(1, 2, false), "ST_Transform(ST_SetSRID(ST_GeomFromWKB($1::bytea), 4326), 2056)");
+        assert_eq!(held.coord_crs(), lv95);
+        // A system RustGIS leaves to the server: longitude/latitude both ways, as before.
+        let mut server = source("GEOMETRY");
+        (server.srid, server.raw_srid) = (2056, 2056);
+        server.table.srid = 2056;
+        assert_eq!(server.geometry_in(1, 2, true), "ST_Transform(ST_SetSRID(ST_GeomFromWKB($1::bytea), 4326), 2056)");
+        assert_eq!(server.coord_crs(), Crs::LonLat);
+        // Checked before anything is written: in another system, each geometry converted to the
+        // table's, a new feature named by its place, not its id; in the table's own, a coordinate
+        // that isn't a number refused.
+        let point = |x, y| Some(crate::Geometry::Point(rustgis_geom::Coord::new(x, y)));
+        let far = Edits { inserts: vec![Feature { id: 7, geometry: point(1e20, 1e20), attrs: Vec::new() }], ..Edits::default() };
+        let e = held.save(&far, &[], Crs::from_epsg(32632).unwrap()).unwrap_err().to_string();
+        assert!(e.starts_with("new feature 1:") && e.contains("EPSG:2056"), "{e}");
+        // A coordinate that isn't a number, in the table's system or another (where an infinite
+        // one could convert to a pole), refused before converting.
+        let bad = Edits { inserts: vec![Feature { id: 7, geometry: point(0.0, f64::INFINITY), attrs: Vec::new() }], ..Edits::default() };
+        for crs in [lv95, Crs::WebMercator, Crs::LonLat] {
+            let e = held.save(&bad, &[], crs).unwrap_err().to_string();
+            assert!(e.starts_with("new feature 1:") && e.contains("isn't a number"), "{crs:?}: {e}");
+        }
     }
 
     #[test]
     fn unconstrained_geometry_keeps_its_parts() {
         // A typed column takes one part as its type; an unconstrained one keeps the geometry as it is.
-        assert!(source("POLYGON").geometry_in(1, 2).contains("ST_NumGeometries"));
-        assert!(!source("GEOMETRY").geometry_in(1, 2).contains("ST_NumGeometries"));
+        assert!(source("POLYGON").geometry_in(1, 2, true).contains("ST_NumGeometries"));
+        assert!(!source("GEOMETRY").geometry_in(1, 2, true).contains("ST_NumGeometries"));
     }
 
     #[test]
@@ -1997,12 +2190,21 @@ mod tests {
             (&[0, 1][..], &[0, 2][..], &[0, 2][..])
         );
         let fields = [Field::new("id", FieldType::Integer), Field::new("seen", FieldType::DateTime)];
+        use crate::loss::LossCode::DroppedValue;
+        let notes = saved_dates_notes(&fields, &saved, "wells");
         assert_eq!(
-            saved_dates_notes(&fields, &saved, "wells"),
+            notes.iter().map(|n| (n.text.as_str(), n.loss)).collect::<Vec<_>>(),
             [
-                "wells: 1 date-time was saved in UTC, without its offset (a timestamptz column holds only the moment), in 'seen'",
-                "wells: 2 date-times were saved at the clock time shown, without their offsets (a timestamp column has no time zone), in 'seen'",
-                "wells: 2 date-times without a time zone were saved as UTC (a timestamptz column holds a moment), in 'seen'"
+                (
+                    "wells: 1 date-time was saved in UTC, without its offset (a timestamptz column holds only the moment), in 'seen'",
+                    Some(DroppedValue)
+                ),
+                (
+                    "wells: 2 date-times were saved at the clock time shown, without their offsets (a timestamp column has no time zone), in 'seen'",
+                    Some(DroppedValue)
+                ),
+                // Its clock time is kept, read as UTC.
+                ("wells: 2 date-times without a time zone were saved as UTC (a timestamptz column holds a moment), in 'seen'", None)
             ]
         );
         assert!(saved_dates_notes(&fields, &Saved::default(), "wells").is_empty());
@@ -2033,14 +2235,17 @@ mod tests {
                 };
                 let opened = start.elapsed();
                 let i = src.info();
-                let all = src.read(&Request { extent: None, limit: 250_000 }).unwrap_or_else(|e| panic!("{}: {e}", t.label()));
+                let all = src.read(&Request { extent: None, limit: 250_000, own: None }).unwrap_or_else(|e| panic!("{}: {e}", t.label()));
                 let read = start.elapsed() - opened;
                 // A view of a quarter of the extent.
                 let e = i.extent;
                 let q = Extent::new(e.min_x, e.min_y, e.min_x + e.width() / 2.0, e.min_y + e.height() / 2.0);
-                let part = src.read(&Request { extent: Some(q), limit: 1000 }).unwrap_or_else(|e| panic!("{}: {e}", t.label()));
+                let part = src.read(&Request { extent: Some(q), limit: 1000, own: None }).unwrap_or_else(|e| panic!("{}: {e}", t.label()));
+                // Features come in the table's own system when RustGIS converts it: their boxes
+                // are compared in longitude/latitude, as the request is.
+                let to = src.coord_crs().to(Crs::LonLat).unwrap_or_else(|e| panic!("{e}"));
                 for ft in &part.features {
-                    let g = ft.geometry.as_ref().map(|g| g.extent()).unwrap_or(Extent::EMPTY);
+                    let g = ft.geometry.as_ref().map(|g| to.geometry(g).extent()).unwrap_or(Extent::EMPTY);
                     assert!(g.intersects(&q.padded(0.01, 0.0)), "{}: feature {} outside the request", t.label(), ft.id);
                 }
                 let mut ids: Vec<u64> = all.features.iter().map(|f| f.id).collect();

@@ -31,7 +31,11 @@ fn area_cmd(s: &mut Session, p: &Value) -> CmdResult {
 fn from_file(s: &mut Session, path: &str) -> Result<Vec<Geometry>, String> {
     let (geometries, messages) = read_geometries(path)?;
     for m in messages {
-        s.warn(m);
+        // An ordinary note warns; a loss says its code too.
+        match m.loss {
+            Some(_) => s.say(m),
+            None => s.warn(m.text),
+        }
     }
     Ok(geometries)
 }
@@ -39,26 +43,33 @@ fn from_file(s: &mut Session, path: &str) -> Result<Vec<Geometry>, String> {
 /// A file's features' geometries and what the reader says of it (each naming the file). Needs no
 /// session, so the app reads a large file on a thread of its own.
 #[cfg(not(target_arch = "wasm32"))]
-fn read_geometries(path: &str) -> Result<(Vec<Geometry>, Vec<String>), String> {
+fn read_geometries(path: &str) -> Result<(Vec<Geometry>, rustgis_data::loss::Notes), String> {
     let (ds, report) = rustgis_data::io::read_path(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
     if ds.features.len() > area::MAX_FEATURES {
         return Err(format!("{path} has more than {} features: simplify it or use a bounding box", area::MAX_FEATURES));
     }
-    let mut messages: Vec<String> = report.into_messages().map(|m| format!("{path}: {m}")).collect();
-    // The search area is in longitude/latitude; a file in another system is read in its own.
-    let ds = ds.in_lonlat().map_err(|e| format!("{path}: {e}"))?;
+    let mut messages = report.messages.prefixed(path);
+    // The search area is in longitude/latitude; a file in another system is read in its own, a
+    // feature with a place that can't be given in longitude/latitude left out, and said.
+    let had: usize = ds.features.rows().filter(|r| r.geometry().is_some()).count();
+    let (ds, unplaced) = ds.in_lonlat_leaving_out().map_err(|e| format!("{path}: {e}"))?;
     let geometries: Vec<Geometry> = ds.features.iter().filter_map(|f| f.geometry.clone()).collect();
-    if geometries.len() < ds.features.len() {
-        messages.push(format!(
-            "{path}: {} feature(s) have no geometry and are left out of the search area",
-            ds.features.len() - geometries.len()
+    if had < ds.features.len() {
+        messages.push(format!("{path}: {} feature(s) have no geometry and are left out of the search area", ds.features.len() - had));
+    }
+    if unplaced > 0 {
+        messages.push(rustgis_data::loss::Note::loss(
+            rustgis_data::loss::LossCode::DroppedFeature,
+            format!(
+                "{path}: {unplaced} feature(s) have a place that can't be given in longitude/latitude and are left out of the search area"
+            ),
         ));
     }
     Ok((geometries, messages))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn read_geometries(_path: &str) -> Result<(Vec<Geometry>, Vec<String>), String> {
+fn read_geometries(_path: &str) -> Result<(Vec<Geometry>, rustgis_data::loss::Notes), String> {
     Err("in the web app, choose the search area's file with Home › Add › Web Data › STAC Search".into())
 }
 
@@ -66,7 +77,7 @@ fn read_geometries(_path: &str) -> Result<(Vec<Geometry>, Vec<String>), String> 
 pub struct Loaded {
     pub geometry: Geometry,
     /// The notices: what the reader and the merge left out, one per kind.
-    pub notices: Vec<String>,
+    pub notices: rustgis_data::loss::Notes,
 }
 
 /// Reads a file and merges its features by the search area's rules (no buffer: that is applied
@@ -80,7 +91,7 @@ pub fn load_file(path: &str) -> Result<Loaded, String> {
 /// where they came from) and what the merge left out. The merge has no Cancel check inside it
 /// (one dissolve of at most [`area::MAX_FEATURES`] features), so the app runs it on a thread of
 /// its own and drops the answer when the user cancels.
-pub fn merge_loaded(geometries: &[Geometry], mut notices: Vec<String>) -> Result<Loaded, String> {
+pub fn merge_loaded(geometries: &[Geometry], mut notices: rustgis_data::loss::Notes) -> Result<Loaded, String> {
     let area = area::merge(geometries)?.ok_or("there is no point, line or polygon to search with")?;
     notices.extend(notes(&area));
     Ok(Loaded { geometry: area.geometry, notices })
@@ -88,7 +99,7 @@ pub fn merge_loaded(geometries: &[Geometry], mut notices: Vec<String>) -> Result
 
 /// The geometries of the selected features of the layer `p` names (`layer`, default the active
 /// layer): a copy, so the merge can run off the session's thread, with what was left out of it.
-pub fn selected_geometries(s: &Session, p: &Value) -> Result<(Vec<Geometry>, Vec<String>), String> {
+pub fn selected_geometries(s: &Session, p: &Value) -> Result<(Vec<Geometry>, Vec<rustgis_data::loss::Note>), String> {
     selected(s, p)
 }
 
@@ -142,14 +153,18 @@ fn notes(area: &Area) -> Vec<String> {
 fn selected_noted(s: &mut Session, p: &Value) -> Result<Vec<Geometry>, String> {
     let (geometries, notes) = selected(s, p)?;
     for n in notes {
-        s.warn(n);
+        if n.loss.is_some() {
+            s.say(n);
+        } else {
+            s.warn(n.text);
+        }
     }
     Ok(geometries)
 }
 
 /// The selected features' geometries of the layer `p` names, and a notice for the selected rows
 /// that have none (a feature without geometry, or a row the layer no longer has).
-fn selected(s: &Session, p: &Value) -> Result<(Vec<Geometry>, Vec<String>), String> {
+fn selected(s: &Session, p: &Value) -> Result<(Vec<Geometry>, Vec<rustgis_data::loss::Note>), String> {
     let id = s.layer_id(p)?;
     let layer = s.map().layer(id).ok_or("no such layer")?;
     if layer.selection.is_empty() {
@@ -160,20 +175,35 @@ fn selected(s: &Session, p: &Value) -> Result<(Vec<Geometry>, Vec<String>), Stri
         return Err(format!("more than {} features are selected: select fewer or use a bounding box", area::MAX_FEATURES));
     }
     // In longitude/latitude, as a search area is, whatever system the layer holds them in.
-    let mut geometries: Vec<Geometry> = Vec::new();
+    // One with a place that can't be given there is left out, and said.
+    let (mut geometries, mut unplaced): (Vec<Geometry>, usize) = (Vec::new(), 0);
     let to = layer.dataset.lonlat_conversion().map_err(|e| format!("{}: {e}", layer.name))?;
     for f in layer.selection.iter().filter_map(|row| layer.dataset.features.row(*row)) {
         if let Some(g) = f.geometry() {
-            let g = rustgis_data::Dataset::geometry_to_lonlat_by(&to, g).map_err(|e| format!("{}: feature {}: {e}", layer.name, f.id()))?;
-            geometries.push(g.into_owned());
+            match rustgis_data::Dataset::converted_to_lonlat(&to, g) {
+                Some(g) => geometries.push(g.into_owned()),
+                None => unplaced += 1,
+            }
         }
     }
+    use rustgis_data::loss::{LossCode, Note};
     let mut notes = Vec::new();
-    if geometries.len() < layer.selection.len() {
-        notes.push(format!(
+    // A feature without geometry had no area to give the search; one with a place it can't give
+    // has lost it.
+    if geometries.len() + unplaced < layer.selection.len() {
+        notes.push(Note::plain(format!(
             "{}: {} selected feature(s) have no geometry and are left out of the search area",
             layer.name,
-            layer.selection.len() - geometries.len()
+            layer.selection.len() - geometries.len() - unplaced
+        )));
+    }
+    if unplaced > 0 {
+        notes.push(Note::loss(
+            LossCode::DroppedFeature,
+            format!(
+                "{}: {unplaced} selected feature(s) have a place that can't be given in longitude/latitude and are left out of the search area",
+                layer.name
+            ),
         ));
     }
     Ok((geometries, notes))
@@ -374,15 +404,15 @@ mod tests {
 
     #[test]
     fn merging_loaded_geometries_says_what_it_leaves_out_and_clean_input_says_nothing() {
-        let clean = merge_loaded(&[point(1.0, 2.0), point(3.0, 4.0)], Vec::new()).unwrap();
+        let clean = merge_loaded(&[point(1.0, 2.0), point(3.0, 4.0)], Default::default()).unwrap();
         assert!(clean.notices.is_empty(), "{:?}", clean.notices);
         assert!(matches!(clean.geometry, Geometry::MultiPoint(_) | Geometry::Point(_)));
         // A polygon and a point: only the polygon is kept, and it is said once.
-        let mixed = merge_loaded(&[square(), point(5.0, 5.0)], vec!["file.geojson: a note".into()]).unwrap();
+        let mixed = merge_loaded(&[square(), point(5.0, 5.0)], ["file.geojson: a note"].into_iter().collect()).unwrap();
         assert!(matches!(mixed.geometry, Geometry::Polygon(_)));
         assert_eq!(mixed.notices.len(), 2, "{:?}", mixed.notices);
         assert!(mixed.notices.iter().any(|n| n.contains("lower dimension")));
-        assert!(merge_loaded(&[], Vec::new()).is_err());
+        assert!(merge_loaded(&[], Default::default()).is_err());
     }
 
     #[test]

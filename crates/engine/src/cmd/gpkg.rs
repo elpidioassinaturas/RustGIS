@@ -80,6 +80,8 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
         let info = src.info();
         let mut ds = rustgis_data::Dataset::new(name.clone(), info.geometry_type, info.fields.clone());
         ds.crs = src.crs();
+        // Held as the table holds it, in its own system.
+        ds.held_in = src.coord_crs();
         ds.zm_dropped = info.zm_dropped;
         let path = path.to_string_lossy().into_owned();
         ds.source = Some(path.clone());
@@ -88,7 +90,7 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
         let versions = versions_of(&editable.features, &Default::default(), &read);
         ds.features = editable.features.into();
         for note in &info.notes {
-            s.notify(format!("{name}: {note}"), false);
+            s.say(note.clone().prefixed(&name));
         }
         if (n as u64) < editable.matched {
             s.notify(
@@ -106,10 +108,10 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
             );
         }
         if let Some(note) = rustgis_data::source::unread_dates_note(&info.fields, &editable.unread_dates) {
-            s.notify(format!("{name}: {note}; saving leaves them as they are unless they're edited"), false);
+            s.say(note.map_text(|note| format!("{name}: {note}; saving leaves them as they are unless they're edited")));
         }
         if let Some(note) = rustgis_data::source::rounded_dates_note(&info.fields, &editable.rounded_dates) {
-            s.notify(format!("{name}: {note}"), false);
+            s.say(note.prefixed(&name));
         }
         if !editable.writable {
             s.notify(format!("{name}: the file is read-only, so edits can't be saved to it"), false);
@@ -236,7 +238,11 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
         }
         let rows = changes.insert_rows;
         let edits = rustgis_data::source::edits::Edits { updates: changes.updates, deletes: changes.deletes, inserts: changes.inserts };
-        let saved_rows = match src.save(&edits, &fields, edit.versions.iter().map(|(key, _)| key), &edit.revision).map_err(err)? {
+        // In the system the layer holds its geometry in: the table's own, longitude/latitude for
+        // a layer a project saved before RustGIS kept a table's own coordinates, or another,
+        // converted straight to the table's; the rows read back come in that system too.
+        let held = s.map().layer(id).ok_or("no such layer")?.dataset.coord_crs();
+        let saved_rows = match src.save(&edits, &fields, edit.versions.iter().map(|(key, _)| key), &edit.revision, held).map_err(err)? {
             Ok(saved) => saved,
             Err(conflicts) => {
                 let mut said: Vec<String> = conflicts.iter().take(20).map(ToString::to_string).collect();
@@ -317,19 +323,23 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
             false,
         );
         if !saved.skipped_fields.is_empty() {
-            s.notify(format!("{name}: {table} has no column for {}, so it wasn't saved", saved.skipped_fields.join(", ")), false);
+            // Their values aren't in the table: lost from the save.
+            s.say(rustgis_data::loss::Note::loss(
+                rustgis_data::loss::LossCode::DroppedValue,
+                format!("{name}: {table} has no column for {}, so it wasn't saved", saved.skipped_fields.join(", ")),
+            ));
         }
         if let Some(note) = rustgis_data::io::fine_dates_note(&fields, &fine_dates, &super::saved_target(&name, table)) {
-            s.notify(note, false);
+            s.say(note);
         }
         if let Some(note) = rustgis_data::source::unread_dates_note(&fields, &unread_dates) {
-            s.notify(format!("{}: {note}, when read back after the save", super::saved_target(&name, table)), false);
+            s.say(note.map_text(|note| format!("{}: {note}, when read back after the save", super::saved_target(&name, table))));
         }
         if let Some(note) = rustgis_data::source::rounded_dates_note(&fields, &rounded_dates) {
-            s.notify(format!("{}: {note}, when read back after the save", super::saved_target(&name, table)), false);
+            s.say(note.map_text(|note| format!("{}: {note}, when read back after the save", super::saved_target(&name, table))));
         }
         if let Some(note) = rustgis_data::io::utc_dates_note(&fields, &utc_dates, &super::saved_target(&name, table)) {
-            s.notify(note, false);
+            s.say(note);
         }
         s.retain_written_notices(written);
         Ok(json!({"saved": true, "inserted": saved.inserted.len(), "updated": saved.updated, "deleted": saved.deleted,
@@ -341,7 +351,7 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
 pub(super) struct Candidate {
     pub dataset: rustgis_data::Dataset,
     pub edit: rustgis_map::source::GpkgEdit,
-    pub notes: Vec<String>,
+    pub notes: rustgis_data::loss::Notes,
     pub matched: u64,
 }
 
@@ -356,6 +366,7 @@ pub(super) fn read_candidate(name: &str, edit: &rustgis_map::source::GpkgEdit) -
     let info = src.info();
     let mut ds = rustgis_data::Dataset::new(name, info.geometry_type, info.fields.clone());
     ds.crs = src.crs();
+    ds.held_in = src.coord_crs();
     ds.source = Some(edit.path.clone());
     ds.zm_dropped = info.zm_dropped;
     ds.features = editable.features.into();
@@ -385,13 +396,13 @@ pub(super) fn read_candidate(name: &str, edit: &rustgis_map::source::GpkgEdit) -
         notes.push(format!("{} rows with a geometry RustGIS can't read weren't loaded; saving leaves them as they are", editable.skipped));
     }
     if let Some(note) = rustgis_data::source::unread_dates_note(&info.fields, &editable.unread_dates) {
-        notes.push(format!("{note}; saving leaves them as they are unless they're edited"));
+        notes.push(note.map_text(|note| format!("{note}; saving leaves them as they are unless they're edited")));
     }
     if let Some(note) = rustgis_data::source::rounded_dates_note(&info.fields, &editable.rounded_dates) {
         notes.push(note);
     }
     if !editable.writable {
-        notes.push("the file is read-only, so edits can't be saved to it".into());
+        notes.push("the file is read-only, so edits can't be saved to it");
     }
     Ok(Candidate { dataset: ds, edit: baseline, notes, matched: editable.matched })
 }
@@ -418,7 +429,7 @@ fn discard_edits(s: &mut Session, p: &Value) -> CmdResult {
         l.touch_geometry();
         l.touch_replacement();
         for note in notes {
-            s.notify(format!("{name}: {note}"), false);
+            s.say(note.prefixed(&name));
         }
         s.notify(format!("{name}: edits discarded; {n} rows loaded again from {}", edit.table), false);
         Ok(json!({"features": n, "matched": matched}))

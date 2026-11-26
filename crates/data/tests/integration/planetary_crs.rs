@@ -37,8 +37,25 @@ const ANOTHER_BODY: &str = "belongs to another body than the Earth";
 const WGS84: &str = r#"GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]]"#;
 
 /// The notice for an Earth definition read in place of another body's IAU code.
-fn earth_over_iau_notes(messages: &[String]) -> Vec<&String> {
-    messages.iter().filter(|m| m.contains("is another body's, but its definition is the Earth's")).collect()
+/// A reader's notes or a raster's losses, as text.
+trait Said {
+    fn said(&self) -> &str;
+}
+
+impl Said for String {
+    fn said(&self) -> &str {
+        self
+    }
+}
+
+impl Said for rustgis_data::loss::Note {
+    fn said(&self) -> &str {
+        &self.text
+    }
+}
+
+fn earth_over_iau_notes<T: Said>(messages: &[T]) -> Vec<&T> {
+    messages.iter().filter(|m| m.said().contains("is another body's, but its definition is the Earth's")).collect()
 }
 
 /// Olympus Mons and Jezero crater (planetocentric, east positive).
@@ -68,12 +85,12 @@ fn shapefile(dir: &Path, name: &str, native: [(f64, f64); 2], prj: &str) -> Path
     dir.join(format!("{name}.shp"))
 }
 
-fn planetary_notes(messages: &[String]) -> Vec<&String> {
-    messages.iter().filter(|m| m.contains(ANOTHER_BODY)).collect()
+fn planetary_notes<T: Said>(messages: &[T]) -> Vec<&T> {
+    messages.iter().filter(|m| m.said().contains(ANOTHER_BODY)).collect()
 }
 
-fn datum_notes(messages: &[String]) -> Vec<&String> {
-    messages.iter().filter(|m| m.contains("few hundred metres")).collect()
+fn datum_notes<T: Said>(messages: &[T]) -> Vec<&T> {
+    messages.iter().filter(|m| m.said().contains("few hundred metres")).collect()
 }
 
 #[test]
@@ -261,7 +278,9 @@ fn planetographic_systems_without_east_axes_are_refused() {
     let path = shapefile(dir.path(), "earth_west", LONLAT, &west);
     let (ds, report) = io::read_path(&path).unwrap();
     assert_eq!(points(&ds), LONLAT.map(|(x, y)| Coord::new(x, y)).to_vec());
-    let said = |notes: &[String]| notes.iter().filter(|m| m.contains("west or south") && m.contains("read as longitude/latitude")).count();
+    let said = |notes: &[rustgis_data::loss::Note]| {
+        notes.iter().filter(|m| m.contains("west or south") && m.contains("read as longitude/latitude")).count()
+    };
     assert_eq!(said(&report.messages), 1, "{:?}", report.messages);
     assert!(planetary_notes(&report.messages).is_empty(), "{:?}", report.messages);
     let src = source::open_path(&path, None).unwrap();
@@ -1052,14 +1071,16 @@ fn exports_say_what_they_write_instead_of_another_body_s_system() {
     // Earth's datum note.
     let notes = rustgis_data::export_notes([(&layer, extent(&layer))], "out.geojson", Crs::LonLat);
     assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].loss, Some(rustgis_data::loss::LossCode::ChangedBody));
     assert!(
         notes[0].contains("craters") && notes[0].contains("written as WGS 84 (EPSG:4326)") && notes[0].contains(&mars.label()),
         "{notes:?}"
     );
     let notes = rustgis_data::export_notes([&layer, &moon, &earth].map(|ds| (ds, extent(ds))), "map.json", Crs::LonLat);
     assert_eq!(notes.len(), 2, "{notes:?}");
-    assert!(notes.iter().any(|n| n.contains("2 layers (craters, moon) are on other bodies")), "{notes:?}");
-    assert!(notes.iter().any(|n| n.contains("parcels") && n.contains("few hundred metres")), "{notes:?}");
+    let coded = |code, words: &str| notes.iter().any(|n| n.loss == Some(code) && n.contains(words));
+    assert!(coded(rustgis_data::loss::LossCode::ChangedBody, "2 layers (craters, moon) are on other bodies"), "{notes:?}");
+    assert!(coded(rustgis_data::loss::LossCode::ApproximatedDatum, "few hundred metres"), "{notes:?}");
     // In its own system (a Shapefile by default): the .prj is the WKT it was read from, the body's
     // name and all, and nothing is said.
     assert_eq!(io::default_export_crs(&layer, "shp"), mars);
@@ -1074,12 +1095,14 @@ fn exports_say_what_they_write_instead_of_another_body_s_system() {
     assert!(rustgis_data::export_notes([(&on_mars, extent(&on_mars))], "out.shp", mars).is_empty());
     let notes = rustgis_data::export_notes([&layer, &moon].map(|ds| (ds, extent(ds))), "out.shp", mars);
     assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].loss, Some(rustgis_data::loss::LossCode::ChangedBody));
     assert!(notes[0].contains("moon is on another body") && notes[0].contains(&format!("written as {}", mars.label())), "{notes:?}");
     // A Mars system known only by a PROJ definition has no name to write: said.
     let by_def = Crs::parse("+proj=longlat +R=3396190 +no_defs").unwrap();
     assert!(by_def.is_planetary());
     let notes = rustgis_data::export_notes([(&layer, extent(&layer))], "out.shp", by_def);
     assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].loss, Some(rustgis_data::loss::LossCode::DroppedCrsName));
     assert!(notes[0].contains("only by the ellipsoid's axes"), "{notes:?}");
     // An Earth layer says nothing of bodies.
     let notes = rustgis_data::export_notes([(&earth, extent(&earth))], "out.geojson", Crs::LonLat);

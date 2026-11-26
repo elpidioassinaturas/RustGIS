@@ -14,7 +14,8 @@ use crate::{CmdResult, Session};
 /// was exported, unless `then` says it).
 pub struct Wrote {
     pub(crate) answer: Value,
-    pub(crate) notes: Vec<String>,
+    /// What it says once written, each loss with its code.
+    pub(crate) notes: rustgis_data::loss::Notes,
     /// Drawing diagnostics available before the session finalizer, with their original severity.
     pub(crate) diagnostics: Vec<(rustgis_data::diagnostics::Severity, String)>,
     /// Source failures to report if delivery cannot update their live layers.
@@ -35,7 +36,12 @@ pub struct Wrote {
 
 impl Wrote {
     fn completion_notes(&self) -> Vec<String> {
-        self.notes.iter().chain(self.diagnostics.iter().map(|(_, text)| text)).chain(&self.refused_notes).cloned().collect()
+        self.notes
+            .texts()
+            .chain(self.diagnostics.iter().map(|(_, text)| text.as_str()))
+            .chain(self.refused_notes.iter().map(String::as_str))
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -135,9 +141,9 @@ fn said(s: &mut Session, wrote: Wrote) -> CmdResult {
     }
     for note in notes {
         if written_path.is_some() {
-            s.notify_written(note);
+            s.say_written(note);
         } else {
-            s.notify(note, false);
+            s.say(note);
         }
     }
     if let Some(then) = then {
@@ -261,7 +267,7 @@ pub(crate) fn drawn(
     });
     Ok(Wrote {
         answer,
-        notes: Vec::new(),
+        notes: Default::default(),
         diagnostics: notices,
         refused_notes,
         written_path,
@@ -273,21 +279,47 @@ pub(crate) fn drawn(
     })
 }
 
-/// What drawing an export on `copy` (a copy of the session) said, each notice with its severity,
-/// to say again where the export lands; past the notices a session keeps, how many earlier ones
-/// there were. `path` names the file in that count.
-pub(crate) fn copy_notices(copy: &mut Session, path: &str) -> Vec<(rustgis_data::diagnostics::Severity, String)> {
+/// [`drawn`] for an export drawn on `copy`, a copy of the session: what drawing it said, a loss
+/// kept with its code and said with the export's notes ([`copy_notices_coded`]).
+pub(crate) fn drawn_on(copy: &mut Session, written: Result<Value, String>, path: String) -> Result<Wrote, String> {
+    let (coded, said): (Vec<_>, Vec<_>) = copy_notices_coded(copy, &path).into_iter().partition(|(_, note)| note.loss.is_some());
+    let said = said.into_iter().map(|(severity, note)| (severity, note.text)).collect();
+    let mut wrote = drawn(&copy.project.maps, said, written, path)?;
+    wrote.notes.extend(coded.into_iter().map(|(_, note)| note));
+    Ok(wrote)
+}
+
+/// What drawing an export on `copy` (a copy of the session) said, each notice with its severity
+/// and its loss code, to say again where the export lands; past the notices a session keeps, how
+/// many earlier ones there were. `path` names the file in that count.
+pub(crate) fn copy_notices_coded(copy: &mut Session, path: &str) -> Vec<(rustgis_data::diagnostics::Severity, rustgis_data::loss::Note)> {
     let kept = std::mem::take(&mut copy.notices);
     let earlier = copy.notices_given().saturating_sub(kept.len() as u64);
     let mut said = Vec::new();
     if earlier > 0 {
         said.push((
             rustgis_data::diagnostics::Severity::Warning,
-            format!("{path}: {earlier} earlier notices from drawing it aren't shown"),
+            rustgis_data::loss::Note::plain(format!("{path}: {earlier} earlier notices from drawing it aren't shown")),
         ));
     }
-    said.extend(kept.into_iter().map(|n| (n.severity, n.text)));
+    said.extend(kept.into_iter().map(|n| (n.severity, rustgis_data::loss::Note { loss: n.loss(), text: n.text })));
     said
+}
+
+/// [`say`] for notices with their loss codes: one with a code is said as that loss.
+pub(crate) fn say_coded(s: &mut Session, notices: Vec<(rustgis_data::diagnostics::Severity, rustgis_data::loss::Note)>) {
+    use rustgis_data::diagnostics::Severity;
+    for (severity, note) in notices {
+        if note.loss.is_some() {
+            s.say(note);
+            continue;
+        }
+        match severity {
+            Severity::Error => s.notify(note.text, true),
+            Severity::Warning => s.warn(note.text),
+            Severity::Info => s.notify(note.text, false),
+        }
+    }
 }
 
 /// Says `notices` (what an export said on a copy of the session) in `s`, each as it was said.
@@ -469,7 +501,7 @@ mod tests {
                 answer: serde_json::json!({"path": "x"}),
                 diagnostics: Vec::new(),
                 refused_notes: Vec::new(),
-                notes: vec!["Exported x".into()],
+                notes: ["Exported x"].into_iter().collect(),
                 written_path: Some("x".into()),
                 then: None,
                 #[cfg(not(target_arch = "wasm32"))]

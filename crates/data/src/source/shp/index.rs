@@ -2,10 +2,20 @@
 
 use super::{BUFFER, Place, bad, be_i32, le_i32, record_box};
 use crate::Result;
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::io::{BufReader, Read};
 use std::path::Path;
 use std::sync::Mutex;
+
+/// A complete read by area takes the record directory in one pass, rather than id by id, once at
+/// least one record in this many matches. Measured on a directory of 3.2 million records (8 MB of
+/// page cache, as [`connect`] sets): about 170 ns a record in one pass, about 13 µs a record by id,
+/// so the two cost the same near one record in 75.
+const PASS_ABOVE: u64 = 64;
+
+/// How many index rows a read by area goes through between looks at Cancel (few in tests, so
+/// that a small file reaches one).
+const LOOK_EVERY: usize = if cfg!(test) { 64 } else { 1 << 16 };
 
 struct DiskIndex {
     db: Mutex<Connection>,
@@ -35,7 +45,7 @@ impl DiskIndex {
     /// [`DataError::Cancelled`](crate::DataError::Cancelled) when Cancel was pressed, which
     /// [`Index::open`] passes on; any other error when neither can be had, for it to scan the
     /// records instead.
-    pub fn open(path: &Path, len: u64, notes: &mut Vec<String>) -> Result<Self> {
+    pub fn open(path: &Path, len: u64, notes: &mut crate::loss::Notes) -> Result<Self> {
         use super::cache;
         use crate::source::external::{fnv1a, stamp};
         // Cancel is looked at once even when the index is reused, so an opening can always be
@@ -148,7 +158,93 @@ impl DiskIndex {
     /// interaction connection's mutex. The index lease keeps this immutable file alive.
     fn visit_complete(&self, extent: Option<[f32; 4]>, visit: impl FnMut(u32, Place) -> Result<()>) -> Result<(u64, bool)> {
         let db = connect(self._lease.path(), false)?;
-        self.visit_on(&db, extent, u32::MAX as usize, visit)
+        match extent.filter(|e| u64::from(self.covered) != self.count || !self.covers_bbox(*e)) {
+            Some(e) => self.visit_matches(&db, e, visit),
+            None => self.visit_on(&db, None, u32::MAX as usize, visit),
+        }
+    }
+
+    /// Every record whose box meets `extent`, in file order (#1065). The R-tree gives the
+    /// matching ids alone, marked in a bitmap of one bit a record; the places are then read
+    /// through the directory in order: by id when few match, else in one pass over it. A join
+    /// of the two tables sorted by id instead costs several seconds a few hundred thousand
+    /// matches, and was run twice, once to count.
+    fn visit_matches(&self, db: &Connection, extent: [f32; 4], visit: impl FnMut(u32, Place) -> Result<()>) -> Result<(u64, bool)> {
+        let [x0, y0, x1, y1] = extent;
+        let words = usize::try_from(self.count.div_ceil(64)).map_err(|_| bad("spatial index: too many records"))?;
+        let mut hits: Vec<u64> = Vec::new();
+        hits.try_reserve_exact(words).map_err(|e| bad(format!("spatial index: {e}")))?;
+        hits.resize(words, 0);
+        let mut matched = 0u64;
+        {
+            let mut stmt = db.prepare("SELECT id FROM bounds WHERE x0<=?1 AND x1>=?2 AND y0<=?3 AND y1>=?4").map_err(sql)?;
+            let mut rows = stmt.query(params![x1, x0, y1, y0]).map_err(sql)?;
+            let mut seen = 0usize;
+            while let Some(r) = rows.next().map_err(sql)? {
+                seen += 1;
+                if seen.is_multiple_of(LOOK_EVERY) {
+                    crate::progress::check()?;
+                }
+                // An id past the directory is no record of this file.
+                let Some(id) = r.get::<_, i64>(0).ok().and_then(|id| u64::try_from(id).ok()).filter(|id| *id < self.count) else {
+                    continue;
+                };
+                let Some(word) = usize::try_from(id / 64).ok().and_then(|w| hits.get_mut(w)) else { continue };
+                let bit = 1u64 << (id % 64);
+                if *word & bit == 0 {
+                    *word |= bit;
+                    matched += 1;
+                }
+            }
+        }
+        self.visit_hits(db, &hits, matched, visit)
+    }
+
+    /// Every record marked in `hits` (one bit a record), `matched` of them, in file order: by id
+    /// when few are, else in one pass over the directory.
+    fn visit_hits(
+        &self,
+        db: &Connection,
+        hits: &[u64],
+        matched: u64,
+        mut visit: impl FnMut(u32, Place) -> Result<()>,
+    ) -> Result<(u64, bool)> {
+        // What the progress counts from here: the records read, not every record of the file.
+        crate::progress::begin(usize::try_from(matched).unwrap_or(usize::MAX));
+        let hit = |id: u64| usize::try_from(id / 64).ok().and_then(|w| hits.get(w)).is_some_and(|w| w & (1u64 << (id % 64)) != 0);
+        if matched.saturating_mul(PASS_ABOVE) >= self.count {
+            let mut stmt = db.prepare("SELECT id, offset, len FROM records ORDER BY id").map_err(sql)?;
+            let mut rows = stmt.query([]).map_err(sql)?;
+            let mut seen = 0usize;
+            while let Some(r) = rows.next().map_err(sql)? {
+                seen += 1;
+                if seen.is_multiple_of(LOOK_EVERY) {
+                    crate::progress::check()?;
+                }
+                let id: u32 = r.get(0).map_err(sql)?;
+                if hit(u64::from(id)) {
+                    visit(id, Place { offset: r.get(1).map_err(sql)?, len: r.get(2).map_err(sql)? })?;
+                }
+            }
+        } else {
+            let mut stmt = db.prepare("SELECT offset, len FROM records WHERE id=?1").map_err(sql)?;
+            for (w, word) in hits.iter().enumerate() {
+                if w.is_multiple_of(LOOK_EVERY / 64) {
+                    crate::progress::check()?;
+                }
+                let mut bits = *word;
+                while bits != 0 {
+                    let id = (w * 64) as u64 + u64::from(bits.trailing_zeros());
+                    bits &= bits - 1;
+                    // An id the directory lacks is no record of this file, as in the pass above.
+                    let place = stmt.query_row([id as i64], |r| Ok(Place { offset: r.get(0)?, len: r.get(1)? })).optional().map_err(sql)?;
+                    if let Some(place) = place {
+                        visit(id as u32, place)?;
+                    }
+                }
+            }
+        }
+        Ok((matched, true))
     }
 
     fn visit_on(
@@ -306,7 +402,7 @@ enum Storage {
     Scan { path: std::path::PathBuf, len: u64 },
 }
 impl Index {
-    pub fn open(path: &Path, len: u64, notes: &mut Vec<String>) -> Result<Self> {
+    pub fn open(path: &Path, len: u64, notes: &mut crate::loss::Notes) -> Result<Self> {
         match DiskIndex::open(path, len, notes) {
             Ok(disk) => Ok(Self { count: disk.count, bounds: disk.bounds, unboxed: disk.unboxed, storage: Storage::Disk(disk) }),
             // Canceled while it was built: the run stops, not a scan in its place.
@@ -318,7 +414,7 @@ impl Index {
         }
     }
     /// The index without a cache: the records' headers scanned now, and again for each read.
-    fn scanning(path: &Path, len: u64, notes: &mut Vec<String>) -> Result<Self> {
+    fn scanning(path: &Path, len: u64, notes: &mut crate::loss::Notes) -> Result<Self> {
         let Scanned { count, note, bounds, unboxed } = scanned(path, len)?;
         if !note.is_empty() {
             notes.push(note);
@@ -334,6 +430,45 @@ impl Index {
     }
     pub fn indexed(&self) -> bool {
         matches!(self.storage, Storage::Disk(_))
+    }
+    /// The records numbered in `ids` (from 0, in order; numbers past the file's are left out), in
+    /// file order, for a read of the features someone already knows by number.
+    pub fn visit_numbered(&self, ids: &[u32], mut visit: impl FnMut(u32, Place) -> Result<()>) -> Result<(u64, bool)> {
+        let words = usize::try_from(self.count.div_ceil(64)).map_err(|_| bad("spatial index: too many records"))?;
+        let mut hits: Vec<u64> = Vec::new();
+        hits.try_reserve_exact(words).map_err(|e| bad(format!("spatial index: {e}")))?;
+        hits.resize(words, 0);
+        let mut matched = 0u64;
+        for &id in ids {
+            let id = u64::from(id);
+            if id >= self.count {
+                continue;
+            }
+            let Some(word) = usize::try_from(id / 64).ok().and_then(|w| hits.get_mut(w)) else { continue };
+            let bit = 1u64 << (id % 64);
+            if *word & bit == 0 {
+                *word |= bit;
+                matched += 1;
+            }
+        }
+        // None of the file's: nothing to read, not even its directory.
+        if matched == 0 {
+            crate::progress::check()?;
+            return Ok((0, true));
+        }
+        match &self.storage {
+            Storage::Disk(disk) => {
+                let db = connect(disk._lease.path(), false)?;
+                disk.visit_hits(&db, &hits, matched, visit)
+            }
+            // Without an index, the record headers are scanned and those numbered visited.
+            Storage::Scan { path, len } => {
+                crate::progress::begin(usize::try_from(matched).unwrap_or(usize::MAX));
+                let hit = |id: u32| usize::try_from(id / 64).ok().and_then(|w| hits.get(w)).is_some_and(|w| w & (1u64 << (id % 64)) != 0);
+                scan_for(path, *len, false, |id, place, _| if hit(id) { visit(id, place) } else { Ok(()) })?;
+                Ok((matched, true))
+            }
+        }
     }
     pub fn visit(&self, extent: Option<[f32; 4]>, limit: usize, mut visit: impl FnMut(u32, Place) -> Result<()>) -> Result<(u64, bool)> {
         match &self.storage {
@@ -531,6 +666,60 @@ mod tests {
     use super::*;
     use crate::{Coord, Dataset, Geometry, GeometryType};
 
+    /// A complete read by area gives the records whose boxes meet it in file order, as a read
+    /// through the R-tree joined to the directory does, whether a few match (read by id) or many
+    /// (one pass over the directory), and nothing for an area off the records (#1065).
+    #[test]
+    fn a_complete_read_by_area_gives_the_matching_records_in_file_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grid.shp");
+        let mut ds = Dataset::new("grid", GeometryType::Point, vec![]);
+        // 400 points, in an order unlike their places, so file order isn't the R-tree's.
+        for i in 0..400u32 {
+            let k = (i * 151) % 400;
+            ds.push(Some(Geometry::Point(Coord::new(f64::from(k % 20), f64::from(k / 20)))), vec![]);
+        }
+        crate::io::write_path(&ds, &path).unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        super::super::cache::with_index_dir(tmp.path().join("cache"), || {
+            let index = Index::open(&path, len, &mut crate::loss::Notes::new()).unwrap();
+            assert!(index.indexed());
+            for (area, many) in [([2.5f32, 2.5, 4.5, 5.5], false), ([0.0, 0.0, 12.0, 15.0], true), ([50.0, 50.0, 60.0, 60.0], false)] {
+                let mut expected = Vec::new();
+                index
+                    .visit(Some(area), usize::MAX, |id, place| {
+                        expected.push((id, place.offset, place.len));
+                        Ok(())
+                    })
+                    .unwrap();
+                let mut got = Vec::new();
+                let (matched, complete) = index
+                    .visit_complete(Some(area), |id, place| {
+                        got.push((id, place.offset, place.len));
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(complete);
+                assert_eq!(got, expected, "{area:?}");
+                assert_eq!(matched, got.len() as u64);
+                assert!(got.windows(2).all(|w| w[0].0 < w[1].0), "in file order");
+                assert_eq!(matched * PASS_ABOVE >= 400, many, "{area:?}: {matched} matched");
+                // Its progress counts the records read, and Cancel stops it before any is.
+                let probe = std::sync::Arc::new(crate::progress::tests::Counted::default());
+                let _probe = crate::progress::install(Some(probe.clone()));
+                index.visit_complete(Some(area), |_, _| Ok(())).unwrap();
+                assert_eq!(probe.total.load(std::sync::atomic::Ordering::Relaxed), matched);
+                probe.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                let mut read = 0;
+                let stopped = index.visit_complete(Some(area), |_, _| {
+                    read += 1;
+                    Ok(())
+                });
+                assert!(matches!(stopped, Err(crate::DataError::Cancelled)) && read == 0, "{area:?}: {read} read");
+            }
+        });
+    }
+
     /// Scanning record headers, when no index can be written, gathers the records' boxes as an
     /// index does (`union`): a NaN shape's box is left out, the others framed (#1985).
     #[test]
@@ -590,7 +779,7 @@ mod tests {
                 .unwrap();
             ids
         };
-        let mut notes = Vec::new();
+        let mut notes = crate::loss::Notes::new();
         let scan = Index::scanning(&path, len, &mut notes).unwrap();
         assert!(!scan.indexed());
         assert_eq!((scan.bounds, scan.unboxed), (whole, 0));
@@ -645,7 +834,7 @@ mod tests {
         std::fs::write(&path, &b).unwrap();
         let len = b.len() as u64;
         let second = Some([12.0, 22.0, 12.5, 22.5]);
-        let mut notes = Vec::new();
+        let mut notes = crate::loss::Notes::new();
         let scan = Index::scanning(&path, len, &mut notes).unwrap();
         assert_eq!((scan.bounds, scan.unboxed), (second, 0));
         super::super::cache::with_index_dir(tmp.path().join("cache"), || {
@@ -668,8 +857,8 @@ mod tests {
         crate::io::write_path(&ds, &path).unwrap();
         let mut b = std::fs::read(&path).unwrap();
         let len = b.len() as u64;
-        let mut notes = Vec::new();
-        let both = |p: &Path, notes: &mut Vec<String>, cache: &str| {
+        let mut notes = crate::loss::Notes::new();
+        let both = |p: &Path, notes: &mut crate::loss::Notes, cache: &str| {
             let scan = Index::scanning(p, len, notes).unwrap();
             let disk = super::super::cache::with_index_dir(tmp.path().join(cache), || Index::open(p, len, notes).unwrap());
             assert!(disk.indexed());
@@ -706,7 +895,7 @@ mod tests {
         // Records of 28 bytes from 100 to 240, each read 60 bytes ahead: past the real end (taken as
         // 100 bytes further) from the fourth.
         let len = std::fs::metadata(&path).unwrap().len() + 100;
-        let mut notes = Vec::new();
+        let mut notes = crate::loss::Notes::new();
         let scan = Index::scanning(&path, len, &mut notes).unwrap();
         assert_eq!(scan.count, 3);
         assert!(notes.iter().any(|n| n.contains("couldn't be read from record 4; the rest are left out")), "{notes:?}");
@@ -763,7 +952,7 @@ mod tests {
         let probe = std::sync::Arc::new(crate::progress::tests::Counted::default());
         probe.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         let _installed = crate::progress::install(Some(probe));
-        let mut notes = Vec::new();
+        let mut notes = crate::loss::Notes::new();
         super::super::cache::with_index_dir(tmp.path().join("cache"), || {
             assert!(matches!(Index::open(&path, len, &mut notes), Err(crate::DataError::Cancelled)));
         });

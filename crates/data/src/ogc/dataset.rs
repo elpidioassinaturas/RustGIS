@@ -97,7 +97,18 @@ fn advertised(from: &str, href: &str, withheld: &mut u32) -> Option<String> {
 /// Constructs an offer whose tile template has already been read, so adding it needs no
 /// second tileset fetch and cannot fall back to a guessed template.
 fn layer(name: String, title: String, offer: Offer) -> ServiceLayer {
-    ServiceLayer { name, title, offer, bbox: None, tilesets: None, time: None, feature_info: None, legends: Vec::new(), zooms: None }
+    ServiceLayer {
+        name,
+        title,
+        offer,
+        bbox: None,
+        tilesets: None,
+        time: None,
+        feature_info: None,
+        legends: Vec::new(),
+        legends_left_out: 0,
+        zooms: None,
+    }
 }
 
 impl DatasetDiscovery {
@@ -112,6 +123,26 @@ impl DatasetDiscovery {
     /// A snapshot of counted omissions, including partial listings and failed traversals.
     pub fn notes(&self) -> Vec<String> {
         self.omissions.iter().map(|(reason, count)| format!("{count} {reason}")).collect()
+    }
+
+    /// Adds counts for known work abandoned by a terminal discovery error or budget. A document
+    /// queued twice (a shared list and metadata pair) or left unread by the failure itself is
+    /// counted per queue entry. Waiting for supplied bytes is not terminal; callers use `notes`
+    /// for that snapshot.
+    pub fn stopped_notes(&self) -> Vec<String> {
+        let mut notes = self.notes();
+        let mut left = BTreeMap::<&str, usize>::new();
+        for doc in &self.pending {
+            let (kind, count) = match &doc.kind {
+                Kind::Tiles(_) => ("tileset documents", 1),
+                Kind::Styles => ("style catalogues", 1),
+                Kind::Style { .. } => ("stylesheets", 1),
+                Kind::Source(candidate) => ("TileJSON source checks", candidate.remaining.len()),
+            };
+            *left.entry(kind).or_default() += count;
+        }
+        notes.extend(left.into_iter().map(|(kind, count)| format!("{count} {kind} were left out: dataset discovery stopped")));
+        notes
     }
 
     /// Counts dataset catalogues that the existing collections traversal does not visit.

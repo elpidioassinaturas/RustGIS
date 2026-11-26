@@ -450,7 +450,8 @@ fn layers_of(s: &Session) -> Value {
             .map(|l| {
                 json!({
                     "id": l.id, "name": l.name, "raster": l.is_raster(), "visible": l.visible,
-                    "geometry": format!("{:?}", l.dataset.geometry_type), "features": l.dataset.features.len(),
+                    "geometry": format!("{:?}", l.dataset.geometry_type), "features": l.feature_count(),
+                    "loaded": l.dataset.features.len(), "streamed": l.is_streamed(),
                     "selected": l.selection.len(), "active": Some(l.id) == active,
                     "extent": super::project::bbox(l.extent()), "transparency": super::project::percent(l.transparency),
                     "crs": layer_crs(l).map(crs_name),
@@ -586,14 +587,16 @@ impl Bridge<'_> {
         let limit = uint(p, "limit").and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::MAX);
         let rows: Vec<usize> = if b(p, "selected") == Some(true) { l.selection.clone() } else { (0..l.dataset.features.len()).collect() };
         // In longitude/latitude, which a response holds unless `crs` asks for another system,
-        // whatever system the layer holds its coordinates in.
+        // whatever system the layer holds its coordinates in; as the layer holds them when `crs`
+        // asks for that one, exactly, with no conversion there and back (#2032 C2e-5).
+        let own = target.is_some_and(|crs| l.dataset.coord_crs().to(crs).is_ok_and(|to| to.is_identity()));
         let mut features = rustgis_data::Features::default();
         // Made at the first feature with a geometry, once for the layer.
         let mut conversion = None;
         for r in rows.iter().take(limit).filter_map(|&i| l.dataset.features.row(i)) {
             let n = features.len();
             features.push_row(r.to_feature());
-            let Some(g) = r.geometry() else { continue };
+            let Some(g) = r.geometry().filter(|_| !own) else { continue };
             let failed = |e: String| format!("{}: feature {}: {e}", l.name, r.id());
             let to = match &mut conversion {
                 Some(to) => &*to,
@@ -603,8 +606,8 @@ impl Bridge<'_> {
                 features.set_geometry(n, Some(g));
             }
         }
-        // Its geometry is longitude/latitude (above); `crs` stays the layer's, as the system it
-        // was read in, which `export_error` reads.
+        // Its geometry is longitude/latitude, or the layer's own (above); `crs` stays the layer's,
+        // as the system it was read in, which `export_error` reads.
         let mut ds = rustgis_data::Dataset {
             name: l.name.clone(),
             geometry_type: l.dataset.geometry_type,
@@ -615,7 +618,7 @@ impl Bridge<'_> {
             crs_incomplete: false,
             zm_dropped: false,
             windowed: false,
-            held_in: rustgis_data::raster::Crs::LonLat,
+            held_in: if own { l.dataset.coord_crs() } else { rustgis_data::raster::Crs::LonLat },
             shown_in: None,
         };
         let mut member = None;
@@ -643,10 +646,13 @@ impl Bridge<'_> {
                 }
                 let Some(g) = f.geometry.take() else { continue };
                 let mut ok = true;
-                if mercator {
+                // As the layer holds it when that is the system asked for: refused only for a
+                // missing coordinate, as a conversion refuses one.
+                if mercator && !own {
                     g.for_each_coord(|c| ok &= c.y.abs() <= rustgis_geom::MAX_LAT || !c.y.is_finite());
                 }
-                let g = if ok { g.map_coords(&|c| t.from_lonlat(c).unwrap_or(crate::geom::Coord::new(f64::NAN, f64::NAN))) } else { g };
+                let g =
+                    if ok && !own { g.map_coords(&|c| t.from_lonlat(c).unwrap_or(crate::geom::Coord::new(f64::NAN, f64::NAN))) } else { g };
                 g.for_each_coord(|c| ok &= c.is_finite());
                 if !ok {
                     failed += 1;
@@ -938,8 +944,13 @@ impl Session {
                 bridge.s.quiet_failure = true;
                 return Err(String::new());
             }
-            // Nor is a command that only left downloads for the front end: they add their
-            // layers, each its own undo step, when they land.
+            // Nor is a command that only left downloads for the front end: they add their layers, each
+            // its own undo step, when they land. Any other plugin command that may edit keeps its step
+            // even if it changed nothing, as a built-in command that mutates does unless it says it
+            // changed nothing, which a plugin's answer can't (`a_pending_answer_is_no_undo_step`); two
+            // tests pin it (`plugin_settings_are_kept_per_plugin_across_sessions_updates_and_toggles`,
+            // `shape_conversion_plugin_handled_rejection_is_atomic_and_has_no_inner_undo`). A script or
+            // task takes none when no line edited (see #2622).
             let steps = bridge.s.shared_steps;
             bridge.s.request_only = res.is_ok() && (state_command || steps.requested) && !steps.edited;
             res
@@ -1090,6 +1101,7 @@ impl Host for Between<'_> {
                     let res = s.guarded(leak(&plugin.manifest.name), mutates, |s| {
                         let (res, changed, requested) = bridge(s);
                         // Only left downloads for the app (they add their layers when they land): no step.
+                        // The same rule as a plugin command's (see `run_plugin`).
                         s.request_only = res.is_ok() && requested && !changed;
                         // The answer goes to the program, which says what it makes of a refusal.
                         s.quiet_failure = res.is_err();
@@ -1142,7 +1154,7 @@ const RESTYLE_EVERY: web_time::Duration = web_time::Duration::from_secs(1);
 pub(crate) struct Seen {
     view: u64,
     /// Their list and order, which is active, names, visibility, opacity, symbology, fields and
-    /// features, and the web tile layers.
+    /// features (a layer read in place: its source's count too), and the web tile layers.
     layers: u64,
     selection: u64,
     /// Bumped when another project replaces the open one ([`Session::opened`]).
@@ -1199,6 +1211,8 @@ fn seen(s: &mut Session, view: &Value) -> Seen {
         (styled, s.active_layer).hash(h);
         for l in &map.layers {
             (l.id, &l.name, l.visible, l.transparency.to_bits(), l.geometry_rev, l.dataset.features.len()).hash(h);
+            // A layer read in place is counted by its source, which can come in before any view is read.
+            l.feature_count().hash(h);
             // Which rows these are: an edit writes new ones and undo puts the old ones back, so it
             // changes even where undo brings `geometry_rev` back to the edit's number.
             (l.dataset.features.allocation_key().as_ptr() as usize).hash(h);
@@ -1379,6 +1393,66 @@ mod tests {
         assert!(s.undo());
         let undone = seen(&mut s, &view);
         assert_ne!(edited.layers, undone.layers);
+    }
+
+    /// The declaration check sees a plugin's host call too (#2696): a command declared as not
+    /// mutating that adds a layer is noted, and fails the command the user ran when it returns.
+    #[test]
+    fn a_host_call_that_changes_layers_is_noted() {
+        let pkg = rustgis_plugins::Package::from_zip(&rustgis_plugins::testing::package("eng-declared", &["edit"])).unwrap();
+        rustgis_plugins::load(pkg, "test").unwrap();
+        let plugin = rustgis_plugins::get("eng-declared").unwrap();
+        let mut s = Session::new(crate::Project::default());
+        s.registry.commands.push(
+            crate::CommandSpec::new("test.quietMap", "Quiet map", "Test", |s, _| {
+                crate::cmd::layer::add_dataset(s, rustgis_data::Dataset::new("Quiet", rustgis_data::GeometryType::Point, vec![]));
+                Ok(Value::Null)
+            })
+            .view(),
+        );
+        let fetches = fetch::Calls::for_plugin("eng-declared");
+        let mut bridge = Bridge { s: &mut s, plugin, fetches };
+        let _ = bridge.call("test.quietMap", &json!({}));
+        assert!(bridge.s.declaration_broken.as_deref().is_some_and(|e| e.contains("test.quietMap")));
+        rustgis_plugins::unload("eng-declared");
+    }
+
+    /// A layer read in place whose source's count changes (a source that opens after the layer is
+    /// added, before any view is read) is a layer change, though the features held are the same.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_changed_source_count_is_a_layer_change() {
+        use rustgis_data::source::{Batch, FeatureSource, Request, SourceInfo};
+        struct Says(SourceInfo);
+        impl FeatureSource for Says {
+            fn info(&self) -> &SourceInfo {
+                &self.0
+            }
+            fn read(&self, _: &Request) -> rustgis_data::Result<Batch> {
+                Ok(Batch::default())
+            }
+        }
+        let mut ds = rustgis_data::Dataset::new("pts", rustgis_data::GeometryType::Point, vec![]);
+        ds.push(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(1.0, 2.0))), vec![]);
+        let bytes = std::sync::Arc::new(rustgis_data::source::fgb::write(&ds).unwrap());
+        let info = rustgis_data::source::open_shared("pts.fgb", bytes, None).unwrap().info().clone();
+        let layer = |count| {
+            let says = Says(SourceInfo { count, ..info.clone() });
+            rustgis_map::source::SourceLayer::from_path("pts.fgb", None, Box::new(says))
+        };
+        let mut s = Session::new(crate::Project::default());
+        let id = s.map_mut().add_streamed("pts".to_string(), layer(None));
+        let view = view_of(&s);
+        let unknown = seen(&mut s, &view);
+        if let Some(l) = s.map_mut().layer_mut(id) {
+            l.source = Some(layer(Some(300)));
+        }
+        let counted = seen(&mut s, &view);
+        assert_ne!(unknown.layers, counted.layers, "the count came in, nothing loaded changed");
+        if let Some(l) = s.map_mut().layer_mut(id) {
+            l.source = Some(layer(Some(301)));
+        }
+        assert_ne!(counted.layers, seen(&mut s, &view).layers);
     }
 
     /// A command that only left a download for the front end changed nothing, and a later one

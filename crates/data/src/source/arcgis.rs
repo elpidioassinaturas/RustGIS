@@ -67,6 +67,14 @@ pub struct ArcgisSource {
     page: std::sync::atomic::AtomicUsize,
     /// Whether the layer's queries take standardized SQL (`MOD`), to sample a view.
     sample: bool,
+    /// The system its features are asked for and held in: the layer's own when RustGIS reads it
+    /// ([`own_system`]), else longitude/latitude, as before.
+    held: crate::raster::Crs,
+    /// What places them in longitude/latitude, to test them against a view (none when held so).
+    to_lonlat: Option<crate::raster::Transformer>,
+    /// The code they are asked for by (`outSR`): the one the layer's description gave, or none for
+    /// longitude/latitude (4326).
+    out_sr: Option<u32>,
 }
 
 impl std::fmt::Debug for ArcgisSource {
@@ -119,7 +127,7 @@ pub fn open_now(remote: Arc<Remote>) -> Result<ArcgisSource> {
     }
     let description = crate::ogc::arcgis_layer_url(&query);
     let counted = with(&query, &[("returnCountOnly", "true"), ("returnExtentOnly", "true"), ("outSR", "4326"), ("f", "json")]);
-    let first = with(&features_query(&query), &[("resultRecordCount", "1")]);
+    let first = with(&features_query(&query, None), &[("resultRecordCount", "1")]);
     // Asked for together: one round.
     let (d, c, f) = (remote.answer(&description)?, remote.answer(&counted)?, remote.answer(&first)?);
     let (Some(d), Some(c), Some(f)) = (d, c, f) else { return Err(remote::need()) };
@@ -139,6 +147,29 @@ pub fn open_now(remote: Arc<Remote>) -> Result<ArcgisSource> {
     // A view is chosen by geometry: a table is downloaded instead.
     let geometry_type = geometry_of(&d).ok_or_else(|| refuse("the layer names no geometry (it is a table)"))?;
     let sample = d.get("useStandardizedQueries").and_then(serde_json::Value::as_bool) == Some(true);
+    let (mut held, mut to_lonlat, mut out_sr) = match own_system(&d) {
+        Some((crs, t, code)) => (crs, Some(t), Some(code)),
+        None => (crate::raster::Crs::LonLat, None, None),
+    };
+    // Asked for in that system once first: a service that answers in another (or one read by its
+    // definition rather than its code) is asked for in longitude/latitude, as before.
+    if out_sr.is_some() {
+        let native = with(&features_query(&query, out_sr), &[("resultRecordCount", "1")]);
+        // An answer too large to take is read in longitude/latitude, as the first one was.
+        let answer = match remote.answer(&native) {
+            Ok(Some(answer)) => Some(answer),
+            Ok(None) => return Err(remote::need()),
+            Err(e) if remote::is_too_large(&e) => None,
+            Err(e) => return Err(e),
+        };
+        // In it, empty or not (a page in another system, or saying none, is read in
+        // longitude/latitude), or no bytes at all, which say nothing of it.
+        let in_it =
+            answer.is_some_and(|a| a.is_empty() || crate::esripbf::read_page(&a, "check").is_ok_and(|p| p.dataset.coord_crs() == held));
+        if !in_it {
+            (held, to_lonlat, out_sr) = (crate::raster::Crs::LonLat, None, None);
+        }
+    }
 
     let c = json(&remote, &counted, &c, MAX_COUNT_ANSWER, "count")?;
     let count = count_of(&c).ok_or_else(|| answer_error(&remote, &counted, "the count isn't a number"))?;
@@ -163,9 +194,9 @@ pub fn open_now(remote: Arc<Remote>) -> Result<ArcgisSource> {
         fields: first.as_ref().map(|p| p.dataset.fields.clone()).unwrap_or_default(),
         extent,
         count: Some(count),
-        crs: "EPSG:4326".into(),
+        crs: held.label(),
         indexed: true,
-        notes: Vec::new(),
+        notes: Default::default(),
         zm_dropped: false,
     };
     if first.as_ref().is_some_and(|p| p.losses.with_zm > 0) {
@@ -175,9 +206,22 @@ pub fn open_now(remote: Arc<Remote>) -> Result<ArcgisSource> {
     // the other sources, and each read says what its own features lost ([`Batch::notes`]).
     info.notes.extend(first.iter().flat_map(|p| p.report.messages.iter().cloned()));
     if !sample {
-        info.notes.push("its queries don't take standardized SQL, so a view holding more features than are drawn shows the first ones by object id rather than a sample of all of them".into());
+        info.notes.push("its queries don't take standardized SQL, so a view holding more features than are drawn shows the first ones by object id rather than a sample of all of them");
     }
-    Ok(ArcgisSource { remote, query, info, oid, oid_at, page: std::sync::atomic::AtomicUsize::new(page), sample })
+    Ok(ArcgisSource { remote, query, info, oid, oid_at, page: std::sync::atomic::AtomicUsize::new(page), sample, held, to_lonlat, out_sr })
+}
+
+/// The layer's own coordinate system, from its description's extent (`latestWkid`, else `wkid`),
+/// with what places it in longitude/latitude and the code read: `None` when it is
+/// longitude/latitude or one RustGIS can't read, which is asked for in longitude/latitude instead.
+fn own_system(description: &serde_json::Value) -> Option<(crate::raster::Crs, crate::raster::Transformer, u32)> {
+    let reference = description.pointer("/extent/spatialReference").or_else(|| description.get("sourceSpatialReference"))?;
+    let code = |k: &str| reference.get(k).and_then(serde_json::Value::as_u64).and_then(|c| u32::try_from(c).ok());
+    let (crs, code) = [code("latestWkid"), code("wkid")].into_iter().flatten().find_map(|c| Some((crate::filegdb::crs_of_code(c)?, c)))?;
+    if crs == crate::raster::Crs::LonLat {
+        return None;
+    }
+    Some((crs, crs.transformer().ok()?, code))
 }
 
 /// What a read says of the features a service counted but didn't send (none when it sent them
@@ -206,11 +250,13 @@ fn with(query: &str, values: &[(&str, &str)]) -> String {
     values.iter().fold(query.to_string(), |q, (k, v)| crate::ogc::with_query_value(&q, k, v))
 }
 
-/// The layer's query asking for features in protocol buffers, in longitude/latitude, with every
-/// field unless it names its own.
-fn features_query(query: &str) -> String {
+/// The layer's query asking for features in protocol buffers, in the system `out_sr` codes (none
+/// for longitude/latitude), with every field unless it names its own.
+fn features_query(query: &str, out_sr: Option<u32>) -> String {
+    // By the code the layer's description gave its own system, or 4326.
+    let out_sr = out_sr.unwrap_or(4326).to_string();
     // With geometry, whatever the query said: a view is chosen by it.
-    let q = with(query, &[("outSR", "4326"), ("f", "pbf"), ("returnGeometry", "true")]);
+    let q = with(query, &[("outSR", &out_sr), ("f", "pbf"), ("returnGeometry", "true")]);
     if crate::ogc::query_value(&q, "outFields").is_some_and(|f| !f.is_empty()) { q } else { with(&q, &[("outFields", "*")]) }
 }
 
@@ -289,7 +335,7 @@ fn step_for(matched: u64, limit: usize) -> u64 {
 impl ArcgisSource {
     /// The query of the features in `cell` (all of them for none), every `step`-th by object id.
     fn query_of(&self, cell: Option<&Extent>, step: u64) -> String {
-        let q = features_query(&self.query);
+        let q = features_query(&self.query, self.out_sr);
         let q = match cell {
             Some(c) => with(
                 &q,
@@ -331,7 +377,7 @@ impl ArcgisSource {
     /// What a read's pages lost, said: Z values only when the layer didn't say it has them, and,
     /// for a view, as counted in the pages read for it, which hold features around it (and those
     /// crossing its cells twice).
-    fn notes(&self, mut losses: crate::esripbf::Losses, view: bool) -> Vec<String> {
+    fn notes(&self, mut losses: crate::esripbf::Losses, view: bool) -> crate::loss::Notes {
         if self.info.zm_dropped {
             losses.with_zm = 0;
         }
@@ -340,14 +386,24 @@ impl ArcgisSource {
         }
         // Features without usable coordinates are left out of a view, not kept.
         let unplaced = std::mem::take(&mut losses.unprojected);
-        let mut notes: Vec<String> =
-            losses.messages().into_iter().map(|n| format!("{n}, counted in the pages read for the view")).collect();
+        let mut notes: crate::loss::Notes =
+            losses.messages().into_iter().map(|n| n.map_text(|t| format!("{t}, counted in the pages read for the view"))).collect();
         if unplaced > 0 {
-            notes.push(format!(
+            notes.push(crate::loss::Note::loss(crate::loss::LossCode::DroppedFeature, format!(
                 "{unplaced} features have coordinates outside their coordinate system, so are left out of the view, counted in the pages read for it"
-            ));
+            )));
         }
         notes
+    }
+
+    /// Whether a feature, held in the layer's system, meets a view in longitude/latitude.
+    fn meets(&self, g: &crate::Geometry, view: &Extent) -> bool {
+        match &self.to_lonlat {
+            // A place that converts beyond longitude/latitude meets the view where it draws, as a
+            // whole read keeps it (#2032 C2f-4b).
+            Some(t) => crate::io::places_lonlat_extent(g, t).is_some_and(|b| b.intersects(view)),
+            None => g.extent().intersects(view),
+        }
     }
 
     /// The features a page asks for now.
@@ -488,7 +544,7 @@ impl ArcgisSource {
                     received = received.saturating_add(sent as u64);
                     for f in got {
                         let inside = match (&view, &f.geometry) {
-                            (Some(v), Some(g)) => g.extent().intersects(v),
+                            (Some(v), Some(g)) => self.meets(g, v),
                             (Some(_), None) => false,
                             (None, _) => true,
                         };
@@ -576,6 +632,14 @@ impl ArcgisSource {
                 "the layer's fields changed since it was added; add it again",
             )));
         }
+        // In the system asked for: a page in another can't be read as if it were.
+        if !page.dataset.features.is_empty() && page.dataset.coord_crs() != self.held {
+            self.remote.forget_answer(url);
+            return Err(DataError::Format(crate::diagnostics::message_with_address(
+                &self.query,
+                &format!("the service answered in {}, not the {} asked for", page.dataset.coord_crs().label(), self.held.label()),
+            )));
+        }
         *skipped = skipped.saturating_add(page.report.skipped);
         losses.add(&page.losses);
         let sent = page.dataset.features.len();
@@ -594,8 +658,18 @@ impl ArcgisSource {
 }
 
 impl FeatureSource for ArcgisSource {
+    /// Its pages' notes count them ([`crate::esripbf::Losses`]).
+    fn says_unplaced_at_open(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> &SourceInfo {
         &self.info
+    }
+
+    /// The layer's own system when RustGIS reads it, else longitude/latitude.
+    fn coord_crs(&self) -> crate::raster::Crs {
+        self.held
     }
 
     fn remote(&self) -> Option<Arc<Remote>> {
@@ -714,7 +788,7 @@ impl FeatureSource for ArcgisSource {
                     let (got, more, sent) = self.page_of(url, &answer, &mut skipped, &mut losses).inspect_err(|_| forget(&urls))?;
                     drop(answer);
                     for f in got {
-                        if view.as_ref().is_none_or(|v| f.geometry.as_ref().is_some_and(|g| g.extent().intersects(v))) {
+                        if view.as_ref().is_none_or(|v| f.geometry.as_ref().is_some_and(|g| self.meets(g, v))) {
                             visited += 1;
                             chunks.push(f).inspect_err(|_| forget(&urls))?;
                         }

@@ -402,20 +402,36 @@ pub(super) fn read_notices(s: &mut Session, name: &str, layer: &mut RasterLayer)
     let lost = layer.lost_unsaid();
     let pixels = layer.pixels_unsaid();
     if let Some(r) = pixels.as_deref()
-        && let Some((fw, fh)) = r.overview.filter(|_| !layer.in_place)
+        && let Some((fw, fh)) = r.overview.filter(|_| !layer.reads_in_place())
     {
         s.notify(format!("{name}: showing a {} × {} overview of the {fw} × {fh} raster", r.width, r.height), false);
     }
     for loss in lost {
-        s.notify(format!("{name}: {loss}"), false);
+        s.say(loss.prefixed(name));
     }
     if let Some(r) = pixels.as_deref() {
-        if let Some(held) = layer.in_place.then(|| crate::in_place_overview(r)).flatten() {
+        if let Some(held) = layer.reads_in_place().then(|| crate::in_place_overview(r, layer.tiled)).flatten() {
             s.notify(format!("{name}: {held}"), false);
         }
         if let Some(count) = rounded_count(r) {
             let held = "pixels are held as 32-bit floats, exact for whole numbers up to 16,777,216 and to about 7 significant digits";
-            s.notify(format!("{name}: {count} rounded as the file was read: {held}, so an export writes the rounded values"), false);
+            // Read in place, the count is of the overview held; the finer levels the map and an
+            // export draw round their own values too, not counted.
+            if layer.reads_in_place() {
+                s.notify(
+                    format!(
+                        "{name}: {count} rounded in its {} × {} overview as it was read: {held}, so the map and an export, which read finer levels too, show rounded values there and in more places",
+                        r.width, r.height
+                    ),
+                    false,
+                );
+            } else {
+                // Read whole, the count is of every value rounded.
+                s.say(rustgis_data::loss::Note::loss(
+                    rustgis_data::loss::LossCode::ChangedRounded,
+                    format!("{name}: {count} rounded as the file was read: {held}, so an export writes the rounded values"),
+                ));
+            }
         }
     }
 }
@@ -477,14 +493,22 @@ pub(crate) fn as_scan(p: &Value) -> Result<bool, String> {
     }
 }
 
-/// Says what reading several rasters left out, each `(raster, line)`: one notice a kind (the same
-/// line), naming the rasters that share it (three, then a count), as AGENTS.md's Never silent asks.
+/// Says what reading several rasters left out ([`loss_lines`]), a notice a line.
+pub(crate) fn say_losses(s: &mut Session, losses: Vec<(String, rustgis_data::loss::Note)>) {
+    for line in loss_lines(losses) {
+        s.say(line);
+    }
+}
+
+/// What reading several rasters left out, each `(raster, line)`, as it is said: one line a kind (the
+/// same line), naming the rasters that share it (three, then a count), as AGENTS.md's Never silent
+/// asks.
 ///
 /// Lines that differ only in their numbers ("1 scale…", "2 scale…") are one kind. When the
 /// numbers are the same for every raster the kind is said once; when they differ, each raster's
 /// own line is said (three rasters or fewer), or the range they give, for each of them ("4
 /// rasters (a, b, c, …), each: 1–2 scale…"): never summed, since a size limit isn't a count.
-pub(crate) fn say_losses(s: &mut Session, losses: Vec<(String, String)>) {
+pub(crate) fn loss_lines(losses: Vec<(String, rustgis_data::loss::Note)>) -> Vec<rustgis_data::loss::Note> {
     // A line's kind: its text with each number taken out, and those numbers. A number is a run of
     // digits standing as a word of its own: one inside a name (`scene2024.tif`) stays text.
     fn kind_of(line: &str) -> (Vec<&str>, Vec<u64>) {
@@ -518,30 +542,31 @@ pub(crate) fn say_losses(s: &mut Session, losses: Vec<(String, String)>) {
         parts.push(&line[from..]);
         (parts, numbers)
     }
-    // Each kind: its text parts, each number's lowest and highest, and the rasters with their
-    // own lines.
-    type Kind = (Vec<String>, Vec<(u64, u64)>, Vec<(String, String)>);
+    // Each kind: its loss code, its text parts, each number's lowest and highest, and the
+    // rasters with their own lines. Lines of different codes are different kinds.
+    type Kind = (Option<rustgis_data::loss::LossCode>, Vec<String>, Vec<(u64, u64)>, Vec<(String, String)>);
     let mut kinds: Vec<Kind> = Vec::new();
-    for (name, line) in losses {
+    for (name, note) in losses {
+        let (code, line) = (note.loss, note.text);
         let (parts, numbers) = kind_of(&line);
         let parts_owned: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
-        match kinds.iter_mut().find(|(p, n, _)| *p == parts_owned && n.len() == numbers.len()) {
-            Some((_, ranges, named)) => {
+        match kinds.iter_mut().find(|(c, p, n, _)| *c == code && *p == parts_owned && n.len() == numbers.len()) {
+            Some((_, _, ranges, named)) => {
                 for (r, n) in ranges.iter_mut().zip(&numbers) {
                     *r = (r.0.min(*n), r.1.max(*n));
                 }
                 named.push((name, line));
             }
-            None => kinds.push((parts_owned, numbers.iter().map(|n| (*n, *n)).collect(), vec![(name, line)])),
+            None => kinds.push((code, parts_owned, numbers.iter().map(|n| (*n, *n)).collect(), vec![(name, line)])),
         }
     }
-    for (parts, ranges, named) in kinds {
+    let mut lines = Vec::new();
+    for (code, parts, ranges, named) in kinds {
+        let line = |text: String| rustgis_data::loss::Note { loss: code, text };
         let differ = ranges.iter().any(|(lo, hi)| lo != hi);
         // A few rasters whose numbers differ: each its own, so none is lost in a range.
         if differ && named.len() <= 3 {
-            for (name, line) in named {
-                s.notify(format!("{name}: {line}"), false);
-            }
+            lines.extend(named.into_iter().map(|(name, l)| line(format!("{name}: {l}"))));
             continue;
         }
         let names: Vec<String> = named.into_iter().map(|(name, _)| name).collect();
@@ -560,14 +585,15 @@ pub(crate) fn say_losses(s: &mut Session, losses: Vec<(String, String)>) {
             }
         };
         let each = if differ { ", each" } else { "" };
-        s.notify(format!("{who}{each}: {line}"), false);
+        lines.push(rustgis_data::loss::Note { loss: code, text: format!("{who}{each}: {line}") });
     }
+    lines
 }
 
 /// Opens a raster file by path; `ignored` is said with what reading it lost (options given that
 /// don't apply to it).
 pub fn add_path(s: &mut Session, path: &str, name: Option<&str>, page: Option<&str>, scan: bool, ignored: Option<String>) -> CmdResult {
-    let mut r = match super::reads::take(s, &read_key(path, page, scan)) {
+    let (mut r, tiled) = match super::reads::take::<RasterRead>(s, &read_key(path, page, scan)) {
         Some(r) => r,
         None => read_raster_as(path, page, scan),
     }?;
@@ -580,7 +606,7 @@ pub fn add_path(s: &mut Session, path: &str, name: Option<&str>, page: Option<&s
     // gives plain paths on Windows rather than `\\?\` ones).
     let full = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
     // A scan is laid over the view as it is added, and that placement makes it reopen as one.
-    let mut rl = RasterLayer::from_path(r, full);
+    let mut rl = if tiled { RasterLayer::tiled_file(r, full) } else { RasterLayer::from_path(r, full) };
     // A PDF's page, kept so the project opens the same page again.
     rl.subdataset = page.map(str::to_string);
     add_raster(s, &name, rl)
@@ -637,12 +663,84 @@ pub fn read_download_shared_page(name: &str, bytes: std::sync::Arc<Vec<u8>>, pag
     raster::read_shared_page(name, bytes, page, place).map_err(|e| format!("{name}: {e}"))
 }
 
-/// The raster at `path` (a PDF's `page`), read whole; for a `scan`, as the file holds it, without
-/// the world file beside it (#2075).
-pub(crate) fn read_raster_as(path: &str, page: Option<&str>, scan: bool) -> Result<Raster, String> {
+/// The raster at `path` (a PDF's `page`), read whole, or for a large tiled GeoTIFF on this
+/// computer its overview, read in place ([`tiled_in_place`]); for a `scan`, as the file holds it,
+/// without the world file beside it (#2075).
+pub(crate) fn read_raster_as(path: &str, page: Option<&str>, scan: bool) -> RasterRead {
+    // A large tiled GeoTIFF: its overview, the part in view read as the map draws. Read whole
+    // as before when its overview can't be read after all.
+    #[cfg(not(target_arch = "wasm32"))]
+    if !scan && page.is_none() {
+        let full = std::path::absolute(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string());
+        if tiled_in_place(&full)
+            && let Ok(mut r) = crate::render::rustgis_tiles::cog::raster::overview_blocking(&full)
+        {
+            r.name = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("raster").to_string();
+            return Ok((r, true));
+        }
+    }
     let p = Path::new(path);
     let read = if scan { raster::read_path_unplaced(p, page, None) } else { raster::read_path_with(p, page, None) };
-    read.map_err(|e| format!("{path}: {e}"))
+    read.map(|r| (r, false)).map_err(|e| format!("{path}: {e}"))
+}
+
+/// The most samples a raster file is held whole with: [`raster::max_samples`], or under test what
+/// [`HELD_WHOLE`] sets on this thread, as no small fixture reaches the real limit.
+#[cfg(not(target_arch = "wasm32"))]
+fn held_whole() -> usize {
+    #[cfg(test)]
+    if let Some(max) = HELD_WHOLE.with(std::cell::Cell::get) {
+        return max;
+    }
+    raster::max_samples()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`held_whole`]'s limit on this thread, under test.
+    pub(crate) static HELD_WHOLE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// A raster file read for [`add_path`]: its pixels, and whether they are the overview of a large
+/// tiled GeoTIFF read in place ([`tiled_in_place`]).
+pub(crate) type RasterRead = Result<(Raster, bool), String>;
+
+/// Whether the GeoTIFF at `path` (a full path on this computer) is read in place rather than
+/// held, as a cloud-optimised GeoTIFF's web address is (#2761): the map then reads the part in
+/// view at the level the view needs, where holding it means one overview at every zoom. It is
+/// when the file is tiled with overviews, too large to hold whole ([`raster::max_samples`]), and
+/// reading it in place loses nothing reading it whole keeps: its header reports no loss (a
+/// transparency mask, metadata that can't be read) and no `.aux.xml` or world file is beside it.
+/// Reads the file's header (a few reads of the file, on the fetch workers), or takes the one kept
+/// while the file hasn't changed since; forgotten when it isn't read in place. The wait for the
+/// header, and [`read_raster_as`]'s for the overview, don't look at Cancel: a local file answers
+/// in milliseconds, and a hung one (an unreachable mount) is given up after two minutes.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn tiled_in_place(path: &str) -> bool {
+    use crate::render::rustgis_tiles::cog;
+    use crate::render::rustgis_tiles::{address::Reach, cache};
+    // A `#` would be taken for a look's start by the in-place reader. A document that may reach
+    // only public addresses reads no file in place, and nothing of it is looked at here.
+    if !cog::is_local_file(path) || path.contains('#') || cache::ceiling_for(path) != Reach::Local {
+        return false;
+    }
+    let p = Path::new(path);
+    if !p.is_file() || raster::pam::read(p).is_some() || raster::world::beside(p).is_some() {
+        return false;
+    }
+    // A header kept for the file is read again only when the file has changed since (see
+    // `cog::with_info`), so its tiles stay while it hasn't.
+    let tiled = cog::info_blocking(path).is_ok_and(|info| {
+        let l = &info.layout;
+        let full = l.levels.first().map_or(0, |f| u64::from(f.width) * u64::from(f.height));
+        let samples = full.saturating_mul(l.bands.max(1) as u64);
+        let lossless = l.lost.is_empty() && l.described.as_ref().is_none_or(|d| d.lost.is_empty());
+        samples > held_whole() as u64 && lossless && cog::raster::overview_level(&info).is_some()
+    });
+    if !tiled {
+        cog::forget_local_file(path);
+    }
+    tiled
 }
 
 /// The key [`add_path`]'s read of `path` (a PDF's `page`) is taken by (see [`super::reads`]): a
@@ -708,7 +806,11 @@ fn add_jpeg2000_bytes(s: &mut Session, p: &Value, name: &str, bytes: Vec<u8>, zo
     // The GeoTIFF GDAL made names the WGS 84 it assumed, as if the file had.
     r.crs_assumed |= c.assumed_lonlat;
     if c.assumed_lonlat {
-        s.notify(format!("{name} doesn't say its coordinate system; its coordinates look like longitude/latitude, so it's read as WGS 84 (give \"crs\" if not)"), false);
+        // As reading the converted file by path says it: an assumption, with its code.
+        s.say(rustgis_data::loss::Note::loss(
+            rustgis_data::loss::LossCode::AssumedCrs,
+            format!("{name} doesn't say its coordinate system; its coordinates look like longitude/latitude, so it's read as WGS 84 (give \"crs\" if not)"),
+        ));
     }
     let title = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| r.name.clone());
     add_raster_after(s, &title, RasterLayer::from_bytes(r, file_name, c.tif), zoom)
@@ -741,17 +843,43 @@ fn add_bytes<const LIMIT: usize>(s: &mut Session, p: &Value) -> CmdResult {
     add_named_bytes(s, p, name, bytes, b(p, "zoom"))
 }
 
+/// The system a WCS coverage was asked for in, for an answer that doesn't say its own:
+/// `"coverageCrs"` (`service.coverage`'s, `EPSG:<code>`), else the one its GetCoverage address
+/// `url` names ([`coverage_request_system`](rustgis_data::ogc::coverage_request_system)).
+pub(crate) fn coverage_system(p: &Value, url: &str) -> Option<rustgis_data::raster::Crs> {
+    // Only `EPSG:<code>`: `Crs::parse` takes WKT and PROJ text too, and keeps a system for them.
+    let given = ps(p, "coverageCrs")
+        .and_then(|c| c.strip_prefix("EPSG:")?.parse::<u32>().ok())
+        .and_then(rustgis_data::raster::Crs::from_epsg)
+        .filter(|c| !c.is_geographic());
+    given.or_else(|| rustgis_data::ogc::coverage_request_system(url))
+}
+
 /// Adds a file's contents (an upload, a download) as its name's extension says. A PDF's page is
 /// drawn here, on the caller's thread, unless it was drawn already ([`add_named_bytes_read`]): the
 /// desktop app's downloads land with theirs drawn off the frame ([`download_page`]) and its file
 /// drops are read by path on the read queue, so a caller here is the command line, Python or a
 /// script, with no window to hold.
 pub(crate) fn add_named_bytes(s: &mut Session, p: &Value, name: String, bytes: Vec<u8>, zoom: Option<bool>) -> CmdResult {
-    add_named_bytes_read(s, p, name, bytes, zoom, None)
+    add_named_bytes_read(s, p, name, bytes, zoom, None, None)
+}
+
+/// [`add_named_bytes`] of a WCS coverage's answer asked for in `asked`, its own system: a GeoTIFF
+/// that doesn't say its system is read in it (#2032).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn add_coverage_bytes(
+    s: &mut Session,
+    p: &Value,
+    name: String,
+    bytes: Vec<u8>,
+    asked: Option<rustgis_data::raster::Crs>,
+) -> CmdResult {
+    add_named_bytes_read(s, p, name, bytes, None, None, asked)
 }
 
 /// [`add_named_bytes`], with a PDF's page drawn already off the frame (a download's,
-/// [`read_download_shared_page`]) instead of here.
+/// [`read_download_shared_page`]) instead of here, and a WCS coverage's own system it was asked
+/// for in (`asked`, for an answer that doesn't say it).
 pub(crate) fn add_named_bytes_read(
     s: &mut Session,
     p: &Value,
@@ -759,6 +887,7 @@ pub(crate) fn add_named_bytes_read(
     bytes: Vec<u8>,
     zoom: Option<bool>,
     drawn: Option<Raster>,
+    asked: Option<rustgis_data::raster::Crs>,
 ) -> CmdResult {
     // A geotagged photo (an upload, a drop): a point in the photo layer, so several uploads
     // gather in one.
@@ -780,7 +909,16 @@ pub(crate) fn add_named_bytes_read(
         let page = pdf_page(&name, p)?;
         let mut r = match drawn {
             Some(r) => r,
-            None => raster::read_shared_page(&name, bytes.clone(), page.as_deref(), !scan).map_err(|e| format!("{name}: {e}"))?,
+            // A WCS coverage asked for in its own system (#2032): an answer that doesn't say its
+            // system is read in that one; one that says it is read as any GeoTIFF.
+            None => match asked.filter(|_| !scan && [".tif", ".tiff"].iter().any(|x| name.to_ascii_lowercase().ends_with(x))) {
+                Some(asked) => {
+                    let stem = std::path::Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or("raster");
+                    rustgis_data::raster::geotiff::read_asked_in(std::io::Cursor::new(bytes.as_slice()), stem, asked)
+                        .map_err(|e| format!("{name}: {e}"))?
+                }
+                None => raster::read_shared_page(&name, bytes.clone(), page.as_deref(), !scan).map_err(|e| format!("{name}: {e}"))?,
+            },
         };
         r.lost.extend(raster::elevation_ignores(&name, ps(p, "layer"), ps(p, "crs")));
         if scan {
@@ -1167,7 +1305,13 @@ pub(super) fn write_geotiff(r: &Raster, bi: usize, cog: bool, path: &str) -> Res
 }
 
 /// Builds the band instruction before combining the note with any caller-supplied path or name.
-fn write_geotiff_with_guidance(r: &Raster, bi: usize, cog: bool, path: &str, band_hint: &str) -> Result<super::exports::Wrote, String> {
+pub(super) fn write_geotiff_with_guidance(
+    r: &Raster,
+    bi: usize,
+    cog: bool,
+    path: &str,
+    band_hint: &str,
+) -> Result<super::exports::Wrote, String> {
     let cog = if cog {
         // Tiles go to the file as they are made: the whole file is never held in memory.
         Some(raster::cogwrite::write_file(r, bi, Path::new(path)).map_err(|e| format!("{path}: {e}"))?)
@@ -1176,6 +1320,56 @@ fn write_geotiff_with_guidance(r: &Raster, bi: usize, cog: bool, path: &str, ban
         rustgis_data::io::write_atomic(Path::new(path), &bytes).map_err(|e| format!("{path}: {e}"))?;
         None
     };
+    wrote_geotiff(r, bi, path, cog, band_hint)
+}
+
+/// The band instruction of a file a tool writes of its result ([`write_geotiff_with_guidance`]).
+pub(super) const RESULT_BAND: &str = "export the resulting layer with share.exportRaster and give \"band\" for another";
+
+/// [`write_geotiff_with_guidance`]'s Cloud Optimized GeoTIFF, written beside `path` and put in
+/// its place when the returned file is committed (as a background run's raster is added).
+pub(super) fn write_cog_staged(
+    r: &Raster,
+    bi: usize,
+    path: &str,
+    band_hint: &str,
+) -> Result<(super::exports::Wrote, rustgis_data::io::StagedWrite), String> {
+    let (cog, staged) = raster::cogwrite::write_staged(r, bi, Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
+    Ok((wrote_geotiff(r, bi, path, Some(cog), band_hint)?, staged))
+}
+
+/// [`write_geotiff_with_guidance`]'s plain GeoTIFF, written beside `path` and put in its place when
+/// the returned file is committed, as [`write_cog_staged`]'s is. It is encoded in memory first, as
+/// `share.exportRaster`'s plain one is; Cancel is looked at as it is encoded and every megabyte
+/// written.
+pub(super) fn write_plain_staged(
+    r: &Raster,
+    bi: usize,
+    path: &str,
+    band_hint: &str,
+) -> Result<(super::exports::Wrote, rustgis_data::io::StagedWrite), String> {
+    use std::io::Write;
+    let bytes = raster::geotiff::write(r, bi).map_err(|e| e.to_string())?;
+    let look = || rustgis_data::progress::check().map_err(std::io::Error::other);
+    let (staged, ()) = rustgis_data::io::stage_streamed(Path::new(path), |w| {
+        for piece in bytes.chunks(1 << 20) {
+            look()?;
+            w.write_all(piece)?;
+        }
+        look()
+    })
+    .map_err(|e: std::io::Error| format!("{path}: {e}"))?;
+    Ok((wrote_geotiff(r, bi, path, None, band_hint)?, staged))
+}
+
+/// What writing `r`'s band `bi` to `path` says.
+fn wrote_geotiff(
+    r: &Raster,
+    bi: usize,
+    path: &str,
+    cog: Option<raster::cogwrite::CogInfo>,
+    band_hint: &str,
+) -> Result<super::exports::Wrote, String> {
     let note = geotiff_note(r, bi, cog.is_some(), band_hint)?;
     let mut v = match r.overview {
         Some((fw, fh)) => json!({"path": path, "width": r.width, "height": r.height, "overviewOf": [fw, fh]}),
@@ -1188,7 +1382,7 @@ fn write_geotiff_with_guidance(r: &Raster, bi: usize, cog: bool, path: &str, ban
         answer: v,
         diagnostics: Vec::new(),
         refused_notes: Vec::new(),
-        notes: vec![format!("Exported {path}{note}")],
+        notes: [format!("Exported {path}{note}")].into_iter().collect(),
         written_path: Some(path.to_string()),
         then: None,
         #[cfg(not(target_arch = "wasm32"))]
@@ -1198,12 +1392,12 @@ fn write_geotiff_with_guidance(r: &Raster, bi: usize, cog: bool, path: &str, ban
     })
 }
 
-/// Writes a tool's raster file and reports the same export notes as `share.exportRaster`.
-pub(super) fn write_and_report(s: &mut Session, r: &Raster, bi: usize, cog: bool, path: &str) -> Result<Value, String> {
-    let wrote =
-        write_geotiff_with_guidance(r, bi, cog, path, "export the resulting layer with share.exportRaster and give \"band\" for another")?;
+/// Writes a tool's raster file, a Cloud Optimized GeoTIFF, and reports the same export notes as
+/// `share.exportRaster`.
+pub(super) fn write_and_report(s: &mut Session, r: &Raster, bi: usize, path: &str) -> Result<Value, String> {
+    let wrote = write_geotiff_with_guidance(r, bi, true, path, RESULT_BAND)?;
     for note in wrote.notes {
-        s.notify_written(note);
+        s.say_written(note);
     }
     Ok(wrote.answer)
 }
@@ -1350,7 +1544,7 @@ mod tests {
         let said = |losses: &[(&str, &str)]| {
             let mut s = Session::new(crate::Project::default());
             let mark = s.notice_mark();
-            say_losses(&mut s, losses.iter().map(|(n, l)| (n.to_string(), l.to_string())).collect());
+            say_losses(&mut s, losses.iter().map(|(n, l)| (n.to_string(), rustgis_data::loss::Note::plain(*l))).collect());
             s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>()
         };
         let cut = |n: u32| format!("{n} band or class name(s) cut to 256 characters");
@@ -1360,6 +1554,19 @@ mod tests {
         assert_eq!(
             said(&[("a", &one), ("b", &three), ("c", &two), ("d", &one)]),
             ["4 rasters (a, b, c, …), each: 1–3 band or class name(s) cut to 256 characters"]
+        );
+        // The same words with a code and without are two kinds, each said with its own.
+        let mut s = Session::new(crate::Project::default());
+        let mark = s.notice_mark();
+        let coded = rustgis_data::loss::Note::loss(rustgis_data::loss::LossCode::ChangedCut, two.clone());
+        say_losses(
+            &mut s,
+            vec![("a".into(), coded.clone()), ("b".into(), coded), ("c".into(), rustgis_data::loss::Note::plain(two.clone()))],
+        );
+        let got: Vec<_> = s.notices_since(mark).iter().map(|n| (n.text.clone(), n.loss())).collect();
+        assert_eq!(
+            got,
+            [(format!("2 rasters (a, b): {two}"), Some(rustgis_data::loss::LossCode::ChangedCut)), (format!("c: {two}"), None)]
         );
     }
 }

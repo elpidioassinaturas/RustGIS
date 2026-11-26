@@ -29,6 +29,19 @@ pub(crate) fn cache_dir(env: &str, sub: &str) -> Option<PathBuf> {
     crate::dirs::cache_dir().map(|b| b.join(sub))
 }
 
+/// Whether a test that needs a program runs (`here`: it is installed). Where it isn't, the test is
+/// skipped, unless the environment variable `require` is set, as in CI's job that installs the
+/// programs: then the `Err` says what is missing, and the test fails instead of passing unrun.
+pub(crate) fn test_runs(require: &str, what: &str, here: bool) -> std::result::Result<bool, String> {
+    if here {
+        Ok(true)
+    } else if std::env::var_os(require).is_some_and(|v| !v.is_empty()) {
+        Err(format!("{require} is set, but {what} wasn't found"))
+    } else {
+        Ok(false)
+    }
+}
+
 const RELOAD_PREFIX: &str = "reload-";
 const RELOAD_OWNER_MARKER: &[u8] = b"RustGIS reload workspace v1\n";
 
@@ -180,7 +193,7 @@ fn run(
         }
     }
     let drain = |p: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
+        std::thread::Builder::new().spawn(move || {
             let mut buf = Vec::new();
             if let Some(mut p) = p {
                 let _ = p.read_to_end(&mut buf);
@@ -190,6 +203,15 @@ fn run(
     };
     let out = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
     let err = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    // No thread to read its output with: the program is stopped, as without one to write with.
+    let (out, err) = match (out, err) {
+        (Ok(out), Ok(err)) => (out, err),
+        (Err(e), _) | (_, Err(e)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
     let start = std::time::Instant::now();
     let status = loop {
         if let Some((dir, max)) = workspace
@@ -486,6 +508,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[expect(clippy::disallowed_methods, reason = "a thread the system refuses fails the test, as it should")]
     fn timeout_returns_while_a_grandchild_holds_the_pipes() {
         use std::time::{Duration, Instant};
         for budgeted in [false, true] {

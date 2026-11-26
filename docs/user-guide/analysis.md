@@ -197,7 +197,14 @@ world projection (World Mercator, Plate Carrée, Robinson, Equal Earth and the l
 the antimeridian as a seam and the poles as lines, is worked on in longitude/latitude, as Web
 Mercator is. If another input has a place that system can't hold, the tool works in
 longitude/latitude instead, and its message says so. A layer in longitude/latitude, Web Mercator or
-another geographic system is worked on in longitude/latitude, as before. In a projected system a
+another geographic system is worked on in longitude/latitude, as before. There, a feature with a place
+that can't be given in longitude/latitude (one far past where its layer's own system reaches) is read
+without its geometry, and the tool's message says how many of each layer were; a tool that updates
+its input in place, as Calculate Geometry Attributes does, leaves that feature's geometry as it was.
+A layer read in place from its file (streamed) holds only the part the map shows: an update of it
+worked in longitude/latitude that read such a feature without its geometry is refused until you
+Load All Features, since that feature's stored geometry may not be in that part.
+In a projected system a
 tool works in, distances in metres (Buffer's, Simplify's tolerance, Points Along Lines' spacing,
 Near's, and the search distances of Select Layer By Location and Spatial Join) are measured flat
 there, in its unit, as distances in a projected system are: a kilometre is 1000 of its metres, or
@@ -211,7 +218,10 @@ is given; Zonal Statistics and Tabulate Area place their zones on a raster in th
 are. A surface given another projected system, or a raster in one, gets the points or zones
 converted straight into it, by the transformation between the two datums where they differ; a raster
 in longitude/latitude or Web Mercator gets them through WGS 84. Their rasters aren't converted, and
-they don't count bent edges. Area, length and perimeter fields stay on the ellipsoid.
+they don't count bent edges. Area, length and perimeter fields stay on the ellipsoid. Calculate
+Geometry Attributes gives a point's `point_x` and `point_y` in that system's x and y, in its unit,
+as the layer holds them. Service Area and OD Cost Matrix still search the network on the ellipsoid,
+and the service area's lines are held in the network's system.
 
 In the desktop app a tool runs in the background, so the map and the rest of the window stay in
 use. While it runs, the Tools pane shows its name, a **Cancel** button and, for the tools that
@@ -422,8 +432,8 @@ Use these ids in `gp.run`'s `tool` parameter (`gp.tools` lists the available too
 | Calculate Geometry Attributes | `calculateGeometry` | Data Management › Features |
 | Simplify | `simplify` | Cartography › Generalization |
 | Tissot's Indicatrix | `tissot` | Cartography › Projections |
-| A5 Grid | `a5Grid` | Analysis › DGGS |
-| Aggregate Points to A5 | `a5Aggregate` | Analysis › DGGS |
+| Generate Tessellation | `a5Grid` | Analysis › DGGS |
+| Aggregate Points to Grid | `a5Aggregate` | Analysis › DGGS |
 | Select Layer By Location | `selectByLocation` | Data Management › Layers and Table Views |
 | Select Layer By Attribute | `selectByAttributes` | Data Management › Layers and Table Views |
 | Summarize Within | `countPoints` | Analysis › Summarize |
@@ -524,9 +534,10 @@ Points can optionally be weighted by a numeric population field (invalid or non-
 are excluded and reported in the tool messages; for multipoint features, each constituent point part
 receives the feature's weight, a part with a coordinate missing or infinite is left out and
 counted, and a feature with no finite part is skipped). Calculations are performed in the linear units
-of a projected coordinate system (defaults to the projected system the layer is held in, or else was read in; if the input layer lacks a
-coordinate system or is in degrees, or to project into a specific system, supply a projected system via `crs`,
-e.g. `EPSG:32618`). Geocentric systems such as `EPSG:4978` (X, Y and Z from the Earth's centre)
+of a projected coordinate system. By default this is the projected system the layer is held in,
+or else was read in. If the layer has no coordinate system or is in degrees, it uses the project's
+projected system and says so. When the project has none either, or to work in a specific system,
+supply a projected system via `crs`, e.g. `EPSG:32618`. Geocentric systems such as `EPSG:4978` (X, Y and Z from the Earth's centre)
 are refused, whether supplied via `crs` or inherited from the layer: their three axes do not
 define the two-dimensional projected plane Kernel Density needs.
 Because bandwidth and cell size are measured in coordinate-space linear units, global cylindrical
@@ -595,16 +606,18 @@ normalized in continuous longitude space, so non-polar regions larger than half 
 keep their full area and small antimeridian crossings stay small. Rings winding around a pole
 use the smaller polar region in either direction; reversing a ring does not select its global
 complement. Edges follow the shortest geodesics between vertices. The output fields remain
-`area_km2`, `perimeter_km` and `length_km`; point coordinates are unchanged.
+`area_km2`, `perimeter_km` and `length_km`; point coordinates are unchanged. A point layer gets
+`point_x` and `point_y`: longitude and latitude, or x and y in the projected system the layer is
+held in (see above). A feature with a place that can't be given in longitude/latitude, or lies
+beyond the poles (a latitude past ±90°), isn't measured, and a notice counts them.
 A ring through both poles can wind beyond one whole surface and bound no single
 region. Calculate Geometry Attributes refuses such input, with the numbers of affected rings
 and features, before changing any fields. The attribute table's Calculate Geometry does the
 same for its chosen rows. Spatial Join's Largest overlap refuses affected selected target or
 join features before writing output. Ordinary polar caps and whole-world rectangles remain
 measurable. Measure Area explains the ambiguity and still shows the perimeter.
-Spatial Join's **Largest overlap** still measures area on a sphere of radius 6,371 km; it can
-differ from the ellipsoid by up to about 0.9 % (a small area near a pole). The same WGS 84
-measure backs the attribute table's **Calculate Geometry** (`edit.calculateGeometry`), the
+Spatial Join's **Largest overlap** ranks overlaps by their area or length on the same ellipsoid.
+The same WGS 84 measure backs the attribute table's **Calculate Geometry** (`edit.calculateGeometry`), the
 [expressions](expressions.md#values)' `$area`, `$perimeter` and `$length`, the map's
 **Measure** tools on the Earth, and every network tool's edge and route lengths, so all of these
 read the same number for the same geometry, with one exception. A polygon ring with a full-turn
@@ -735,8 +748,10 @@ IDW Interpolation and Ordinary Kriging make their raster in the projected coordi
 as `crs` (such as `EPSG:32616` for UTM zone 16N, or a State Plane code), and then take the
 extent, pixel size and Kriging's `range` in its units, usually metres or feet. Without `crs`
 they use the projected system the layer is held in (or else was read in), as Kernel Density
-does without a note, and say so, naming it; a layer read in longitude and latitude gives a
-raster in degrees, with all three in degrees.
+does without a note, and say so, naming it; a layer read in longitude and latitude, or with no
+system, gives a raster in the project's coordinate system when it has a projected one (said, as
+the Geostatistical Wizard does when Environments sets none), else in degrees, with all three in
+degrees.
 `crs: "EPSG:4326"` makes it in degrees whatever the layer was read in, as these tools always did
 before `crs` was there; so does a layer read in a system that can't hold a raster's cells (a
 geocentric one) or that this version can't project to, with a notice saying which. A script
@@ -1202,23 +1217,45 @@ gp.run={"tool":"tabulateIntersection","params":{"zones":"parcels","classes":"flo
     They are measured against the WGS 84 ellipsoid. For a world projection the map draws on a sphere (Mollweide, Robinson…), they can be off by a few tenths of a percent.
 - **Making a distortion map:** color the circles by `area_scale` or `max_angle`.
 
-**A5 Grid** and **Aggregate Points to A5** use [A5](https://a5geo.org), a discrete global grid of
-pentagonal cells that all have the same area at a given resolution. A count per cell is therefore
-already a density, and stays comparable between regions, unlike a grid of cells that change size
-with latitude or the map's projection.
+**Generate Tessellation** and **Aggregate Points to Grid** build a discrete global grid, or count
+points by its cells, in one of four grid systems chosen with **System**, so the same place can be
+compared in several grids. System is **A5** unless another is chosen; the tools were A5 Grid and
+Aggregate Points to A5 before they took a system, and keep their ids (`a5Grid`, `a5Aggregate`),
+so a model or script saved before gets A5, as it did. A project, model or web tool that saves a
+run in another system can't be opened in a release before this one, which would make A5 cells
+instead.
 
-- **A5 Grid** makes the cells at a resolution (0–30; each step divides a cell into four: 5 is
-  about 33,000 km², 9 about 130 km², 12 about 2 km²) over the map's extent, an input layer's
-  polygons (or the extent of its points and lines), or the whole world. **Cells: Overlapping**
-  covers the area without gaps; **Center** keeps the cells whose centre is inside. A run makes at
-  most 200,000 cells.
-- **Aggregate Points to A5** counts a point layer's points (its selection, when there is one) by the
-  cell holding them, and keeps only the cells that hold any. It adds `count` and
-  `density_per_km2`, and a numeric field's `_sum` and `_mean`, where a feature's value counts
-  once in each cell (a multipoint's, however many of its points fall there).
-- Both write `a5` (the cell's 64-bit id in hex, as other A5 tools read it: DuckDB, PostgreSQL,
-  Python's `pya5`, R), `resolution` and `area_km2`. A cell across the antimeridian, or round a pole, is
-  split at ±180° into two parts of one polygon, each within −180° to 180°.
+| System | Cells | Resolutions | Id field |
+|---|---|---|---|
+| **A5** (Felix Palmer, [a5geo.org](https://a5geo.org)) | pentagons that all have the same area at a resolution, so a count per cell is already a density | 0–30, each step a quarter: 5 is about 33,000 km², 9 about 130 km², 12 about 2 km² | `a5`, the cell's 64-bit id in hex, as other A5 tools read it (DuckDB, PostgreSQL, Python's `pya5`, R) |
+| **H3** (Uber) | hexagons (and twelve pentagons a resolution), whose areas vary by about two to one | 0–15, each about a seventh of the one before: 5 is about 250 km², 9 about 0.1 km² | `h3`, H3's own hex text (`8966…fff`), as DuckDB, PostgreSQL and Python's `h3` read it |
+| **S2** (Google) | quadrilaterals from the faces of a cube | 0–30, each a quarter: 10 is about 80 km², 14 about 0.3 km² | `s2`, the cell's S2 token |
+| **Hexagon** | flat hexagons on the map's projection | 0–24, each a quarter; a cell at a resolution has an A5 cell's area there on the map's plane | `hex`, its axial coordinates `q,r` |
+
+- **Generate Tessellation** makes the cells at a resolution over the map's extent, an input
+  layer's polygons (or the extent of its points and lines), or the whole world. **Cells:
+  Overlapping** covers the area without gaps (H3, by its own rule, also keeps a cell that only
+  touches the area's outline); **Center** keeps the cells whose centre is inside.
+- **Aggregate Points to Grid** counts a point layer's points (its selection, when there is one) by
+  the cell holding them, and keeps only the cells that hold any. It adds `count` and
+  `density_per_km2` (by that cell's area, since H3, S2 and hexagon cells differ in size), and a
+  numeric field's `_sum` and `_mean`, where a feature's value counts once in each cell (a
+  multipoint's, however many of its points fall there). In the same system and resolution the two
+  tools give the same ids, so their layers join on the id field.
+- **Every layer** writes the cell's id, `resolution` and `area_km2`, the cell's own area on the
+  ground, measured on the authalic sphere (the one with the WGS 84 ellipsoid's total area), so it
+  differs from the ellipsoid's by under 1%. A cell across the antimeridian, or round a pole, is split at ±180° into two parts of one
+  polygon, each within −180° to 180°.
+- **The hexagon grid** is laid on the active map's projection (Web Mercator when the map is a
+  globe), anchored at that projection's origin rather than at a layer's corner, so a place falls in
+  the same cell whatever layer or extent it's gridded with. Its ids only mean something in that
+  projection, which the `plane` field names. In a projection local to the area (a national or UTM
+  system), every cell has about the same area on the ground; in Web Mercator, cells shrink on the
+  ground away from the equator, and stop at 85.05° north and south: an area past it is cut there,
+  and a point past it left out, each said in the run's message. A cell whose corners the
+  projection can't take back to longitudes and latitudes is left out, and counted too.
+- **Limits:** a run makes at most 200,000 cells, and one whose area would need far more is refused
+  before it's covered, with the count in the message.
 
 ### Network tools
 
@@ -1227,7 +1264,8 @@ network, as the Network Analysis workflow's route does: lines join where their v
 line's length is measured on the WGS 84 ellipsoid, and a **Cost Field** multiplies it (a line with
 no number there costs its length, and one costing 0 or less is closed; each is counted in a
 notice). Every line can be travelled both ways. The network's selection is honoured, and the graph
-is reused while the lines don't change, shared with routes.
+is reused while the lines don't change, shared with routes: a network held in a projected system
+is converted to longitude/latitude only to build it, not on every run.
 
 Points are moved onto the nearest line, at most **Snap Distance** metres (1,000 by default). A
 feature farther away, with no point, or with several (a multipoint) is left out and counted in a
@@ -1454,7 +1492,7 @@ The suite is an optional download, so RustGIS itself stays small: the **GeoLibre
 single `geolibre` program (about 20 MB to download). In the Tools pane, click
 **Install Whitebox and GeoLibre tools** under *Whitebox and GeoLibre tools*: RustGIS downloads the runner for your
 platform from the geolibre-rust release it was built and tested with
-([1.8.0](https://github.com/opengeos/geolibre-rust/releases/tag/v1.8.0), the same runner the browser
+([1.8.3](https://github.com/opengeos/geolibre-rust/releases/tag/v1.8.3), the same runner the browser
 uses), checks it against its published SHA-256 checksum (which catches a corrupted download; the
 release itself is trusted as when you download it by hand), checks that it starts and reports a
 version RustGIS works with, and only then installs it in its data folder
@@ -1469,6 +1507,16 @@ it installed and removes the `geolibre` folder only if it is empty. Other files 
 you located yourself, and one on your `PATH` are left alone; RustGIS looks for a runner again.
 You can install the tools again at any time. In the browser,
 **Remove** unloads the tools and stops loading them when RustGIS starts.
+
+An existing desktop runner is kept when RustGIS updates. To update a runner installed by RustGIS
+in place, run `gp.installGeolibre` from the command line in the updated RustGIS build. It downloads
+and checks the replacement before changing the installed program, so a download or verification
+failure leaves the installed runner in place. Restart the desktop app afterwards to reload its
+tools. For a runner you located yourself, download the new release and use **Locate…**.
+
+Runner 1.8.3 corrects the OSGB36 datum conversion that offset stream vectors from their raster.
+Rerun **Raster Streams to Vector** to create a corrected layer, then remove the old offset layer
+after checking the result. Save the project or export the corrected layer as needed.
 
 **In your language.** The tools' names, descriptions, parameters and toolboxes come in English.
 GeoLibre translates them into some twenty languages, in
@@ -1564,13 +1612,14 @@ click them on the map:
 | --- | --- |
 | Raster Functions | Slope in degrees or percent, aspect, hillshade (8-bit shades from 1 to 255, with 0 for no data), NDVI, band math (`(b4-b3)/(b4+b3)`), remapping, thresholds, resampling |
 | Function Editor | Chains raster functions, each on the previous output |
+| Process | Clips a raster to the view or to a polygon layer, or resamples it ([below](#zonal-statistics-and-polygon-clipping)) |
 | Suitability Modeler | Scores rasters 1–10 and adds them with weights |
 | Visibility Analysis | A viewshed from a point on an elevation raster, with the Earth's curvature and the refraction of visible light (1/7, as `gdal_viewshed`). The ground along each ray is the cell each point falls in by default; `heights: "bilinear"` (**Ground heights › Between cells (bilinear)** in the Workflows pane) reads it between the cells' centres instead. Both are estimates of the ground between cell centres; between cells is closer on ground that bulges (a hill seen from its top), where the nearest cell can hide cells just inside the horizon. With no radius, or one longer than the raster's diagonal, the viewshed covers the whole raster. The map's **Viewshed N km Here** reads the ground as the Workflows pane's **Ground heights** says. On a raster round the whole Earth the rays don't cross its east–west edge, which the analysis says when the radius reaches it and the way across is shorter: the ground just across the edge is left out, worked out the long way round where the radius reaches the far edge through the raster too (always with no radius), or partly both, near the observer's row and not farther from it. The observer's height must be from 0 to 10,000 m. Ground with no data hides nothing, and next to it bilinear heights take the nearest cell's height; the analysis says how many cells this touched, in a notice. The answer gives both counts (0 when there is nothing to say): `acrossNoData` counts the visible cells whose rays crossed ground with no data (a hidden cell stays hidden whatever that ground is, so it isn't counted, and 0 doesn't mean no ray crossed any); `readNearest` counts every cell, visible or hidden, whose ray took a nearest height next to no data in bilinear mode |
 | Exploratory 3D Analysis | A line of sight between two points, split into seen and hidden parts, with the same curvature and refraction |
 | Geostatistical Wizard | An IDW surface from feature values, using 12 nearest neighbours by default |
 | Network Analysis | The shortest (or cheapest, by a cost field) route over a line layer |
 | Neighborhood Explorer | What lies within a distance of a point, with sums of numeric fields |
-| Simulation | Random points in polygons (a fixed number, or from a field × rate) |
+| Simulation | Random points in polygons (a fixed number, or from a field × rate), spread in the layer's own coordinates when it is held in a projected system, else in longitude/latitude (then held in the project's coordinate system when it has one, other than a geocentric one; a polygon with a place that can't be given in longitude/latitude gets no points, and a notice counts them) |
 | Data Engineering | Counts, nulls, distinct values, min, max and mean of every field |
 | Exploratory Analysis | Histograms and correlations of numeric fields |
 | Embeddings | The features most like the selected one, by their numeric attributes |
@@ -1679,11 +1728,17 @@ computer's memory, or on Linux the lowest memory limit of the control groups Rus
 own and those above it (set by a container runtime, or by systemd's `MemoryMax` for a service),
 when it is lower: each plans for a quarter of it, never below the web app's fixed limits and never
 above a ceiling. `limits.memorySource` says what they follow: `computer`, `container` (such a limit, lower than the computer's memory),
-`override` or `unknown`. For tests, or to reproduce a smaller computer, set the environment
+`phone`, `override` or `unknown`. For tests, or to reproduce a smaller computer, set the environment
 variable `RUSTGIS_MEMORY_BYTES` to the memory in bytes (such as `8589934592` for 8 GiB) before
 starting RustGIS: it replaces the memory read from the computer and any container limit, and the
 command line says so on every run. It isn't a way to go faster: a value above the computer's
 memory raises every limit past what it has, and a large job can then run out of memory.
+
+On a phone the limits plan the same way from what its system allows: on Android, the memory the
+device has, and no more than is free before Android starts ending processes; on iOS, what iOS says
+the app may still use. Where the web app's floor is lower (`rasterSamples`, `bufferBytes`), a
+phone takes it. There `undoBytes` plans for what is free too, once as RustGIS starts, and
+`threadScratchBytes` is the web app's 256 MiB (see [Memory](field-work.md#memory)).
 
 The limits below other than `threadScratchBytes`, `undoBytes` and `projectBytes` plan for less
 when memory is short, never below their floors. They plan for the smallest of three figures:
@@ -1750,7 +1805,7 @@ on a grid of any coordinate system, cell size and extent, and Polygons to Raster
 (`raster.rasterize`) burns polygons onto the same grids; Raster Functions › Resample matches a
 target raster's grid.
 
-The **Script** pane runs commands from text, one per line (`id {json}`); its box grows with the script down to the bottom of the pane,
+The **Script** pane runs commands from text, one per line (`id {json}`, or `id={json}` as on the command line); its box grows with the script down to the bottom of the pane,
 short of the buttons, and then scrolls, so **Run** stays in view; Ctrl+Enter (⌘+Enter on macOS)
 in the box runs the script too. Above a run's results, a line tells its number, how long it took
 and when it started (`Run #2 (0.84 s)`, and `14:04 UTC` on the right), so a run made again by
@@ -1785,7 +1840,9 @@ opens a list of the commands it starts, under the cursor: ↑/↓ to move, Enter
 Escape to close, or a click; Ctrl+Space opens it with nothing typed yet (on an empty line, every
 command), or again after Escape closed it (on macOS, where Ctrl+Space may switch the input source,
 type the first letter instead). Beside it, the highlighted command's help: its signature (keys with `?`
-may be left out), its name, its parameters one per line, and where it sits in the interface.
+may be left out), its name, its parameters one per line, and where it sits in the interface. Page Up
+and Page Down scroll a help longer than its box. With a screen reader, each entry the highlight
+moves to is read with a short form of its help.
 Accepting a command on a line of its own adds its braces: with its required keys ready for their
 values, the cursor at the first (`map.goToXY {"lon": , "lat": }`), or empty with the cursor inside
 when every key may be left out; a command with no parameters gets none, and a line that has
@@ -1934,7 +1991,10 @@ save and run models without the canvas:
 ## Imagery
 
 The Imagery tab's groups open their tools in the Workflows pane. The tab belongs to the Imagery
-[extension](index.md#extensions): turn it on in Plugins › Extensions to show the tab:
+[extension](index.md#extensions): turn it on in Plugins › Extensions to show the tab. Three
+commands described here aren't on the tab or part of the extension, and run whether or not it is on:
+**Mosaic Rasters**, **Project Raster** and **Polygons to Raster**. So does
+[Process](#zonal-statistics-and-polygon-clipping), on the Analyze tab.
 
 - **Ortho Mapping** and **Reality Mapping** workspaces mosaic georeferenced images into an
   orthomosaic, or elevation rasters into a surface model that exports as a 3D mesh (OBJ).
@@ -1947,8 +2007,23 @@ The Imagery tab's groups open their tools in the Workflows pane. The tab belongs
   images are in another geographic system (NAD83, say), the run says so. A geographic `crs` other
   than EPSG:4326 is refused.
 - **Georeference** places a raster from control points (column, row, longitude, latitude) or
-  stretches it over the map view. Those only shift and scale a north-up grid, as RustGIS's
-  geotransform has no rotation. With `transform` (`raster.georeference`) the points are fitted by any
+  stretches it over the map view (**Fit To Map View**, `"extent": "view"`). Those only shift and
+  scale a north-up grid, as RustGIS's geotransform has no rotation. Fitted to the view, the raster
+  is placed in the map's own system on a flat map of the Earth (Web Mercator's EPSG:3857, the map's
+  EPSG or ESRI code, or a preset's definition), so it fills the view as drawn; on the globe and
+  another body's map, over the longitude and latitude box the view shows. A turned or tilted map
+  is refused (Reset North first), as is a Web Mercator view wider than the world or across the
+  antimeridian; a view of a world copy past it is fitted to the same place within ±180°. Control
+  points without `transform` are longitude and latitude, and `pointsCrs` or `crs` with them is
+  refused. An `extent` of four
+  numbers is in degrees, or in `crs` when given (`{"extent": [2599000, 1199000, 2601000, 1201000],
+  "crs": "EPSG:2056"}`), and the raster is placed in that system; an entry that isn't a number is
+  refused, not passed over. An extent goes without control points, `transform` and `pointsCrs`:
+  any of them beside it is refused, as none would be used. So are `name`, `path`, `cellSize` and
+  `resampling` without `transform`, as only a warp makes a new raster; without one the layer itself
+  is placed. The `extent` it answers is in longitude/latitude, whatever system the raster is
+  placed in.
+  With `transform` (`raster.georeference`) the points are fitted by any
   of the Control Point Fit transforms and the raster is warped onto a new north-up grid covering the
   warped image: `{"layer": "scan", "transform": "spline", "points": [[column, row, x, y], …],
   "pointsCrs": "EPSG:4326", "crs": 32613, "resampling": "bilinear", "cellSize": 5, "name": "warped",
@@ -1988,19 +2063,11 @@ The Imagery tab's groups open their tools in the Workflows pane. The tab belongs
   every answer has the band names and, when the file gives any, `"wavelengths"` in nanometres.
   After GeoLibre's spectral profile.
 - **Change Detection** (difference, ratio, percent), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI,
-  EVI), **Process** (clip to the view, to a box, or to a polygon layer's selected or all polygons,
-  with the cells outside them no-data; resample) and the **Pixel Editor** (set the pixels inside a
-  polygon). As in Project Raster, the cells outside the polygons are see-through instead (0, with
-  alpha 0) in an image with an alpha band, and a three-band colour image with neither alpha nor
-  no-data gains one for them, so an 8-bit image stays 8-bit when it is exported. A colour image
-  with a fourth band of data and no alpha (RGB and near-infrared) gets no-data there as before
-  (−3.4e38 when it has none). Project Raster doesn't give it an alpha band either: a colour image's
-  alpha is read from its fourth band, which holds its data. A clip that gained an alpha band has
-  four bands, so Mosaic Rasters refuses it beside three-band tiles, saying how many bands each
-  has: clip the others the same way, or mosaic first and clip the result.
+  EVI) and the **Pixel Editor** (set the pixels inside a polygon).
 - **Mosaic Rasters** (`raster.mosaic`) merges tiles of one grid, such as the 1 km tiles of a state
   elevation model, into one raster in their own coordinate system and cell size, optionally
-  written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. Inputs
+  written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. It has no
+  pane yet: run it from the Script pane, the AI Assistant, the command line or Python. Inputs
   are layers or file paths; where they overlap, the first one with data wins. Tiles in different
   coordinate systems or cell sizes, or opened from an overview, are refused rather than quietly
   resampled, as are tiles whose cells don't line up; the mosaic has to fit in memory (120 million
@@ -2054,9 +2121,12 @@ The Imagery tab's groups open their tools in the Workflows pane. The tab belongs
   is a new layer (`name`, by default the layer's name with "raster"), and with `path` a
   cloud-optimised GeoTIFF too.
   - **The grid** is given as for Project Raster: `"grid"`, another raster's grid taken exactly, or
-    `crs` (by default the layer's), `cellSize` (required), `origin` (`[0, 0]` by default, so the
-    result lines up with any raster projected with the same `crs` and `cellSize`) and `extent` (by
-    default the polygons' bounds).
+    `crs` (by default the projected system the layer holds its coordinates in, else the one it was
+    read in), `cellSize` (required), `origin` (`[0, 0]` by default, so the result lines up with any
+    raster projected with the same `crs` and `cellSize`) and `extent` (by default the polygons'
+    bounds). The polygons are burned from their own coordinates: as they are on a grid in their
+    layer's system, else converted straight into the grid's, by the transformation between the
+    two datums where they differ. Raster clip and a spectral zone take a polygon the same way.
   - **What a cell takes:** a cell takes a polygon's value when its centre falls inside it, holes
     cut out. A numeric `field` gives its values; a text `field` gives codes 1 to n, in sorted order
     of its values. A table named after the result with "classes" (`code`, `value`), numbered if
@@ -2079,11 +2149,15 @@ The Imagery tab's groups open their tools in the Workflows pane. The tab belongs
     million cells, or more on a computer with more memory; 32 million in the web app): a grid past
     that is refused before anything is burned. A layer read in place (only the part in view loaded)
     is refused until all its features are loaded. Taken from a raster read from its overview, the
-    grid is the overview's, and a notice says so. The command runs where it is called, with no Cancel
-    yet and no cap on its work: each polygon fills the cells it covers, so many large polygons on a
-    fine grid take time in proportion.
+    grid is the overview's, and a notice says so. Run from Command Search in the desktop app, it
+    runs on a thread of its own, its progress and Cancel in the Workflows pane, as the Analysis
+    workflows that make a raster do, and a GeoTIFF it writes replaces the file only once it is done
+    (Cancel leaves the file as it was). There is no cap on its work: each polygon fills the cells
+    it covers, so many large polygons on a fine grid take time in proportion.
 - **Classification Wizard** (unsupervised k-means) and **Classification Tools** (minimum distance
-  from training polygons).
+  from training polygons). Training polygons held in a coordinate system of their own are read as
+  they are: a pixel's centre is converted into their system to be tested, straight by the
+  transformation between the two datums where they differ, as for Deep Learning Tools.
 - **Mensuration**: distances along the surface, heights between two points, areas, and volumes
   above or below a base height, with a list of results.
 
@@ -2338,12 +2412,23 @@ statistics. If a part subsequently fails projection onto the raster grid, it is 
 statistics cover the remaining valid parts. Large
 overlapping zones each require a separate pass over their raster window.
 
+**Process** (`raster.process`, Analyze › Raster) clips a raster to the view, to a box, or to a
+polygon layer's selected or all polygons, with the cells outside them no-data, or resamples it.
+As in [Project Raster](#imagery), the cells outside the polygons are see-through instead (0, with
+alpha 0) in an image with an alpha band, and a three-band colour image with neither alpha nor
+no-data gains one for them, so an 8-bit image stays 8-bit when it is exported. A colour image
+with a fourth band of data and no alpha (RGB and near-infrared) gets no-data there as before
+(−3.4e38 when it has none). Project Raster doesn't give it an alpha band either: a colour image's
+alpha is read from its fourth band, which holds its data. A clip that gained an alpha band has
+four bands, so Mosaic Rasters refuses it beside three-band tiles, saying how many bands each
+has: clip the others the same way, or mosaic first and clip the result.
+
 For `raster.process` polygon clipping, `selectedOnly: true` requires a selection,
 `selectedOnly: false` uses every polygon, and omitting it uses the selection when present.
-The Process pane initially checks Selected only when the chosen layer has a selection, and sends
-the choice explicitly. Clipping and Zonal Statistics share
-polygon transformation rules so a failed hole cannot silently enlarge the sampled area.
-A malformed ring or a failed projection rejects its complete polygon part in all raster masking
+The Process section of the Workflows pane (Analyze › Raster › Process) initially checks Selected
+only when the chosen layer has a selection, and sends the choice explicitly. Clipping and Zonal
+Statistics share polygon transformation rules so a failed hole cannot silently enlarge the sampled
+area. A malformed ring or a failed projection rejects its complete polygon part in all raster masking
 operations. Clipping skips invalid features and reports their count in the command result;
 its output bounds cover the valid polygons only.
 
@@ -2360,8 +2445,9 @@ the wrong field.
 ## Deep learning and hosted imagery
 
 **Imagery › Deep Learning Tools** trains a neural network (a multilayer perceptron) on the pixels
-under training polygons and classifies every pixel, adding a class raster with a confidence band
-and reporting the accuracy on held-back pixels. Run from its pane in the desktop app, it trains
+under training polygons (tested in the system their layer holds them in, as for Classification
+Tools) and classifies every pixel, adding a class raster with a confidence band and reporting the
+accuracy on held-back pixels. Run from its pane in the desktop app, it trains
 on every sampled pixel for all the epochs asked, however long that takes, and can be cancelled;
 elsewhere it keeps to a few seconds of work (see the limits above). Trained models stay in the project; **Publish ›
 Share As › Deep Learning** saves one as a package to apply in other projects. **Imagery › Create

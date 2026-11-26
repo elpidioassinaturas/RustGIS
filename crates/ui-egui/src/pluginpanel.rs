@@ -1228,6 +1228,7 @@ fn range(app: &mut RustGisApp, ui: &mut Ui, pid: &str, item: &PanelItemDecl, sta
     }
 }
 
+#[expect(clippy::disallowed_methods, reason = "a thread the system refuses fails the test, as it should")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1466,6 +1467,8 @@ mod tests {
     /// the frame, as the browser does, and the layer lands as the plugin asked for it (#1144).
     #[test]
     fn a_plugin_adds_data_by_address_off_the_frame() {
+        // The plugin's downloads come from this computer (a test server or address).
+        rustgis_engine::cmd::plugins::fetch::plugins_reach_this_computer();
         let _turn = crate::fetching::turn();
         use rustgis_engine::plugins;
         use std::io::{Read, Write};
@@ -1513,6 +1516,8 @@ mod tests {
     /// The real deferred request and probe loop refuse a withdrawn plugin before a fallback send.
     #[test]
     fn permission_policy_plugin_deferred_probe_refuses_before_fallback() {
+        // The plugin's downloads come from this computer (a test server or address).
+        rustgis_engine::cmd::plugins::fetch::plugins_reach_this_computer();
         let _turn = crate::fetching::turn();
         use rustgis_engine::{plugins, render::rustgis_tiles::cache};
         use std::sync::{
@@ -1586,6 +1591,8 @@ mod tests {
     /// without first reading its header to see whether it could be read in place.
     #[test]
     fn a_scan_by_address_is_downloaded_whole_without_a_probe() {
+        // The plugin's downloads come from this computer (a test server or address).
+        rustgis_engine::cmd::plugins::fetch::plugins_reach_this_computer();
         let _turn = crate::fetching::turn();
         use rustgis_engine::plugins;
         use std::io::{Read, Write};
@@ -1634,6 +1641,8 @@ mod tests {
     /// `layer.addUrl` answers what was added (#1330).
     #[test]
     fn a_plugin_reads_a_window_off_the_frame() {
+        // The plugin's downloads come from this computer (a test server or address).
+        rustgis_engine::cmd::plugins::fetch::plugins_reach_this_computer();
         let _turn = crate::fetching::turn();
         use rustgis_engine::plugins;
         use std::sync::atomic::Ordering;
@@ -2187,7 +2196,8 @@ mod tests {
         assert_eq!(taken.len(), 1);
         let id = app.session.download_started_for(&taken[0]).unwrap();
         let landed = crate::serviceui::Landed { id, url: url.to_string(), params: taken[0].params().clone(), origin: None };
-        crate::serviceui::go_on(&mut app, landed, 0, rustgis_engine::data::ogc::Step::Failed("its second page failed".into()));
+        let local = rustgis_engine::render::rustgis_tiles::address::Reach::Local;
+        crate::serviceui::go_on(&mut app, landed, 0, local, rustgis_engine::data::ogc::Step::Failed("its second page failed".into()));
         let ran = app.session.poll_plugin_retries();
         assert_eq!(ran.len(), 1, "{ran:?}");
         assert!(ran[0].1.as_ref().is_err_and(|e| e.contains("its second page failed")), "{ran:?}");

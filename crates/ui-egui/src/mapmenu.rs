@@ -5,6 +5,7 @@ use egui::Ui;
 use rustgis_engine::geom::Coord;
 use serde_json::json;
 
+use crate::coordreadout::MapSystem;
 use crate::widgets::{menu_row, submenu_row};
 use crate::{CoordReadout, RustGisApp, i18n};
 
@@ -54,11 +55,19 @@ fn lat_lon(c: Coord) -> String {
 /// The coordinate row: the text it shows and copies, in the readout's format, and whether it fell
 /// back from it. Decimal degrees are `lat, lon` ([`lat_lon`]); north of 84° N and south of 80° S
 /// UTM and MGRS give UPS (`north …`, `Z …`); on another body's map (`earth` false) they fall back
-/// to latitude and longitude (and the row's hover text says why).
-fn coordinate_row(c: Coord, f: CoordReadout, earth: bool) -> (String, bool) {
-    match f {
-        CoordReadout::Decimal => (lat_lon(c), false),
-        _ => match f.format(c, earth) {
+/// to latitude and longitude (and the row's hover text says why). Map coordinates are the map's
+/// own system's (`map`), followed by its name so the copy says which system they are in
+/// (`2600173 mE  1200272 mN  EPSG:2056`); without one (the globe, another body) they are latitude
+/// and longitude, and where the system doesn't reach they fall back to them. Layer coordinates are
+/// the active layer's projected system's alike (latitude and longitude without one).
+fn coordinate_row(c: Coord, f: CoordReadout, earth: bool, map: Option<&MapSystem>) -> (String, bool) {
+    match (f, map) {
+        (CoordReadout::Decimal, _) | (CoordReadout::Map | CoordReadout::Layer, None) => (lat_lon(c), false),
+        (CoordReadout::Map | CoordReadout::Layer, Some(m)) => match f.format(c, earth, map) {
+            Some(text) => (format!("{text}  {}", m.name()), false),
+            None => (lat_lon(c), true),
+        },
+        _ => match f.format(c, earth, map) {
             Some(text) => (text, false),
             None => (lat_lon(c), true),
         },
@@ -124,8 +133,15 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui, c: Coord) {
     crate::shapeconvert::menu(app, ui);
     let format = app.map.coord_format;
     let earth = app.session.map().body().is_earth();
-    let (coords, fell_back) = coordinate_row(c, format, earth);
-    let hover = if fell_back && !earth {
+    let system = format.system(app.session.map(), app.session.active_layer);
+    let (coords, fell_back) = coordinate_row(c, format, earth, system.as_ref());
+    let hover = if fell_back && format == CoordReadout::Map {
+        tl!("Copy coordinates to the clipboard. The map's coordinate system doesn't reach here, so latitude and longitude are copied")
+            .to_string()
+    } else if fell_back && format == CoordReadout::Layer {
+        tl!("Copy coordinates to the clipboard. The active layer's coordinate system doesn't reach here, so latitude and longitude are copied")
+            .to_string()
+    } else if fell_back && !earth {
         i18n::fmt(
             "Copy coordinates to the clipboard. {format} is a grid of the Earth, so latitude and longitude are copied",
             &[("format", format.label())],
@@ -289,14 +305,14 @@ mod tests {
     #[test]
     fn the_coordinate_row_copies_the_chosen_format() {
         let p = Coord::new(44.4, 33.3);
-        assert_eq!(coordinate_row(p, CoordReadout::Decimal, true), ("33.300000, 44.400000".into(), false));
-        assert_eq!(coordinate_row(p, CoordReadout::Dms, true), ("44°24′00.0″ E  33°18′00.0″ N".into(), false));
-        assert_eq!(coordinate_row(p, CoordReadout::Utm, true), ("38north 444141 3684706".into(), false));
-        assert_eq!(coordinate_row(p, CoordReadout::Mgrs, true), ("38S MB 44140 84706".into(), false));
+        assert_eq!(coordinate_row(p, CoordReadout::Decimal, true, None), ("33.300000, 44.400000".into(), false));
+        assert_eq!(coordinate_row(p, CoordReadout::Dms, true, None), ("44°24′00.0″ E  33°18′00.0″ N".into(), false));
+        assert_eq!(coordinate_row(p, CoordReadout::Utm, true, None), ("38north 444141 3684706".into(), false));
+        assert_eq!(coordinate_row(p, CoordReadout::Mgrs, true, None), ("38S MB 44140 84706".into(), false));
         // What is copied as UTM or MGRS is found again by the search box, in both hemispheres.
         for q in [p, Coord::new(-58.4, -34.6), Coord::new(151.2, -33.87), Coord::new(3.0, -1e-7), Coord::new(-21.9, 64.15)] {
             for f in [CoordReadout::Utm, CoordReadout::Mgrs] {
-                let (text, fell_back) = coordinate_row(q, f, true);
+                let (text, fell_back) = coordinate_row(q, f, true, None);
                 assert!(!fell_back, "{text}");
                 let at = rustgis_engine::cmd::search::read_grid_reference(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
                 assert!((at.x - q.x).abs() < 1e-4 && (at.y - q.y).abs() < 1e-4, "{text} {at:?}");
@@ -305,15 +321,50 @@ mod tests {
         // Where UTM has no zone, the row gives UPS (`north …`, `Z …`), which reads back too.
         let pole = Coord::new(10.0, 86.0);
         for f in [CoordReadout::Utm, CoordReadout::Mgrs] {
-            let (text, fell_back) = coordinate_row(pole, f, true);
+            let (text, fell_back) = coordinate_row(pole, f, true, None);
             assert!(!fell_back && (text.starts_with("north ") || text.starts_with("Z ")), "{f:?}: {text}");
             let at = rustgis_engine::cmd::search::read_grid_reference(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
             assert!((at.x - pole.x).abs() < 1e-3 && (at.y - pole.y).abs() < 1e-4, "{text} {at:?}");
             // On another body's map the row falls back to latitude and longitude (and says so):
             // UTM, MGRS and UPS are the Earth's grids.
-            assert_eq!(coordinate_row(p, f, false), ("33.300000, 44.400000".into(), true), "{f:?}");
+            assert_eq!(coordinate_row(p, f, false, None), ("33.300000, 44.400000".into(), true), "{f:?}");
         }
-        assert!(!coordinate_row(pole, CoordReadout::Dms, true).1);
-        assert_eq!(coordinate_row(p, CoordReadout::Dms, false), coordinate_row(p, CoordReadout::Dms, true));
+        assert!(!coordinate_row(pole, CoordReadout::Dms, true, None).1);
+        assert_eq!(coordinate_row(p, CoordReadout::Dms, false, None), coordinate_row(p, CoordReadout::Dms, true, None));
+        // Map coordinates: the map's own system's, and latitude and longitude without one (the
+        // globe, another body) or where the system doesn't reach (said in the row's hover text).
+        let merc = MapSystem::new(rustgis_engine::map::projection::Flat::Mercator, 1000.0, "Web Mercator");
+        assert_eq!(coordinate_row(Coord::new(0.0, 0.0), CoordReadout::Map, true, Some(&merc)), ("0 mE  0 mN  Web Mercator".into(), false));
+        assert_eq!(coordinate_row(p, CoordReadout::Map, true, None), ("33.300000, 44.400000".into(), false));
+        let lv95 = MapSystem::new(
+            rustgis_engine::map::projection::Flat::of(&rustgis_engine::map::Projection::Custom("EPSG:2056".into())),
+            1.0,
+            "EPSG:2056",
+        );
+        let (bern, _) = coordinate_row(Coord::new(7.4386, 46.9511), CoordReadout::Map, true, Some(&lv95));
+        assert!(bern.starts_with("2599") && bern.ends_with(" mN  EPSG:2056"), "{bern}");
+        let far = Coord::new(-150.0, -60.0);
+        assert_eq!(coordinate_row(far, CoordReadout::Map, true, Some(&lv95)), ("-60.000000, -150.000000".into(), true));
+    }
+
+    /// Layer coordinates copy the active layer's projected system's easting and northing with its
+    /// code, as Go To XY reads them back, and latitude and longitude without such a layer.
+    #[test]
+    fn the_layer_row_copies_the_layers_system_by_its_code() {
+        use rustgis_engine::data::{Dataset, GeometryType, raster::Crs};
+        let mut s = rustgis_engine::Session::new(rustgis_engine::Project::default());
+        let mut ds = Dataset::new("laea", GeometryType::Point, Vec::new());
+        ds.crs = Some(Crs::from_epsg(3035).unwrap());
+        let id = s.map_mut().add_dataset(ds);
+        let p = Coord::new(15.3, 49.85);
+        let laea = CoordReadout::Layer.system(s.map(), Some(id));
+        let (row, fell_back) = coordinate_row(p, CoordReadout::Layer, true, laea.as_ref());
+        assert!(!fell_back && row.ends_with(" mN  EPSG:3035"), "{row}");
+        // The copy is a position Go To XY reads, at the same place.
+        s.run("map.goToXY", &serde_json::json!({"position": row})).unwrap();
+        let c = s.map().center_lonlat();
+        assert!((c.x - 15.3).abs() < 1e-4 && (c.y - 49.85).abs() < 1e-4, "{row}: {c:?}");
+        // No layer active: latitude and longitude.
+        assert_eq!(coordinate_row(p, CoordReadout::Layer, true, CoordReadout::Layer.system(s.map(), None).as_ref()), (lat_lon(p), false));
     }
 }

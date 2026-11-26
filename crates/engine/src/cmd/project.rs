@@ -237,8 +237,10 @@ impl ConversionLoss {
 /// known, and saved-conversion fallbacks once with the layer count and first failure. Ordinary
 /// source notes are not opening conversion diagnostics.
 pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
+    use rustgis_data::loss::LossCode;
     let mut fallback: Option<(usize, String, String)> = None;
-    let mut losses = std::collections::BTreeMap::<(String, String), ConversionLoss>::new();
+    // By provider and kind, and by the loss code the notes carry, which the summary keeps.
+    let mut losses = std::collections::BTreeMap::<(String, String, Option<&'static str>), (ConversionLoss, Option<LossCode>)>::new();
     for l in s.project.maps.iter_mut().flat_map(|m| &mut m.layers) {
         let Some(source) = l.source.as_mut() else { continue };
         if let Some(note) = source.take_conversion_fallback() {
@@ -249,6 +251,8 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
         }
         let mut seen = std::collections::BTreeSet::new();
         for note in source.take_conversion_notes() {
+            let code = note.loss;
+            let note = note.text;
             // Source layer names and feature counts vary within a loss kind. Count affected
             // layers once each and total leading feature/row counts across those layers.
             let kind = [
@@ -264,9 +268,9 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
             // An unlisted GDAL warning, without its per-layer occurrence count.
             .unwrap_or_else(|| note.rsplit_once(" (").filter(|(_, tail)| tail.ends_with("occurrence(s))")).map_or(&note, |(base, _)| base));
             let provider = note.split_once(": ").map_or("", |(provider, _)| provider);
-            let key = (provider.to_owned(), kind.to_owned());
+            let key = (provider.to_owned(), kind.to_owned(), code.map(|c| c.spec().id));
             if seen.insert(key.clone()) {
-                losses.entry(key).and_modify(|loss| loss.add(&note)).or_insert_with(|| ConversionLoss::new(&l.name, note));
+                losses.entry(key).and_modify(|(loss, _)| loss.add(&note)).or_insert_with(|| (ConversionLoss::new(&l.name, note), code));
             }
         }
     }
@@ -278,8 +282,8 @@ pub(crate) fn say_conversion_fallbacks(s: &mut Session) {
         };
         s.notify(text, false);
     }
-    for loss in losses.into_values() {
-        s.notify(loss.notice(), false);
+    for (loss, code) in losses.into_values() {
+        s.say(rustgis_data::loss::Note { text: loss.notice(), loss: code });
     }
 }
 
@@ -340,7 +344,7 @@ fn reset(s: &mut Session, p: Project) {
     s.wait_in_place_reads();
     // What reading a raster left out (a colour table, names, a sidecar's scale) is said again as
     // the project opens, as when it was added. One still read in the background isn't here yet.
-    let mut lost: Vec<(String, String)> = Vec::new();
+    let mut lost: Vec<(String, rustgis_data::loss::Note)> = Vec::new();
     for l in s.project.maps.iter_mut().flat_map(|m| &mut m.layers) {
         if let Some(rl) = &mut l.raster {
             lost.extend(rl.lost_unsaid().into_iter().map(|what| (l.name.clone(), what)));
@@ -659,20 +663,25 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
     let origin = if is_package { path.canonicalize() } else { std::path::absolute(&path) }
         .map_err(|error| format!("{}: {error}", path.display()))?;
     super::connections::clear_active();
+    // What it names is held within this as it is read, before anything it names is read.
+    let reach = s.file_reach(p);
     let proj = (|| -> Result<_, String> {
         if is_field {
             let bytes = crate::project::read_file(&path, MAX_PACKAGE)?;
             let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             let (dir, text, notes) = super::field::unpack(&bytes, &stem)?;
-            Ok((super::field::project_in(&text, &dir)?, notes))
+            let (proj, named) = super::field::project_in_within(&text, &dir, reach)?;
+            Ok((proj, named, notes))
         } else if is_package {
             let bytes = crate::project::read_file(&path, MAX_PACKAGE)?;
-            Ok((Project::from_import_json(&super::items::package_text(&bytes)?, None)?, Vec::new()))
+            let (proj, named) = Project::from_import_json_within(&super::items::package_text(&bytes)?, None, reach)?;
+            Ok((proj, named, Vec::new()))
         } else {
-            Ok((Project::load(&path)?, Vec::new()))
+            let (proj, named) = Project::load_within(&path, Some(reach))?;
+            Ok((proj, named, Vec::new()))
         }
     })();
-    let (proj, notes) = match proj {
+    let (proj, named, notes) = match proj {
         Ok(proj) => proj,
         Err(error) => {
             super::connections::restore_active(s);
@@ -705,6 +714,7 @@ fn open(s: &mut Session, p: &Value) -> CmdResult {
         s.path = Some(origin);
     }
     s.notify(format!("Opened {}", s.project.name), false);
+    named.say(s, &format!("the project '{}'", s.project.name));
     for note in notes {
         s.warn(note);
     }
@@ -743,8 +753,10 @@ fn open_text(s: &mut Session, p: &Value) -> CmdResult {
     let text = super::ps(p, "text").ok_or("text is required")?;
     let package = super::b(p, "package").unwrap_or(false);
     super::connections::clear_active();
-    let proj = if package { Project::from_import_json(text, None) } else { Project::from_json(text) };
-    let proj = match proj {
+    // What it names is held within this as it is read, before anything it names is read.
+    let reach = s.file_reach(p);
+    let proj = if package { Project::from_import_json_within(text, None, reach) } else { Project::from_json_within(text, reach) };
+    let (proj, named) = match proj {
         Ok(proj) => proj,
         Err(error) => {
             super::connections::restore_active(s);
@@ -760,6 +772,7 @@ fn open_text(s: &mut Session, p: &Value) -> CmdResult {
     }
     s.path = None;
     s.notify(format!("Opened {}", s.project.name), false);
+    named.say(s, &format!("the project '{}'", s.project.name));
     super::connections::resolve_project(s);
     super::connections::note_waiting(s);
     Ok(Value::Null)
@@ -794,7 +807,7 @@ fn write(s: &mut Session, path: PathBuf) -> CmdResult {
     s.notify_written(format!("Saved {}", path.display()));
     crate::durable::notify(s, &report);
     for note in construction_notes {
-        s.notify(note, false);
+        s.say(note);
     }
     s.retain_written_notices(written);
     s.path = Some(destination);
@@ -1040,6 +1053,8 @@ pub(crate) fn bbox(e: rustgis_geom::Extent) -> Value {
 /// Everything about the open project in one call (the AI Assistant's and MCP's `list_layers`).
 /// Layers are in table-of-contents order, top first. `nameFilter` keeps the layers and tables
 /// whose name holds it (ignoring case); `includeFields: false` leaves out their fields.
+/// A feature layer's `features` is its size: for a layer read in place (`streamed`) its source's
+/// total, `null` when the source doesn't say or isn't open; `loaded` is what is in memory now.
 /// Project inventory; additive element addresses leave existing map-frame summaries intact.
 fn info(s: &mut Session, p: &Value) -> CmdResult {
     let filter = ps(p, "nameFilter").map(|f| f.trim().to_lowercase()).filter(|f| !f.is_empty());
@@ -1070,8 +1085,8 @@ fn info(s: &mut Session, p: &Value) -> CmdResult {
                     "missing": rl.data.is_none(),
                 }),
                 None => json!({
-                    "id": l.id, "name": l.name, "type": l.geometry_type().label(), "features": l.dataset.features.len(),
-                    "visible": l.visible, "renderer": l.renderer.kind_label(), "selected": l.selection.len(),
+                    "id": l.id, "name": l.name, "type": l.geometry_type().label(), "features": l.feature_count(),
+                    "loaded": l.dataset.features.len(), "streamed": l.is_streamed(), "visible": l.visible, "renderer": l.renderer.kind_label(), "selected": l.selection.len(),
                     "definitionQuery": l.definition_query.as_deref().filter(|q| !q.trim().is_empty()),
                     // The text expression it labels by while that reads, as the map draws, else its field.
                     "labels": l.labels.enabled.then(|| {

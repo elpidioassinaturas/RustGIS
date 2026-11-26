@@ -4,8 +4,8 @@
 //! point at this computer or the local network: a self-hosted tile server. Addresses that come
 //! from somewhere else (inside a style or TileJSON document, or a redirect) may not reach into
 //! the local network unless the document itself came from there, so a style found on the web
-//! can't make the app probe local services. Link-local addresses, where cloud metadata services
-//! answer, are never fetched.
+//! can't make the app probe local services. Link-local addresses and the other addresses cloud
+//! metadata services answer at are never fetched.
 //!
 //! These spelling checks also run after template expansion. Native fetchers additionally
 //! filter the resolved IPs before connecting: a public document cannot select a local
@@ -20,7 +20,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub enum Reach {
     /// The internet.
     Public,
-    /// This computer or the local network (loopback, private and unique-local addresses).
+    /// This computer or the local network (loopback, private, unique-local and site-local
+    /// addresses).
     Local,
     /// Never fetched: link-local and unspecified addresses, cloud metadata hosts.
     Forbidden,
@@ -119,8 +120,19 @@ fn host(url: &str) -> Option<String> {
     Some(host.trim_end_matches('.').to_ascii_lowercase())
 }
 
+/// Cloud instance metadata services at addresses outside the link-local ranges (every link-local
+/// address is forbidden on its own): one unique-local IPv6 and one carrier-grade NAT address. Only
+/// these two: the ranges around them stay local, for self-hosted servers there.
+const METADATA: [IpAddr; 2] =
+    [IpAddr::V6(Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254)), IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200))];
+
 /// How far an IP address reaches.
 pub fn ip_reach(ip: IpAddr) -> Reach {
+    // For the IPv6 metadata address. The IPv4 one is also checked in `v4_reach`, which every
+    // spelling of it reaches (mapped, NAT64, IPv4-compatible, 6to4, the `inet_aton` forms in `reach`).
+    if METADATA.contains(&ip) {
+        return Reach::Forbidden;
+    }
     match ip {
         IpAddr::V4(v4) => v4_reach(v4),
         IpAddr::V6(v6) => {
@@ -132,10 +144,24 @@ pub fn ip_reach(ip: IpAddr) -> Reach {
             if let [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] = v6.segments() {
                 return v4_reach(Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo)));
             }
+            // IPv4-compatible (`::a.b.c.d`, RFC 4291 §2.5.5.1) and 6to4 (`2002:a.b.c.d::/48`,
+            // RFC 3056) addresses embed one too. `::` and `::1` keep their own arms below.
+            match v6.segments() {
+                [0, 0, 0, 0, 0, 0, hi, lo] if hi != 0 || lo > 1 => {
+                    return v4_reach(Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo)));
+                }
+                [0x2002, hi, lo, ..] => return v4_reach(Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo))),
+                _ => {}
+            }
+            // Teredo (`2001:0::/32`, RFC 4380) embeds an IPv4 address too, but obfuscated (the
+            // client's is XORed) and only reached through a relay, never routed to directly, so it
+            // keeps the public arm.
             let seg0 = v6.segments().first().copied().unwrap_or(0);
             if v6.is_unspecified() || (seg0 & 0xffc0) == 0xfe80 {
                 Reach::Forbidden
-            } else if v6 == Ipv6Addr::LOCALHOST || (seg0 & 0xfe00) == 0xfc00 {
+            } else if v6 == Ipv6Addr::LOCALHOST || (seg0 & 0xfe00) == 0xfc00 || (seg0 & 0xffc0) == 0xfec0 {
+                // Unique-local `fc00::/7` and the deprecated site-local `fec0::/10` (RFC 3879),
+                // which older networks still route inside a site.
                 Reach::Local
             } else {
                 Reach::Public
@@ -145,7 +171,7 @@ pub fn ip_reach(ip: IpAddr) -> Reach {
 }
 
 fn v4_reach(v4: Ipv4Addr) -> Reach {
-    if v4.is_unspecified() || v4.is_link_local() || v4.is_broadcast() {
+    if v4.is_unspecified() || v4.is_link_local() || v4.is_broadcast() || METADATA.contains(&IpAddr::V4(v4)) {
         Reach::Forbidden
     } else if v4.is_loopback() || v4.is_private() || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64) {
         // 100.64.0.0/10 (carrier-grade NAT) counts as local too.
@@ -275,6 +301,19 @@ pub fn check_reach(url: &str, ceiling: Reach) -> Result<(), String> {
     }
 }
 
+/// Whether a fetch's error is a refusal for where its address reaches ([`check_reach`], or where
+/// the address resolved when it was fetched), not a failure of the service.
+pub fn is_refusal(error: &str) -> bool {
+    [
+        "can't point into the local network",
+        "that address is never fetched",
+        "that peer address is never fetched",
+        "resolves to this computer or the local network",
+    ]
+    .iter()
+    .any(|m| error.contains(m))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +352,40 @@ mod tests {
         }
     }
 
+    /// IPv4-compatible (`::a.b.c.d`) and 6to4 (`2002:a.b.c.d::`) addresses keep the reach of the
+    /// IPv4 address they embed; `::1` stays loopback and `::` unspecified.
+    #[test]
+    fn embedded_ipv4_destinations_keep_their_reach() {
+        for (v4, expected) in [
+            ("100.100.100.200", Reach::Forbidden),
+            ("169.254.169.254", Reach::Forbidden),
+            ("127.0.0.1", Reach::Local),
+            ("10.0.0.1", Reach::Local),
+            ("203.0.113.1", Reach::Public),
+        ] {
+            let ip: Ipv4Addr = v4.parse().unwrap();
+            let [a, b, c, d] = ip.octets();
+            let six_to_four = Ipv6Addr::new(0x2002, u16::from_be_bytes([a, b]), u16::from_be_bytes([c, d]), 0, 0, 0, 0, 1);
+            for peer in [format!("::{v4}").parse::<IpAddr>().unwrap(), IpAddr::V6(six_to_four)] {
+                let url = format!("http://[{peer}]/tile");
+                assert_eq!(ip_reach(peer), expected, "{peer}");
+                assert_eq!(reach(&url), expected, "{url}");
+                assert_eq!(check(&url, None).is_ok(), expected != Reach::Forbidden, "{url}");
+                assert_eq!(check(&url, Some("https://public.example/style.json")).is_ok(), expected == Reach::Public, "{url}");
+                let observed = Origin::connected("https://dns.example/tile", peer);
+                if expected == Reach::Forbidden {
+                    assert!(observed.is_err(), "DNS cannot hide a forbidden embedded peer {peer}");
+                } else {
+                    assert_eq!(observed.unwrap().reach, expected, "{peer}");
+                }
+            }
+        }
+        assert_eq!(ip_reach(Ipv6Addr::LOCALHOST.into()), Reach::Local);
+        assert_eq!(reach("http://[::1]/"), Reach::Local);
+        assert_eq!(ip_reach(Ipv6Addr::UNSPECIFIED.into()), Reach::Forbidden);
+        assert_eq!(reach("http://[::]/"), Reach::Forbidden);
+    }
+
     #[test]
     fn judges_addresses() {
         assert_eq!(reach("https://tile.openstreetmap.org/1/0/0.png"), Reach::Public);
@@ -337,6 +410,62 @@ mod tests {
         assert_eq!(reach("http://1.2.3.4.5/"), Reach::Forbidden);
         assert_eq!(reach("http://999.1/"), Reach::Forbidden);
         assert_eq!(reach("http://tiles.example.com/"), Reach::Public);
+    }
+
+    /// The two metadata addresses outside the link-local ranges are never fetched, however they
+    /// are spelled; their neighbours stay local (self-hosted servers on those ranges keep working).
+    #[test]
+    fn cloud_metadata_addresses_are_forbidden_and_their_ranges_stay_local() {
+        for url in [
+            "http://[fd00:ec2::254]/latest/meta-data/",
+            "http://[::ffff:100.100.100.200]/",
+            "http://100.100.100.200/latest/meta-data/",
+            "http://[64:ff9b::6464:64c8]/",
+            "http://[::100.100.100.200]/",
+            "http://[2002:6464:64c8::1]/",
+            "http://1684301000/",
+        ] {
+            assert_eq!(reach(url), Reach::Forbidden, "{url}");
+            assert!(check(url, None).is_err(), "{url}");
+        }
+        for peer in ["fd00:ec2::254", "100.100.100.200", "::100.100.100.200", "2002:6464:64c8::1"] {
+            assert!(Origin::connected("https://selected.example/", peer.parse().unwrap()).is_err(), "{peer}");
+        }
+        for url in ["http://[fd00:ec2::253]/", "http://[fd12:3456::1]/", "http://100.100.100.201/", "http://100.64.0.1/"] {
+            assert_eq!(reach(url), Reach::Local, "{url}");
+            assert!(check(url, None).is_ok(), "{url}");
+        }
+    }
+
+    /// Every refusal for where an address reaches is told from a service's failure.
+    #[test]
+    fn refusals_are_told_from_other_failures() {
+        let refused = [
+            check_reach("http://10.0.40.1/a.png", Reach::Public).unwrap_err(),
+            check_reach("http://169.254.169.254/latest", Reach::Local).unwrap_err(),
+            Origin::connected("https://refused-peer.example/a.png", "169.254.169.254".parse().unwrap()).unwrap_err(),
+        ];
+        for e in &refused {
+            assert!(is_refusal(e), "{e}");
+        }
+        assert!(!is_refusal("HTTP 404"));
+    }
+
+    /// Site-local addresses (`fec0::/10`, deprecated but still routed inside some sites) are
+    /// local: a document on the web can't point at them, and a peer there is observed local.
+    /// Teredo addresses stay public: what they embed is obfuscated and reached through a relay.
+    #[test]
+    fn site_local_addresses_are_local_and_teredo_stays_public() {
+        for ip in ["fec0::1", "fefe:1::2", "feff:ffff::1"] {
+            let url = format!("http://[{ip}]/tiles");
+            assert_eq!(reach(&url), Reach::Local, "{url}");
+            assert!(check(&url, None).is_ok(), "{url}");
+            assert!(check(&url, Some("https://public.example/style.json")).is_err(), "{url}");
+            assert_eq!(Origin::connected("https://looks-public.example/", ip.parse().unwrap()).unwrap().reach, Reach::Local, "{ip}");
+        }
+        // Link-local, just below, stays forbidden.
+        assert_eq!(reach("http://[febf::1]/"), Reach::Forbidden);
+        assert_eq!(reach("http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/"), Reach::Public);
     }
 
     #[test]

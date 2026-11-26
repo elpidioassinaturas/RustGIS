@@ -336,6 +336,19 @@ impl Session {
     pub(crate) fn policy_user(&self) -> bool {
         self.policy.scopes.last().is_none_or(|s| matches!(s.kind, Kind::User))
     }
+    /// Whether a plugin's authority is in the active scope: one of its commands, or what its
+    /// session program asks between them, through any item it runs.
+    pub(crate) fn policy_plugin(&self) -> bool {
+        /// Looks through item narrowing for a plugin.
+        fn plugin(kind: &Kind) -> bool {
+            match kind {
+                Kind::Plugin { .. } => true,
+                Kind::Item { within, .. } => plugin(within),
+                _ => false,
+            }
+        }
+        self.policy.scopes.last().is_some_and(|s| plugin(&s.kind))
+    }
     /// Whether the active scope may exercise reserved connection/account authority.
     pub(crate) fn policy_allows_reserved(&self) -> bool {
         match &self.scope().kind {
@@ -517,11 +530,18 @@ impl Session {
                 }
                 let node = self.admit(node)?;
                 // Its lines run nested: what they couldn't read as true or false is said here (#1600).
-                self.with_unread_bools(Some("script.run"), |s| {
+                let result = self.with_unread_bools(Some("script.run"), |s| {
                     s.with_node(node, |s| {
                         s.guarded("Run Script", true, |s| crate::cmd::workflows::run_script(s, &json!({"script":script})))
                     })
-                })
+                });
+                // Not a command, so no `command_epilogue`: its lines' declaration check is raised here.
+                #[cfg(any(test, feature = "declaration-check"))]
+                if self.depth == 0 {
+                    let broken = self.declaration_broken.take();
+                    assert!(broken.is_none(), "{}", broken.unwrap_or_default());
+                }
+                result
             }
             CallKind::Adapter { .. } => {
                 let node = self.call_node(&self.scope(), call)?;
@@ -691,6 +711,10 @@ impl Session {
         } else if decision != Decision::Allow {
             return Err("this operation needs your approval".into());
         }
+        // Plugins reach only the internet: so does every command one runs that connects.
+        if node.effects.contains(super::Effect::Network) {
+            self.hold_plugin_addresses(&node.params)?;
+        }
         Ok(Arc::new(node))
     }
     /// Keeps the admitted node and synchronous request predicate through nested execution; restores both on panic.
@@ -705,7 +729,13 @@ impl Session {
         }
         let still = continuation.map(|c| Arc::new(move || c.check().is_ok()) as crate::render::rustgis_tiles::cache::Still);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::render::rustgis_tiles::cache::with_optional_still(still, || f(self))
+            // Plugins reach only the internet: so does every request a command one runs makes,
+            // the ones it derives from an address it was given (a listing, a search, a next page)
+            // and the ones a saved connection sends.
+            let held = node.effects.contains(super::Effect::Network) && self.plugin_held();
+            crate::render::rustgis_tiles::cache::with_optional_still(still, || {
+                crate::render::rustgis_tiles::cache::held_to_public(held, || f(self))
+            })
         }));
         let complete =
             if let Some(cursor) = &mut self.policy.cursor { cursor.frames.pop().is_none_or(|(n, at)| n.len() == at) } else { true };
@@ -1010,8 +1040,10 @@ impl Session {
                     crate::cmd::project::take_first_layer_system(self, &before);
                 }
                 #[cfg(any(test, feature = "declaration-check"))]
-                if let Some(before) = declared {
-                    assert!(self.restored().layers == before, "{} doesn't mutate but changed the layers", spec.id);
+                if let Some(before) = declared
+                    && self.restored().layers != before
+                {
+                    self.declaration_broken.get_or_insert_with(|| format!("{} doesn't mutate but changed the layers", spec.id));
                 }
                 self.url_completion_landed(spec.id, &params, &result);
                 if result.is_ok() && (spec.mutates || spec.effects.contains(crate::policy::Effect::History)) && spec.id != "data.similar" {

@@ -24,15 +24,15 @@ area('ac') BETWEEN 1 AND 5 AND zoning = 'R-1'
 ```
 
 In Select By Attributes, the Layer Properties Query tab and a label class's SQL query, the
-**Functions** and **Variables** menus list the language's catalog in the same list the
-expression box suggests from. The highlighted item's help shows beside the list (below it in a
-narrow window), or the help of the item under the pointer: a function's signature, description
-and example, or a variable's description. The list shows ten items at a time and scrolls to the
-rest. Up and Down move the highlight, Enter or a click appends the item to the expression, and
-Escape, Tab or a click elsewhere closes the list; from the keyboard, Tab to the menu and press
-Enter or Space to open it (Space again closes it). While the list is open, shortcuts with Ctrl
-(⌘) still work. A function opens its argument list, or inserts the complete call when it takes
-no arguments.
+**Functions** and **Variables** menus list the language's catalog in the same list the expression
+box suggests from. The highlighted item's help shows beside the list (below it in a narrow window),
+or the help of the item under the pointer: a function's signature, description and example, or a
+variable's description. The list shows ten items at a time and scrolls to the rest. Up and Down move
+the highlight, Page Up and Page Down scroll a help longer than its box, Enter or a click appends the
+item to the expression, and Escape, Tab or a click elsewhere closes the list; from the keyboard, Tab
+to the menu and press Enter or Space to open it (Space again closes it). While the list is open,
+shortcuts with Ctrl (⌘) still work. A function opens its argument list, or inserts the complete call
+when it takes no arguments.
 
 ## Grammar
 
@@ -221,9 +221,11 @@ As the expression is typed, a list under the cursor suggests what can go there: 
 (quoted when their name needs it: `"Pop Est"`), the functions, the variables and the keywords
 that start with what's typed, each with its help beside (a function's signature, description
 and example; a field's type). Ctrl+Space opens it with nothing typed (on macOS, where Ctrl+Space
-may switch the input source, type the first letter instead). ↑/↓ move through it, Enter
-or Tab take the highlighted item (Enter doesn't calculate while the list is open) and Escape
-closes it. Inside a quoted field name (`"Pop`) only fields are suggested. Inside a text compared
+may switch the input source, type the first letter instead). ↑/↓ move through it, Page Up and
+Page Down scroll a help longer than its box, Enter or Tab take the highlighted item (Enter
+doesn't calculate while the list is open) and Escape closes it. With a screen reader, each item
+the highlight moves to is read with a short form of its help. Inside a quoted field name
+(`"Pop`) only fields are suggested. Inside a text compared
 with a text, date or date-time field (`name = 'Pa`, `name LIKE '`, `name IN ('Lima', '`), the list
 suggests that field's values that start with what's typed, and the one taken is written with its
 quotes (`'Paris'`, a `'` in it doubled), over the closing quote. Where a value goes with nothing
@@ -238,7 +240,21 @@ them when it takes no arguments).
 While the list is open the expression isn't checked: `pop_`, with `pop_est` suggested, is a word
 still being chosen. It is checked once the list closes (an item taken, Escape, the cursor moved
 away, the box left, or nothing matching what's typed), and its error shown then if it's still
-invalid (`pop_x`: no field named 'pop_x').
+invalid (`pop_x`: no field named 'pop_x'). Once it reads, a line under the box previews what the
+expression gives in the first three selected rows, or the first three rows when none is selected,
+as the chosen field holds it and the attribute table shows it, with what writing it loses:
+`Preview: 2 (fraction dropped) · <Null> (a division by zero) · 6`. Only those rows are evaluated,
+and nothing changes until **Calculate** is clicked. On a layer, each previewed row also runs the
+layer's calculation rules and checks (domains, allowed combinations of values, constraint rules) as
+Calculate would. A calculation rule that writes the chosen field overwrites Calculate's result, so
+the preview shows the rule's result, as the field holds it, with what writing that loses (the later
+of two rules wins; what Calculate's own result lost isn't shown then, though Calculate says it; a
+rule that no longer reads is skipped, as Calculate skips it and says so). A
+row the checks would refuse says so in Calculate's words:
+`Preview: 15 · 30 · 45 (refused: 45 isn't allowed in v (its domain))`. Calculate refuses the whole
+edit when any of its rows is refused, so rows the preview doesn't show can still refuse it. An area
+the edit reads that is ambiguous refuses it too, and the preview doesn't say so, even for a row it
+shows.
 
 A `(` typed closes itself, the cursor inside, unless text follows it or it's in a text or a field
 name; so does a `'` or `"` where a value can start (at the start, after a space, `(`, `,` or an

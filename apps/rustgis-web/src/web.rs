@@ -1287,6 +1287,8 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
         save_project: None,
         // The browser's camera isn't asked yet (a phone's shell asks its own).
         take_photo: None,
+        // The browser gives egui's own fields its typing: no text field of its own is needed.
+        enter_text: None,
         // A text field's Paste: the page reads the clipboard (Firefox and Safari show a Paste
         // button to confirm, Chrome asks once); only over HTTPS, where the browser offers it.
         read_clipboard: clipboard().map(|clipboard| -> Box<dyn Fn(Slot<Result<String, String>>)> {
@@ -1315,21 +1317,20 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
         recovery: None,
         fetch_font: Some(Box::new(move |url: &str| {
             let (url, inbox, ctx) = (url.to_string(), font_sink.clone(), font_ctx.clone());
-            let capture = Capture::current();
-            wasm_bindgen_futures::spawn_local(async move {
-                match fetch_bytes(&url, capture, None, &[]).await {
-                    Ok(bytes) => {
-                        inbox.lock().unwrap_or_else(|e| e.into_inner()).push((url, bytes));
-                        ctx.request_repaint();
-                    }
-                    Err(e) => {
-                        log::error!("couldn't load font {url}: {e}");
-                        // Empty bytes tell the app the download failed.
-                        inbox.lock().unwrap_or_else(|e| e.into_inner()).push((url, Vec::new()));
-                        ctx.request_repaint();
-                    }
-                }
-            });
+            let request = url.clone();
+            // Use the bounded internet-only transport, as native fallback fonts do.
+            rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::download_public_limited(
+                &request,
+                rustgis_ui_egui::rustgis_engine::render::fonts::MAX_FONT_BYTES,
+                Box::new(move |answer| {
+                    let bytes = answer.unwrap_or_else(|e| {
+                        log::warn!("couldn't load fallback font: {e}");
+                        Vec::new()
+                    });
+                    inbox.lock().unwrap_or_else(|e| e.into_inner()).push((url, bytes));
+                    ctx.request_repaint();
+                }),
+            );
         })),
         font_inbox: Some(font_inbox),
         open_async: Some(Box::new(move |purpose: &str| {
@@ -1406,7 +1407,9 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
             } else if purpose == "assistantPicture" {
                 rfd::AsyncFileDialog::new()
                     .add_filter(rustgis_ui_egui::tl!("Pictures"), rustgis_ui_egui::rustgis_assistant::attach::EXTENSIONS)
-            } else if purpose == "picture" || marker.is_some() {
+            } else if marker.is_some() {
+                rfd::AsyncFileDialog::new().add_filter(rustgis_ui_egui::tl!("Pictures"), rustgis_ui_egui::MARKER_EXTENSIONS)
+            } else if purpose == "picture" {
                 rfd::AsyncFileDialog::new().add_filter(rustgis_ui_egui::tl!("Pictures"), &["png", "jpg", "jpeg"])
             } else {
                 rfd::AsyncFileDialog::new().add_filter(

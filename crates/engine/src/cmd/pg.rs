@@ -124,7 +124,11 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
         let src = postgis::PostgisSource::open(conn, t, edit.origin.family, edit.origin.crs.as_deref()).map_err(err)?;
         let rows = changes.insert_rows.clone();
         let edits = rustgis_data::source::edits::Edits { updates: changes.updates, deletes: changes.deletes, inserts: changes.inserts };
-        let saved = match src.save(&edits, &fields).map_err(err)? {
+        // In the system the layer holds its geometry in: the table's own, longitude/latitude for
+        // a layer a project saved before RustGIS kept a table's own coordinates, or another (the
+        // column given another SRID since), converted straight to the table's.
+        let held = s.map().layer(id).ok_or("no such layer")?.dataset.coord_crs();
+        let saved = match src.save(&edits, &fields, held).map_err(err)? {
             Ok(saved) => saved,
             Err(conflicts) => {
                 let mut said: Vec<String> = conflicts.iter().take(20).map(ToString::to_string).collect();
@@ -165,10 +169,14 @@ fn save_edits(s: &mut Session, p: &Value) -> CmdResult {
             false,
         );
         if !saved.skipped_fields.is_empty() {
-            s.notify(format!("{name}: {table} has no column for {}, so it wasn't saved", saved.skipped_fields.join(", ")), false);
+            // Their values aren't in the table: lost from the save, as a GeoPackage save says.
+            s.say(rustgis_data::loss::Note::loss(
+                rustgis_data::loss::LossCode::DroppedValue,
+                format!("{name}: {table} has no column for {}, so it wasn't saved", saved.skipped_fields.join(", ")),
+            ));
         }
         for note in postgis::saved_dates_notes(&fields, &saved, &super::saved_target(&name, &table)) {
-            s.notify(note, false);
+            s.say(note);
         }
         s.retain_written_notices(written);
         Ok(json!({
@@ -213,6 +221,9 @@ fn discard_edits(s: &mut Session, p: &Value) -> CmdResult {
         let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
         l.dataset.fields = src.info().fields.clone();
         l.dataset.features = editable.features.into();
+        // Read again as the table holds it now, which a layer a project saved before RustGIS
+        // kept a table's own coordinates takes too.
+        l.dataset.held_in = src.coord_crs();
         l.selection.clear();
         l.touch_geometry();
         let baseline = rustgis_map::source::versions_of(&l.dataset.features, &Default::default(), &read);
@@ -222,7 +233,7 @@ fn discard_edits(s: &mut Session, p: &Value) -> CmdResult {
         }
         s.notify(format!("{name}: edits discarded; {n} rows loaded again from {}", edit.origin.table), false);
         if let Some(note) = unread {
-            s.notify(format!("{name}: {note}"), false);
+            s.say(note.prefixed(&name));
         }
         Ok(json!({"features": n, "matched": editable.matched}))
     }
@@ -389,6 +400,8 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
             let info = src.info();
             let mut ds = rustgis_data::Dataset::new(layer_name.clone(), info.geometry_type, info.fields.clone());
             ds.crs = u32::try_from(src.srid()).ok().filter(|&c| c != 0 && c != 4326).and_then(rustgis_data::raster::Crs::from_epsg);
+            // Held as the table holds it, when RustGIS converts its system itself.
+            ds.held_in = src.coord_crs();
             let n = editable.features.len() as u64;
             let read: std::collections::HashMap<u64, i64> = editable.versions.iter().copied().collect();
             let versions = rustgis_map::source::versions_of(&editable.features, &Default::default(), &read);
@@ -403,7 +416,7 @@ fn add_layer(s: &mut Session, p: &Value) -> CmdResult {
                 );
             }
             if let Some(note) = rustgis_data::source::unread_dates_note(&info.fields, &editable.unread_dates) {
-                s.notify(format!("{layer_name}: {note}"), false);
+                s.say(note.prefixed(&layer_name));
             }
             if !editable.writable {
                 s.notify(format!("{layer_name}: this user can't insert, update or delete its rows, so edits can't be saved to it"), false);

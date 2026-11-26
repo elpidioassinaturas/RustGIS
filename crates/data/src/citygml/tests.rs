@@ -1,3 +1,4 @@
+#![expect(clippy::disallowed_methods, reason = "a thread the system refuses fails the test, as it should")]
 use super::*;
 use crate::{Geometry, GeometryType, Value};
 
@@ -60,7 +61,7 @@ fn building(id: &str, inner: &str) -> String {
 }
 
 fn messages_of(out: &[(Dataset, ReadReport)]) -> Vec<String> {
-    out.iter().flat_map(|(_, r)| r.messages.clone()).collect()
+    out.iter().flat_map(|(_, r)| r.messages.texts().map(str::to_string).collect::<Vec<_>>()).collect()
 }
 
 fn says(out: &[(Dataset, ReadReport)], text: &str) -> bool {

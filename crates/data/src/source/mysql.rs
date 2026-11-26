@@ -4,8 +4,9 @@
 //! RustGIS talks to the server itself (the pure-Rust `mysql` client, TLS through rustls), so
 //! nothing else needs installing. Extent queries use the column's spatial index
 //! (`MBRIntersects`); geometry comes as WKB, longitude first (MySQL's geographic coordinate
-//! systems are latitude first unless asked), and RustGIS converts it to longitude/latitude
-//! itself, since MariaDB has no `ST_Transform`. A capped read returns an evenly spread sample,
+//! systems are latitude first unless asked), kept in the table's own system; RustGIS converts it
+//! to longitude/latitude itself where that is needed (a view's box), since MariaDB has no
+//! `ST_Transform`. A capped read returns an evenly spread sample,
 //! numbered on the server (window functions: MySQL 8 or MariaDB 10.2 and later), so only the rows
 //! kept cross the network. The session is read only, and a server asking for a local file
 //! (`LOAD DATA LOCAL INFILE`) is refused.
@@ -13,8 +14,8 @@
 //! What a server sends is hostile input: geometry is decoded by [`wkb`], reads are bounded by
 //! `LIMIT`, and statements time out.
 
-use super::{Batch, Family, FeatureSource, Reproject, Request, SourceInfo, clamp_limit, in_request, stride};
-use crate::{DataError, Feature, Field, FieldType, Geometry, GeometryType, Result, Value, wkb};
+use super::{Batch, Family, FeatureSource, Reproject, Request, SourceInfo, clamp_limit, stride};
+use crate::{DataError, Feature, Field, FieldType, GeometryType, Result, Value, wkb};
 use mysql::prelude::Queryable;
 use rustgis_geom::Extent;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -712,7 +713,7 @@ impl MysqlSource {
     /// Opens a table's geometry column (`family`: the one family to read of a column of mixed
     /// types). `crs` (`EPSG:…`) is the coordinate system of a geometry whose SRID is 0.
     pub fn open(conn: Arc<Conn>, table: Table, family: Option<Family>, crs: Option<&str>) -> Result<Self> {
-        let mut notes = Vec::new();
+        let mut notes = crate::loss::Notes::new();
         let g = ident(&table.column);
         let from = table.sql_from();
         let server = conn.server;
@@ -755,13 +756,14 @@ impl MysqlSource {
                     srid = u32::from(code);
                     notes.extend(note);
                 }
-                None => notes.push(
-                    "the geometry doesn't say its coordinate system; read as longitude/latitude (add it again with \"crs\", such as EPSG:2263)".into(),
-                ),
+                None => notes.push(crate::loss::Note::loss(
+                    crate::loss::LossCode::AssumedCrs,
+                    "the geometry doesn't say its coordinate system; read as longitude/latitude (add it again with \"crs\", such as EPSG:2263)",
+                )),
             }
         }
         if let Some(note) = tls_note(&conn.config.tls, conn.is_plain()) {
-            notes.push(note.into());
+            notes.push(note);
         }
         let reproject = Reproject::from_epsg(Some(srid), &mut notes);
         let wkb = format!("ST_AsBinary({g}{})", server.axis_option());
@@ -804,9 +806,7 @@ impl MysqlSource {
         // Ids stable between reads: the key; without one, the rows are numbered as read.
         let numbered = pk.is_none();
         if numbered {
-            notes.push(
-                "no single-column integer key: features are numbered as read, so their ids can change from one read to the next".into(),
-            );
+            notes.push("no single-column integer key: features are numbered as read, so their ids can change from one read to the next");
         }
         let order = pk.as_deref().map(|k| format!("ORDER BY t.{}", ident(k))).unwrap_or_default();
         let id = pk.map(|k| ident(&k)).unwrap_or_else(|| "`rustgis rn`".into());
@@ -843,7 +843,7 @@ impl MysqlSource {
         if src.info.count != Some(0) {
             src.info.extent = src.measure();
             if src.info.extent.is_empty() {
-                src.info.notes.push("the table's extent couldn't be measured in time: zooming to the layer does nothing".into());
+                src.info.notes.push("the table's extent couldn't be measured in time: zooming to the layer does nothing");
             }
         }
         Ok(src)
@@ -893,10 +893,16 @@ impl MysqlSource {
     /// The table's extent in longitude/latitude, from an evenly spread sample of its rows (all of
     /// them for a table that isn't large).
     fn measure(&self) -> Extent {
-        let Ok(b) = self.read_within(&Request { extent: None, limit: EXTENT_SAMPLE }, Some(PROBE_TIMEOUT)) else {
+        let Ok(b) = self.read_within(&Request { extent: None, limit: EXTENT_SAMPLE, own: None }, Some(PROBE_TIMEOUT)) else {
             return Extent::EMPTY;
         };
-        b.features.iter().filter_map(|f| f.geometry.as_ref()).fold(Extent::EMPTY, |e, g| e.union(&g.extent()))
+        // Read in the table's own system: each placed in longitude/latitude, vertex by vertex.
+        b.features
+            .into_iter()
+            .filter_map(|f| f.geometry)
+            .filter_map(|g| self.reproject.read(g))
+            .filter_map(|p| p.lonlat)
+            .fold(Extent::EMPTY, |e, l| e.union(&l))
     }
 
     /// The `WHERE` condition: a geometry, of the family read, and in `window` (a polygon's text
@@ -929,16 +935,17 @@ impl MysqlSource {
         w
     }
 
-    /// A row read as a feature: the id, the geometry and the fields, in the order of the select.
-    /// `None` without an id or a geometry RustGIS reads. A value of a date field that isn't a date
-    /// RustGIS holds is null, counted in `unread` ([`Batch::unread_dates`]).
-    fn row_feature(&self, r: &mysql::Row, unread: &mut Vec<usize>) -> Option<Feature> {
+    /// A row read as a feature: the id, the geometry (as the table holds it, in its own system)
+    /// and the fields, in the order of the select, with the geometry's box in longitude/latitude
+    /// (`None` for one with no place there, [`Reproject::read`]). `None` without an id or a
+    /// geometry RustGIS reads. A value of a date field that isn't a date RustGIS holds is null, counted in `unread` ([`Batch::unread_dates`]).
+    fn row_feature(&self, r: &mysql::Row, unread: &mut Vec<usize>) -> Option<(Feature, Option<Extent>)> {
         let id = id_of(at(r, 0))?;
         let geometry = match at(r, 1) {
             mysql::Value::Bytes(b) => wkb::decode(b),
             _ => None,
         }?;
-        let geometry: Geometry = self.reproject.to_lonlat_geometry(geometry)?;
+        let super::Placed { geometry, lonlat } = self.reproject.read(geometry)?;
         let attrs = self
             .info
             .fields
@@ -958,7 +965,7 @@ impl MysqlSource {
             })
             .collect();
         // A negative key keeps its bits: still one id per row, and the same on every read.
-        Some(Feature { id, geometry: Some(geometry), attrs })
+        Some((Feature { id, geometry: Some(geometry), attrs }, lonlat))
     }
 }
 
@@ -1075,14 +1082,13 @@ impl MysqlSource {
         for r in &rows {
             // Dates that aren't ones are counted in the rows kept.
             let mut unread = Vec::new();
-            let Some(f) = self.row_feature(r, &mut unread) else {
+            let Some((f, lonlat)) = self.row_feature(r, &mut unread) else {
                 out.skipped += 1;
                 continue;
             };
             // The index matched the request's box in the table's coordinates, which holds more
-            // than the request when they are projected.
-            let Some(g) = &f.geometry else { continue };
-            if !in_request(g, req) {
+            // than the request when they are projected: placed in longitude/latitude to compare.
+            if !Reproject::within(lonlat.as_ref(), req.extent.as_ref()) {
                 continue;
             }
             super::add_unread_dates(&mut out.unread_dates, &unread);
@@ -1098,11 +1104,17 @@ impl FeatureSource for MysqlSource {
         &self.info
     }
 
+    /// The table's own system, which its rows are read in (as a file's are kept).
+    fn coord_crs(&self) -> crate::raster::Crs {
+        self.reproject.crs()
+    }
+
     fn read(&self, req: &Request) -> Result<Batch> {
         self.read_within(req, None)
     }
 }
 
+#[expect(clippy::disallowed_methods, reason = "a thread the system refuses fails the test, as it should")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1302,11 +1314,11 @@ mod tests {
 
     #[test]
     fn refused_database_view_is_not_a_whole_table_sample() {
-        let r = Reproject::from_crs(crate::raster::Crs::from_epsg(32617).unwrap(), &mut Vec::new());
-        let req = Request { extent: Some(Extent::new(-120.0, -30.0, 10.0, 30.0)), limit: 10 };
+        let r = Reproject::from_crs(crate::raster::Crs::from_epsg(32617).unwrap(), &mut crate::loss::Notes::new());
+        let req = Request { extent: Some(Extent::new(-120.0, -30.0, 10.0, 30.0)), limit: 10, own: None };
         let all = Extent::new(-84.0, 0.0, -78.0, 25.0);
         assert!(native_window(&req, all, &r).unwrap_err().to_string().contains("can't be bounded"));
-        let clean = Request { extent: Some(Extent::new(-84.0, 30.0, -78.0, 40.0)), limit: 10 };
+        let clean = Request { extent: Some(Extent::new(-84.0, 30.0, -78.0, 40.0)), limit: 10, own: None };
         assert!(native_window(&clean, Extent::EMPTY, &r).unwrap().is_some());
         assert!(native_window(&Request::all(), all, &r).unwrap().is_none());
     }
@@ -1357,15 +1369,17 @@ mod tests {
                 let src = MysqlSource::open(conn.clone(), t.clone(), Some(f), None).unwrap_or_else(|e| panic!("{}: {e}", t.label()));
                 let opened = start.elapsed();
                 let i = src.info();
-                let whole = src.read(&Request { extent: None, limit: 250_000 }).unwrap_or_else(|e| panic!("{}: {e}", t.label()));
+                let whole = src.read(&Request { extent: None, limit: 250_000, own: None }).unwrap_or_else(|e| panic!("{}: {e}", t.label()));
                 let read = start.elapsed() - opened;
                 let e = i.extent;
                 let q = Extent::new(e.min_x, e.min_y, e.min_x + e.width() / 2.0, e.min_y + e.height() / 2.0);
                 let started = std::time::Instant::now();
-                let part = src.read(&Request { extent: Some(q), limit: 1000 }).unwrap_or_else(|e| panic!("{}: {e}", t.label()));
+                let part = src.read(&Request { extent: Some(q), limit: 1000, own: None }).unwrap_or_else(|e| panic!("{}: {e}", t.label()));
                 let quarter = started.elapsed();
+                // In the table's own system: compared in longitude/latitude, as the request is.
+                let to = src.coord_crs().to(crate::raster::Crs::LonLat).unwrap_or_else(|e| panic!("{e}"));
                 for ft in &part.features {
-                    let g = ft.geometry.as_ref().map(|g| g.extent()).unwrap_or(Extent::EMPTY);
+                    let g = ft.geometry.as_ref().map(|g| to.geometry(g).extent()).unwrap_or(Extent::EMPTY);
                     assert!(g.intersects(&q.padded(0.01, 0.0)), "{}: feature {} outside the request", t.label(), ft.id);
                 }
                 let mut ids: Vec<u64> = whole.features.iter().map(|f| f.id).collect();

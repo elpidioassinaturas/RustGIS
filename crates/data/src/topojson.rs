@@ -475,15 +475,18 @@ fn read_with(file_name: &str, text: &str, budget: usize) -> Result<Vec<(Dataset,
         // Geometries left out are said with why; their features are kept, with their attributes,
         // so they aren't counted as skipped.
         if bad > 0 {
-            rep.messages.push(format!(
+            rep.messages.push(crate::loss::Note::loss(crate::loss::LossCode::DroppedGeometry, format!(
                 "{} couldn't be read (unreadable coordinates or arcs, a member of a collection that can't be read, or a kind of geometry not read): kept as features without geometry",
                 counted(bad, "geometry", "geometries")
-            ));
+            )));
         }
         if cut > 0 {
-            rep.messages.push(format!(
-                "{} left out at the limit of {budget} coordinates rebuilt from the file's arcs: kept as features without geometry",
-                counted(cut, "geometry", "geometries")
+            rep.messages.push(crate::loss::Note::loss(
+                crate::loss::LossCode::DroppedGeometry,
+                format!(
+                    "{} left out at the limit of {budget} coordinates rebuilt from the file's arcs: kept as features without geometry",
+                    counted(cut, "geometry", "geometries")
+                ),
             ));
         }
         let lost: usize = used.iter().filter_map(|i| topo.arcs_lost.get(*i)).sum();
@@ -508,9 +511,12 @@ fn read_with(file_name: &str, text: &str, budget: usize) -> Result<Vec<(Dataset,
     if objects.len() > MAX_OBJECTS
         && let Some((_, rep)) = out.first_mut()
     {
-        rep.messages.push(format!(
-            "{} left out past the limit of {MAX_OBJECTS} objects: only the first {MAX_OBJECTS} are read",
-            counted(objects.len() - MAX_OBJECTS, "object", "objects")
+        rep.messages.push(crate::loss::Note::loss(
+            crate::loss::LossCode::DroppedOverLimit,
+            format!(
+                "{} left out past the limit of {MAX_OBJECTS} objects: only the first {MAX_OBJECTS} are read",
+                counted(objects.len() - MAX_OBJECTS, "object", "objects")
+            ),
         ));
     }
     if out.is_empty() {
@@ -594,7 +600,7 @@ mod tests {
     /// them.
     fn zm_said(text: &str) -> (bool, Vec<String>) {
         let (ds, rep) = read("z.topojson", text).unwrap().remove(0);
-        (ds.zm_dropped, rep.messages)
+        (ds.zm_dropped, rep.messages.texts().map(str::to_string).collect())
     }
 
     #[test]
@@ -668,7 +674,7 @@ mod tests {
     fn a_height_that_isnt_a_number_is_said() {
         let said = |text: &str| -> Vec<String> {
             let (_, rep) = read("h.topojson", text).unwrap().remove(0);
-            rep.messages.into_iter().filter(|m| m.contains("read without a height")).collect()
+            rep.messages.texts().filter(|m| m.contains("read without a height")).map(str::to_string).collect()
         };
         let lossy = r#"{"type":"Topology","objects":{"o":{"type":"GeometryCollection","geometries":[
 {"type":"Point","coordinates":[1,2,"10"]},{"type":"MultiPoint","coordinates":[[1,2,true],[3,4,5]]},{"type":"LineString","arcs":[0]}]}},
@@ -851,7 +857,7 @@ mod tests {
 {"type":"Point","coordinates":[1,2,3]}]}},"arcs":[[[0,0,9],[1,1,9]]]}"#;
         let (ds, rep) = read("z.topojson", text).unwrap().remove(0);
         assert_eq!(rep.skipped, 0);
-        assert!(ds.zm_dropped && rep.messages.contains(&crate::zm_note(Some(1))), "{:?}", rep.messages);
+        assert!(ds.zm_dropped && rep.messages.says(&crate::zm_note(Some(1))), "{:?}", rep.messages);
     }
 
     #[test]

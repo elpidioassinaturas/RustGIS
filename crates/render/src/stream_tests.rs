@@ -27,7 +27,7 @@ impl FeatureSource for Chunks {
             unread_dates: Vec::new(),
             rounded_dates: Vec::new(),
             null_text: Vec::new(),
-            notes: Vec::new(),
+            notes: Default::default(),
             not_utf8: Vec::new(),
         })
     }
@@ -84,7 +84,7 @@ fn streamed_kind(layer: &Layer, size: usize, native: bool) -> Layer {
         count: Some(ds.features.len() as u64),
         crs: if native { "EPSG:3857".into() } else { "EPSG:4326".into() },
         indexed: true,
-        notes: Vec::new(),
+        notes: Default::default(),
         zm_dropped: false,
     };
     let mut l = layer.clone();
@@ -111,7 +111,7 @@ fn complete_chunks_preserve_painter_order_filters_transparency_labels_and_select
                 unread_dates: Vec::new(),
                 rounded_dates: Vec::new(),
                 null_text: Vec::new(),
-                notes: Vec::new(),
+                notes: Default::default(),
                 not_utf8: Vec::new(),
             })
         }
@@ -874,7 +874,7 @@ fn pitched_mixed_sources_keep_windows_and_pending_on_the_owner() {
                 unread_dates: Vec::new(),
                 rounded_dates: Vec::new(),
                 null_text: Vec::new(),
-                notes: Vec::new(),
+                notes: Default::default(),
                 not_utf8: Vec::new(),
             })
         }
@@ -1716,7 +1716,7 @@ fn a_stopped_frame_reads_no_further_chunk_and_leaves_its_source_unfailed() {
         count: Some(ds.features.len() as u64),
         crs: "EPSG:4326".into(),
         indexed: true,
-        notes: Vec::new(),
+        notes: Default::default(),
         zm_dropped: false,
     };
     let stop = Arc::new(AtomicBool::new(false));
@@ -1737,4 +1737,526 @@ fn a_stopped_frame_reads_no_further_chunk_and_leaves_its_source_unfailed() {
     let drawn = crate::cancel::DRAWN.get();
     assert!(drawn <= 20, "{drawn} features drawn: the read went on past the first chunk");
     assert!(m.layers[0].source.as_ref().is_some_and(|s| s.error.is_none()), "a stop isn't a source error");
+}
+
+/// A source that reads only the features whose boxes meet the extent asked for, as a Shapefile's
+/// index does, and keeps each extent asked for.
+struct Near {
+    chunks: Chunks,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<Option<Extent>>>>,
+    /// Whether a read by area finds every feature a whole read does.
+    all_by_area: bool,
+}
+
+impl FeatureSource for Near {
+    fn info(&self) -> &SourceInfo {
+        self.chunks.info()
+    }
+    fn read(&self, r: &Request) -> rustgis_data::Result<Batch> {
+        self.chunks.read(r)
+    }
+    fn streams_chunks(&self) -> bool {
+        true
+    }
+    fn finds_all_by_area(&self) -> bool {
+        self.all_by_area
+    }
+    fn same_as_opened(&self) -> rustgis_data::Result<bool> {
+        Ok(true)
+    }
+    /// Keeps `extent`, then gives the features whose boxes meet it (all of them for `None`), in
+    /// file order.
+    fn visit_chunks(
+        &self,
+        extent: Option<Extent>,
+        _: usize,
+        visit: &mut dyn FnMut(Vec<Feature>) -> rustgis_data::Result<()>,
+    ) -> rustgis_data::Result<Batch> {
+        self.asked.lock().unwrap().push(extent);
+        let near: Vec<Feature> = self
+            .chunks
+            .ds
+            .features
+            .iter()
+            .filter(|f| extent.is_none_or(|e| f.geometry.as_ref().is_some_and(|g| g.extent().intersects(&e))))
+            .cloned()
+            .collect();
+        let matched = near.len() as u64;
+        for chunk in near.chunks(7) {
+            visit(chunk.to_vec())?;
+        }
+        Ok(Batch { complete: true, matched, ..Default::default() })
+    }
+}
+
+/// A streamed layer that draws nothing from beyond the view reads only the features near it on
+/// Web Mercator, and draws what the layer held in memory draws (#1065); one whose labels, stacked
+/// strokes, selection or row numbers reach in from beyond the view, or on another projection,
+/// reads them all.
+#[test]
+fn a_streamed_layer_reads_only_the_view_when_nothing_it_draws_reaches_in() {
+    use std::sync::{Arc, Mutex};
+    // A grid of squares and of points, a degree apart, across 40 degrees.
+    let mut squares = Dataset::new("squares", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+    let mut points = Dataset::new("points", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+    for i in 0..40 {
+        for j in 0..40 {
+            let (x, y) = (i as f64 - 20.0, j as f64 - 20.0);
+            let ring =
+                vec![Coord::new(x, y), Coord::new(x + 0.6, y), Coord::new(x + 0.6, y + 0.6), Coord::new(x, y + 0.6), Coord::new(x, y)];
+            squares.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Value::Text(format!("s{i}-{j}"))]);
+            points.push(Some(Geometry::Point(Coord::new(x + 0.3, y + 0.3))), vec![Value::Text(format!("p{i}-{j}"))]);
+        }
+    }
+    // A view of a few squares near the grid's centre, on Web Mercator and a curved projection,
+    // north up and turned.
+    let camera = Camera::new(rustgis_geom::lonlat_to_merc(Coord::new(0.3, 0.3)), 2_000.0);
+    let total = squares.features.len();
+    let cases: [(Dataset, fn(&mut Layer), bool); 7] = [
+        (squares.clone(), |_| {}, true),
+        (points.clone(), |_| {}, true),
+        (squares.clone(), |l| l.labels.enabled = true, false),
+        (points.clone(), |l| l.line_strokes = vec![LineStroke { offset: 3.0, width: Some(2.0), ..Default::default() }], false),
+        (points, |l| l.selection = vec![0], false),
+        (squares.clone(), |l| l.selection = vec![0], false),
+        (squares.clone(), |l| l.definition_query = Some("@row_number > 0".into()), false),
+    ];
+    let views = [rustgis_map::Projection::default(), rustgis_map::Projection::Custom("robinson".into())].into_iter().flat_map(|p| {
+        [0.0, 25.0].map(|bearing| {
+            (p.clone(), View { width: 320.0, height: 240.0, pixels_per_point: 1.0, camera: Camera { bearing, ..camera }, sky: false })
+        })
+    });
+    for ((projection, view), (n, (ds, style, near))) in
+        views.flat_map(|v| cases.clone().into_iter().enumerate().map(move |c| (v.clone(), c)))
+    {
+        let mut m = Map::new("near");
+        // Only Web Mercator keeps a box of longitude/latitude whole.
+        let near = near && projection == rustgis_map::Projection::default();
+        m.projection = projection;
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.add_dataset(ds.clone());
+        m.layers[0].labels.default.field = "name".into();
+        style(&mut m.layers[0]);
+        let expected = render(&mut m.clone(), &view).unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut actual = m.clone();
+        let mut layer = streamed(&m.layers[0], usize::MAX);
+        let info = layer.source.as_ref().unwrap().info().unwrap().clone();
+        let features = ds.features.clone();
+        let chunks = Chunks { info, ds, size: usize::MAX };
+        layer.source = Some(SourceLayer::from_path("near.shp", None, Box::new(Near { chunks, asked: asked.clone(), all_by_area: true })));
+        layer.selection = m.layers[0].selection.clone();
+        actual.layers[0] = layer;
+        let Some(RenderOutput::Cpu(got)) = render_with_backend(&mut actual, &view, true, Backend::Cpu) else {
+            panic!("case {n}, {view:?}: a complete frame");
+        };
+        assert!(got.pixmap.data() == expected.pixmap.data(), "case {n}, {view:?}: the pixels changed");
+        let asked = asked.lock().unwrap();
+        let drawn = asked.last().copied().flatten();
+        if near {
+            let e = drawn.unwrap_or_else(|| panic!("case {n}: the whole source was read"));
+            let read = features.iter().filter(|f| f.geometry.as_ref().is_some_and(|g| g.extent().intersects(&e))).count();
+            // A fifth: the view is read a quarter of its size wider on each side, to be kept.
+            assert!(read * 5 < total, "case {n}, {view:?}: {read} of {total} features read for a view of a few");
+        } else {
+            assert_eq!(drawn, None, "case {n}: a layer reaching in from beyond the view reads everything");
+        }
+    }
+    // A view over most of the grid reads all of it, in file order.
+    let mut m = Map::new("whole");
+    m.basemap = rustgis_map::Basemap::Blank;
+    m.add_dataset(squares.clone());
+    let view = View { width: 320.0, height: 240.0, pixels_per_point: 1.0, camera: Camera { res: 15_000.0, ..camera }, sky: false };
+    let expected = render(&mut m.clone(), &view).unwrap();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let mut layer = streamed(&m.layers[0], usize::MAX);
+    let info = layer.source.as_ref().unwrap().info().unwrap().clone();
+    let chunks = Chunks { info, ds: squares, size: usize::MAX };
+    layer.source = Some(SourceLayer::from_path("whole.shp", None, Box::new(Near { chunks, asked: asked.clone(), all_by_area: true })));
+    m.layers[0] = layer;
+    let Some(RenderOutput::Cpu(got)) = render_with_backend(&mut m, &view, true, Backend::Cpu) else { panic!("a complete frame") };
+    assert!(got.pixmap.data() == expected.pixmap.data(), "the pixels changed");
+    assert_eq!(asked.lock().unwrap().last().copied().flatten(), None, "a view over most of the layer reads it all");
+    // A source whose reads by area leave features out, and a view reaching the latitudes Web
+    // Mercator clamps (a point at 88°N drawn on its edge), read everything too.
+    let mut far = Dataset::new("far", GeometryType::Point, vec![]);
+    for x in 0..200 {
+        far.push(Some(Geometry::Point(Coord::new(f64::from(x) * 0.5 - 50.0, 0.0))), vec![]);
+    }
+    far.push(Some(Geometry::Point(Coord::new(60.0, 88.0))), vec![]);
+    let edge = rustgis_geom::lonlat_to_merc(Coord::new(60.0, 88.0));
+    for (all_by_area, center) in [(false, rustgis_geom::lonlat_to_merc(Coord::new(0.0, 0.0))), (true, edge)] {
+        let mut m = Map::new("far");
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.add_dataset(far.clone());
+        let view = View { width: 320.0, height: 240.0, pixels_per_point: 1.0, camera: Camera::new(center, 1_000.0), sky: false };
+        let expected = render(&mut m.clone(), &view).unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut layer = streamed(&m.layers[0], usize::MAX);
+        let info = layer.source.as_ref().unwrap().info().unwrap().clone();
+        let chunks = Chunks { info, ds: far.clone(), size: usize::MAX };
+        layer.source = Some(SourceLayer::from_path("far.shp", None, Box::new(Near { chunks, asked: asked.clone(), all_by_area })));
+        m.layers[0] = layer;
+        let Some(RenderOutput::Cpu(got)) = render_with_backend(&mut m, &view, true, Backend::Cpu) else { panic!("a complete frame") };
+        assert!(got.pixmap.data() == expected.pixmap.data(), "all by area {all_by_area}: the pixels changed");
+        assert_eq!(asked.lock().unwrap().last().copied().flatten(), None, "all by area {all_by_area}: reads everything");
+    }
+}
+
+/// A streamed layer's view is kept with the geometry drawn from it: the same view again, a short
+/// pan, a zoom in and a restyle draw from it without reading the source, as the layer held in
+/// memory draws; a pan out of it or the source reset reads again (#1065).
+#[test]
+fn a_kept_view_draws_the_frames_inside_it_without_reading_the_source() {
+    use std::sync::{Arc, Mutex};
+    let mut squares = Dataset::new("squares", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+    for i in 0..40 {
+        for j in 0..40 {
+            let (x, y) = (i as f64 - 20.0, j as f64 - 20.0);
+            let ring =
+                vec![Coord::new(x, y), Coord::new(x + 0.6, y), Coord::new(x + 0.6, y + 0.6), Coord::new(x, y + 0.6), Coord::new(x, y)];
+            squares.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Value::Text(format!("s{i}-{j}"))]);
+        }
+    }
+    let mut base = Map::new("kept");
+    base.basemap = rustgis_map::Basemap::Blank;
+    base.add_dataset(squares.clone());
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let mut actual = base.clone();
+    let mut layer = streamed(&base.layers[0], usize::MAX);
+    let info = layer.source.as_ref().unwrap().info().unwrap().clone();
+    layer.source = Some(SourceLayer::from_path(
+        "kept.shp",
+        None,
+        Box::new(Near { chunks: Chunks { info, ds: squares, size: usize::MAX }, asked: asked.clone(), all_by_area: true }),
+    ));
+    actual.layers[0] = layer;
+    let camera = Camera::new(rustgis_geom::lonlat_to_merc(Coord::new(0.3, 0.3)), 2_000.0);
+    let mut view = View { width: 320.0, height: 240.0, pixels_per_point: 1.0, camera, sky: false };
+    // What drawing `view` reads from the source: the boxes asked for, none for a kept view.
+    let frame = |base: &mut Map, actual: &mut Map, view: &View, what: &str| -> Vec<bool> {
+        let before = asked.lock().unwrap().len();
+        let expected = render(&mut base.clone(), view).unwrap();
+        let Some(RenderOutput::Cpu(got)) = render_with_backend(&mut actual.clone(), view, true, Backend::Cpu) else {
+            panic!("{what}: a complete frame");
+        };
+        assert!(got.pixmap.data() == expected.pixmap.data(), "{what}: the pixels changed");
+        let asked = asked.lock().unwrap();
+        // Each read: whether by area. A whole read is the thinning decision's, made once a
+        // projection and level of detail, or a frame reading everything.
+        asked[before..].iter().map(Option::is_some).collect()
+    };
+    assert_eq!(frame(&mut base, &mut actual, &view, "first"), [false, true], "the first frame reads the view");
+    assert_eq!(frame(&mut base, &mut actual, &view, "again"), [false; 0], "the same view draws from the kept one");
+    view.camera.center.x += view.width * view.camera.res * 0.1;
+    assert_eq!(frame(&mut base, &mut actual, &view, "short pan"), [false; 0], "a short pan draws from the kept view");
+    view.camera.res /= 2.0;
+    assert_eq!(frame(&mut base, &mut actual, &view, "zoom in"), [false], "a zoom in decides its level and draws from the kept view");
+    for map in [&mut base, &mut actual] {
+        map.layers[0].renderer =
+            Renderer::Single(Symbol { fill: Rgba::new(30, 160, 90, 200), ..Symbol::default_for(GeometryType::Polygon, map.layers[0].id) });
+    }
+    assert_eq!(frame(&mut base, &mut actual, &view, "restyle"), [false; 0], "a restyled layer draws from the kept view");
+    view.camera.center.x += view.width * view.camera.res * 3.0;
+    assert_eq!(frame(&mut base, &mut actual, &view, "far pan"), [true], "a pan out of the kept view reads again");
+    // Robinson reads everything (no box), and leaves the Web Mercator view kept.
+    for map in [&mut base, &mut actual] {
+        map.projection = rustgis_map::Projection::Custom("robinson".into());
+    }
+    assert_eq!(frame(&mut base, &mut actual, &view, "robinson"), [false, false], "another projection decides and reads everything");
+    for map in [&mut base, &mut actual] {
+        map.projection = rustgis_map::Projection::default();
+    }
+    assert_eq!(frame(&mut base, &mut actual, &view, "back"), [false; 0], "the Web Mercator view is still kept");
+    actual.layers[0].source.as_mut().unwrap().reset();
+    assert_eq!(frame(&mut base, &mut actual, &view, "reset"), [false, true], "a reset source reads again");
+    // A view of nowhere in the layer, past the grid's east edge, is kept with nothing in it.
+    view.camera.center = rustgis_geom::lonlat_to_merc(Coord::new(30.0, 0.3));
+    assert_eq!(frame(&mut base, &mut actual, &view, "empty"), [true], "an empty view is read");
+    assert_eq!(frame(&mut base, &mut actual, &view, "empty again"), [false; 0], "and kept, with nothing in it");
+}
+
+/// A source that keeps each request a complete read asks, and answers as the one it wraps.
+struct Asked {
+    inner: Box<dyn FeatureSource>,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<Option<Request>>>>,
+}
+
+impl FeatureSource for Asked {
+    fn info(&self) -> &SourceInfo {
+        self.inner.info()
+    }
+    fn read(&self, r: &Request) -> rustgis_data::Result<Batch> {
+        self.inner.read(r)
+    }
+    fn coord_crs(&self) -> rustgis_data::raster::Crs {
+        self.inner.coord_crs()
+    }
+    fn reads_own_box(&self) -> bool {
+        self.inner.reads_own_box()
+    }
+    fn streams_chunks(&self) -> bool {
+        self.inner.streams_chunks()
+    }
+    fn finds_all_by_area(&self) -> bool {
+        self.inner.finds_all_by_area()
+    }
+    fn same_as_opened(&self) -> rustgis_data::Result<bool> {
+        self.inner.same_as_opened()
+    }
+    fn visit_chunks(
+        &self,
+        extent: Option<Extent>,
+        bytes: usize,
+        visit: &mut dyn FnMut(Vec<Feature>) -> rustgis_data::Result<()>,
+    ) -> rustgis_data::Result<Batch> {
+        self.asked.lock().unwrap().push(extent.map(|extent| Request { extent: Some(extent), limit: usize::MAX, own: None }));
+        self.inner.visit_chunks(extent, bytes, visit)
+    }
+    fn visits_ids(&self) -> bool {
+        self.inner.visits_ids()
+    }
+    /// Kept as a request of no extent with the number of ids as its limit (a read by ids), then
+    /// answered.
+    fn visit_ids_chunks(
+        &self,
+        ids: &[u64],
+        bytes: usize,
+        visit: &mut dyn FnMut(Vec<Feature>) -> rustgis_data::Result<()>,
+    ) -> rustgis_data::Result<Batch> {
+        self.asked.lock().unwrap().push(Some(Request { extent: None, limit: ids.len(), own: None }));
+        self.inner.visit_ids_chunks(ids, bytes, visit)
+    }
+    /// Kept as asked, then answered by the wrapped source.
+    fn visit_request_chunks(
+        &self,
+        req: &Request,
+        bytes: usize,
+        visit: &mut dyn FnMut(Vec<Feature>) -> rustgis_data::Result<()>,
+    ) -> rustgis_data::Result<Batch> {
+        self.asked.lock().unwrap().push(Some(*req));
+        self.inner.visit_request_chunks(req, bytes, visit)
+    }
+}
+
+/// A projected Shapefile on a map drawn in its own system reads only the view, by the view's box
+/// in the file's units, and draws what reading the whole file drew (#2788); on a map in another
+/// system it reads by no box (by its index of boxes as drawn). A Web Mercator file on Web
+/// Mercator reads by its box too.
+#[test]
+fn a_shapefile_on_a_map_in_its_own_system_reads_the_view_in_its_units() {
+    use rustgis_data::raster::Crs;
+    use std::sync::{Arc, Mutex};
+    rustgis_data::source::shp::use_temporary_index_dir();
+    let dir = tempfile::tempdir().unwrap();
+    for (crs, projection, own) in [
+        (Crs::from_epsg(32631).unwrap(), rustgis_map::Projection::Custom("EPSG:32631".into()), true),
+        (Crs::from_epsg(32631).unwrap(), rustgis_map::Projection::default(), false),
+        (Crs::WebMercator, rustgis_map::Projection::default(), true),
+    ] {
+        // Squares 600 m wide, 1 km apart, over 40 km around Paris, in the file's own units.
+        let (x0, y0) = if crs == Crs::WebMercator { (250_000.0, 6_230_000.0) } else { (440_000.0, 5_400_000.0) };
+        let mut ds = Dataset::new("squares", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+        for i in 0..40 {
+            for j in 0..40 {
+                let (x, y) = (x0 + f64::from(i) * 1000.0, y0 + f64::from(j) * 1000.0);
+                let ring = vec![
+                    Coord::new(x, y),
+                    Coord::new(x + 600.0, y),
+                    Coord::new(x + 600.0, y + 600.0),
+                    Coord::new(x, y + 600.0),
+                    Coord::new(x, y),
+                ];
+                ds.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Value::Text(format!("s{i}-{j}"))]);
+            }
+        }
+        ds.held_in = crs;
+        let path = dir.path().join(format!("squares-{}.shp", crs.label().replace([':', ' ', '/'], "_")));
+        rustgis_data::io::write_path_in(&ds, &path, crs).unwrap();
+        let mut base = Map::new("own");
+        base.basemap = rustgis_map::Basemap::Blank;
+        base.projection = projection.clone();
+        let opened = rustgis_data::source::shp::ShpSource::open_path(&path, "squares").unwrap();
+        let mut held = ds.clone();
+        held.fields = opened.info().fields.clone();
+        base.add_dataset(held);
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut actual = base.clone();
+        let mut layer = streamed(&base.layers[0], usize::MAX);
+        layer.source =
+            Some(SourceLayer::from_path(path.to_string_lossy(), None, Box::new(Asked { inner: Box::new(opened), asked: asked.clone() })));
+        actual.layers[0] = layer;
+        // A view of a few squares in the middle of the grid.
+        let middle = if crs == Crs::WebMercator {
+            Coord::new(x0 + 20_300.0, y0 + 20_300.0)
+        } else {
+            rustgis_geom::lonlat_to_merc(Coord::new(2.35, 48.85))
+        };
+        let center = if own && crs != Crs::WebMercator { Coord::new(x0 + 20_300.0, y0 + 20_300.0) } else { middle };
+        let view = View { width: 320.0, height: 240.0, pixels_per_point: 1.0, camera: Camera::new(center, 15.0), sky: false };
+        let what = format!("{} on {projection:?}", crs.label());
+        // The first frame reads the whole file (its stored boxes checked); the ones after only
+        // the view, and draw what it drew.
+        let mut whole = None;
+        for frame in 0..3 {
+            let Some(RenderOutput::Cpu(got)) = render_with_backend(&mut actual.clone(), &view, true, Backend::Cpu) else {
+                panic!("{what}: a complete frame");
+            };
+            let whole = whole.get_or_insert_with(|| got.pixmap.data().to_vec());
+            assert!(got.pixmap.data() == whole.as_slice(), "{what}, frame {frame}: the pixels changed");
+        }
+        let asked = asked.lock().unwrap();
+        let by_box: Vec<&Request> = asked.iter().flatten().collect();
+        if own {
+            let req = by_box.last().unwrap_or_else(|| panic!("{what}: never read by a box"));
+            let (asked_crs, b) = req.own.unwrap_or_else(|| panic!("{what}: read by longitude/latitude"));
+            assert_eq!(asked_crs, crs, "{what}");
+            assert!(b.width() < 10_000.0 && b.intersects(&Extent::new(x0, y0, x0 + 40_000.0, y0 + 40_000.0)), "{what}: {b:?}");
+        } else {
+            // A map in another system reads by the features' boxes as drawn (#2788), not by a box.
+            assert!(
+                by_box.iter().all(|r| r.own.is_none() && r.extent.is_none()),
+                "{what}: a map in another system reads by its index, not {by_box:?}"
+            );
+        }
+    }
+}
+
+/// How many reads a recording source has been asked.
+fn asked_len(asked: &std::sync::Mutex<Vec<Option<Request>>>) -> usize {
+    asked.lock().unwrap().len()
+}
+
+/// A streamed Shapefile on a map that doesn't draw it as it is (a UTM file on Web Mercator or
+/// Robinson, a longitude/latitude file on Robinson) reads every feature on its first frame and
+/// indexes their boxes as drawn; the frames after read only the features that index finds in the
+/// view, by id, and draw what the whole read drew (#2788). That includes a long line drawn
+/// straight across the view on Robinson while its box in the file misses the view's box.
+#[test]
+fn a_shapefile_on_another_map_reads_the_view_by_its_boxes_as_drawn() {
+    use rustgis_data::raster::Crs;
+    use std::sync::{Arc, Mutex};
+    rustgis_data::source::shp::use_temporary_index_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let utm = Crs::from_epsg(32631).unwrap();
+    let robinson = rustgis_map::Projection::Custom("robinson".into());
+    let squares = |x0: f64, y0: f64, step: f64| {
+        let mut ds = Dataset::new("squares", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+        for i in 0..40 {
+            for j in 0..40 {
+                let (x, y) = (x0 + f64::from(i) * step, y0 + f64::from(j) * step);
+                let w = step * 0.6;
+                let ring = vec![Coord::new(x, y), Coord::new(x + w, y), Coord::new(x + w, y + w), Coord::new(x, y + w), Coord::new(x, y)];
+                ds.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Value::Text(format!("s{i}-{j}"))]);
+            }
+        }
+        ds
+    };
+    // A line from 60°E on the equator to 60°E at 80°N, beside squares of a degree.
+    let mut lines = Dataset::new("lines", GeometryType::Polyline, vec![Field::new("name", FieldType::Text)]);
+    lines.push(Some(Geometry::Line(vec![vec![Coord::new(60.0, 0.0), Coord::new(60.0, 80.0)]])), vec![Value::Text("long".into())]);
+    for i in 0..40 {
+        for j in 0..40 {
+            let (x, y) = (f64::from(i) - 20.0, f64::from(j) - 20.0);
+            lines.push(
+                Some(Geometry::Line(vec![vec![Coord::new(x, y), Coord::new(x + 0.6, y + 0.6)]])),
+                vec![Value::Text(format!("l{i}-{j}"))],
+            );
+        }
+    }
+    let cases: [(&str, Dataset, Crs, rustgis_map::Projection); 3] = [
+        ("utm on web mercator", squares(440_000.0, 5_400_000.0, 1000.0), utm, rustgis_map::Projection::default()),
+        ("utm on robinson", squares(440_000.0, 5_400_000.0, 1000.0), utm, robinson.clone()),
+        ("long line on robinson", lines, Crs::LonLat, robinson),
+    ];
+    for (what, mut ds, crs, projection) in cases {
+        ds.held_in = crs;
+        let path = dir.path().join(format!("{}.shp", what.replace(' ', "-")));
+        rustgis_data::io::write_path_in(&ds, &path, crs).unwrap();
+        let mut base = Map::new("drawn");
+        base.basemap = rustgis_map::Basemap::Blank;
+        base.projection = projection;
+        let opened = rustgis_data::source::shp::ShpSource::open_path(&path, "drawn").unwrap();
+        let mut held = ds.clone();
+        held.fields = opened.info().fields.clone();
+        base.add_dataset(held);
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let asked_handle = Arc::clone(&asked);
+        let mut actual = base.clone();
+        let mut layer = streamed(&base.layers[0], usize::MAX);
+        layer.source =
+            Some(SourceLayer::from_path(path.to_string_lossy(), None, Box::new(Asked { inner: Box::new(opened), asked: asked.clone() })));
+        actual.layers[0] = layer;
+        let flat = actual.flat();
+        // The long line's middle as drawn (its two ends' places, halfway), else the squares' middle.
+        let center = if what.starts_with("long") {
+            let (a, b) = (flat.forward(Coord::new(60.0, 0.0)).unwrap(), flat.forward(Coord::new(60.0, 80.0)).unwrap());
+            Coord::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+        } else {
+            flat.forward(Coord::new(2.25, 48.9)).unwrap()
+        };
+        let view = View { width: 320.0, height: 240.0, pixels_per_point: 1.0, camera: Camera::new(center, 40.0), sky: false };
+        // The first frame reads every feature and has their boxes indexed off the frame; the
+        // frames after read every feature until the index lands, then only those it finds.
+        let by_ids = |r: &Option<Request>| r.is_some_and(|r| r.extent.is_none() && r.own.is_none());
+        let mut whole = None;
+        let mut frames = 0;
+        loop {
+            let Some(RenderOutput::Cpu(got)) = render_with_backend(&mut actual.clone(), &view, true, Backend::Cpu) else {
+                panic!("{what}: a complete frame");
+            };
+            let data = got.pixmap.data();
+            let whole = whole.get_or_insert_with(|| data.to_vec());
+            assert!(data == whole.as_slice(), "{what}, frame {frames}: the pixels changed");
+            assert!(data.chunks(4).any(|p| p != &data[..4]), "{what}: nothing drawn");
+            // Every read of the first frame is of every feature: there is no index yet.
+            if frames == 0 {
+                let first = asked.lock().unwrap().clone();
+                assert!(!first.is_empty() && first.iter().all(Option::is_none), "{what}: the first frame read {first:?}");
+            }
+            frames += 1;
+            if asked.lock().unwrap().last().is_some_and(by_ids) {
+                break;
+            }
+            assert!(frames < 2_000, "{what}: never read by ids");
+            std::thread::sleep(std::time::Duration::from_millis(2)); // test-wait: the index is packed on a worker
+        }
+        // One more frame, read by ids too, draws the same.
+        let Some(RenderOutput::Cpu(got)) = render_with_backend(&mut actual.clone(), &view, true, Backend::Cpu) else {
+            panic!("{what}: a complete frame");
+        };
+        assert!(Some(got.pixmap.data()) == whole.as_deref(), "{what}: the pixels changed");
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.first(), Some(&None), "{what}: the first frame reads every feature");
+        let last = asked.last().copied().flatten().filter(|r| by_ids(&Some(*r)));
+        // A fifth at most: the view is read a quarter of its size wider on each side, to be kept.
+        let ids = last.map_or(0, |r| r.limit);
+        assert!(ids > 0 && ids * 5 < ds.features.len(), "{what}: {ids} of {} features read for the view", ds.features.len());
+        drop(asked);
+        // Zoomed in, a new level of detail decides its thinning from every feature (once a level,
+        // #1121); the view itself is read by ids, or drawn from the view kept, never whole.
+        let before = asked_len(&asked_handle);
+        let zoomed = View { camera: Camera { res: view.camera.res / 2.0, ..view.camera }, ..view };
+        let Some(RenderOutput::Cpu(got)) = render_with_backend(&mut actual.clone(), &zoomed, true, Backend::Cpu) else {
+            panic!("{what}: a zoomed frame");
+        };
+        // Exactly one read of every feature (the new level's decision), the view itself read by
+        // ids or drawn from the view kept: a whole read of it would be a second.
+        let asked = asked_handle.lock().unwrap();
+        let zoom = &asked[before..];
+        assert!(zoom.iter().filter(|r| r.is_none()).count() == 1 && zoom.iter().all(|r| r.is_none() || by_ids(r)), "{what}: {zoom:?}");
+        // And it draws what a source opened afresh, read whole, draws at that zoom.
+        let mut fresh = base.clone();
+        let mut layer = streamed(&base.layers[0], usize::MAX);
+        layer.source = Some(SourceLayer::from_path(
+            path.to_string_lossy(),
+            None,
+            Box::new(rustgis_data::source::shp::ShpSource::open_path(&path, "drawn").unwrap()),
+        ));
+        fresh.layers[0] = layer;
+        let Some(RenderOutput::Cpu(whole_zoomed)) = render_with_backend(&mut fresh, &zoomed, true, Backend::Cpu) else {
+            panic!("{what}: a zoomed whole frame");
+        };
+        assert!(got.pixmap.data() == whole_zoomed.pixmap.data(), "{what}: the zoomed pixels changed");
+    }
 }

@@ -1349,7 +1349,8 @@ mod tests {
         let mut app = RustGisApp::new(rustgis_engine::Session::new(rustgis_engine::Project::default()));
         app.reads_off_frame = true;
         app.run("project.coordinateSystem", json!({"fromFirstLayer": true})).unwrap();
-        assert_eq!(crate::layerchooser::add_file(&mut app, &path.display().to_string()).unwrap()["started"], "Add Data");
+        // Added as Add Data adds it once Copy or Link is answered (a Shapefile asks, #2350).
+        assert_eq!(crate::readjob::run(&mut app, "layer.addData", json!({"path": path})).unwrap()["started"], "Add Data");
         landed(&mut app, 60);
         assert_eq!(app.session.map().layers.len(), 1);
         assert_eq!(app.session.project.coordinate_system, Some(rustgis_engine::data::raster::Crs::Epsg(2056)));
@@ -1739,8 +1740,8 @@ mod tests {
         assert!(matches!(app.session.map().layer(id).unwrap().symbol(0).marker, rustgis_engine::map::Marker::Picture(_)));
         app.run("edit.undo", Value::Null).unwrap();
         assert!(matches!(app.session.map().layer(id).unwrap().symbol(0).marker, rustgis_engine::map::Marker::Circle));
-        // A clean style says nothing; one whose image isn't a PNG or JPEG says so once, on landing.
-        let said = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("isn't a PNG or JPEG")).count();
+        // A clean style says nothing; one whose image isn't a PNG, JPEG or SVG says so once, on landing.
+        let said = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("isn't a PNG, JPEG or SVG")).count();
         assert_eq!(said(&app), 0);
         std::fs::write(dir.path().join("pin.gif"), b"GIF89a").unwrap();
         let gif = dir.path().join("gif.qml");

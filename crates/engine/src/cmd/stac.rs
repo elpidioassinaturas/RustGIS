@@ -1214,22 +1214,30 @@ impl super::cube::TimeCube for StacCube {
     /// Band pixels their item's mask file doesn't cover: left out as not clear, and said with
     /// their count and the first such mask; and cells left out at a date for a value in only some
     /// of the bands asked for.
-    fn lost(&self) -> Vec<String> {
+    fn lost(&self) -> Vec<rustgis_data::loss::Note> {
+        // Pixels with a value left out as not clear: a value lost.
         let mut said = match self.uncovered.lock().map(|u| u.clone()) {
-            Ok((n, Some(href))) if n > 0 => vec![crate::sources::message_with_address(
-                &href,
-                &format!(
-                    "{n} band pixel(s) with a value lie outside their item's mask file (this one the first), so they were left out as not clear"
+            Ok((n, Some(href))) if n > 0 => vec![rustgis_data::loss::Note::loss(
+                rustgis_data::loss::LossCode::DroppedValue,
+                crate::sources::message_with_address(
+                    &href,
+                    &format!(
+                        "{n} band pixel(s) with a value lie outside their item's mask file (this one the first), so they were left out as not clear"
+                    ),
                 ),
             )],
             _ => Vec::new(),
         };
         let partial = self.partial.load(std::sync::atomic::Ordering::Relaxed);
         if partial > 0 {
-            said.push(format!(
-                "{}: {partial} cell(s) had a value in some of the bands {} but not all at a date, so they were left out at that date (each cell's bands are of one date)",
-                self.label,
-                self.assets.join(", ")
+            // Values in some of a date's bands, left out with the rest of that date: values lost.
+            said.push(rustgis_data::loss::Note::loss(
+                rustgis_data::loss::LossCode::DroppedValue,
+                format!(
+                    "{}: {partial} cell(s) had a value in some of the bands {} but not all at a date, so they were left out at that date (each cell's bands are of one date)",
+                    self.label,
+                    self.assets.join(", ")
+                ),
             ));
         }
         said

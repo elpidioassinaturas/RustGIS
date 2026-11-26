@@ -42,7 +42,8 @@ pub(super) fn long_commands(boundaries: bool) {
             layer.touch_geometry();
         }
     }
-    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": if boundaries { tiny_raster(false) } else { dem_b64() }})).unwrap();
+    let data = if boundaries { tiny_raster(false) } else { dem_b64() };
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": data})).unwrap();
     let dem = s.map().layers.iter().find(|l| l.is_raster()).unwrap().name.clone();
     // What some of them read: a later DEM, a slope, training squares, an imagery workspace, a
     // two-class scene with its training polygons, and a layout.
@@ -86,6 +87,8 @@ pub(super) fn long_commands(boundaries: bool) {
         ("raster.index", json!({"layer": dem, "index": "ndvi", "nir": 1, "red": 1})),
         ("raster.process", json!({"layer": dem, "operation": "resample", "factor": 4})),
         ("imagery.mosaic", json!({"name": "Valley"})),
+        ("raster.rasterize", json!({"layer": "Squares", "field": "name", "cellSize": 0.0005, "path": out("burned.tif")})),
+        ("raster.mosaic", json!({"inputs": ["dem_later", out("tile.tif"), dem], "path": out("mosaic.tif")})),
         (
             "dl.classify",
             json!({"layer": "scene", "training": "training", "classField": "class", "bands": [1, 2], "epochs": if boundaries { 2 } else { 30 }, "model": "landcover"}),
@@ -113,6 +116,12 @@ pub(super) fn long_commands(boundaries: bool) {
                 "index": "ndvi", "bbox": [10.0, 45.0, 10.02, 45.02]}),
         ),
     ];
+    // A mosaic's input read from a file, and a file where it writes its own: Cancel keeps both.
+    {
+        use base64::Engine;
+        std::fs::write(out("tile.tif"), base64::engine::general_purpose::STANDARD.decode(&data).unwrap()).unwrap();
+        std::fs::write(out("mosaic.tif"), b"before").unwrap();
+    }
     // Every command that runs in the background is here, and only those.
     /// Keeps the shared fixture list in step with the production registry.
     fn listed<'a>(l: &[(&'a str, Value)]) -> std::collections::BTreeSet<&'a str> {
@@ -180,6 +189,11 @@ pub(super) fn long_commands(boundaries: bool) {
     // The Add Service dialog replays supplied metadata off the desktop frame too.
     let params = json!({"url":"https://maps.example.org/dataset","type":"ogcapi","text":"{\"collections\":[]}"});
     for command in ["service.layers", "service.add"] {
+        // An add names its layer: a call without one is refused before any discovery starts.
+        let mut params = params.clone();
+        if command == "service.add" {
+            params["layer"] = json!("map");
+        }
         // Adding a service needs a real collection and remote features to succeed. An empty
         // listing is useful only for the original first-check cancellation test.
         if !boundaries || command == "service.layers" {
@@ -348,6 +362,10 @@ pub(super) fn long_commands(boundaries: bool) {
         ("tabulateIntersection", json!({"zones": "Countries", "classes": "Squares", "includeEmptyZones": true})),
         ("serviceArea", json!({"network": "Rivers", "facilities": "Cities", "breaks": "50", "snapDistance": 100000})),
         ("odCostMatrix", json!({"network": "Rivers", "origins": "Cities", "destinations": "Cities", "count": 1, "snapDistance": 100000})),
+        ("a5Grid", json!({"system": "S2", "resolution": 4, "area": "Input Layer", "input": "Countries"})),
+        ("a5Grid", json!({"system": "Hexagon", "resolution": 3, "area": "Input Layer", "input": "Countries"})),
+        ("a5Aggregate", json!({"system": "H3", "input": "Cities", "resolution": 3})),
+        ("a5Grid", json!({"system": "H3", "resolution": 3, "area": "Input Layer", "input": "Countries"})),
     ];
     for (tool, params) in &tools {
         exercise(&s, tool, params, Kind::Tool, &dir.0, boundaries);

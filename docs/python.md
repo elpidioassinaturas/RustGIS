@@ -212,6 +212,24 @@ s.undo()
 s.redo()
 ```
 
+A notice that says a command lost data, and has a [loss code](cli.md#loss-codes), is also raised
+as a Python warning: `rustgis.DroppedWarning`, `ChangedWarning`, `ApproximatedWarning` or
+`AssumedWarning`, all subclasses of `rustgis.DataLossWarning`. The warning's `code` (such as
+`"dropped.ring"`) and `kind` say which, and its message is the notice's text with the code. The
+notice stays in `s.notices()`. Python's warning filters decide what happens, so a script can turn
+losses into errors and allow the ones it expects:
+
+```python
+import warnings
+
+warnings.filterwarnings("error", category=rustgis.DataLossWarning)
+warnings.filterwarnings("ignore", category=rustgis.DroppedWarning, message=r".*\[dropped\.ring\]")
+s.add_data("storms.rss")                            # raises on any other loss
+```
+
+A warning turned into an error is raised after the command has run, so what it changed is kept.
+Losses that don't have a code yet are only in `s.notices()`.
+
 `run_tool` runs a geoprocessing tool and returns the layer it made (a list when it made several),
 or the tool's own result for one that selects or makes a table. Layers can be given as `Layer`
 objects or by name; tools take layers by name, so of two layers with the same name the upper one
@@ -323,7 +341,10 @@ to choose coordinate columns.
 Every format the app reads works here: GeoJSON, CSV, Shapefile, GeoPackage, GeoParquet,
 FlatGeobuf, KML/KMZ, GPX, GeoTIFF and the rest of [Supported Data
 Formats](user-guide/data-formats.md). A layer read in place (a large file, a database table)
-keeps only the features of the last view in memory; `to_geojson` and `to_geopandas` read all of
+keeps only the features of the last view in memory (`Layer.count` is its source's total when the source says it,
+the planner's estimate for a large PostGIS table, and otherwise the number
+loaded now, which may be only part of the layer; for a feature layer `s.layers()` gives `features`,
+the source's total or `None`, and `loaded`, what is in memory; a raster's entry has neither); `to_geojson` and `to_geopandas` read all of
 its features from the source each time they're called (unless asked for the selected features
 only), as Load All Features does, and rows that can't be read are left out and said in
 `s.notices()`. `to_file` can be cheaper for a large layer: to GeoJSON, CSV,

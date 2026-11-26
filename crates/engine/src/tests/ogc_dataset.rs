@@ -32,6 +32,71 @@ fn ogc_dataset_supplied_listing_reads_off_frame_with_its_login() {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn ogc_dataset_url_only_add_prepares_discovery_on_the_worker() {
+    use crate::analysis::control::Control;
+    use crate::cmd::reads::{read_ahead, read_land};
+    let landing = json!({"links":[{"rel":"tilesets-map","href":"/tiles?f=json"}]});
+    let metadata = json!({"tileMatrixSetId":"WebMercatorQuad","links":[
+        {"rel":"item","type":"image/png","href":"/map/{tileMatrix}/{tileRow}/{tileCol}.png"}]});
+    let server = Server::new(vec![Route::new("/dataset", &landing.to_string()), Route::new("/tiles", &metadata.to_string())]);
+    let mut session = Session::new(Project::default());
+    let read =
+        read_ahead(&mut session, "service.add", &json!({"url":format!("{}/dataset", server.base),"type":"ogcapi","layer":"map"})).unwrap();
+    assert!(read.reads(), "a URL-only add must prepare its discovery for a worker");
+    assert!(server.requests().is_empty(), "preparing the read cannot fetch on the frame");
+    let done = read.run(&Control::new()).unwrap();
+    assert_eq!(server.requests().len(), 2);
+    assert!(session.map().tiles.is_empty());
+    read_land(&mut session, done).unwrap();
+    assert_eq!(session.map().tiles.len(), 1);
+    assert_eq!(server.requests().len(), 2, "landing consumes the prepared discovery without fetching it again");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn ogc_dataset_url_only_add_without_a_layer_is_refused_before_any_fetch() {
+    use crate::cmd::reads::read_ahead;
+    let server = Server::new(vec![Route::new("/dataset", &json!({"links":[]}).to_string())]);
+    let mut session = Session::new(Project::default());
+    for layer in [None, Some("  ")] {
+        let mut params = json!({"url":format!("{}/dataset", server.base),"type":"ogcapi"});
+        if let Some(layer) = layer {
+            params["layer"] = json!(layer);
+        }
+        let error = read_ahead(&mut session, "service.add", &params).err().unwrap();
+        assert_eq!(error, "layer is required");
+    }
+    let error = read_ahead(&mut session, "service.add", &json!({"url":"ftp://maps.example.org/dataset","layer":"map"})).err().unwrap();
+    assert!(error.contains("http:// or https://"), "{error}");
+    assert!(server.requests().is_empty(), "a refused call cannot fetch");
+}
+
+#[test]
+fn ogc_dataset_stopped_discovery_counts_a_pending_tilejson_source_once() {
+    let root = json!({"links":[{"rel":"tilesets-vector","href":"/tiles?f=json"},{"rel":"styles","href":"/styles?f=json"}]});
+    let tiles = json!({"tilesets":[{"dataType":"vector","tileMatrixSetId":"WebMercatorQuad","links":[
+        {"rel":"item","type":"application/vnd.mapbox-vector-tile","href":"/vector/{tileMatrix}/{tileRow}/{tileCol}.pbf"}]}]});
+    let styles = json!({"styles":[{"id":"roads","links":[
+        {"rel":"stylesheet","type":"application/vnd.mapbox.style+json","href":"/style?f=mapbox"}]}]});
+    let style = json!({"version":8,"sources":{"tiles":{"type":"vector","url":"/source?f=json"}},
+        "layers":[{"id":"roads","type":"line","source":"tiles","source-layer":"roads"}]});
+    let params = json!({"url":"https://maps.example.org/dataset","type":"ogcapi","layer":"roads","text":root.to_string(),
+    "documents":[
+        {"url":"https://maps.example.org/tiles?f=json","text":tiles.to_string()},
+        {"url":"https://maps.example.org/styles?f=json","text":styles.to_string()},
+        {"url":"https://maps.example.org/style?f=mapbox","text":style.to_string()},
+        {"url":"https://maps.example.org/source?f=json","text":" ".repeat(crate::cmd::service::MAX_DATASET_BYTES)}
+    ]});
+    let mut session = Session::new(Project::default());
+    for command in ["service.layers", "service.add"] {
+        let error = session.run(command, &params).unwrap_err();
+        assert!(error.contains("metadata budget"), "{error}");
+        assert!(error.contains("1 TileJSON source checks were left out: dataset discovery stopped"), "{error}");
+    }
+}
+
 #[test]
 fn ogc_dataset_rejected_landing_links_never_guess_a_template() {
     let mut session = Session::new(Project::default());
@@ -318,8 +383,11 @@ fn ogc_dataset_styles_use_advertised_projection_and_native_web_parity() {
 
 #[test]
 fn ogc_dataset_styles_require_templates_allowed_from_the_tileset_document() {
+    // The first read from the internet (the app's record of its root), on its own name as the
+    // record is process-wide; the last on the local network.
+    crate::render::rustgis_tiles::cache::restrict_to_public("https://maps-web-templates.example.org/dataset");
     for (origin, template, allowed) in [
-        ("https://maps.example.org", "http://127.0.0.1/{z}/{y}/{x}.pbf", false),
+        ("https://maps-web-templates.example.org", "http://127.0.0.1/{z}/{y}/{x}.pbf", false),
         ("https://maps.example.org", "https://tiles.example.org/{z}/{y}/{x}.pbf", true),
         ("http://127.0.0.1", "http://127.0.0.1/{z}/{y}/{x}.pbf", true),
     ] {
@@ -580,14 +648,17 @@ fn ogc_dataset_style_discovery_is_bounded_and_checks_source_addresses() {
     assert_eq!(listing["count"], 16, "{listing}");
     assert!(listing["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("16-style discovery limit")));
     assert_eq!(server.requests().len(), 19);
-    let root = "https://maps.example.org/dataset";
+    // The root read from the internet (the app's record of it), on its own name as the record is
+    // process-wide.
+    let root = "https://maps-web-styles.example.org/dataset";
+    crate::render::rustgis_tiles::cache::restrict_to_public(root);
     let mut docs = documents();
     docs[2].1["styles"].as_array_mut().unwrap().truncate(1);
     docs[3].1["sources"]["basemap"] = json!({"type":"vector","url":"http://127.0.0.1/private"});
     let params = json!({"url":root,"type":"ogcapi","text":docs[0].1.to_string(),"documents":[
-        {"url":"https://maps.example.org/tiles?f=json","text":docs[1].1.to_string()},
-        {"url":"https://maps.example.org/styles?f=json","text":docs[2].1.to_string()},
-        {"url":"https://maps.example.org/good?f=mapbox","text":docs[3].1.to_string()}
+        {"url":"https://maps-web-styles.example.org/tiles?f=json","text":docs[1].1.to_string()},
+        {"url":"https://maps-web-styles.example.org/styles?f=json","text":docs[2].1.to_string()},
+        {"url":"https://maps-web-styles.example.org/good?f=mapbox","text":docs[3].1.to_string()}
     ]});
     let mut params = params;
     params["documents"][1]["text"] = json!(
@@ -597,7 +668,7 @@ fn ogc_dataset_style_discovery_is_bounded_and_checks_source_addresses() {
         ]})
         .to_string()
     );
-    params["documents"].as_array_mut().unwrap().push(json!({"url":"https://maps.example.org/public","text":good.to_string()}));
+    params["documents"].as_array_mut().unwrap().push(json!({"url":"https://maps-web-styles.example.org/public","text":good.to_string()}));
     let listing = session.run("service.layers", &params).unwrap();
     assert_eq!(listing["count"], 1, "{listing}");
     assert_eq!(listing["layers"][0]["name"], "public");
@@ -804,7 +875,7 @@ fn ogc_dataset_failed_discovery_keeps_prior_omission_counts() {
             sets.insert(0, json!({"tileMatrixSetId":"Unsupported"}));
         }
         let params = json!({"url":"https://maps.example.org/dataset","type":"ogcapi","layer":"map",
-        "text":json!({"links":[{"rel":"tilesets-map","href":"/tiles?f=json"}]}).to_string(),
+        "text":json!({"links":[{"rel":"tilesets-map","href":"/tiles?f=json"},{"rel":"styles","href":"/styles"}]}).to_string(),
         "documents":[
             {"url":"https://maps.example.org/tiles?f=json","text":json!({"tilesets":sets}).to_string()},
             {"url":"https://maps.example.org/metadata?f=json","text":" ".repeat(crate::cmd::service::MAX_DATASET_BYTES)}
@@ -813,6 +884,8 @@ fn ogc_dataset_failed_discovery_keeps_prior_omission_counts() {
         for command in ["service.layers", "service.add"] {
             let error = session.run(command, &params).unwrap_err();
             assert!(error.contains("metadata budget"), "{error}");
+            assert!(error.contains("1 tileset documents were left out: dataset discovery stopped"), "{error}");
+            assert!(error.contains("1 style catalogues were left out: dataset discovery stopped"), "{error}");
             assert_eq!(error.contains("1 tilesets were left out"), omitted, "{error}");
             #[cfg(not(target_arch = "wasm32"))]
             {
