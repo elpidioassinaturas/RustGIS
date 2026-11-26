@@ -811,8 +811,8 @@ pub struct StacCube {
     files: Vec<Vec<(String, (f64, f64), Vec<f64>, Option<Mask>, Vec<Band>)>>,
     /// The bands asked for, when several (`"assets"`): a slice holds one band for each.
     assets: Vec<String>,
-    /// Cells with a value in some of the bands but not all at a date, left out of it (so each
-    /// cell's bands are of one date): said once the run has read its slices.
+    /// Pixels with a value in some of the bands but not all at a date, left out of it (so each
+    /// cell's bands are the mean of the same pixels): said once the run has read its slices.
     partial: std::sync::atomic::AtomicU64,
     /// The quality values that let a cell through, for a cube masked by its items' quality band.
     mask: Option<super::cube_mask::Test>,
@@ -1212,7 +1212,7 @@ impl super::cube::TimeCube for StacCube {
         &self.assets
     }
     /// Band pixels their item's mask file doesn't cover: left out as not clear, and said with
-    /// their count and the first such mask; and cells left out at a date for a value in only some
+    /// their count and the first such mask; and pixels left out at a date for a value in only some
     /// of the bands asked for.
     fn lost(&self) -> Vec<rustgis_data::loss::Note> {
         // Pixels with a value left out as not clear: a value lost.
@@ -1234,7 +1234,7 @@ impl super::cube::TimeCube for StacCube {
             said.push(rustgis_data::loss::Note::loss(
                 rustgis_data::loss::LossCode::DroppedValue,
                 format!(
-                    "{}: {partial} cell(s) had a value in some of the bands {} but not all at a date, so they were left out at that date (each cell's bands are of one date)",
+                    "{}: {partial} pixel(s) had a value in some of the bands {} but not all at a date, so they were left out at that date (each cell's bands are of the same pixels)",
                     self.label,
                     self.assets.join(", ")
                 ),
@@ -1370,11 +1370,16 @@ impl super::cube::TimeCube for StacCube {
                 (Some(_), None) => return Err(crate::sources::message_with_address(href, "has no quality band to mask its cells by")),
                 _ => None,
             };
-            // The band pixels with a value that the mask file doesn't cover (the first band's).
+            // The item's pixels with a value that the mask file doesn't cover, and those with a value
+            // in only some of the bands asked for.
             let mut outside = 0u64;
             let across = (fc1 - fc0) as usize;
+            let mut partial = 0u64;
             let bands = std::iter::once((href, scale, fill)).chain(more.iter().map(|(h, s, f)| (h, s, f)));
-            for (b, ((bh, (k, o), fill), (sum, count))) in bands.zip(sums.iter_mut().zip(&mut counts)).enumerate() {
+            // Every band's window is read before any pixel goes in, so a cell's bands are the mean of
+            // the same pixels: one with a value in only some of them goes in none (said).
+            let mut reads: Vec<(Vec<f32>, Vec<f32>, (f64, f64))> = Vec::with_capacity(nb);
+            for (b, (bh, (k, o), fill)) in bands.enumerate() {
                 let fill: Vec<f32> = fill.iter().map(|v| *v as f32).collect();
                 // The item's other bands are read on its first band's pixels, the same window.
                 let read = if b == 0 {
@@ -1393,31 +1398,43 @@ impl super::cube::TimeCube for StacCube {
                     }
                     cog::read_values_blocking(&bi, bh, self.level, 0, cols, rows)?
                 };
-                for (r, line) in read.chunks(across).enumerate() {
-                    let row = ((fr0 - dy - top_f) as usize + r) / f as usize;
-                    for (c, v) in line.iter().enumerate() {
-                        let col = ((fc0 - dx) as usize + c) / f as usize;
-                        let cell = row * w as usize + col;
-                        if !v.is_finite() || fill.contains(v) {
-                            continue;
+                reads.push((read, fill, (*k, *o)));
+            }
+            let pixels = reads.iter().map(|(r, ..)| r.len()).min().unwrap_or(0);
+            for i in 0..pixels {
+                let valued = reads.iter().filter(|(read, fill, _)| read[i].is_finite() && !fill.contains(&read[i])).count();
+                if valued == 0 {
+                    continue;
+                }
+                let clear = match &keep {
+                    None => true,
+                    Some(kept) => match kept.get(i).copied().flatten() {
+                        Some(clear) => clear,
+                        None => {
+                            outside += 1;
+                            false
                         }
-                        let clear = match &keep {
-                            None => true,
-                            Some(kept) => match kept.get(r * across + c).copied().flatten() {
-                                Some(clear) => clear,
-                                None => {
-                                    outside += u64::from(b == 0);
-                                    false
-                                }
-                            },
-                        };
-                        if clear && let (Some(s), Some(n)) = (sum.get_mut(cell), count.get_mut(cell)) {
-                            *s += f64::from(*v) * k + o;
-                            *n += 1;
-                        }
+                    },
+                };
+                if !clear {
+                    continue;
+                }
+                if valued < reads.len() {
+                    partial += 1;
+                    continue;
+                }
+                let (r, c) = (i / across, i % across);
+                let row = ((fr0 - dy - top_f) as usize + r) / f as usize;
+                let col = ((fc0 - dx) as usize + c) / f as usize;
+                let cell = row * w as usize + col;
+                for ((read, _, (k, o)), (sum, count)) in reads.iter().zip(sums.iter_mut().zip(&mut counts)) {
+                    if let (Some(s), Some(n)) = (sum.get_mut(cell), count.get_mut(cell)) {
+                        *s += f64::from(read[i]) * k + o;
+                        *n += 1;
                     }
                 }
             }
+            self.partial.fetch_add(partial, std::sync::atomic::Ordering::Relaxed);
             if outside > 0
                 && let (Ok(mut u), Some((m, _))) = (self.uncovered.lock(), mask)
             {
@@ -1425,23 +1442,11 @@ impl super::cube::TimeCube for StacCube {
                 u.1.get_or_insert_with(|| m.clone());
             }
         }
-        let mut bands: Vec<Vec<f32>> = sums
+        let bands: Vec<Vec<f32>> = sums
             .iter()
             .zip(&counts)
             .map(|(sum, count)| sum.iter().zip(count).map(|(s, n)| if *n > 0 { (s / f64::from(*n)) as f32 } else { f32::NAN }).collect())
             .collect();
-        // A cell's bands are of one date: one with a value in only some of them is left out (said).
-        if nb > 1 {
-            let mut partial = 0u64;
-            for c in 0..cells {
-                let valued = bands.iter().filter(|b| b.get(c).is_some_and(|v| v.is_finite())).count();
-                if valued > 0 && valued < nb {
-                    partial += 1;
-                    bands.iter_mut().filter_map(|b| b.get_mut(c)).for_each(|v| *v = f32::NAN);
-                }
-            }
-            self.partial.fetch_add(partial, std::sync::atomic::Ordering::Relaxed);
-        }
         let transform = rustgis_data::raster::GeoTransform {
             origin_y: self.transform.origin_y + f64::from(top) * self.transform.pixel_height,
             ..self.transform

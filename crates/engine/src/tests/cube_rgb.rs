@@ -116,7 +116,7 @@ fn several_bands_summarised_as_one_rgb_layer() {
     check(&median, &middle, "median");
     assert_eq!(median[0][9], 10.0, "three dates: date 0's, not the band's own middle (20)");
     assert!(said.iter().any(|t| t.contains("2 item(s) left out") && t.contains("B04, B03, B02")), "{said:?}");
-    assert!(said.iter().any(|t| t.contains("1 cell(s) had a value in some of the bands")), "{said:?}");
+    assert!(said.iter().any(|t| t.contains("1 pixel(s) had a value in some of the bands")), "{said:?}");
     // First, the clearest date first (the second, then the first and third, tied, by date).
     let (first, _) = reduce(&mut s, &with(json!({"stat": "first"})));
     check(&first, &|col, row| RGB[*[1, 0, 2].iter().find(|k| clear(col, row).contains(k)).unwrap()], "first, clearest");
@@ -131,7 +131,7 @@ fn several_bands_summarised_as_one_rgb_layer() {
     check(&mean, &average, "mean");
     // Two bands without the missing value: nothing left out, nothing said of it.
     let (_, said) = reduce(&mut s, &with(json!({"stat": "median", "assets": ["B04", "B03"]})));
-    assert!(!said.iter().any(|t| t.contains("cell(s) had a value")), "{said:?}");
+    assert!(!said.iter().any(|t| t.contains("pixel(s) had a value")), "{said:?}");
     // What can't be asked.
     for (bad, why) in [
         (json!({"stat": "max"}), "assets takes mean, median or first"),
@@ -161,4 +161,39 @@ fn assets_are_a_collections() {
     let mut s = Session::new(Project::default());
     let e = s.run("cube.reduce", &json!({"layers": ["a", "b"], "assets": ["B04", "B03"], "stat": "median"})).unwrap_err();
     assert!(e.contains("STAC collection's bands"), "{e}");
+}
+
+/// Averaged cells (`"resampling": "average"`) take each pixel with all its bands or not at all:
+/// in the bottom half B04 has a value only in even columns and B03 only in odd ones, so no pixel
+/// there has both and its cells are left out (said), not B04's even pixels' mean beside B03's
+/// odd pixels' (#2712 review).
+#[test]
+fn an_averaged_cell_takes_its_bands_from_the_same_pixels() {
+    let n = 1024u32;
+    let band = |v: f32, even: bool| {
+        cog((0..n * n).map(|c| if c / n < n / 2 || (c % n).is_multiple_of(2) == even { v } else { -1.0 }).collect(), n, Some(-1.0))
+    };
+    let (files, _) = serve_ranged_files(vec![("/B04.tif".into(), band(10.0, true)), ("/B03.tif".into(), band(20.0, false))]);
+    let search = format!(
+        r#"{{"type": "FeatureCollection", "features": [{{"type": "Feature", "id": "s0", "collection": "s2", "bbox": [10, 45, 11, 46],
+           "geometry": null, "properties": {{"datetime": "2024-01-01T00:00:00Z"}},
+           "assets": {{"B04": {{"href": "{files}/B04.tif"}}, "B03": {{"href": "{files}/B03.tif"}}}}}}]}}"#
+    );
+    let api = format!("{}/v1", serve_routes(vec![("/v1/search", search)], 64));
+    let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
+    let p = json!({"url": api, "collection": "s2", "assets": ["B04", "B03"], "bbox": [10, 45, 11, 46], "start": "2024-01-01",
+        "end": "2024-01-31", "stat": "first", "cellSize": 2.0 / f64::from(n), "resampling": "average"});
+    let r = s.run("cube.reduce", &p).unwrap_or_else(|e| panic!("{e}"));
+    let l = s.map().layer(r["layers"][0].as_u64().unwrap() as u32).unwrap();
+    let raster = l.raster.as_ref().unwrap().data.clone().unwrap();
+    let half = n as usize / 2;
+    assert_eq!((raster.width, raster.height), (half as u32, half as u32));
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    for (j, want) in [10.0f32, 20.0].into_iter().enumerate() {
+        let b = &raster.bands[j].data;
+        assert!(b[..half * half / 2].iter().all(|v| (v - want).abs() < 1e-3), "band {j}, top half");
+        assert!(b[half * half / 2..].iter().all(|v| v.is_nan()), "band {j}, bottom half: {:?} ({said:?})", &b[half * half / 2..][..4]);
+    }
+    assert!(said.iter().any(|t| t.contains("had a value in some of the bands")), "{said:?}");
 }

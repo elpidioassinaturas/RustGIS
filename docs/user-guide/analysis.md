@@ -2286,8 +2286,9 @@ is the data cube summary's only.
 - **Several bands:** `"assets": ["B04", "B03", "B02"]` (instead of `"asset"`) reads 2 to 16 of a
   collection's bands from the same items and makes one layer of a band for each, drawn as RGB when
   there are three. It takes **mean**, **median** and **first**, which keep each cell's bands
-  together: a cell goes in at a date only with a value in every band (one with a value in only
-  some is left out at that date, and said with how many), so first takes all its bands from the
+  together: a pixel goes in at a date only with a value in every band (one with a value in only
+  some is left out at that date, and said with how many), so an averaged cell's bands are the mean
+  of the same pixels, first takes all its bands from the
   same date, and median takes them from one date too, the one whose bands' sum is the middle (the
   lower of the two middle ones for an even count), not each band's own middle, which can mix dates
   into a colour no date had. The bands have to be on one grid of pixels (one cell size); a
