@@ -1,5 +1,13 @@
 //! Snapping, which reads only the shapes whose kept box is near, finds what a search of every
-//! shape finds.
+//! shape finds, as a property: over two generated layers, with one feature left out, and after
+//! shapes are moved, added and removed.
+//!
+//! Pull requests run a fixed seed; the nightly a new one with more cases. A failure gives its seed
+//! and the smallest layers and places found. To run a seed again, or deeper:
+//! `PROPERTY_SEED=7 PROPERTY_CASES=2000 cargo test -p rustgis-engine --test integration snap_boxes::`.
+use proptest::prelude::*;
+use proptest::sample::Index;
+use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
 use rustgis_engine::{
     Project, Session,
     cmd::design::snap_except,
@@ -7,40 +15,53 @@ use rustgis_engine::{
     geom::{Coord, merc_to_lonlat},
     map::design::Snapping,
 };
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 const TOLERANCE: f64 = 10.0;
 
-/// Metre-sized fixtures in the longitude/latitude coordinates of feature layers.
-fn c(x: f64, y: f64) -> Coord {
-    merc_to_lonlat(Coord::new(x, y))
-}
-
-/// A repeatable pseudo-random sequence in 0..1.
-fn sequence(mut seed: u64) -> impl FnMut() -> f64 {
-    move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed >> 11) as f64 / (1u64 << 53) as f64
+/// A number from the environment, else `default`; one set that isn't a whole number fails, so a
+/// typo doesn't run the defaults without a word (#2639).
+fn env(name: &str, default: u64) -> u64 {
+    match std::env::var(name) {
+        Ok(v) => v.trim().parse().unwrap_or_else(|_| panic!("{name}={v:?} isn't a whole number")),
+        Err(std::env::VarError::NotPresent) => default,
+        Err(e) => panic!("{name}: {e}"),
     }
 }
 
-fn layer(next: &mut impl FnMut() -> f64, name: &str, n: usize) -> Dataset {
+/// Metre-sized fixtures in the longitude/latitude coordinates of feature layers, a few hundred
+/// metres from a corner far from the map's origin.
+fn c((x, y): (f64, f64)) -> Coord {
+    merc_to_lonlat(Coord::new(x - 5e6, y - 2e6))
+}
+
+/// A shape of any kind, or none, a few tens of metres across, somewhere in 400 m square.
+fn shape() -> BoxedStrategy<Option<Geometry>> {
+    let path = |at: (f64, f64), n: std::ops::Range<usize>| {
+        proptest::collection::vec((0.0..60.0f64, 0.0..60.0f64), n)
+            .prop_map(move |v| v.into_iter().map(|(dx, dy)| c((at.0 + dx, at.1 + dy))).collect::<Vec<_>>())
+    };
+    let square =
+        |(x, y): (f64, f64), r: f64| vec![c((x - r, y - r)), c((x + r, y - r)), c((x + r, y + r)), c((x - r, y + r)), c((x - r, y - r))];
+    (0.0..400.0f64, 0.0..400.0f64)
+        .prop_flat_map(move |at| {
+            prop_oneof![
+                Just(Some(Geometry::Point(c(at)))),
+                path(at, 1..4).prop_map(|p| Some(Geometry::MultiPoint(p))),
+                // A part of one place too, whose end is its vertex.
+                (path(at, 2..5), path(at, 1..3)).prop_map(|(a, b)| Some(Geometry::Line(vec![a, b]))),
+                (1.0..40.0f64).prop_map(move |r| Some(Geometry::Polygon(vec![vec![square(at, r), square(at, r / 2.0)]]))),
+                (path(at, 3..6), path(at, 3..5)).prop_map(|(a, b)| Some(Geometry::Polygon(vec![vec![a], vec![b]]))),
+                Just(None),
+            ]
+        })
+        .boxed()
+}
+
+fn dataset(name: &str, shapes: Vec<Option<Geometry>>) -> Dataset {
     let mut d = Dataset::new(name, GeometryType::Polygon, vec![]);
-    for i in 0..n {
-        let (x, y) = (next() * 400.0 - 5e6, next() * 400.0 - 2e6);
-        let mut path = |n: usize| -> Vec<Coord> { (0..n).map(|_| c(x + next() * 60.0, y + next() * 60.0)).collect() };
-        let square = |r: f64| vec![c(x - r, y - r), c(x + r, y - r), c(x + r, y + r), c(x - r, y + r), c(x - r, y - r)];
-        let g = match i % 6 {
-            0 => Some(Geometry::Point(c(x, y))),
-            1 => Some(Geometry::MultiPoint(path(3))),
-            2 => Some(Geometry::Line(vec![path(4), path(2)])),
-            3 => Some(Geometry::Polygon(vec![vec![square(40.0), square(20.0)]])),
-            4 => Some(Geometry::Polygon(vec![vec![path(4)], vec![path(3)]])),
-            _ => None,
-        };
-        d.push(g, vec![]);
-    }
+    shapes.into_iter().for_each(|g| d.push(g, vec![]));
     d
 }
 
@@ -83,43 +104,67 @@ fn nearest_of_every_shape(s: &mut Session, m: Coord, skip: Option<(u32, usize)>)
     point.or(edge).map(|(_, at, kind)| (at, kind))
 }
 
-fn check(s: &mut Session, next: &mut impl FnMut() -> f64, skip: Option<(u32, usize)>) {
-    let mut kinds = std::collections::BTreeMap::new();
-    for _ in 0..600 {
-        let at = c(next() * 500.0 - 5e6 - 20.0, next() * 500.0 - 2e6 - 20.0);
+/// Snapping at each place finds what the search of every shape finds; each kind found is counted.
+fn check(
+    s: &mut Session,
+    places: &[(f64, f64)],
+    skip: Option<(u32, usize)>,
+    kinds: &RefCell<BTreeMap<Option<&'static str>, u32>>,
+) -> Result<(), TestCaseError> {
+    for at in places.iter().map(|p| c(*p)) {
         let m = s.map().to_map(at).unwrap();
         let expected = nearest_of_every_shape(s, m, skip);
         let got = snap_except(s, at, skip);
-        assert_eq!(got.map(|g| g.1), expected.map(|e| e.1), "{at:?}");
-        *kinds.entry(got.map(|g| g.1)).or_insert(0) += 1;
+        prop_assert_eq!(got.map(|g| g.1), expected.map(|e| e.1), "at {:?}, leaving out {:?}", at, skip);
+        *kinds.borrow_mut().entry(got.map(|g| g.1)).or_insert(0) += 1;
         if let (Some((got, _)), Some((expected, _))) = (got, expected) {
             let got = s.map().to_map(got).unwrap();
-            assert!((got.x - expected.x).abs() < 1e-6 && (got.y - expected.y).abs() < 1e-6, "{got:?} != {expected:?}");
+            prop_assert!((got.x - expected.x).abs() < 1e-6 && (got.y - expected.y).abs() < 1e-6, "{:?} != {:?}", got, expected);
         }
     }
-    // Every kind, and nothing near too.
-    assert_eq!(kinds.len(), 4, "{kinds:?}");
+    Ok(())
 }
 
 #[test]
 fn snapping_finds_what_a_search_of_every_shape_finds() {
-    let mut next = sequence(0x9E37_79B9_7F4A_7C15);
-    let mut s = Session::new(Project::new("Snap boxes"));
-    s.map_mut().layers.clear();
-    let id = s.map_mut().add_dataset(layer(&mut next, "A", 48));
-    s.map_mut().add_dataset(layer(&mut next, "B", 48));
-    s.map_mut().camera.res = 1.0;
-    s.map_mut().editing.snapping = Snapping { enabled: true, tolerance_px: TOLERANCE, vertex: true, edge: true, end: true };
-    check(&mut s, &mut next, None);
-    // All but one shape.
-    check(&mut s, &mut next, Some((id, 3)));
-    // Shapes moved, added and removed: their boxes are those of the new ones.
-    let l = s.map_mut().layer_mut(id).unwrap();
-    let far = c(-5e6 + 900.0, -2e6);
-    l.dataset.features.set_geometry(0, Some(Geometry::Point(far)));
-    l.dataset.features.set_geometry(3, None);
-    l.dataset.features.set_geometry(5, Some(Geometry::Line(vec![vec![c(-5e6, -2e6), c(-5e6 + 400.0, -2e6 + 400.0)]])));
-    l.touch_geometry();
-    assert_eq!(snap_except(&mut s, c(-5e6 + 905.0, -2e6), None), Some((far, "vertex")));
-    check(&mut s, &mut next, None);
+    let seed = env("PROPERTY_SEED", 1);
+    let mut bytes = [0u8; 32];
+    bytes[..8].copy_from_slice(&seed.to_le_bytes());
+    let cases = env("PROPERTY_CASES", 256);
+    let cases = u32::try_from(cases).unwrap_or_else(|_| panic!("PROPERTY_CASES={cases} is past {}", u32::MAX));
+    let config = Config { cases, failure_persistence: None, ..Config::default() };
+    let mut runner = TestRunner::new_with_rng(config, TestRng::from_seed(RngAlgorithm::ChaCha, &bytes));
+    let layer = || proptest::collection::vec(shape(), 1..40);
+    let places = proptest::collection::vec((-50.0..500.0f64, -50.0..500.0f64), 1..40);
+    let skip = proptest::option::of((any::<bool>(), any::<Index>()));
+    let edits = proptest::collection::vec((any::<Index>(), shape()), 0..4);
+    // What snapping found over every case: one that never finds a kind checks nothing of it.
+    let kinds = RefCell::new(BTreeMap::new());
+    let result = runner.run(&(layer(), layer(), places, skip, edits), |(a, b, places, skip, edits)| {
+        let (na, nb) = (a.len(), b.len());
+        let mut s = Session::new(Project::new("Snap boxes"));
+        s.map_mut().layers.clear();
+        let ia = s.map_mut().add_dataset(dataset("A", a));
+        let ib = s.map_mut().add_dataset(dataset("B", b));
+        s.map_mut().camera.res = 1.0;
+        s.map_mut().editing.snapping = Snapping { enabled: true, tolerance_px: TOLERANCE, vertex: true, edge: true, end: true };
+        check(&mut s, &places, None, &kinds)?;
+        let skip = skip.map(|(first, i)| if first { (ia, i.index(na)) } else { (ib, i.index(nb)) });
+        check(&mut s, &places, skip, &kinds)?;
+        // Shapes moved, added and removed: their boxes are those of the new ones.
+        let l = s.map_mut().layer_mut(ia).unwrap();
+        for (i, g) in edits {
+            l.dataset.features.set_geometry(i.index(na), g);
+        }
+        let far = c((900.0, 0.0));
+        l.dataset.features.set_geometry(0, Some(Geometry::Point(far)));
+        l.touch_geometry();
+        prop_assert_eq!(snap_except(&mut s, c((905.0, 0.0)), None), Some((far, "vertex")));
+        check(&mut s, &places, None, &kinds)
+    });
+    if let Err(e) = result {
+        panic!("PROPERTY_SEED={seed}: {e}");
+    }
+    let kinds = kinds.into_inner();
+    assert_eq!(kinds.len(), 4, "PROPERTY_SEED={seed}: snapping found only {kinds:?}");
 }

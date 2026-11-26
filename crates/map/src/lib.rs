@@ -3482,9 +3482,9 @@ impl Map {
     /// Every feature under a point in the visible layers `keep` accepts: top layer first and, in
     /// a layer, the one drawn on top first. At most `limit` of them; with `first_layer`, only
     /// those of the top layer with any. A shape whose kept box ([`Layer::projected_extents`]) is
-    /// farther than `tol` isn't read: so one with a place the projection can't show (its ring has
-    /// a gap, through which its inside would run on past it) is hit only in or near its box, as it
-    /// is drawn.
+    /// farther than `tol` (and a rounding margin, see `box_may_hit`) isn't read: so one with a
+    /// place the projection can't show (its ring has a gap, through which its inside would run on
+    /// past it) is hit only in or near its box, as it is drawn.
     pub fn hits_at(
         &mut self,
         p: Coord,
