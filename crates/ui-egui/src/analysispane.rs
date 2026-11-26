@@ -58,7 +58,7 @@ pub struct Workflow {
     /// instant), the project it was asked in ([`rustgis_engine::Session::opened`]) and the script it
     /// runs, in the order asked, for [`script_ran`] to tell as each lands: where it stopped is read
     /// in that script, whatever the box holds by then.
-    script_started: std::collections::VecDeque<(u64, web_time::Instant, u64, String)>,
+    script_started: std::collections::VecDeque<ScriptStart>,
     /// While [`start_script`] asks for a run: one refused as it's asked lands at once, ahead of any
     /// still running, and is the last in [`Self::script_started`], not the first.
     script_asking: bool,
@@ -212,6 +212,15 @@ pub struct StoppedAt {
     pub column: Option<usize>,
     pub index: usize,
     pub script: u64,
+}
+
+/// A Script pane run under way or waiting (`script_started`): when it was asked
+/// (seconds since 1970, and the instant), the project it was asked in and the script it runs.
+struct ScriptStart {
+    at: u64,
+    asked: web_time::Instant,
+    opened: u64,
+    script: String,
 }
 
 /// A line a Script pane run ran, with its whole result. `text`, the result laid out to read a
@@ -649,8 +658,8 @@ pub const SECTIONS: &[(&str, &str)] = &[
 /// extension is off.
 pub fn section_extension(section: &str) -> Option<&'static str> {
     match section {
-        "georeference" | "change" | "spectral" | "classify" | "supervised" | "deepLearning" | "hosted" | "indices" | "process"
-        | "pixels" | "mensuration" | "ortho" | "reality" => Some(rustgis_engine::extensions::IMAGERY.id),
+        "georeference" | "change" | "spectral" | "classify" | "supervised" | "deepLearning" | "hosted" | "indices" | "pixels"
+        | "mensuration" | "ortho" | "reality" => Some(rustgis_engine::extensions::IMAGERY.id),
         _ => None,
     }
 }
@@ -2126,7 +2135,12 @@ fn start_script(app: &mut RustGisApp, script: String) {
     // When it started and how long it took: a tool run outside the app in the browser
     // (`gp.finish`) ends later.
     let at = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    app.workflow.script_started.push_back((at, web_time::Instant::now(), app.session.opened, script.clone()));
+    app.workflow.script_started.push_back(ScriptStart {
+        at,
+        asked: web_time::Instant::now(),
+        opened: app.session.opened,
+        script: script.clone(),
+    });
     app.workflow.script_out = vec![(tl!("Running…").to_string(), false)];
     // Its error, which the mark goes with, is no longer shown.
     if let Some(last) = app.workflow.script_last.as_mut() {
@@ -2150,7 +2164,8 @@ fn script_ran(app: &mut RustGisApp, landed: crate::Landed) {
     let opened = app.session.opened;
     let queue = &mut app.workflow.script_started;
     let this = if std::mem::take(&mut app.workflow.script_asking) { queue.pop_back() } else { queue.pop_front() };
-    let (asked_at, asked, asked_in, ran_script) = this.unwrap_or_else(|| (0, now, opened, app.workflow.script.clone()));
+    let ScriptStart { at: asked_at, asked, opened: asked_in, script: ran_script } =
+        this.unwrap_or_else(|| ScriptStart { at: 0, asked: now, opened, script: app.workflow.script.clone() });
     // Asked in a project since replaced and not run (left as another opened, or cancelled): the
     // pane started blank for the new one, and its notice is the session's.
     if asked_in != opened && !matches!(landed, crate::Landed::Ran(_)) {
@@ -2203,7 +2218,7 @@ fn script_ran(app: &mut RustGisApp, landed: crate::Landed) {
     // Another still to land: the results say so first, above this one's, where their scroll
     // starts, however many lines it ran. One asked in a project this run replaced is left, not
     // run, so it isn't told.
-    if app.workflow.script_started.iter().any(|&(_, _, asked_in, _)| asked_in == opened) {
+    if app.workflow.script_started.iter().any(|s| s.opened == opened) {
         app.workflow.script_out.insert(0, (tl!("Running…").to_string(), false));
     }
     app.map.invalidate();
@@ -2274,18 +2289,24 @@ fn script(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, fit: bool) {
             .desired_width(f32::INFINITY)
             .hint_text("map.goToXY {\"lon\": 2.35, \"lat\": 48.85, \"scale\": 5000000}\nselect.byAttributes {\"layer\": \"Cities\", \"where\": \"pop_max > 1000000\"}")
             .show(ui);
-        if let Some(at) = stopped {
+        // Asked by a click on the error, taken every frame: one that doesn't show the stop (a key
+        // typed) drops it, rather than leaving it for a later stop.
+        let go = ui.data_mut(|d| d.remove_temp::<bool>(box_id.with("go_to_stopped"))).is_some();
+        // Not in the frame of a key: `stopped` was read from the text before it.
+        if let Some(at) = stopped.filter(|_| !out.response.changed()) {
             paint_stopped(ui, &out, at);
-            // Once, asked by a click on the error: inside this scroll, which takes it as it ends.
-            // The box scrolls to its cursor only when the cursor moves within it.
-            if ui.data_mut(|d| d.remove_temp::<bool>(box_id.with("go_to_stopped"))).is_some() {
+            // Once, inside this scroll, which takes it as it ends. The box scrolls to its cursor
+            // only when the cursor moves within it.
+            if go {
                 let origin = (out.galley_pos - vec2(out.galley.rect.left(), 0.0)).to_vec2();
-                let cursor = out.galley.pos_from_cursor(egui::text::CCursor::new(at.index)).translate(origin);
+                let cursor = out.galley.pos_from_cursor(stopped_cursor(at.index)).translate(origin);
                 ui.scroll_to_rect(cursor, Some(egui::Align::Center));
             }
         }
         out
     });
+    // The same for its error's click (see the mark's paint above).
+    let stopped = stopped.filter(|_| !out.inner.response.changed());
     let clicked = crate::scriptcomplete::show(ui, box_id, &out.inner, out.inner_rect, &app.workflow.script, &app.session);
     crate::scriptcomplete::hint(ui, box_id, &out.inner, out.inner_rect, &app.workflow.script, &app.session);
     if let Some((offer, item)) = clicked {
@@ -2300,13 +2321,20 @@ fn script(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, fit: bool) {
     // `out.cursor_range` is None while the box isn't focused.
     let size = vec2(ui.available_width(), script_cursor_height(ui));
     ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        // The row keeps only what's drawn in it: its height, with no label in it yet.
+        // An empty row takes no height: without this the buttons below move when the first cursor
+        // appears.
         ui.set_min_height(size.y);
-        let cursor = egui::widgets::text_edit::TextEditState::load(ui.ctx(), box_id).and_then(|s| s.cursor.char_range());
-        if let Some(range) = cursor {
+        if let Some(range) = crate::widgets::cursor_range(ui.ctx(), box_id) {
             let (line, col) = line_col(&app.workflow.script, range.primary.index.0);
-            let at = crate::i18n::fmt("Ln {line}, Col {col}", &[("line", &line.to_string()), ("col", &col.to_string())]);
-            ui.label(egui::RichText::new(at).small().weak()).on_hover_text(tl!("The cursor's line and column"));
+            let selected = range.primary.index.0.abs_diff(range.secondary.index.0);
+            let (line, col, n) = (line.to_string(), col.to_string(), selected.to_string());
+            let place = if selected > 0 {
+                crate::i18n::fmt("Ln {line}, Col {col} ({n} selected)", &[("line", &line), ("col", &col), ("n", &n)])
+            } else {
+                crate::i18n::fmt("Ln {line}, Col {col}", &[("line", &line), ("col", &col)])
+            };
+            ui.label(egui::RichText::new(place).small().weak())
+                .on_hover_text(tl!("The cursor's line and column, and how many characters are selected"));
         }
     });
     ui.horizontal(|ui| {
@@ -2435,7 +2463,7 @@ fn paint_stopped(ui: &Ui, out: &egui::text_edit::TextEditOutput, at: StoppedAt) 
     }
     if at.column.is_some() {
         use egui::text::CCursor;
-        let a = galley.pos_from_cursor(CCursor::new(at.index)).translate(origin);
+        let a = galley.pos_from_cursor(stopped_cursor(at.index)).translate(origin);
         let b = galley.pos_from_cursor(CCursor::new(at.index + 1)).translate(origin);
         // The next character on the same row, else a character's width.
         let width = if b.min.y == a.min.y && b.min.x > a.min.x { b.min.x - a.min.x } else { a.height() * 0.5 };
@@ -2444,14 +2472,20 @@ fn paint_stopped(ui: &Ui, out: &egui::text_edit::TextEditOutput, at: StoppedAt) 
     }
 }
 
+/// The cursor at a stop's `index`: a column at the start of a wrapped row is that row's, not the
+/// end of the row above (the default when a cursor sits on the break).
+fn stopped_cursor(index: usize) -> egui::text::CCursor {
+    egui::text::CCursor { prefer_next_row: true, ..egui::text::CCursor::new(index) }
+}
+
 /// The box's cursor put where the last run stopped, the box focused, and asked to scroll there
 /// on the next frame (as it lays the box out: [`paint_stopped`]'s caller).
 fn go_to_stopped(ui: &Ui, box_id: egui::Id, index: usize) {
-    use egui::text::{CCursor, CCursorRange};
-    let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), box_id).unwrap_or_default();
-    state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(index))));
-    state.store(ui.ctx(), box_id);
+    use egui::text::CCursorRange;
+    crate::widgets::set_cursor_range(ui.ctx(), box_id, CCursorRange::one(stopped_cursor(index)));
     ui.memory_mut(|m| m.request_focus(box_id));
+    // The scroll waits for the next frame; without this, for the next event.
+    ui.ctx().request_repaint();
     ui.data_mut(|d| d.insert_temp(box_id.with("go_to_stopped"), true));
 }
 
@@ -2633,6 +2667,11 @@ mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
 
+    /// A run asked now in project `opened`, running `script`.
+    fn started(opened: u64, script: &str) -> ScriptStart {
+        ScriptStart { at: 0, asked: web_time::Instant::now(), opened, script: script.into() }
+    }
+
     /// An empty radius field (or one of spaces) runs the viewshed over the whole DEM, about
     /// 630 km long: one whose radius square, the DEM's diagonal each way, holds far more cells
     /// than the DEM.
@@ -2796,8 +2835,7 @@ mod tests {
         let blank =
             |app: &RustGisApp| app.workflow.script.is_empty() && app.workflow.script_out.is_empty() && app.workflow.script_last.is_none();
         let ran = |line: &str| crate::Landed::Ran(Ok(json!({"ran": [{"line": 1, "command": line, "result": null}]})));
-        let ask =
-            |app: &mut RustGisApp| app.workflow.script_started.push_back((0, web_time::Instant::now(), app.session.opened, String::new()));
+        let ask = |app: &mut RustGisApp| app.workflow.script_started.push_back(started(app.session.opened, ""));
         // Shown first: its own project's results stay, and the count goes on.
         start_over_in_another_project(&mut app);
         app.workflow.script = "select.all".to_string();
@@ -2866,9 +2904,12 @@ mod tests {
     fn a_queued_script_run_is_timed_from_its_start() {
         let mut app = RustGisApp::with_sample();
         let asked = web_time::Instant::now() - std::time::Duration::from_secs(10);
-        app.workflow
-            .script_started
-            .extend([(1_000, asked, app.session.opened, String::new()), (1_000, asked, app.session.opened, String::new())]);
+        app.workflow.script_started.extend((0..2).map(|_| ScriptStart {
+            at: 1_000,
+            asked,
+            opened: app.session.opened,
+            script: String::new(),
+        }));
         let ran: Vec<Value> = (1..=8).map(|n| json!({"line": n, "command": "select.all", "result": null})).collect();
         script_ran(&mut app, crate::Landed::Ran(Ok(json!({"ran": ran}))));
         let first = app.workflow.script_last.as_ref().map(|r| (r.secs, r.at)).unwrap();
@@ -2921,7 +2962,7 @@ mod tests {
         assert_eq!(h.state().workflow.script, "map.zoomFull");
         assert!(h.state().workflow.script_last.is_none(), "the results stay gone");
         // A run under way: off, as its results would land in the emptied pane.
-        h.state_mut().workflow.script_started.push_back((0, web_time::Instant::now(), 0, String::new()));
+        h.state_mut().workflow.script_started.push_back(started(0, ""));
         h.run();
         assert!(!on(&h));
     }
@@ -2977,7 +3018,7 @@ mod tests {
         assert_eq!(h.state().workflow.script, "kept", "Ctrl+Z brings it back");
         assert!(h.state().workflow.script_last.is_none(), "the results stay gone");
         // A run under way: off, as its results would land in the replaced script.
-        h.state_mut().workflow.script_started.push_back((0, web_time::Instant::now(), 0, String::new()));
+        h.state_mut().workflow.script_started.push_back(started(0, ""));
         h.run();
         assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Load…")).is_disabled());
         std::fs::remove_dir_all(dir).unwrap();
@@ -3027,7 +3068,7 @@ mod tests {
         assert_eq!(h.state().workflow.script, "map.zoomFull");
         assert_eq!(h.state().session.notices.len(), said, "a clean file says nothing");
         assert_eq!(h.state().ui.right, Some(crate::RightPane::Script));
-        h.state_mut().workflow.script_started.push_back((0, web_time::Instant::now(), 0, String::new()));
+        h.state_mut().workflow.script_started.push_back(started(0, ""));
         assert!(h.state_mut().open_picked(&format!("{}other.txt", crate::SCRIPT_PICK), b"map.new").is_err());
         h.run();
         assert_eq!(h.state().workflow.script, "map.zoomFull", "not while a run is under way");
@@ -3108,7 +3149,7 @@ mod tests {
         assert_eq!(at(&app), None);
         // Edited while it ran: no mark on the text the box holds, and back to the text that ran
         // (undo), the mark where that text stopped.
-        app.workflow.script_started.push_back((0, web_time::Instant::now(), app.session.opened, "no.such {}".into()));
+        app.workflow.script_started.push_back(started(app.session.opened, "no.such {}"));
         app.workflow.script = "map.zoomFull\nno.such {}".into();
         script_ran(&mut app, crate::Landed::Ran(Err("line 1: unknown command 'no.such'".into())));
         assert_eq!(at(&app), None);
@@ -3119,31 +3160,32 @@ mod tests {
         script_ran(&mut app, crate::Landed::NotRun("cancelled".into()));
         assert_eq!(at(&app), None);
         // JSON that doesn't read, after two lines; a click on the error goes to its column.
-        let e = stopped(&mut app, "# move\nmap.zoomFull\nlayer.rename {\"layer\": }");
-        assert_eq!(at(&app), Some((3, Some(24))), "{e}");
+        let (first, second, third) = ("# move\n", "map.zoomFull\n", r#"layer.rename {"layer": }"#);
+        // The JSON stops reading at the closing brace, the line's last character.
+        let column = third.chars().count();
+        let e = stopped(&mut app, &format!("{first}{second}{third}"));
+        assert_eq!(at(&app), Some((3, Some(column))), "{e}");
+        // The cursor goes to the error: the characters of the two lines before it, and its column.
+        let error_at = first.chars().count() + second.chars().count() + (column - 1);
         let mut h = egui_kittest::Harness::builder()
             .with_size(vec2(900.0, 800.0))
             .build_ui_state(|ui, app: &mut RustGisApp| script_pane(app, ui, &Tokens::light()), app);
         h.run();
         let box_id = egui::Id::unique("script_text");
-        let cursor = |h: &egui_kittest::Harness<'_, RustGisApp>| {
-            egui::widgets::text_edit::TextEditState::load(&h.ctx, box_id).and_then(|s| s.cursor.char_range()).map(|r| r.primary.index.0)
-        };
-        assert_ne!(cursor(&h), Some(7 + 13 + 23));
+        let cursor = |h: &egui_kittest::Harness<'_, RustGisApp>| crate::widgets::cursor_range(&h.ctx, box_id).map(|r| r.primary.index.0);
+        assert_ne!(cursor(&h), Some(error_at));
         h.get_by_label(&e).click();
         h.run();
-        assert_eq!(cursor(&h), Some(7 + 13 + 23), "line 3, column 24");
+        assert_eq!(cursor(&h), Some(error_at), "line 3, column {column}");
         assert!(h.ctx.memory(|m| m.has_focus(box_id)));
         // From the keyboard: the error takes the focus (Tab), and Enter goes there too.
-        let mut state = egui::widgets::text_edit::TextEditState::load(&h.ctx, box_id).unwrap_or_default();
-        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
-        state.store(&h.ctx, box_id);
+        crate::widgets::set_cursor_range(&h.ctx, box_id, egui::text::CCursorRange::one(egui::text::CCursor::new(0)));
         h.get_by_label(&e).focus();
         h.run();
         assert_eq!(cursor(&h), Some(0), "moved away first");
         h.key_press(egui::Key::Enter);
         h.run();
-        assert_eq!(cursor(&h), Some(7 + 13 + 23), "by the keyboard");
+        assert_eq!(cursor(&h), Some(error_at), "by the keyboard");
         // Edited since: the error no longer goes anywhere.
         h.state_mut().workflow.script.insert(0, '\n');
         h.run();
@@ -3151,6 +3193,77 @@ mod tests {
         h.get_by_label(&e).click();
         h.run();
         assert_eq!(cursor(&h), before);
+    }
+
+    /// A stop's column at the start of a wrapped row belongs to that row, not to the end of the one
+    /// above (#2940): the cursor [`stopped_cursor`] makes lands on the second row, where a plain
+    /// one lands on the first, and a column inside a row is the same either way.
+    #[test]
+    fn a_stop_at_the_start_of_a_wrapped_row_is_on_that_row() {
+        let h = egui_kittest::Harness::new_ui(|_| {});
+        let ctx = h.ctx.clone();
+        let text = "layer.rename {\"layer\": \"Cities\", \"name\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}".to_string();
+        let galley = ctx.fonts_mut(|f| f.layout(text, egui::FontId::monospace(14.0), egui::Color32::WHITE, 200.0));
+        assert!(galley.rows.len() > 1, "the line wraps");
+        let first = galley.rows[0].char_count_excluding_newline().0;
+        let row_of = |c: egui::text::CCursor| galley.pos_from_cursor(c).min.y;
+        let second = galley.rows[1].rect().min.y;
+        assert!(row_of(egui::text::CCursor::new(first)) < second, "a plain cursor sits at the end of the first row");
+        assert_eq!(row_of(stopped_cursor(first)), row_of(egui::text::CCursor::new(first + 1)), "the stop's is on the second");
+        assert_eq!(row_of(stopped_cursor(3)), row_of(egui::text::CCursor::new(3)), "inside a row, the same");
+    }
+
+    /// The frame a key is typed in the box, a stop's error is not clickable (#2940): it was read from
+    /// the text before the key, which the box has changed by now. (Its mark, painted in the same
+    /// frame, is off by the same check; a screenshot is what shows it.)
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_key_typed_over_a_stop_takes_its_error_click_off_that_frame() {
+        let mut app = RustGisApp::with_sample();
+        let script = "layer.rename {\"layer\": }";
+        app.workflow.script = script.to_string();
+        let e = app.session.run("script.run", &json!({"script": script})).unwrap_err();
+        script_ran(&mut app, crate::Landed::Ran(Err(e.clone())));
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(vec2(900.0, 800.0))
+            .build_ui_state(|ui, app: &mut RustGisApp| script_pane(app, ui, &Tokens::light()), app);
+        h.run();
+        let goes = |h: &egui_kittest::Harness<'_, RustGisApp>| {
+            egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label(&e)).data().supports_action(egui::accesskit::Action::Focus)
+        };
+        assert!(goes(&h), "while the box holds the script that stopped");
+        let box_id = egui::Id::unique("script_text");
+        h.ctx.memory_mut(|m| m.request_focus(box_id));
+        h.run();
+        h.event(egui::Event::Text("x".into()));
+        h.step();
+        assert_ne!(h.state().workflow.script, script, "the key typed");
+        assert!(!goes(&h), "the frame of the key");
+    }
+
+    /// A click on a stop's error asks the box to scroll there once; a frame that doesn't show the
+    /// stop (a key typed right after) drops the request, so a later stop doesn't scroll by itself.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_scroll_asked_for_a_stop_is_dropped_by_a_key_typed_next() {
+        let mut app = RustGisApp::with_sample();
+        let script = "layer.rename {\"layer\": }";
+        app.workflow.script = script.to_string();
+        let e = app.session.run("script.run", &json!({"script": script})).unwrap_err();
+        script_ran(&mut app, crate::Landed::Ran(Err(e.clone())));
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(vec2(900.0, 800.0))
+            .build_ui_state(|ui, app: &mut RustGisApp| script_pane(app, ui, &Tokens::light()), app);
+        h.run();
+        let asked = |h: &egui_kittest::Harness<'_, RustGisApp>| {
+            h.ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("script_text").with("go_to_stopped"))).is_some()
+        };
+        h.get_by_label(&e).click();
+        h.step();
+        assert!(asked(&h), "asked by the click");
+        h.event(egui::Event::Text("x".into()));
+        h.step();
+        assert!(!asked(&h), "dropped by the frame of the key");
     }
 
     /// The line and column of a cursor index (#2831): the script's lines, as a run's error names
@@ -3193,15 +3306,17 @@ mod tests {
             .with_size(vec2(300.0, 800.0))
             .build_ui_state(|ui, app: &mut RustGisApp| script_pane(app, ui, &Tokens::light()), app);
         h.run();
+        // Any label of the row. The exact text is pinned below, once the box has a cursor.
         assert!(h.query_by_label_contains("Ln ").is_none(), "no cursor yet");
         let no_cursor = h.get_by_label("Clear").rect();
         let box_id = egui::Id::unique("script_text");
         let set = |h: &mut egui_kittest::Harness<'_, RustGisApp>, range: CCursorRange| {
-            let mut state = egui::widgets::text_edit::TextEditState::load(&h.ctx, box_id).unwrap_or_default();
-            state.cursor.set_char_range(Some(range));
-            state.store(&h.ctx, box_id);
+            crate::widgets::set_cursor_range(&h.ctx, box_id, range);
             h.run();
         };
+        // The first position, once the box has a cursor: no selection, so no count.
+        set(&mut h, CCursorRange::one(CCursor::new(0)));
+        assert!(h.query_by_label("Ln 1, Col 1").is_some(), "the first position");
         // On the wrapped line, past its first row: one line, its column from the line's start.
         set(&mut h, CCursorRange::one(CCursor::new(13 + 250)));
         assert!(h.query_by_label("Ln 2, Col 251").is_some(), "on a wrapped line");
@@ -3224,7 +3339,29 @@ mod tests {
         assert!(h.query_by_label("Ln 1, Col 6").is_some(), "typed");
         // A selection made backwards, from line 2 up to line 1: where its caret is, not its end.
         set(&mut h, CCursorRange { primary: CCursor::new(1), secondary: CCursor::new(14 + 4), h_pos: None });
-        assert!(h.query_by_label("Ln 1, Col 2").is_some(), "a selection's caret");
+        assert!(
+            h.query_by_label("Ln 1, Col 2 (17 selected)").is_some(),
+            "a selection's caret, its count to the other end, a line break in it"
+        );
+        let label = h.get_by_label("Ln 1, Col 2 (17 selected)").rect();
+        let clear = h.get_by_label("Clear").rect();
+        assert!(
+            !label.intersects(clear) && label.bottom() <= clear.top(),
+            "the longer label still clear of the buttons: {label:?} {clear:?}"
+        );
+        // Forwards, within a line; then all of it.
+        set(&mut h, CCursorRange { primary: CCursor::new(5), secondary: CCursor::new(1), h_pos: None });
+        assert!(h.query_by_label("Ln 1, Col 6 (4 selected)").is_some(), "forwards");
+        let script = h.state().workflow.script.clone();
+        let all = script.chars().count();
+        let last_line = script.rsplit('\n').next().map_or(0, |l| l.chars().count());
+        set(&mut h, CCursorRange { primary: CCursor::new(all), secondary: CCursor::new(0), h_pos: None });
+        let lines = script.matches('\n').count() + 1;
+        assert!(h.query_by_label(&format!("Ln {lines}, Col {} ({all} selected)", last_line + 1)).is_some(), "everything");
+        // A script loaded from a Windows file: the count is the cursor's, so the line break is two.
+        h.state_mut().workflow.script = "a\r\nb".into();
+        set(&mut h, CCursorRange { primary: CCursor::new(4), secondary: CCursor::new(0), h_pos: None });
+        assert!(h.query_by_label("Ln 2, Col 2 (4 selected)").is_some(), "a CRLF line break counts two");
     }
 
     /// Details… opens the last run in a window of its own, each line folded: a result the pane cuts

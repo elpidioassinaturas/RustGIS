@@ -161,7 +161,7 @@ gpkg.addLayer path table? limit? name?
 gpkg.discardEdits layer?
 gpkg.pendingEdits layer?
 gpkg.saveEdits layer?
-graphics.add shape points layer? text? fill? outline? width? size? fontSize? bold? italic? align? letterSpacing? image? path?
+graphics.add shape points layer? text? fill? outline? width? size? fontSize? bold? italic? align? letterSpacing? image? path? frame?
 graphics.edit layer row points? text? fontSize? bold? italic? align? letterSpacing? fill? outline? width? size?
 graphics.keepTool on?
 graphics.newLayer name?
@@ -295,7 +295,7 @@ layout.guides layout? x? y? clear?
 layout.import path? text?
 layout.move name? layout? to
 layout.new name? page? orientation? width? height? template?
-layout.page layout? page? orientation? width? height? decimal?
+layout.page layout? page? orientation? width? height? decimal? color?
 layout.publication profile? extent? name? title? subtitle? sources? reference? note? author? headings? locator? decimal? colorbar? veil? contextInLegend? northArrow? legendBox? style? accent? arrangement? coverage?
 layout.remove name? layout?
 layout.removeElement layout? element

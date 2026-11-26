@@ -122,16 +122,29 @@ impl Project {
     /// Apply the same capability predicate to every replayable project container.
     fn uses_commands(&self, uses: CommandCheck) -> bool {
         self.models.iter().any(|m| model_uses(&m.steps, m.graph.as_ref(), uses))
-            || self.tasks.iter().any(|t| t.steps.iter().any(|s| uses(&s.command, &s.params)))
+            || self.tasks.iter().any(|t| t.steps.iter().any(|s| command_uses(&uses, &s.command, &s.params)))
             || self.gp_history.iter().any(|h| {
-                uses(if h.id.is_empty() { &h.tool } else { &h.id }, &h.params)
-                    || h.command.as_ref().is_some_and(|(id, params)| uses(id, params))
+                command_uses(&uses, if h.id.is_empty() { &h.tool } else { &h.id }, &h.params)
+                    || h.command.as_ref().is_some_and(|(id, params)| command_uses(&uses, id, params))
             })
             || self.notebooks.iter().any(|n| {
                 n.language().is_none()
                     && n.cells.iter().any(|c| c.kind == crate::cmd::notebook::CellKind::Code && script_uses(&c.source, uses))
             })
     }
+}
+
+/// What a task saved on its own needs: what a project saves for its tasks' steps (a `model.run`
+/// given its graph inline, and a script line, included), in the order its list has them.
+pub(crate) fn task_capabilities(steps: &[super::TaskStep]) -> Vec<&'static str> {
+    let mut required: Vec<&'static str> = COMMAND_CAPABILITIES
+        .iter()
+        .filter_map(|&(name, uses)| steps.iter().any(|s| command_uses(&uses, &s.command, &s.params)).then_some(name))
+        .collect();
+    if steps.iter().any(|s| command_uses_table_export_order(&s.command, &s.params)) {
+        required.push("table-export-order");
+    }
+    required
 }
 
 type CommandCheck = fn(&str, &Value) -> bool;
@@ -163,6 +176,7 @@ const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] = &[
     ("label-clearance", command_clears_labels),
     ("label-duplicates", command_removes_duplicate_labels),
     ("tile-resampling", command_resamples_tiles),
+    ("layout-page-color", command_colours_the_page),
 ];
 
 /// A saved `labels.placement` that has a class remove duplicates, read as the command reads it
@@ -298,6 +312,22 @@ fn command_uses_section(id: &str, params: &Value) -> bool {
         "layout.update" => params.get("section").is_some_and(|v| !v.is_null()),
         "layout.import" => imported_layout_uses(params, &["\"sections\""], |e| e.kind.has_sections()),
         "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_section)),
+        _ => false,
+    }
+}
+
+/// A `layout.page` command that gives the page a colour other than white (#2855), read as the
+/// command reads it: an older reader ignores `color` and opens the page white. A `layout.import`
+/// whose layout has one needs it too.
+fn command_colours_the_page(id: &str, params: &Value) -> bool {
+    match id {
+        "layout.page" => crate::cmd::opaque_color(params, "color")
+            .is_ok_and(|c| c.flatten().is_some_and(|c| c != rustgis_map::Rgba::rgb(0xFF, 0xFF, 0xFF))),
+        "layout.import" => imported_layout(params, &["\"paper\""]).is_some_and(|mut l| {
+            l.clamp();
+            l.paper.is_some()
+        }),
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_colours_the_page)),
         _ => false,
     }
 }
@@ -570,12 +600,17 @@ fn command_uses_chart_outline(id: &str, params: &Value) -> bool {
 /// backslash: JSON may spell a key with escapes (`"\u0063olor"`). It is read once, whatever its
 /// keys.
 fn imported_layout_uses(params: &Value, keys: &[&str], uses: fn(&rustgis_map::layout::Element) -> bool) -> bool {
+    imported_layout(params, keys).is_some_and(|l| l.elements.iter().any(uses))
+}
+
+/// A `layout.import`'s layout, read only when its text names one of `keys` (or escapes, which
+/// could hide one).
+fn imported_layout(params: &Value, keys: &[&str]) -> Option<rustgis_map::layout::Layout> {
     params
         .get("text")
         .and_then(Value::as_str)
         .filter(|t| keys.iter().any(|key| t.contains(key)) || t.contains('\\'))
         .and_then(|t| serde_json::from_str::<rustgis_map::layout::Layout>(t).ok())
-        .is_some_and(|l| l.elements.iter().any(uses))
 }
 
 /// Require only executable payloads being saved: graph files omit steps, web tools omit graphs.
@@ -696,7 +731,39 @@ fn script_uses(script: &str, uses: impl Fn(&str, &Value) -> bool) -> bool {
     script
         .lines()
         .take(crate::cmd::workflows::MAX_SCRIPT_LINES)
-        .any(|line| crate::script_line(line).is_some_and(|parsed| parsed.is_ok_and(|(id, params)| uses(&id, &params))))
+        .any(|line| crate::script_line(line).is_some_and(|parsed| parsed.is_ok_and(|(id, params)| command_uses(&uses, &id, &params))))
+}
+
+/// `uses` on a saved command and, for a `model.run` given its graph inline, on each of the graph's
+/// tool nodes as on a saved model's steps (#2758): that graph is in no saved model, so nothing
+/// else reads it, and an older reader would run its nodes with the option dropped.
+fn command_uses(uses: &impl Fn(&str, &Value) -> bool, id: &str, params: &Value) -> bool {
+    uses(id, params) || (id == "model.run" && inline_graph_uses(params, uses))
+}
+
+/// A graph read as the run reads it (`model::graph_from_json_counted`): an object with `nodes`, at
+/// most `MAX_NODES` nodes and `MAX_EDGES` connections (a bigger one is refused there, so needs
+/// nothing), and only a node of kind `tool` runs, with `params` that aren't an object dropped (the
+/// checks read nothing from one). Read in place, without a copy, so a node the run drops (an empty
+/// or repeated id, an unreadable `x`, a `layer` that isn't text) is read here all the same: that
+/// only over-requires, which is safe, and a node it can't use never hides the others.
+///
+/// No recursion: a node is checked by the leaf check only. A node runs a tool (`model::tool_of`),
+/// so one naming a command, `model.run` included, fails there and is read as the id no check
+/// matches; and one naming `script.run` is skipped, as its check is the one that reads into a
+/// script, which could hold another graph.
+fn inline_graph_uses(params: &Value, uses: &impl Fn(&str, &Value) -> bool) -> bool {
+    let Some(graph) = params.get("graph") else { return false };
+    let few = |key: &str, max: usize| graph.get(key).and_then(Value::as_array).is_none_or(|list| list.len() <= max);
+    few("edges", crate::model::MAX_EDGES)
+        && graph.get("nodes").and_then(Value::as_array).filter(|nodes| nodes.len() <= crate::model::MAX_NODES).is_some_and(|nodes| {
+            nodes.iter().any(|node| {
+                let tool = node.get("tool").and_then(Value::as_str).unwrap_or("");
+                node.get("kind").and_then(Value::as_str) == Some("tool")
+                    && tool != "script.run"
+                    && uses(tool, node.get("params").unwrap_or(&Value::Null))
+            })
+        })
 }
 
 fn relief_effects(layer: &Layer) -> bool {
@@ -910,6 +977,7 @@ fn layout_capabilities(layouts: &[rustgis_map::layout::Layout]) -> Vec<&'static 
         (elements().any(|e| e.kind.has_sections()), "layout-section"),
         (elements().any(|e| e.kind.has_custom_text_size()), "layout-text-size"),
         (elements().any(bar_details), "layout-scale-bar-details"),
+        (layouts.iter().any(|l| l.paper.is_some()), "layout-page-color"),
     ]
     .into_iter()
     .filter_map(|(used, name)| used.then_some(name))
@@ -1107,6 +1175,211 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A `model.run` command given `graph` inline, as a saved task step, a script line in a task, a
+    /// notebook cell and a recorded command: what a project saves as `requires` for each (`None`:
+    /// no header).
+    fn saved_requires_of_inline_graph(run: &Value) -> Vec<Option<Value>> {
+        let script = format!("# Run\nmodel.run {run}");
+        let base = serde_json::to_value(Project::default()).unwrap();
+        [
+            ("tasks", json!([{"name": "Task", "steps": [{"title": "Run", "command": "model.run", "params": run}]}])),
+            ("tasks", json!([{"name": "Script", "steps": [{"title": "Run", "command": "script.run", "params": {"script": script}}]}])),
+            ("notebooks", json!([{"name": "Notebook", "cells": [{"kind": "code", "source": script}]}])),
+            ("gp_history", json!([{"tool": "Run", "params": {}, "command": ["model.run", run], "ok": true, "messages": [], "millis": 0}])),
+        ]
+        .into_iter()
+        .map(|(field, value)| {
+            let mut document = base.clone();
+            document[field] = value;
+            let project = Project::from_json(&document.to_string()).unwrap();
+            serde_json::to_value(&project).unwrap().get("requires").cloned()
+        })
+        .collect()
+    }
+
+    fn graph_of_one_tool(tool: &str, params: Value) -> Value {
+        json!({"graph": {"nodes": [{"id": "n", "kind": "tool", "tool": tool, "params": params}]}})
+    }
+
+    /// A saved command that runs a graph given inline requires what its tool nodes would as
+    /// saved steps, wherever the command is saved (#2758); one that needs nothing, none.
+    #[test]
+    fn an_inline_model_graph_requires_what_its_tool_nodes_do() {
+        for (capability, tool, needs, needs_not) in [
+            ("dggs-system", "a5Grid", json!({"system": "H3"}), json!({"system": "A5"})),
+            ("dggs-system", "a5Aggregate", json!({"system": "Hexagon"}), json!({})),
+            ("dggs-system", "A5 Grid", json!({"system": "S2"}), json!({"system": null})),
+            ("tabulate-intersection-unit", "tabulateIntersection", json!({"areaUnit": "ac"}), json!({"areaUnit": "km2"})),
+            (
+                "tabulate-intersection-empty-zones",
+                "tabulateIntersection",
+                json!({"includeEmptyZones": true}),
+                json!({"includeEmptyZones": false}),
+            ),
+            // As for a saved model's graph (`slope_percent_capability_follows_saved_executables`);
+            // no tool node runs a raster function, so this is parity, not a reachable run.
+            ("slope-percent", "raster.function", json!({"function": "slope", "units": "percent"}), json!({"function": "slope"})),
+        ] {
+            for (index, saved) in saved_requires_of_inline_graph(&graph_of_one_tool(tool, needs.clone())).into_iter().enumerate() {
+                assert_eq!(saved, Some(json!([capability])), "{tool} {needs} in container {index}");
+            }
+            for (index, saved) in saved_requires_of_inline_graph(&graph_of_one_tool(tool, needs_not.clone())).into_iter().enumerate() {
+                assert_eq!(saved, None, "{tool} {needs_not} in container {index}");
+            }
+        }
+    }
+
+    /// A node of an inline graph is checked as a step of a saved model is, by every capability: one
+    /// sample for each entry of `COMMAND_CAPABILITIES`, each requiring exactly its own name, so an
+    /// entry added later without a sample fails here. The walk takes a node's id and parameters as
+    /// they come, as a saved model's does, so every entry is reachable; only the tool-based ones
+    /// (`tabulate*`, `dggs-system`) are also a node a run can run, the rest are parity.
+    #[test]
+    fn an_inline_graph_node_is_checked_as_a_saved_step_is() {
+        let ink_layout = {
+            let fixture = Project::from_json(include_str!("../../../schema/fixtures/layout_element_ink.rgis")).unwrap();
+            serde_json::to_value(&fixture).unwrap()["layouts"][0].to_string()
+        };
+        let svg = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 4"/>"#)
+        };
+        let chart = json!({"kind": "chart"});
+        let samples: Vec<(&[&str], &str, Value)> = vec![
+            (&["slope-percent"], "raster.function", json!({"function": "slope", "units": "percent"})),
+            (&["slope-percent"], "raster.functionChain", json!({"steps": [{"function": "slope", "units": "percent"}]})),
+            (&["tabulate-intersection-unit"], "tabulateIntersection", json!({"areaUnit": "ac"})),
+            (&["tabulate-intersection-empty-zones"], "tabulateIntersection", json!({"includeEmptyZones": true})),
+            (&["layout-element-background"], "layout.update", json!({"element": 1, "background": {}})),
+            (&["picture-markers"], "layer.marker", json!({"image": "iVBORw0KGgo"})),
+            (&["graticule-mgrs"], "map.graticule", json!({"type": "mgrs"})),
+            (&["graticule-on-top"], "map.graticule", json!({"onTop": true})),
+            (&["graticule-color"], "map.graticule", json!({"color": "#000000"})),
+            (&["layout-element-ink"], "layout.import", json!({"text": ink_layout})),
+            (&["layout-element-wrap"], "layout.addElement", json!({"kind": "text", "wrap": true})),
+            (&["layout-chart-data"], "layout.addElement", json!({"kind": "chart", "group": "Region"})),
+            (&["layout-chart-look"], "layout.update", json!({"element": 1, "values": true})),
+            (&["layout-chart-classes"], "layout.update", json!({"element": 1, "classes": true})),
+            (&["layout-chart-stack"], "layout.update", json!({"element": 1, "stack": "Kind"})),
+            (&["layout-chart-facing"], "layout.update", json!({"element": 1, "mirror": true})),
+            (&["layout-chart-outline"], "layout.update", json!({"element": 1, "barOutline": {"width": 1}})),
+            (&["layout-scale-bar-details"], "layout.update", json!({"element": 1, "subdivisions": 2})),
+            (&["blank-paper"], "map.basemap", json!({"name": "blank", "color": "#112233"})),
+            (&["layout-frame-border"], "layout.update", json!({"element": 1, "border": {}})),
+            (&["layout-text-size"], "layout.update", json!({"element": 1, "textSize": 12})),
+            (&["dggs-system"], "a5Grid", json!({"system": "H3"})),
+            (&["dggs-system"], "a5Aggregate", json!({"system": "S2"})),
+            (&["label-weight"], "labels.placement", json!({"weight": 9})),
+            (&["label-clearance"], "labels.placement", json!({"clearance": 9})),
+            (&["label-duplicates"], "labels.placement", json!({"removeDuplicates": 20})),
+            (&["tile-resampling"], "map.addTiles", json!({"resampling": "nearest"})),
+            (&["layout-page-color"], "layout.page", json!({"color": "#0B1B2B"})),
+            // An SVG image is a picture marker as well, in a node as in a saved command.
+            (&["picture-markers", "svg-markers"], "layer.marker", json!({"image": svg})),
+            (&[], "buffer", json!({"input": "Cities", "distance": 1})),
+            (&[], "layout.addElement", chart),
+        ];
+        let mut covered = std::collections::BTreeSet::new();
+        for (capability, id, params) in samples {
+            let step = [ModelStep { tool: id.into(), params: params.clone() }];
+            let names: Vec<&str> =
+                COMMAND_CAPABILITIES.iter().filter_map(|&(name, uses)| model_uses(&step, None, uses).then_some(name)).collect();
+            assert_eq!(names, capability, "the sample {id} {params} requires exactly its own capability");
+            covered.extend(capability.iter().copied());
+            for (index, saved) in saved_requires_of_inline_graph(&graph_of_one_tool(id, params.clone())).into_iter().enumerate() {
+                // The documents are otherwise empty, so the header names only what the node needs.
+                assert_eq!(saved, (!capability.is_empty()).then(|| json!(capability)), "{id} {params} in container {index}");
+            }
+        }
+        let missing: Vec<&str> = COMMAND_CAPABILITIES.iter().map(|&(name, _)| name).filter(|name| !covered.contains(name)).collect();
+        assert!(missing.is_empty(), "add a sample for each command capability, missing: {missing:?}");
+    }
+
+    /// An inline graph is read as the run reads it: only an object with `nodes`, only nodes of kind
+    /// `tool` with an object for `params`; one it can't read it drops, not the rest.
+    #[test]
+    fn an_inline_graph_is_read_as_the_run_reads_it() {
+        let h3 = json!({"system": "H3"});
+        let node = |extra: Value| {
+            let mut n = json!({"id": "n", "kind": "tool", "tool": "a5Grid", "params": h3});
+            for (k, v) in extra.as_object().into_iter().flatten() {
+                n[k] = v.clone();
+            }
+            n
+        };
+        let none = |run: Value, why: &str| {
+            assert!(saved_requires_of_inline_graph(&run).iter().all(Option::is_none), "{why}");
+        };
+        let needs = |run: Value, why: &str| {
+            assert!(saved_requires_of_inline_graph(&run).iter().all(|r| r == &Some(json!(["dggs-system"]))), "{why}");
+        };
+        let graph = |nodes: Vec<Value>| json!({"graph": {"nodes": nodes}});
+        none(json!({"graph": graph(vec![node(json!({}))]).get("graph").map(Value::to_string)}), "a graph as text is refused by the run");
+        none(json!({"graph": null, "name": "Saved"}), "no graph: the named model is read as a saved model");
+        none(json!({"graph": []}), "not an object");
+        none(json!({"graph": {"nodes": "text"}}), "nodes not a list");
+        none(graph(vec![node(json!({"kind": null}))]), "no kind");
+        none(graph(vec![node(json!({"kind": "input"}))]), "an input node runs no tool");
+        none(graph(vec![node(json!({"kind": "output"}))]), "an output node runs no tool");
+        none(graph(vec![node(json!({"kind": "Tool"}))]), "kind is lowercase");
+        none(graph(vec![node(json!({"tool": 5}))]), "tool not text");
+        none(graph(vec![node(json!({"params": h3.to_string()}))]), "params as text are dropped");
+        none(graph(vec![node(json!({"params": [h3]}))]), "params as a list are dropped");
+        none(graph(vec![node(json!({"params": null}))]), "no params");
+        none(graph(vec![node(json!({"tool": "buffer"}))]), "another tool");
+        needs(graph(vec![node(json!({}))]), "the plain case");
+        needs(graph(vec![json!(5), json!({"id": 3}), json!(null), node(json!({}))]), "the run drops a node it can't read, not the rest");
+        needs(graph(vec![node(json!({"tool": "A5 Grid"}))]), "a tool by its former name");
+        needs(json!({"graph": {"nodes": [node(json!({}))], "edges": "junk"}}), "edges are not read");
+    }
+
+    /// A graph past the run's limits is refused there, so needs nothing; one no bigger is read to
+    /// its last node. Nested and cyclic graphs are read one level, without recursion.
+    #[test]
+    fn a_hostile_inline_graph_is_read_without_panic_or_hang() {
+        use crate::model::{MAX_EDGES, MAX_NODES};
+        let junk = || json!({"id": "j", "kind": "tool", "tool": "buffer", "params": {}});
+        let h3 = || json!({"id": "h", "kind": "tool", "tool": "a5Grid", "params": {"system": "H3"}});
+        let nodes_with_last = |count: usize, last: Value| {
+            let mut nodes = vec![junk(); count - 1];
+            nodes.push(last);
+            json!({"graph": {"nodes": nodes}})
+        };
+        let all = |run: Value, expected: Option<Value>, why: &str| {
+            for (index, saved) in saved_requires_of_inline_graph(&run).into_iter().enumerate() {
+                assert_eq!(saved, expected, "{why} (container {index})");
+            }
+        };
+        // A notebook cell is cut at `MAX_SOURCE` on load: the task and history containers cover the oversized graphs.
+        all(nodes_with_last(MAX_NODES, h3()), Some(json!(["dggs-system"])), "as many nodes as a run takes, the last one needing it");
+        all(nodes_with_last(MAX_NODES + 1, h3()), None, "one more is refused");
+        all(nodes_with_last(100_000, h3()), None, "far more is refused");
+        let mut edges = nodes_with_last(2, h3());
+        edges["graph"]["edges"] = json!(vec![json!({"from": "j", "to": "h", "toPort": "input"}); MAX_EDGES + 1]);
+        all(edges, None, "more connections than a run takes");
+        // A node that is itself a `model.run`, nested to the depth the project's JSON allows (128).
+        let mut nested = graph_of_one_tool("a5Grid", json!({"system": "H3"}));
+        for _ in 0..24 {
+            nested = json!({"graph": {"nodes": [{"id": "m", "kind": "tool", "tool": "model.run", "params": nested}]}});
+        }
+        all(nested, None, "a node is a tool, not a model run: nothing inside it is read");
+        // A node that is a script holding a graph holding a script, as deep as its escaping allows.
+        let mut cycle = graph_of_one_tool("a5Grid", json!({"system": "H3"}));
+        for _ in 0..12 {
+            let script = format!("model.run {cycle}");
+            cycle = json!({"graph": {"nodes": [{"id": "s", "kind": "tool", "tool": "script.run", "params": {"script": script}}]}});
+        }
+        all(cycle, None, "a script node is not read into");
+        // A script of as many graph lines as a script takes.
+        let line = format!("model.run {}", graph_of_one_tool("buffer", json!({})));
+        let script = vec![line; crate::cmd::workflows::MAX_SCRIPT_LINES].join("\n");
+        let base = serde_json::to_value(Project::default()).unwrap();
+        let mut document = base;
+        document["tasks"] = json!([{"name": "T", "steps": [{"title": "Run", "command": "script.run", "params": {"script": script}}]}]);
+        let project = Project::from_json(&document.to_string()).unwrap();
+        assert!(serde_json::to_value(&project).unwrap().get("requires").is_none());
     }
 
     /// All replayable project containers require non-default options only when requested.
@@ -2234,6 +2507,48 @@ mod tests {
         let mut unknown = saved;
         unknown["requires"] = json!(["layout-frame-border", "future-border"]);
         assert!(Project::from_json(&unknown.to_string()).unwrap_err().contains("future-border"));
+    }
+
+    /// A layout's page colour (#2855) is required where it is saved, so an older reader refuses
+    /// the project instead of opening the page white and saving it so. A white page is not
+    /// written and needs nothing; neither do a saved layout.page that gives white or null.
+    #[test]
+    fn page_color_capability_follows_saved_layouts_and_commands() {
+        let fixture = Project::from_json(include_str!("../../../schema/fixtures/layout_page_color.rgis")).unwrap();
+        let saved = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(saved["requires"], json!(["layout-page-color"]));
+        assert_eq!(saved["layouts"][0]["paper"], json!([11, 27, 43, 255]));
+        let mut clean = fixture;
+        clean.layouts[0].paper = None;
+        let base = serde_json::to_value(&clean).unwrap();
+        assert!(base.get("requires").is_none() && base["layouts"][0].get("paper").is_none(), "a white page needs nothing");
+        for (params, required) in [
+            (json!({"color": "#0B1B2B"}), true),
+            (json!({"color": " #0b1b2b "}), true),
+            (json!({"color": "#FFFFFF"}), false),
+            (json!({"color": "#ffffff"}), false),
+            (json!({"color": null}), false),
+            (json!({"orientation": "portrait"}), false),
+        ] {
+            let script = format!("layout.page {params}");
+            for value in [
+                json!([{"name": "Task", "steps": [{"title": "Page", "command": "layout.page", "params": params}]}]),
+                json!([{"name": "Script", "steps": [{"title": "Page", "command": "script.run", "params": {"script": script}}]}]),
+            ] {
+                let mut document = base.clone();
+                document["tasks"] = value;
+                let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+                let expected = if required { json!(["layout-page-color"]) } else { Value::Null };
+                assert_eq!(saved.get("requires").cloned().unwrap_or(Value::Null), expected, "{params}");
+            }
+        }
+        // An imported layout's text with a page colour needs it; a white one, none.
+        for (layout, required) in [(&saved["layouts"][0], true), (&base["layouts"][0], false)] {
+            let mut document = base.clone();
+            document["tasks"] = json!([{"name": "Task", "steps": [{"title": "Import", "command": "layout.import", "params": {"text": layout.to_string()}}]}]);
+            let saved = serde_json::to_value(Project::from_json(&document.to_string()).unwrap()).unwrap();
+            assert_eq!(saved.get("requires").is_some(), required, "{layout}");
+        }
     }
 
     /// A legend's, scale bar's or grid's text size other than its default (#2581) is required

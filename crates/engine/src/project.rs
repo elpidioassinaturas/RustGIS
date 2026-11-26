@@ -15,7 +15,7 @@ mod capabilities;
 #[path = "project_label_losses.rs"]
 pub(crate) mod label_losses;
 pub use capabilities::layout_file_bytes;
-pub(crate) use capabilities::{layer_file_bytes, map_file_bytes, model_capabilities};
+pub(crate) use capabilities::{layer_file_bytes, map_file_bytes, model_capabilities, task_capabilities};
 
 /// A map export cannot keep runtime-only download reservations, even in a larger project.
 pub(crate) fn ensure_map_imports_complete(map: &Map) -> Result<(), String> {
@@ -123,6 +123,7 @@ pub const CAPABILITIES: &[&str] = &[
     "svg-markers",
     "label-duplicates",
     "tile-resampling",
+    "layout-page-color",
 ];
 /// An offline area keeping the versions that lost a sync or a Bring Back
 /// (`OfflineArea::conflicts`, #2468): an older reader would save it again without them.
@@ -2796,7 +2797,7 @@ pub(crate) fn layout_notices(
     let pages = total(|r| r.page_adjusted);
     if pages > 0 {
         notices.push(format!(
-            "{name}: the page size, guides or map series margin of {pages} layout(s) adjusted {when} (in {})",
+            "{name}: the page size, guides, page colour or map series margin of {pages} layout(s) adjusted {when} (in {})",
             layout_names(repairs, |r| r.page_adjusted)
         ));
     }

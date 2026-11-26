@@ -5,11 +5,15 @@ use crate::{Project, Session, sample};
 
 #[path = "tests/formats_out.rs"]
 mod formats_out;
+#[path = "tests/graphics_frames.rs"]
+mod graphics_frames;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "tests/held_databases.rs"]
 mod held_databases;
 #[path = "tests/own_grid_edits.rs"]
 mod own_grid_edits;
+#[path = "tests/own_segments.rs"]
+mod own_segments;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "tests/scene_losses.rs"]
 mod scene_losses;
@@ -3454,16 +3458,26 @@ fn a_scripts_error_says_where_it_stopped() {
     assert_eq!(stop(&mut s, "script.run {}", "line 1: "), Some((1, None)));
     // JSON that doesn't read: the column of its error in the line, after indentation and `id=`.
     assert_eq!(stop(&mut s, "map.zoomFull\n  layer.rename= {\"layer\": }", "line 2: "), Some((2, Some(27))));
+    // The same after characters past ASCII, counted as characters, not bytes.
+    assert_eq!(stop(&mut s, "layer.rename {\"layer\": \"é\", \"name\": }", "line 1: "), Some((1, Some(37))));
     // Counted in characters: `á` is two bytes.
     assert_eq!(stop(&mut s, "layer.rename {\"name\": \"Bogotá\", }", "line 1: "), Some((1, Some(33))));
     // JSON cut short: its last character, never past the line.
     assert_eq!(stop(&mut s, "layer.rename {\"name\": ", "line 1: "), Some((1, Some(21))));
+    // The file goes when the test ends, whether or not an assert failed first (`stop` asserts too).
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
     // An edit to a layer read in place.
-    let path = grid_fgb("script-stopped-at", 4);
-    let mut streamed = with_streamed(&path);
+    // `streamed` is declared after `path`, so it drops first and releases the file before it is removed
+    // (a file still open can't be removed on Windows): keep this order.
+    let path = RemoveOnDrop(grid_fgb("script-stopped-at", 4));
+    let mut streamed = with_streamed(&path.0);
     let script = "edit.enable {\"on\": true}\nedit.addFeature {\"layer\": \"Streamed\", \"geometry\": {\"type\": \"Point\", \"coordinates\": [1, 2]}}";
     assert_eq!(stop(&mut streamed, script, "line 2: "), Some((2, None)));
-    let _ = std::fs::remove_file(path);
     // Errors that name no line of the script.
     let long = "map.zoomFull\n".repeat(crate::cmd::workflows::MAX_SCRIPT_LINES + 1);
     let e = s.run("script.run", &json!({"script": long})).unwrap_err();
@@ -19204,6 +19218,55 @@ fn a_globe_locator_keeps_the_blank_paper() {
     assert_eq!(m.blank_paper(), Some(rustgis_map::Rgba::rgb(0xF1, 0xEA, 0xDF)));
 }
 
+/// A layout's page colour (#2855): set by layout.page, opaque #RRGGBB only, white or null giving
+/// the white page back; painted under every element in the PNG and SVG exports, kept by
+/// duplicate, undone in one step, and written only when it isn't white.
+#[test]
+fn a_layouts_page_takes_a_colour() {
+    let navy = rustgis_map::Rgba::rgb(0x0B, 0x1B, 0x2B);
+    let mut s = Session::new(Project::default());
+    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape", "template": "blank"})).unwrap();
+    let paper = |s: &Session| s.project.layouts.last().and_then(|l| l.paper);
+    assert_eq!(s.run("layout.page", &json!({})).unwrap()["color"], Value::Null, "white unless given");
+    let r = s.run("layout.page", &json!({"color": "#0B1B2B"})).unwrap();
+    assert_eq!((r["color"].clone(), paper(&s)), (json!("#0B1B2B"), Some(navy)));
+    s.run("layout.page", &json!({"orientation": "portrait"})).unwrap();
+    assert_eq!(paper(&s), Some(navy), "a page change without color keeps it");
+    // Painted under everything: a corner of the PNG and the SVG's page.
+    let dir = std::env::temp_dir().join(format!("rustgis-page-colour-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("page.png");
+    s.run("layout.export", &json!({"path": png.display().to_string(), "dpi": 72})).unwrap();
+    let pm = crate::render::decode_png(&std::fs::read(&png).unwrap()).unwrap();
+    let corner = pm.pixel(3, 3).unwrap();
+    assert_eq!((corner.red(), corner.green(), corner.blue()), (0x0B, 0x1B, 0x2B));
+    let svg = dir.join("page.svg");
+    s.run("layout.export", &json!({"path": svg.display().to_string()})).unwrap();
+    let text = std::fs::read_to_string(&svg).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(text.contains(r##"fill="#0b1b2b"/>"##) && !text.contains(r##"fill="#ffffff"/>"##), "{text}");
+    // Saved with the layout, and kept by a duplicate.
+    let saved = serde_json::to_value(&s.project).unwrap();
+    assert_eq!(saved["layouts"][0]["paper"], json!([0x0B, 0x1B, 0x2B, 255]));
+    s.run("layout.duplicate", &json!({})).unwrap();
+    assert_eq!(paper(&s), Some(navy));
+    // Bad colours are refused and change nothing; translucent ones too (a page has nothing under it).
+    for bad in [json!("#0B1B2B80"), json!("0B1B2B"), json!("#+B1B2B"), json!("navy"), json!(3)] {
+        let e = s.run("layout.page", &json!({"color": bad})).unwrap_err();
+        assert!(e.contains("#RRGGBB"), "{bad}: {e}");
+        assert_eq!(paper(&s), Some(navy), "{bad}");
+    }
+    // White and null give the white page back, written as before (no key).
+    s.run("layout.page", &json!({"color": "#ffffff"})).unwrap();
+    assert_eq!(paper(&s), None, "white is the page's own");
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(paper(&s), Some(navy), "undone in one step");
+    s.run("layout.page", &json!({"color": null})).unwrap();
+    assert_eq!(paper(&s), None);
+    let saved = serde_json::to_value(&s.project).unwrap();
+    assert!(saved["layouts"].as_array().unwrap().last().unwrap().get("paper").is_none());
+}
+
 /// A blank basemap's paper colour (#2532): kept until null or another basemap, opaque #RRGGBB only,
 /// a warning (not an error) when given with another basemap, and drawn in a layout's map frame.
 #[test]
@@ -20860,6 +20923,86 @@ fn plugin_mosaics_of_project_layers_need_no_files() {
     let e = forward(&mut s, "eng-mosaic", "raster.mosaic", json!({"inputs": ["west", "east"]})).unwrap_err();
     assert!(e.contains("no raster layer 'east'") && !e.contains("permission"), "{e}");
     rustgis_plugins::unload("eng-mosaic");
+}
+
+/// Clip, resample and mosaic run while the Imagery extension is off (#2823), whoever asks: the user,
+/// a script, a saved task, or a plugin, which can't turn the extension on. Imagery's own commands
+/// stay refused.
+#[test]
+fn clip_resample_and_mosaic_run_with_imagery_off() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = world();
+    for (name, x0) in [("west", 0.0), ("east", 1.0)] {
+        let gt = GeoTransform { origin_x: x0, origin_y: 1.0, pixel_width: 0.1, pixel_height: -0.1 };
+        let r = Raster::new(name, 10, 10, vec![vec![1.0; 100]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let bytes = geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(&mut s, name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+    }
+    s.run("layer.template", &json!({"template": "polygons", "name": "Area"})).unwrap();
+    // Around the cell centres of 4 columns and 5 rows.
+    let ring = json!([[0.2, 0.3], [0.6, 0.3], [0.6, 0.8], [0.2, 0.8], [0.2, 0.3]]);
+    s.run("edit.addFeature", &json!({"layer": "Area", "geometry": {"type": "Polygon", "coordinates": [ring]}})).unwrap();
+    s.run("extension.disable", &json!({"id": "imagery"})).unwrap();
+
+    let commands = |by: &str| {
+        [
+            ("raster.process", json!({"layer": "west", "operation": "clip", "polygon": "Area", "name": format!("{by} clip")})),
+            ("raster.process", json!({"layer": "west", "operation": "resample", "factor": 2, "name": format!("{by} half")})),
+            ("raster.mosaic", json!({"inputs": ["west", "east"], "name": format!("{by} both")})),
+        ]
+    };
+    let check = |s: &Session, by: &str| {
+        for (kind, size, cells) in [("clip", (4, 5), 20), ("half", (5, 5), 25), ("both", (20, 10), 200)] {
+            let name = format!("{by} {kind}");
+            let layer = s.map().layer_by_name(&name).unwrap_or_else(|| panic!("no {name}"));
+            let r = layer.raster.as_ref().unwrap().data.as_ref().unwrap();
+            assert_eq!(((r.width, r.height), r.bands[0].stats.count), (size, cells), "{name}");
+        }
+    };
+    for (id, p) in commands("user") {
+        s.run(id, &p).unwrap();
+    }
+    check(&s, "user");
+    let script = commands("script").map(|(id, p)| format!("{id} {p}")).join("\n");
+    s.run("script.run", &json!({"script": script})).unwrap();
+    check(&s, "script");
+    let steps = commands("task").map(|(id, p)| json!({"title": id, "command": id, "params": p}));
+    s.run("task.new", &json!({"name": "Raster steps", "steps": steps})).unwrap();
+    s.run("task.run", &json!({"task": "Raster steps"})).unwrap();
+    check(&s, "task");
+    plugin("eng-imagery-off", &["edit"]);
+    for (id, p) in commands("plugin") {
+        forward(&mut s, "eng-imagery-off", id, p).unwrap();
+    }
+    check(&s, "plugin");
+    // As the desktop app runs clip and resample: worked out on a thread, landed, then added by the
+    // command. A mosaic has no such run.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use crate::cmd::workflows::{raster_land, raster_start};
+        for (id, p) in commands("app") {
+            if id == "raster.mosaic" {
+                s.run(id, &p).unwrap();
+                continue;
+            }
+            let run = raster_start(&mut s, id, &p).unwrap();
+            let ran = run.id;
+            let made = std::thread::spawn(move || run.run(&rustgis_analysis::control::Control::new())).join().unwrap().unwrap();
+            assert_eq!(raster_land(&mut s, ran, made), Ok(true));
+            s.finish_raster(id, ran, &p).unwrap();
+        }
+        check(&s, "app");
+    }
+
+    for id in ["raster.classify", "raster.index", "raster.change", "raster.editPixels"] {
+        let p = json!({"layer": "west"});
+        for e in [s.run(id, &p).unwrap_err(), forward(&mut s, "eng-imagery-off", id, p).unwrap_err()] {
+            assert!(e.contains("Imagery extension, which is off"), "{id}: {e}");
+        }
+    }
+    forward(&mut s, "eng-imagery-off", "extension.enable", json!({"id": "imagery"})).unwrap_err();
+    assert!(!s.extensions().is_on("imagery"), "a plugin can't turn it on");
+    rustgis_plugins::unload("eng-imagery-off");
 }
 
 #[test]
@@ -52955,6 +53098,115 @@ fn calculate_field_preview_refuses_what_calculate_refuses() {
         .collect();
     assert_eq!(refused, ran, "the rule reads the row's place");
     assert_eq!(ran.iter().map(Option::is_some).collect::<Vec<_>>(), [false, true], "row 1 makes 10, row 2 makes 20");
+}
+
+/// Calculate Field's preview shows the value the field holds after the layer's calculation rules
+/// (#2884): a rule writing the field overwrites Calculate's result on the run, so the preview is the
+/// rule's result, as the field holds it, with what writing that loses. It is what Calculate leaves in
+/// each row, with a layer whose only design is calculation rules, with the later of two rules, and
+/// with a rule on another field leaving the value alone.
+#[test]
+fn calculate_field_preview_shows_what_a_calculation_rule_leaves_in_the_field() {
+    use crate::cmd::edit::{PreviewLoss, preview_calculation};
+    use rustgis_data::Value as V;
+    use rustgis_data::query::Fault;
+    let layer = |rules: &[(&str, &str, &str)]| {
+        let mut s = Session::new(Project::default());
+        let features: Vec<Value> = [1, 2, 3]
+            .map(|n| json!({"type": "Feature", "properties": {"n": n, "m": 0}, "geometry": {"type": "Point", "coordinates": [n, 0]}}))
+            .to_vec();
+        let points = json!({"type": "FeatureCollection", "features": features});
+        s.run("layer.addDataText", &json!({"fileName": "calc.geojson", "text": points.to_string()})).unwrap();
+        for (name, field, expression) in rules {
+            if expression.contains("nosuch") {
+                // The command refuses a rule that doesn't read; a hand-edited file or an earlier version may hold one.
+                let id = s.map().layer_by_name("calc").unwrap().id;
+                let rule = rustgis_map::design::AttributeRule {
+                    name: name.to_string(),
+                    kind: rustgis_map::design::RuleKind::Calculation,
+                    field: field.to_string(),
+                    expression: expression.to_string(),
+                };
+                s.map_mut().layer_mut(id).unwrap().design.rules.push(rule);
+                continue;
+            }
+            s.run(
+                "data.attributeRule",
+                &json!({"layer": "calc", "name": name, "kind": "calculation", "field": field, "expression": expression}),
+            )
+            .unwrap();
+        }
+        s
+    };
+    // The preview's value and loss in each row, and what Calculate leaves there when it runs on that row alone.
+    let both = |rules: &[(&str, &str, &str)], expression: &str| -> (Vec<(V, Option<PreviewLoss>)>, Vec<V>) {
+        let s = layer(rules);
+        let l = s.map().layer_by_name("calc").unwrap();
+        let n = l.dataset.field_index("n").unwrap();
+        let previewed = preview_calculation(expression, &l.dataset, n, &[0, 1, 2], Some(&l.design)).unwrap();
+        let ran = (0..3)
+            .map(|row| {
+                let mut s = layer(rules);
+                s.run("select.rows", &json!({"layer": "calc", "rows": [row]})).unwrap();
+                s.run("edit.calculateField", &json!({"layer": "calc", "field": "n", "expression": expression})).unwrap();
+                let l = s.map().layer_by_name("calc").unwrap();
+                l.dataset.value(row, n).clone()
+            })
+            .collect();
+        (previewed.into_iter().map(|p| (p.value, p.lost)).collect(), ran)
+    };
+    let clean = |values: [i64; 3]| values.map(|v| (V::Int(v), None)).to_vec();
+    // The rule's result, not the expression's, and the same as the run leaves; a layer with a rule
+    // and no check at all gets it too.
+    let (shown, ran) = both(&[("Tens", "n", "n * 10")], "n + 1");
+    assert_eq!(shown, clean([20, 30, 40]));
+    assert_eq!(ran, [V::Int(20), V::Int(30), V::Int(40)]);
+    // The later of two rules writing the field wins.
+    let (shown, ran) = both(&[("Tens", "n", "n * 10"), ("Five", "n", "n + 5")], "n + 1");
+    assert_eq!(shown, clean([25, 35, 45]));
+    assert_eq!(ran, [V::Int(25), V::Int(35), V::Int(45)]);
+    // A rule on another field leaves the value, and what writing it loses, as they were.
+    let (shown, ran) = both(&[("Place", "m", "n * 10")], "n + 1");
+    assert_eq!(shown, clean([2, 3, 4]));
+    assert_eq!(ran, [V::Int(2), V::Int(3), V::Int(4)]);
+    // What the rule's own write loses is what the preview says: a fraction its whole-number field
+    // drops (the second row: 3 * 0.5), and an error that made it null.
+    let (shown, ran) = both(&[("Half", "n", "n * 0.5")], "n + 1");
+    assert_eq!(shown, vec![(V::Int(1), None), (V::Int(1), Some(PreviewLoss::Fraction)), (V::Int(2), None)]);
+    assert_eq!(ran, [V::Int(1), V::Int(1), V::Int(2)]);
+    let (shown, ran) = both(&[("Zero", "n", "n / 0")], "n + 1");
+    assert_eq!(shown, vec![(V::Null, Some(PreviewLoss::Error(Fault::DivisionByZero))); 3]);
+    assert_eq!(ran, vec![V::Null; 3]);
+    // A rule's clean result over Calculate's lossy one loses nothing in the field.
+    let (shown, ran) = both(&[("Tens", "n", "n * 10")], "n + 0.5");
+    assert_eq!(shown, clean([10, 20, 30]));
+    assert_eq!(ran, [V::Int(10), V::Int(20), V::Int(30)]);
+    // A rule reading `@row_number` reads the layer's row in the preview's copy: 1, 2, 3.
+    let (shown, ran) = both(&[("Place", "n", "@row_number * 10")], "n + 1");
+    assert_eq!(shown, clean([10, 20, 30]));
+    assert_eq!(ran, [V::Int(10), V::Int(20), V::Int(30)]);
+    // A rule that no longer reads is skipped, as the run skips it: the others still apply.
+    let (shown, ran) = both(&[("Gone", "n", "nosuch + 1")], "n + 1");
+    assert_eq!(shown, clean([2, 3, 4]));
+    assert_eq!(ran, [V::Int(2), V::Int(3), V::Int(4)]);
+    let (shown, ran) = both(&[("Gone", "n", "nosuch + 1"), ("Tens", "n", "n * 10")], "n + 1");
+    assert_eq!(shown, clean([20, 30, 40]));
+    assert_eq!(ran, [V::Int(20), V::Int(30), V::Int(40)]);
+    // A rule on another field feeding a domain it breaks still refuses the row, as the run does.
+    let mut with_domain = layer(&[("Place", "m", "n * 10")]);
+    with_domain.run("data.domain", &json!({"layer": "calc", "field": "m", "min": 0, "max": 25})).unwrap();
+    let l = with_domain.map().layer_by_name("calc").unwrap();
+    let n = l.dataset.field_index("n").unwrap();
+    let previewed = preview_calculation("n", &l.dataset, n, &[0, 1, 2], Some(&l.design)).unwrap();
+    assert_eq!(previewed.iter().map(|p| p.refused.is_some()).collect::<Vec<_>>(), [false, false, true], "30 is past the domain");
+    assert_eq!(previewed.iter().map(|p| p.value.clone()).collect::<Vec<_>>(), [V::Int(1), V::Int(2), V::Int(3)]);
+    // No rule: the expression's value, as before; no rows: nothing previewed.
+    let (shown, _) = both(&[], "n + 1");
+    assert_eq!(shown, clean([2, 3, 4]));
+    let s = layer(&[("Tens", "n", "n * 10")]);
+    let l = s.map().layer_by_name("calc").unwrap();
+    let n = l.dataset.field_index("n").unwrap();
+    assert_eq!(preview_calculation("n + 1", &l.dataset, n, &[], Some(&l.design)).unwrap(), vec![]);
 }
 
 /// Calculate Field keeps a decimal result as it is in a decimal field, rather than rounding it to

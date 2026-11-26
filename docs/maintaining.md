@@ -76,9 +76,9 @@ same files. New and changed code follows these rules; not every existing reader 
   writes it.
 - A project, map or layer file, a model or a web tool lists in `requires` each capability it needs
   that an older reader would lose or misread: a reader refuses one it doesn't know, naming it.
-  `task.import` reads a task file this way (#2818), though `task.save` doesn't list anything in one
-  yet. Presentation and notebook readers, and models inside a task's steps, don't check
-  `requires` yet. A release reads
+  A task file does too (#2818): `task.save` lists what its steps need, a `model.run` step's inline
+  graph included, and `task.import` refuses one it doesn't know. Presentation and notebook readers
+  don't check `requires` yet. A release reads
   `.rgis` format 2 before any writes it (`READ_FORMAT` and `CAPABILITIES` in
   `crates/engine/src/project.rs`), so what is added to format 2 after that comes with a capability
   name, added to `CAPABILITIES` where it is read.
@@ -145,6 +145,11 @@ The same containers require `dggs-system` when Generate Tessellation or Aggregat
 (`a5Grid`, `a5Aggregate`) is given a `system` other than A5: those were A5's tools, and an older
 reader would make A5 cells, warning only that it ignored the key. A blank `system`, `A5` or none
 needs nothing.
+
+Every capability a saved command can need, except `table-export-order` (no tool node runs
+`share.exportTable`), also reads a `model.run` whose `graph` is given inline, in a saved task step,
+script line, notebook cell or history entry: each of the graph's tool nodes needs what the same
+tool as a step needs.
 
 Projects with a background on a layout element, or a saved task step, script, notebook command
 cell or history entry that gives one (`layout.addElement` or `layout.update` with a
@@ -294,6 +299,14 @@ too: a saved `layout.update` can't tell whose they are, so a number there requir
 `layout.import` whose `text` has such a bar requires it as well, and a layout file
 (`.rgislayout`) with such a bar lists it in its header, so an older reader refuses the file too.
 A scale bar's text size isn't one of its details: it requires `layout-text-size`, as above.
+
+Projects with a layout whose page isn't white (`paper` on the layout, #2855) require
+`layout-page-color`, so an older reader refuses them instead of opening the page white and saving
+it again without its colour. A saved `layout.page` that gives a `color` other than white requires
+it too; `null` or `"#FFFFFF"` need nothing. A saved `layout.import` whose `text` has a coloured
+page requires it as well. A translucent page colour, which only a hand-edited file holds, is read
+as it looks on white paper (a clear one is the white page) and counted with the page settings the
+project says it repaired.
 
 Projects, map files and layer files with a layer or table held in a coordinate system of its own
 (`Dataset::held_in`: a file's system, kept since #2580) save its features in that system, exactly,

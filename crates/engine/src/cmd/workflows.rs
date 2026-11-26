@@ -379,6 +379,19 @@ pub struct Made {
 }
 
 impl Made {
+    /// With `extra` added to the command's answer.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_extra(mut self, extra: Value) -> Made {
+        self.extra = Some(extra);
+        self
+    }
+
+    /// The layer it adds, to style.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn layer_mut(&mut self) -> &mut rustgis_map::RasterLayer {
+        &mut self.layer
+    }
+
     /// With `file` to commit as it is added; `said`, what the run had to say, goes with the
     /// error when it can't be (its `then` doesn't run).
     pub(crate) fn committing(mut self, file: rustgis_data::io::StagedWrite, said: Vec<String>) -> Made {
@@ -1547,9 +1560,13 @@ pub fn script_commands(script: &str) -> Result<Vec<(usize, String, Value)>, Stri
 /// doesn't read, the column of its error in the line (1-based, in characters, as an editor counts).
 /// `None` for an error that names no line of `script`. The Script pane marks the line and goes to
 /// it (#2815). It reads the `line {n}` that `run_script`'s and [`script_commands`]' stops at a line
-/// start with (the line cap and a run ahead's refusal name none, so they leave no mark), rather
-/// than the run returning the line apart, which would change the error type every caller of a
-/// command shares; `a_scripts_error_says_where_it_stopped` pins each message.
+/// start with, rather than the run returning the line apart, which would change the error type
+/// every caller of a command shares; `a_scripts_error_says_where_it_stopped` pins the stops that start
+/// with a line (except the `check_prepared_prefix` refusal) and the line cap.
+/// Of the stops of a run of a script's lines, three name no line, so they leave no mark: the line
+/// cap, `NOT_AHEAD`, and the refusal of a script that can't prepare its queries or table writes
+/// under its permissions. The refusal of `check_prepared_prefix`, from a run ahead or the run that
+/// uses it, does name its line and is marked like any other stop.
 pub fn script_error_at(script: &str, error: &str) -> Option<(usize, Option<usize>)> {
     let rest = error.strip_prefix("line ")?;
     let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
@@ -1565,14 +1582,11 @@ pub fn script_error_at(script: &str, error: &str) -> Option<(usize, Option<usize
 /// [`crate::script_line`] reads it; `None` when it reads or there is none. serde counts its column
 /// in bytes from the JSON's start.
 fn json_error_column(line: &str) -> Option<usize> {
-    let (_, rest) = crate::parameters::split_script_id(line.trim());
-    let json = rest.trim();
+    let (_, json, start) = crate::parameters::script_parts(line);
     if json.is_empty() {
         return None;
     }
     let e = serde_json::from_str::<Value>(json).err()?;
-    // `rest` ends where the trimmed line does.
-    let start = line.trim_end().len() - rest.trim_start().len();
     let mut at = (start + e.column().saturating_sub(1)).min(line.len());
     while !line.is_char_boundary(at) {
         at -= 1;
@@ -1583,20 +1597,38 @@ fn json_error_column(line: &str) -> Option<usize> {
 /// One raster function's output pixels on `r`'s grid, or a resample's on `target`'s (from
 /// [`resample_target`]). A remap adds its ranges that match nothing to `remaps`, and whether it
 /// left any cell with a value.
-fn apply_function(r: &Raster, p: &Value, target: Option<&Raster>, remaps: &mut Remaps) -> Result<Vec<f32>, String> {
+/// `ground`, for `r` a part of a larger raster read a block at a time, is the whole's: a function
+/// over a cell's neighbours measures its cells as on the whole (`rasterops::slope_on`).
+fn apply_function(
+    r: &Raster,
+    p: &Value,
+    target: Option<&Raster>,
+    remaps: &mut Remaps,
+    ground: Option<&rustgis_geom::Extent>,
+) -> Result<Vec<f32>, String> {
     let band = band_of(p, r)?;
     let zf = f(p, "zFactor").unwrap_or(1.0).clamp(0.0001, 100_000.0);
     match ps(p, "function").ok_or("function is required")? {
         "slope" => match p.get("units") {
-            None => rasterops::slope(r, band, zf),
-            Some(Value::String(units)) if units == "degrees" => rasterops::slope(r, band, zf),
-            Some(Value::String(units)) if units == "percent" => rasterops::slope_percent(r, band, zf),
+            None => rasterops::slope_on(r, band, zf, ground),
+            Some(Value::String(units)) if units == "degrees" => rasterops::slope_on(r, band, zf, ground),
+            // A part read with a margin: its cells past Float32's range are counted where they're
+            // kept ([`super::in_blocks::Shape::overflow`]).
+            Some(Value::String(units)) if units == "percent" && ground.is_some() => {
+                rasterops::slope_percent_cells_on(r, band, zf, ground).map(|(p, _)| p)
+            }
+            Some(Value::String(units)) if units == "percent" => rasterops::slope_percent_on(r, band, zf, ground),
             _ => Err("slope units must be degrees or percent".into()),
         },
-        "aspect" => rasterops::aspect(r, band),
-        "hillshade" => {
-            rasterops::hillshade(r, band, f(p, "azimuth").unwrap_or(315.0), f(p, "altitude").unwrap_or(45.0).clamp(0.0, 90.0), zf)
-        }
+        "aspect" => rasterops::aspect_on(r, band, ground),
+        "hillshade" => rasterops::hillshade_on(
+            r,
+            band,
+            f(p, "azimuth").unwrap_or(315.0),
+            f(p, "altitude").unwrap_or(45.0).clamp(0.0, 90.0),
+            zf,
+            ground,
+        ),
         "ndvi" => {
             let (nir, red) = (p.get("nir").and_then(Value::as_u64).unwrap_or(4), p.get("red").and_then(Value::as_u64).unwrap_or(3));
             rasterops::band_math(r, &format!("(b{nir} - b{red}) / (b{nir} + b{red})"))
@@ -1668,11 +1700,33 @@ fn function_work(s: &Session, p: &Value) -> Result<Work, String> {
     if matches!(ps(&p, "function"), Some("remap" | "threshold")) {
         super::settle_bool(&mut p, "keep");
     }
+    // A file too large to read whole at its full size: a block at a time, with the cells around
+    // each that a function over a cell's neighbours reads (#2865).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(halo) = ps(&p, "function").and_then(super::in_blocks::function_halo)
+        && let Some(blocks) = super::in_blocks::plan(s, &src, &name)?
+    {
+        let shape = function_shape(&p);
+        return Ok(Box::new(move || {
+            let met = std::cell::RefCell::new(BlockRemaps::default());
+            let made = blocks.with_halo(halo).run(
+                |block, ground| {
+                    let mut remaps = Remaps::default();
+                    let pixels = apply_function(block, &p, None, &mut remaps, Some(ground))?;
+                    met.borrow_mut().add(remaps);
+                    Ok(pixels)
+                },
+                shape,
+            )?;
+            let made = also(made, met.into_inner().met().then());
+            Ok(if is_hillshade(&p) { hillshade_look(made, &defaults) } else { made })
+        }));
+    }
     Ok(Box::new(move || {
         let src = src.read()?;
         let target = read_target(target.as_ref())?;
         let mut remaps = Remaps::default();
-        let pixels = apply_function(&src, &p, target.as_deref(), &mut remaps)?;
+        let pixels = apply_function(&src, &p, target.as_deref(), &mut remaps, None)?;
         // Only a resample takes another raster's grid.
         let raster = derive_function(target.as_deref().unwrap_or(&src), &name, &p, pixels)?;
         if is_hillshade(&p) { made_hillshade(raster, &defaults) } else { made_then(raster, None, Some(remaps.then())) }
@@ -1686,12 +1740,34 @@ fn derive_function(r: &Raster, name: &str, p: &Value, pixels: Vec<f32>) -> Resul
         return rasterops::derive_hillshade(r, name, pixels);
     }
     let mut out = rasterops::derive(r, name, vec![pixels])?;
-    if ps(p, "function") == Some("slope")
-        && let Some(band) = out.bands.first_mut()
-    {
-        band.name = if ps(p, "units") == Some("percent") { "Slope (percent)" } else { "Slope (degrees)" }.into();
+    if let (Some(name), Some(band)) = (function_band(p), out.bands.first_mut()) {
+        band.name = name;
     }
     Ok(out)
+}
+
+/// What a raster function step `p` makes, as a raster made a block at a time holds it: its band's
+/// name, a hillshade's bytes, a threshold's classes and a remap's (not one that keeps the cells it
+/// doesn't match, which keep their measures), and a percent slope's cells past Float32's range
+/// counted.
+#[cfg(not(target_arch = "wasm32"))]
+fn function_shape(p: &Value) -> super::in_blocks::Shape {
+    super::in_blocks::Shape {
+        band: function_band(p),
+        bytes: is_hillshade(p),
+        classes: match ps(p, "function") {
+            Some("threshold") => true,
+            Some("remap") => !b(p, "keep").unwrap_or(false),
+            _ => false,
+        },
+        overflow: (ps(p, "function") == Some("slope") && ps(p, "units") == Some("percent")).then_some(rasterops::PERCENT_OVERFLOW),
+    }
+}
+
+/// The name a raster function step `p` gives its band: a slope's says its unit; none otherwise.
+fn function_band(p: &Value) -> Option<String> {
+    (ps(p, "function") == Some("slope"))
+        .then(|| if ps(p, "units") == Some("percent") { "Slope (percent)" } else { "Slope (degrees)" }.to_string())
 }
 
 /// Whether raster function step `p` is a hillshade, whose pixels are bytes
@@ -1704,12 +1780,67 @@ fn is_hillshade(p: &Value) -> bool {
 /// shades it holds: as whole numbers, 16 or fewer (a gentle slope) would otherwise be drawn as
 /// classes (Unique Values).
 fn made_hillshade(raster: Raster, defaults: &rustgis_map::RasterDefaults) -> Result<Made, String> {
-    let mut m = made(raster, None)?;
+    Ok(hillshade_look(made(raster, None)?, defaults))
+}
+
+/// A hillshade made, drawn as one: stretched in grey, as the raster defaults have it.
+fn hillshade_look(mut m: Made, defaults: &rustgis_map::RasterDefaults) -> Made {
     let style = &mut m.layer.style;
     style.renderer = rustgis_map::RasterRenderer::Stretch { band: 0, ramp: defaults.ramp.clone(), invert: defaults.invert };
     style.stretch = defaults.stretch;
     style.resampling = defaults.resampling;
-    Ok(m)
+    m
+}
+
+/// `m`, doing `then` too once it is added, after what it did already.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn also(mut m: Made, then: Then) -> Made {
+    let before = m.then.take();
+    m.then = Some(Box::new(move |s: &mut Session, v: &mut Value| {
+        if let Some(before) = before {
+            before(s, v);
+        }
+        then(s, v);
+    }));
+    m
+}
+
+/// What the remaps of a function made a block at a time met ([`Remaps`]), gathered block by
+/// block: the ranges that match nothing (a low end not below its high end, the same in every
+/// block), and a remap leaving no cell with a value only when it leaves none in every block.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct BlockRemaps {
+    /// The ranges that match nothing, as every block so far found them; `None` before the first.
+    empty: Option<Vec<(String, f64, f64)>>,
+    /// Whether every block so far was left with no value, and the raster it was said of.
+    emptied: Option<Option<String>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BlockRemaps {
+    /// Adds what one block's remaps met.
+    fn add(&mut self, r: Remaps) {
+        self.empty = Some(match self.empty.take() {
+            None => r.empty,
+            Some(mut e) => {
+                // Looked up by their bits, so a remap of many ranges isn't compared range by range.
+                let key = |(name, lo, hi): &(String, f64, f64)| (name.clone(), lo.to_bits(), hi.to_bits());
+                let here: std::collections::HashSet<_> = r.empty.iter().map(key).collect();
+                e.retain(|x| here.contains(&key(x)));
+                e
+            }
+        });
+        self.emptied = Some(match self.emptied.take() {
+            None => r.emptied,
+            Some(all) => all.and(r.emptied),
+        });
+    }
+
+    /// What every block's remaps met together.
+    fn met(self) -> Remaps {
+        Remaps { empty: self.empty.unwrap_or_default(), emptied: self.emptied.flatten() }
+    }
 }
 
 /// Runs raster functions one after another, each on the previous one's output.
@@ -1737,6 +1868,39 @@ fn function_chain_work(s: &Session, p: &Value) -> Result<Work, String> {
         .collect::<Result<_, _>>()?;
     let named = Some(out_name(p, String::new())?).filter(|n| !n.is_empty());
     let defaults = s.raster_defaults.clone();
+    // A file too large to read whole at its full size: a block at a time (#2865), with the cells
+    // around each that its steps over a cell's neighbours read, one each; a chain that can't be
+    // made so ([`super::in_blocks::chain_halo`]) reads the file as before.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(halo) = super::in_blocks::chain_halo(&steps) {
+        let names: Vec<String> = steps.iter().map(func).collect();
+        let out = named.clone().unwrap_or_else(|| format!("{}_{}", src.held().name, names.join("_")));
+        if let Some(blocks) = super::in_blocks::plan(s, &src, &out)? {
+            let last = steps.last().cloned().unwrap_or_default();
+            let shape = function_shape(&last);
+            return Ok(Box::new(move || {
+                let met = std::cell::RefCell::new(BlockRemaps::default());
+                let made = blocks.with_halo(halo).run(
+                    |block, ground| {
+                        let mut remaps = Remaps::default();
+                        let mut cur: Option<Raster> = None;
+                        for (i, st) in steps.iter().enumerate() {
+                            let input = cur.as_ref().unwrap_or(block);
+                            let pixels = apply_function(input, st, None, &mut remaps, Some(ground))
+                                .map_err(|e| format!("step {} ({}): {e}", i + 1, func(st)))?;
+                            cur = Some(derive_function(input, &input.name, st, pixels)?);
+                        }
+                        met.borrow_mut().add(remaps);
+                        let cur = cur.ok_or("the chain made no raster")?;
+                        Ok(cur.bands.into_iter().next().map(|b| b.data).unwrap_or_default())
+                    },
+                    shape,
+                )?;
+                let made = also(made, met.into_inner().met().then());
+                Ok(if is_hillshade(&last) { hillshade_look(made, &defaults) } else { made })
+            }));
+        }
+    }
     Ok(Box::new(move || {
         let src = src.read()?;
         // Each step's output, the next step's input; the first step reads the raster itself, not
@@ -1748,7 +1912,8 @@ fn function_chain_work(s: &Session, p: &Value) -> Result<Work, String> {
             let f = func(st);
             let target = read_target(target.as_ref()).map_err(|e| format!("step {} ({f}): {e}", i + 1))?;
             let input = cur.as_ref().unwrap_or(&src);
-            let pixels = apply_function(input, st, target.as_deref(), &mut remaps).map_err(|e| format!("step {} ({f}): {e}", i + 1))?;
+            let pixels =
+                apply_function(input, st, target.as_deref(), &mut remaps, None).map_err(|e| format!("step {} ({f}): {e}", i + 1))?;
             // Only a resample takes another raster's grid; otherwise the grid is the current one.
             let next = derive_function(target.as_deref().unwrap_or(input), &input.name, st, pixels)?;
             cur = Some(next);

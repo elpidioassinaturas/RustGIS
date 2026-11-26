@@ -1301,9 +1301,16 @@ impl Raster {
 
     /// Ground size of a pixel in metres (approximate for geographic rasters).
     pub fn cell_size_m(&self) -> (f64, f64) {
+        self.cell_size_m_on(&self.extent)
+    }
+
+    /// [`Raster::cell_size_m`] as on `ground` (longitude/latitude): a cell of a geographic raster
+    /// measured at its middle's latitude, as a raster covering that ground measures its cells. A
+    /// part of a raster measures its cells so as the whole of it does.
+    pub fn cell_size_m_on(&self, ground: &Extent) -> (f64, f64) {
         let (x, y) = self.cell_size();
         if self.crs.is_geographic() {
-            let lat = self.extent.center().y.to_radians().cos().abs().max(0.01);
+            let lat = ground.center().y.to_radians().cos().abs().max(0.01);
             (x * 111_320.0 * lat, y * 110_574.0)
         } else {
             (x, y)
@@ -1504,6 +1511,13 @@ pub struct PartRead {
     pub bounds: Extent,
     /// The file's full image, its columns and rows (the raster's `overview` is the part's).
     pub full: (u32, u32),
+}
+
+/// The columns and rows of a tile of the GeoTIFF at `path` (a strip's: the image's width), which a
+/// part read decodes whole ([`read_path_part`]); `None` when they can't be read.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn chunk_size(path: &Path) -> Option<(u32, u32)> {
+    geotiff::chunk_size(path)
 }
 
 /// `part` of the GeoTIFF at `path`, as [`read_path`] reads the file but holding only that part,
