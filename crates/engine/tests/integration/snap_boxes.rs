@@ -15,8 +15,6 @@ use rustgis_engine::{
     geom::{Coord, merc_to_lonlat},
     map::design::Snapping,
 };
-use std::cell::RefCell;
-use std::collections::BTreeMap;
 
 const TOLERANCE: f64 = 10.0;
 
@@ -104,22 +102,36 @@ fn nearest_of_every_shape(s: &mut Session, m: Coord, skip: Option<(u32, usize)>)
     point.or(edge).map(|(_, at, kind)| (at, kind))
 }
 
-/// Snapping at each place finds what the search of every shape finds; each kind found is counted.
-fn check(
-    s: &mut Session,
-    places: &[(f64, f64)],
-    skip: Option<(u32, usize)>,
-    kinds: &RefCell<BTreeMap<Option<&'static str>, u32>>,
-) -> Result<(), TestCaseError> {
+/// Snapping at each place finds what the search of every shape finds.
+fn check(s: &mut Session, places: &[(f64, f64)], skip: Option<(u32, usize)>) -> Result<(), TestCaseError> {
     for at in places.iter().map(|p| c(*p)) {
         let m = s.map().to_map(at).unwrap();
         let expected = nearest_of_every_shape(s, m, skip);
         let got = snap_except(s, at, skip);
         prop_assert_eq!(got.map(|g| g.1), expected.map(|e| e.1), "at {:?}, leaving out {:?}", at, skip);
-        *kinds.borrow_mut().entry(got.map(|g| g.1)).or_insert(0) += 1;
         if let (Some((got, _)), Some((expected, _))) = (got, expected) {
             let got = s.map().to_map(got).unwrap();
             prop_assert!((got.x - expected.x).abs() < 1e-6 && (got.y - expected.y).abs() < 1e-6, "{:?} != {:?}", got, expected);
+        }
+    }
+    Ok(())
+}
+
+/// A line far from the generated shapes, which every case snaps to by its end, its other vertex
+/// and its edge, and beside which it finds nothing: each kind is checked in every case.
+const FIXED: [(f64, f64); 3] = [(1000.0, 0.0), (1100.0, 0.0), (1100.0, 100.0)];
+
+fn check_fixed(s: &mut Session) -> Result<(), TestCaseError> {
+    for (at, expected) in [
+        ((1003.0, 2.0), Some(((1000.0, 0.0), "end"))),
+        ((1102.0, 3.0), Some(((1100.0, 0.0), "vertex"))),
+        ((1050.0, 4.0), Some(((1050.0, 0.0), "edge"))),
+        ((1050.0, 50.0), None),
+    ] {
+        let got = snap_except(s, c(at), None).map(|(g, kind)| (s.map().to_map(g).unwrap(), kind));
+        prop_assert_eq!(got.map(|g| g.1), expected.map(|e| e.1), "at {:?}", at);
+        if let (Some((got, _)), Some(((x, y), _))) = (got, expected) {
+            prop_assert!((got.x - (x - 5e6)).abs() < 1e-6 && (got.y - (y - 2e6)).abs() < 1e-6, "{:?} at {:?}", got, at);
         }
     }
     Ok(())
@@ -138,19 +150,20 @@ fn snapping_finds_what_a_search_of_every_shape_finds() {
     let places = proptest::collection::vec((-50.0..500.0f64, -50.0..500.0f64), 1..40);
     let skip = proptest::option::of((any::<bool>(), any::<Index>()));
     let edits = proptest::collection::vec((any::<Index>(), shape()), 0..4);
-    // What snapping found over every case: one that never finds a kind checks nothing of it.
-    let kinds = RefCell::new(BTreeMap::new());
-    let result = runner.run(&(layer(), layer(), places, skip, edits), |(a, b, places, skip, edits)| {
+    let result = runner.run(&(layer(), layer(), places, skip, edits), |(a, mut b, places, skip, edits)| {
         let (na, nb) = (a.len(), b.len());
+        b.push(Some(Geometry::Line(vec![FIXED.iter().map(|p| c(*p)).collect()])));
         let mut s = Session::new(Project::new("Snap boxes"));
         s.map_mut().layers.clear();
         let ia = s.map_mut().add_dataset(dataset("A", a));
         let ib = s.map_mut().add_dataset(dataset("B", b));
         s.map_mut().camera.res = 1.0;
         s.map_mut().editing.snapping = Snapping { enabled: true, tolerance_px: TOLERANCE, vertex: true, edge: true, end: true };
-        check(&mut s, &places, None, &kinds)?;
+        check_fixed(&mut s)?;
+        check(&mut s, &places, None)?;
+        // The fixed line is never the one left out.
         let skip = skip.map(|(first, i)| if first { (ia, i.index(na)) } else { (ib, i.index(nb)) });
-        check(&mut s, &places, skip, &kinds)?;
+        check(&mut s, &places, skip)?;
         // Shapes moved, added and removed: their boxes are those of the new ones.
         let l = s.map_mut().layer_mut(ia).unwrap();
         for (i, g) in edits {
@@ -160,11 +173,9 @@ fn snapping_finds_what_a_search_of_every_shape_finds() {
         l.dataset.features.set_geometry(0, Some(Geometry::Point(far)));
         l.touch_geometry();
         prop_assert_eq!(snap_except(&mut s, c((905.0, 0.0)), None), Some((far, "vertex")));
-        check(&mut s, &places, None, &kinds)
+        check(&mut s, &places, None)
     });
     if let Err(e) = result {
         panic!("PROPERTY_SEED={seed}: {e}");
     }
-    let kinds = kinds.into_inner();
-    assert_eq!(kinds.len(), 4, "PROPERTY_SEED={seed}: snapping found only {kinds:?}");
 }
