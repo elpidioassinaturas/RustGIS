@@ -105,6 +105,12 @@ mod layout_title;
 #[path = "tests/layout_removed_layer.rs"]
 mod layout_removed_layer;
 
+#[path = "tests/layout_edge.rs"]
+mod layout_edge;
+
+#[path = "tests/layout_publication_parts.rs"]
+mod layout_publication_parts;
+
 #[path = "tests/sde_connections.rs"]
 mod sde_connections;
 
@@ -1079,7 +1085,7 @@ fn undo_steps_share_the_layers_they_leave_alone() {
     for (snap, ..) in &s.undo {
         let old = snap.maps.iter().flat_map(|m| &m.layers).find(|l| l.id == id).unwrap();
         assert!(old.dataset.features.shares(&live.dataset.features), "the snapshot copied the features");
-        assert_eq!(old.projected_cache().as_ptr(), live.projected_cache().as_ptr(), "the snapshot copied the projected geometry");
+        assert!(old.projected_cache().same(live.projected_cache()), "the snapshot copied the projected geometry");
     }
     // An edit copies the layer it changes, once, and leaves the snapshot as it was.
     let before = s.map().layer_by_name("Cities").unwrap().dataset.features.len();
@@ -2280,7 +2286,7 @@ fn a_streamed_layer_says_its_view_reads_notes_once() {
         };
         let expected: &[&str] = if nan {
             &[
-                "roads: 1 shape(s) have a coordinate that isn't a number under a bounding box that is one: they're left out of the read, but the layer's extent and its index still take in their stored boxes",
+                "roads: 1 shape(s) have a coordinate that isn't a number under a bounding box that is one: they have no geometry, so the read leaves them out, but the layer's extent and its index still take in their stored boxes",
             ]
         } else {
             &[]
@@ -15649,6 +15655,8 @@ fn a_veil_panel_groups_the_surrounds_by_the_bands_shape() {
     let (l, locator, _, b) = veil_panel((0.0, 0.0, 90.0, 130.0), legend, Some(40.0), arrow, scale, 3.0).unwrap();
     assert!(l.1 >= b.1 + b.3 && locator.unwrap().0 == b.0, "under it: {l:?} {b:?}");
     assert!(veil_panel((0.0, 0.0, 60.0, 60.0), legend, Some(40.0), arrow, scale, 3.0).is_none());
+    // With nothing to group beside it, a legend the size of the band fits it: no gap is kept.
+    assert!(veil_panel((0.0, 0.0, legend.0, legend.1), legend, None, None, (0.0, 0.0), 3.0).is_some());
     assert!(veil_panel((0.0, 0.0, 160.0, 70.0), legend, None, arrow, scale, 3.0).unwrap().1.is_none());
     // With no north arrow (a continental extent, #1379), the locator stands alone over the scale bar.
     let (_, locator, a, b) = veil_panel((0.0, 0.0, 160.0, 70.0), legend, Some(40.0), None, scale, 3.0).unwrap();
@@ -61852,12 +61860,12 @@ fn a_save_refuses_coordinates_that_arent_numbers_and_keeps_the_file() {
     assert_eq!(t.map().layer_by_name("ways").unwrap().dataset.features.len(), 3);
 }
 
-/// A Shapefile read in place (streamed) leaves out a shape with a coordinate that isn't a number,
-/// counted, as one it can't convert (#1985): nothing NaN reaches the map. Read whole, the feature
-/// keeps its attributes without geometry. Either way the project saves and opens again.
+/// A Shapefile shape with a coordinate that isn't a number keeps its attributes without geometry,
+/// counted, read whole or in place (streamed; before #2032 C2f the streamed read left it out):
+/// nothing NaN reaches the map, and the project saves and opens again.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn a_shapefile_coordinate_that_isnt_a_number_reaches_no_layer() {
+fn a_shapefile_coordinate_that_isnt_a_number_keeps_its_feature_without_geometry() {
     use rustgis_data::{Coord, Dataset, Geometry, GeometryType};
     // Removed however the test ends.
     struct Dir(std::path::PathBuf);
@@ -61889,15 +61897,12 @@ fn a_shapefile_coordinate_that_isnt_a_number_reaches_no_layer() {
             t.run("layer.loadAll", &json!({"layer": id})).unwrap();
         }
         let notices: Vec<String> = t.notices_since(mark).iter().map(|n| n.text.clone()).collect();
-        let said = if stream {
-            "pts: 1 row couldn't be read and was left out"
-        } else {
-            "pts: 1 shape(s) have a coordinate that isn't a number (NaN or infinite): their features are kept without geometry"
-        };
-        assert!(notices.iter().any(|n| n == said), "stream {stream}: {notices:?}");
+        let said = "1 shape(s) have a coordinate that isn't a number (NaN or infinite): their features are kept without geometry";
+        assert_eq!(notices.iter().filter(|n| n.contains(said)).count(), 1, "stream {stream}: {notices:?}");
+        assert!(!notices.iter().any(|n| n.contains("couldn't be read")), "stream {stream}: {notices:?}");
         let geometries: Vec<_> = t.map().layer(id).unwrap().dataset.features.iter().map(|f| f.geometry.clone()).collect();
         let kept = Some(Geometry::Point(Coord::new(11.0, 21.0)));
-        assert_eq!(geometries, if stream { vec![kept] } else { vec![None, kept] }, "stream {stream}");
+        assert_eq!(geometries, vec![None, kept], "stream {stream}");
         let saved = dir.join(format!("p-{stream}.rgis"));
         t.run("project.saveAs", &json!({"path": saved})).unwrap();
         Session::new(Project::default()).run("project.open", &json!({"path": saved})).unwrap();

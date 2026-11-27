@@ -1287,7 +1287,8 @@
           "label-duplicates",
           "tile-resampling",
           "layout-page-color",
-          "layout-text-statistics"
+          "layout-text-statistics",
+          "layout-publication-parts"
         ],
         "type": "string"
       },
@@ -1403,7 +1404,8 @@
     "label-duplicates",
     "tile-resampling",
     "layout-page-color",
-    "layout-text-statistics"
+    "layout-text-statistics",
+    "layout-publication-parts"
   ],
   "x-rustgis-reads-format": 2,
   "x-rustgis-writes-format": 2

@@ -40,9 +40,12 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     datum under it, at 7 pt. A figure's title and sources belong in its caption, so they are
     left out, and the result says so.
   - **Step by step**: **Publication Layout Wizard…**, at the end of the same menu, asks for the
-    size (a sheet turned Auto, Portrait or Landscape, or a figure), the style, the texts (title,
-    the active map's name until one is typed; subtitle, note, sources and credit line, or none)
-    and the accent colour, then shows what was picked; **Create** makes the layout as the menu
+    size (a sheet turned Auto, Portrait or Landscape, or a figure), the style (each beside an
+    outline of where its title, map and footer go, and its column or panel if it has one, with
+    the accent colour picked, or else its own, where the sheet takes it, which Classic's doesn't;
+    a click on the outline picks the style), the texts (title, the active map's name until one is
+    typed; subtitle, note, sources and credit line, or none) and the accent colour, then shows
+    what was picked; **Create** makes the layout as the menu
     does. A figure goes from its size to the review, as it takes no style, texts or accent. A
     field left empty is left out (for the credit line, the dated default applies); the title is
     the exception: empty, it means no title. A layout the command refuses is said, and the wizard
@@ -141,6 +144,16 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     centred as near it as fits, and a warning says where. With an `extent`, a sheet on the globe
     is laid out as on a flat map. In any frame on the globe, the light space around the globe is
     room for the surrounds, as the blank page is.
+  - **Grid, scale bar and north arrow**: `"grid"`, `"scaleBar"` and `"northArrow"` each take
+    `"none"` to leave that part out, or an object with its options, and a key the part doesn't
+    read is refused. `"grid"` takes a frame grid's options (`{"step": 5}`,
+    `{"type": "measured"}`, `{"edges": ["bottom"]}`; a graticule takes no `crs`, `short` or `mgrs`,
+    and a measured grid no `format` or `hemisphere`); the strips inside the frame follow its
+    labels, edges and `labelSize`, and without a graticule the default reference text names none
+    (a `{grid}` you type reads `—`). `"scaleBar"` takes a scale bar's options
+    (`{"units": "miles", "style": "line"}`), its box growing with a larger `textSize`. A `textSize` or `labelSize` you give is in points
+    as written: unlike the defaults, it isn't scaled with the sheet.
+    `"northArrow"` also takes `{"show": "auto"|"always", "style", "fill", "outline"}`.
   - **Legend box**: over the map, the legend's box is left clear where the map shows nothing under
     it but its light plain paper or water: no layer, label, context layer, basemap shape or graticule
     line, no web tiles, and no veil. Dark basemaps keep a white backing so the dark legend text
@@ -186,9 +199,15 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     corners on a light page: the map in one, the locator and the legend in one each beside it,
     the sources and reference in tinted ones under them; `"poster"` colours the whole page, sets
     the title and subtitle in light text across the top, the map in a light card and the footer
-    in darker blocks with amber headings. `"accent"` (`#RRGGBB`) colours the band, the panel's
-    tint, the headings and rules, and a poster's page (a deep brown, green or blue by default).
-    A figure leaves the style to its caption. In the menu, each sheet opens a list of the six
+    in darker blocks with amber headings; `"edge"` runs the map from one side of the page to the
+    other with no border, a kicker, the title and subtitle over it and the footer with no boxes
+    under a thin rule. An edge sheet also takes `"paper"` (`#RRGGBB`, the page's colour; on a dark
+    one the texts are light) and `"kicker"` (a short line in spaced capitals over the title);
+    other styles and figures refuse both. Its graticule labels sit at the page's side edges, so a
+    printer with no bleed may clip them. `"accent"` (`#RRGGBB`) colours the band, the panel's
+    tint, the headings and rules, a poster's page and an edge sheet's kicker (a deep brown, green
+    or blue by default, a brick red on an edge sheet).
+    A figure leaves the style to its caption. In the menu, each sheet opens a list of the seven
     styles, each saying what it looks like, in its default accent (`"accent"` in the command
     picks another).
   - Every element is an ordinary one, to move or restyle afterwards. The command returns element
