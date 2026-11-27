@@ -5966,7 +5966,14 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
         let dated = s.map().tiles.get(index).ok_or("added GeoTIFF tile is missing")?.url.clone();
         // Its header read now (natively) as an undated address's is before it is added.
         #[cfg(not(target_arch = "wasm32"))]
-        let probe = if s.leave_downloads { Ok(false) } else { crate::render::rustgis_tiles::cog::probe_blocking(&dated) };
+        // Not probed off the frame: the file shown (not the template) is read again by the map's
+        // draw if its connection dropped (#2886).
+        let probe = if s.leave_downloads {
+            crate::render::rustgis_tiles::cog::forget_dropped(&dated);
+            Ok(false)
+        } else {
+            crate::render::rustgis_tiles::cog::probe_blocking(&dated)
+        };
         #[cfg(target_arch = "wasm32")]
         let probe: Result<bool, String> = Ok(false);
         (dated, probe == Ok(true), probe.err())

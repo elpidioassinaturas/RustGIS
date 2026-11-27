@@ -2571,8 +2571,9 @@ mod native {
     //! Wayback answers every tile with a redirect first), and the connections stay open between
     //! tiles, so fetching is bound by latency: how many requests are under way at once. Each
     //! server gets up to [`PER_HOST`] of them (OpenStreetMap's tile servers [`PER_HOST_OSM`],
-    //! CDSE's an account's quota, [`crate::copernicus::PER_HOST`]), and the workers share one agent,
-    //! so a server never sees more open connections than that.
+    //! each of CDSE's data servers [`crate::copernicus::PER_HOST`], the connections its quota gives
+    //! a general account), and the workers share one agent, so a server never sees more open
+    //! connections than that.
 
     use std::collections::HashMap;
     use std::sync::{Condvar, Mutex, OnceLock};
