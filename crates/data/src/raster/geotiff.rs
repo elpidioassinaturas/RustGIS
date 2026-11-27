@@ -1016,6 +1016,17 @@ impl Span {
     }
 }
 
+/// The columns and rows of a chunk (a tile, or a strip of the image's width) of the full image of
+/// the GeoTIFF at `path`, as its tags give them; `None` when it can't be read.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn chunk_size(path: &std::path::Path) -> Option<(u32, u32)> {
+    let file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut dec = Decoder::new(reader(file).ok()?).ok()?.with_limits(Limits::default());
+    let (w, h) = dec.dimensions().ok()?;
+    let c = Chunks::new(&mut dec, w, h, 1, false);
+    Some((c.cw, c.ch))
+}
+
 /// How an image is cut into chunks (strips or tiles), and how they're laid out.
 #[derive(Clone, Copy)]
 struct Chunks {
@@ -1186,6 +1197,28 @@ impl Chunks {
             })?;
         let ((xs, xe), (ys, ye)) = (span.kept(span.cols, x0, cols, k), span.kept(span.rows, y0, rows, k));
         let (sc, sr) = (u64::from(span.cols.0), u64::from(span.rows.0));
+        // Every pixel kept and none to count: a run of a row at a time. Threads reading an image
+        // take turns placing their chunks, so this part of a read isn't shared among them.
+        if k == 1 && changed.is_none() {
+            let (width, left) = (xe.saturating_sub(xs) as usize, (xs - x0) as usize);
+            for y in ys..ye {
+                let src = ((y - y0) as usize * stride + left) * per_pixel;
+                let dst = (y - sr) as usize * ow + (xs - sc) as usize;
+                let Some(src) = values.get(src..src + width * per_pixel) else { continue };
+                for b in 0..self.samples {
+                    let band = if self.planar { plane } else { b };
+                    let Some(row) = bands.get_mut(band).and_then(|v| v.get_mut(dst..dst + width)) else { continue };
+                    if per_pixel == 1 {
+                        row.copy_from_slice(src);
+                    } else {
+                        for (slot, v) in row.iter_mut().zip(src.iter().skip(b).step_by(per_pixel)) {
+                            *slot = *v;
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
         let mut y = ys;
         while y < ye {
             let mut x = xs;
@@ -2037,19 +2070,26 @@ fn read_image(
                 return Err(DataError::Format(e.clone()));
             }
             if let Some(asked) = asked.filter(|_| geo.custom_error.is_none() && !geo.geographic_model && !degrees) {
-                assumed = Some(format!("it doesn't say its coordinate system: read in {}, the system it was asked for in", asked.label()));
+                // Read in the system asked for: nothing assumed past the request.
+                assumed = Some(crate::loss::Note::plain(format!(
+                    "it doesn't say its coordinate system: read in {}, the system it was asked for in",
+                    asked.label()
+                )));
                 asked
             } else if geo.geographic_model || degrees {
-                assumed = Some(match &geo.custom_error {
-                    // The file's own projection couldn't be read, but its coordinates fit in degrees:
-                    // why is said, not dropped.
-                    Some(e) => super::assumed_wgs84_note(&format!(
-                        "its own coordinate system can't be read ({})",
-                        e.strip_prefix("GeoTIFF: ").unwrap_or(e)
-                    )),
-                    None if geo.geographic_model => NO_EPSG_GEOGRAPHIC.to_string(),
-                    None => super::assumed_wgs84_note("it doesn't say its coordinate system"),
-                });
+                assumed = Some(crate::loss::Note::loss(
+                    crate::loss::LossCode::AssumedCrs,
+                    match &geo.custom_error {
+                        // The file's own projection couldn't be read, but its coordinates fit in degrees:
+                        // why is said, not dropped.
+                        Some(e) => super::assumed_wgs84_note(&format!(
+                            "its own coordinate system can't be read ({})",
+                            e.strip_prefix("GeoTIFF: ").unwrap_or(e)
+                        )),
+                        None if geo.geographic_model => NO_EPSG_GEOGRAPHIC.to_string(),
+                        None => super::assumed_wgs84_note("it doesn't say its coordinate system"),
+                    },
+                ));
                 Crs::LonLat
             } else {
                 return Err(err("the file's coordinate system isn't recognised"));
@@ -2259,15 +2299,28 @@ fn put<T: Copy + Sync, const N: usize>(
     le: fn(T) -> [u8; N],
     out: &mut std::io::Cursor<Vec<u8>>,
 ) -> Result<()> {
+    put_cells(img, data, |v| le(*v), out)
+}
+
+/// [`put`], each cell of `data` written as `cell` gives it: on the threads that make the strips,
+/// with no copy of the samples made first.
+fn put_cells<T: Sync, const N: usize>(
+    img: super::cogwrite::Strips,
+    data: &[T],
+    cell: impl Fn(&T) -> [u8; N] + Sync,
+    out: &mut std::io::Cursor<Vec<u8>>,
+) -> Result<()> {
     let per_row = img.w as usize * usize::from(img.spp);
     super::cogwrite::write_strips(img, out, |rows, buf| {
         let s = data.get(rows.start * per_row..rows.end * per_row).ok_or_else(|| err("the samples don't fill the image"))?;
-        buf.extend(s.iter().flat_map(|v| le(*v)));
+        buf.extend(s.iter().flat_map(&cell));
         Ok(())
     })
 }
 
-/// [`write`] (or with `every`, [`write_all`]).
+/// [`write`] (or with `every`, [`write_all`]). Whether a single 8-bit band's cells are all bytes
+/// is one look over the band, on several threads, with no look at Cancel inside it: Cancel is
+/// looked at after it, and between strips as they are written.
 fn encode(r: &Raster, band: usize, every: bool) -> Result<Vec<u8>> {
     use super::cogwrite::{Sample, Strips, few_classes, geo_entries};
     // A scan's place is only where it was laid on the view: not coordinates to write into a file.
@@ -2431,17 +2484,15 @@ fn encode(r: &Raster, band: usize, every: bool) -> Result<Vec<u8>> {
         let b = r.bands.get(band).ok_or_else(|| err(format!("the raster has no band {}", band + 1)))?;
         // An 8-bit band is written as bytes when every value is a whole byte and an empty cell is
         // only where no-data can mark it (as the multiband samples above); otherwise as floats.
-        let byte = |v: &f32| if r.is_valid(*v) { v.fract() == 0.0 && (0.0..=255.0).contains(v) } else { r.nodata.is_some() };
-        if r.data_type == "UInt8" && fits_bytes(r, band) && b.data.iter().all(byte) {
+        // A whole number from 0 to 255 is the one value a byte holds that converts back to itself.
+        let byte = |v: &f32| if r.is_valid(*v) { f32::from(*v as u8) == *v } else { r.nodata.is_some() };
+        let all_bytes =
+            || super::on_runs(&b.data, super::threads_for(b.data.len()), |_, run| run.iter().all(byte)).iter().all(|&fits| fits);
+        if r.data_type == "UInt8" && fits_bytes(r, band) && all_bytes() {
+            crate::progress::check()?;
             let nodata = r.nodata.map_or(0, |d| d as u8);
-            let mut data = super::room(b.data.len(), w as usize, h as usize)?;
-            for (i, v) in b.data.iter().enumerate() {
-                if i % (1 << 20) == 0 {
-                    crate::progress::check()?;
-                }
-                data.push(if r.is_valid(*v) { *v as u8 } else { nodata });
-            }
-            put(image(&[band], Sample::Byte, Vec::new())?, &data, u8::to_le_bytes, &mut out)?;
+            let cell = |v: &f32| [if r.is_valid(*v) { *v as u8 } else { nodata }];
+            put_cells(image(&[band], Sample::Byte, Vec::new())?, &b.data, cell, &mut out)?;
         } else {
             put(image(&[band], Sample::Float, Vec::new())?, &b.data, f32::to_le_bytes, &mut out)?;
         }
@@ -2879,6 +2930,32 @@ mod tests {
         assert_eq!((back.value(0, 0, 0), back.value(0, 1, 0), back.value(0, 2, 0)), (Some(1.0), None, Some(255.0)));
         assert_eq!(byte(vec![1.0, f32::NAN, 2.0], None).data_type, "Float32");
         assert_eq!(byte(vec![1.0, 2.5, 2.0], Some(0.0)).data_type, "Float32");
+        // A band long enough to be looked at on several threads, and written as several strips
+        // that each hold other values (they repeat every 251 cells): one fraction in its last run
+        // keeps it floats.
+        let side = 2048;
+        let n = side * side;
+        assert!(n >= 4 * super::super::PARALLEL_VALUES);
+        let cells = |last: f32| {
+            let mut cells: Vec<f32> = (0..n).map(|i| (i % 251) as f32).collect();
+            cells[n - 2] = last;
+            cells
+        };
+        let long = |last: f32| {
+            let r = Raster::new("g", side as u32, side as u32, vec![cells(last)], gt, Crs::LonLat, Some(0.0), ColorHint::Gray, "UInt8")
+                .unwrap();
+            read(std::io::Cursor::new(write(&r, 0).unwrap()), "back").unwrap()
+        };
+        // Every cell reads back where it was, so the strips made on several threads are in order.
+        let back = long(7.0);
+        assert_eq!(back.data_type, "UInt8");
+        let written = cells(7.0);
+        let wrong = written
+            .iter()
+            .enumerate()
+            .find(|&(i, &v)| back.value(0, (i % side) as i64, (i / side) as i64) != Some(v).filter(|v| *v != 0.0));
+        assert!(wrong.is_none(), "{wrong:?}");
+        assert_eq!(long(7.5).data_type, "Float32");
     }
 
     #[test]
@@ -3027,7 +3104,7 @@ mod tests {
         let rotated = [30.0, 5.0, 0.0, 400_000.0, 3.0, -30.0, 0.0, 5_000_000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
         let r = read(std::io::Cursor::new(tests_support::matrix_tiff(rotated, false)), "rot").unwrap();
         assert_eq!(r.lost.len(), 1, "{:?}", r.lost);
-        let said = &r.lost[0];
+        let said = &r.lost[0].text;
         assert!(said.starts_with("it is rotated or skewed, so it is resampled (nearest pixel) onto a north-up grid of "), "{said}");
         assert!(said.contains(&format!("{} × {} pixels of 30.25 each", r.width, r.height)), "{said}");
         assert!(!said.contains("coarser"), "{said}");

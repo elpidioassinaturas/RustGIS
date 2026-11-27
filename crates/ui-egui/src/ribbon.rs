@@ -229,7 +229,7 @@ pub(crate) fn arrow_scroll_area<R>(
     area: egui::ScrollArea,
     tips: [&str; 2],
     add: impl FnOnce(&mut Ui) -> R,
-) {
+) -> egui::Id {
     // egui sets a scroll area's offset only as it is built, so a click moves it on the next frame.
     // It is asked for once, on a frame egui keeps: a discarded one doesn't move the area, and asking
     // on every frame would pin the area there against the wheel.
@@ -250,6 +250,7 @@ pub(crate) fn arrow_scroll_area<R>(
         ui.data_mut(|d| d.insert_temp(key, x));
         ui.ctx().request_repaint();
     }
+    scroll.id
 }
 
 /// The collapse button at the right of the tab strip.
@@ -259,14 +260,14 @@ const COLLAPSE_W: f32 = 24.0;
 const TAB_GAP: f32 = 2.0;
 
 /// The active tool indicator at the right of the tab strip, unless the Explore tool is on: its
-/// label and width.
+/// label, in logical order (its accessible name; painted in display form), and width.
 fn tool_indicator(app: &RustGisApp, ui: &Ui) -> Option<(String, f32)> {
     let tool = app.session.tool;
     if tool == Tool::Explore {
         return None;
     }
-    let label = crate::i18n::fmt("{tool} tool active · Esc to stop", &[("tool", tl_raw!(tool.label()))]);
-    let w = text_w(ui, &label, regular(11.5)) + 18.0;
+    let label = crate::i18n::fmt_raw("{tool} tool active · Esc to stop", &[("tool", tl_raw!(tool.label()))]);
+    let w = text_w(ui, &crate::i18n::display(&label), regular(11.5)) + 18.0;
     Some((label, w))
 }
 
@@ -276,6 +277,7 @@ fn tab_strip(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         // The Project button opens the backstage.
         let pw = text_w(ui, tl!("Project"), semibold(12.5)) + 26.0;
         let (pr, presp) = ui.allocate_exact_size(vec2(pw, 26.0), Sense::click());
+        presp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl_raw!("Project")));
         let fill = if presp.hovered() { crate::theme::BRAND_DARK } else { crate::theme::BRAND };
         ui.painter().rect_filled(pr, CornerRadius::same(6), fill);
         ui.painter().text(pr.center(), Align2::CENTER_CENTER, tl!("Project"), semibold(12.5), egui::Color32::WHITE);
@@ -364,6 +366,7 @@ fn tab_strip(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             let icon = if app.ui.ribbon_minimized { "chevron_down" } else { "up" };
             icons::paint(ui.painter(), cr.shrink(5.0), icon, t.text_dim, t.accent);
             let title = if app.ui.ribbon_minimized { tl_raw!("Expand the ribbon") } else { tl_raw!("Collapse the ribbon") };
+            cresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
             let shortcut = crate::keymap::shortcut_text(ui.ctx(), app, "ui.ribbon", &Value::Null);
             let tip = if shortcut.is_empty() {
                 crate::i18n::fmt("{title}", &[("title", title)])
@@ -375,8 +378,9 @@ fn tab_strip(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             }
             if let Some((label, w)) = tool {
                 let (r, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
                 ui.painter().rect_filled(r, CornerRadius::same(11), t.checked);
-                ui.painter().text(r.center(), Align2::CENTER_CENTER, label, regular(11.5), t.accent_text);
+                ui.painter().text(r.center(), Align2::CENTER_CENTER, crate::i18n::display(&label), regular(11.5), t.accent_text);
                 if resp.clicked() {
                     app.session.tool = Tool::Explore;
                     app.map.cancel_sketch();
@@ -748,6 +752,26 @@ pub(crate) fn sample_data_gallery(ui: &mut Ui, app: &mut RustGisApp) {
     }
 }
 
+/// The page's colour (#2855), under Page Size. The picker is drawn in the menu itself, as the
+/// blank basemap's paper is: a colour button's picker is a popup of its own, and opening it would
+/// close the menu.
+fn page_color(ui: &mut Ui, app: &mut RustGisApp, li: usize, layout: &rustgis_engine::map::layout::Layout) {
+    let white = rustgis_engine::map::Rgba::rgb(0xFF, 0xFF, 0xFF);
+    ui.separator();
+    egui::CollapsingHeader::new(tl!("Page color")).id_salt("page_color").show(ui, |ui| {
+        if let Some(c) = opaque_picker(ui, app, layout.paper.unwrap_or(white))
+            && let Err(e) = app.run("layout.page", json!({"layout": li, "color": c.hex()}))
+        {
+            app.session.notify(e, true);
+        }
+        if ui.add_enabled(layout.paper.is_some(), egui::Button::new(tl!("White"))).clicked()
+            && let Err(e) = app.run("layout.page", json!({"layout": li, "color": null}))
+        {
+            app.session.notify(e, true);
+        }
+    });
+}
+
 /// The blank basemap's paper colour (#2532), while the map is on it with no web basemap over it:
 /// the colour a map frame shows on a coloured page. The picker is drawn in the gallery itself: a
 /// colour button's picker is a popup of its own, and opening it would close this menu.
@@ -756,17 +780,27 @@ fn blank_paper(ui: &mut Ui, app: &mut RustGisApp) {
     if map.basemap != Basemap::Blank || !map.tiles.iter().all(|t| t.overlay) {
         return;
     }
-    let mut c = crate::theme::c32(map.palette().0);
+    let current = map.palette().0;
     ui.add_space(6.0);
     egui::CollapsingHeader::new(tl!("Paper color")).id_salt("blank_paper").show(ui, |ui| {
-        let picked = ui.scope(|ui| egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque));
-        if picked.inner {
-            crate::widgets::one_step_per_press(app, &picked.response);
-            let [r, g, b, _] = c.to_srgba_unmultiplied();
-            let _ =
-                app.run("map.basemap", json!({"name": "blank", "color": rustgis_engine::map::Rgba::rgb(r, g, b).hex(), "keepTiles": true}));
+        if let Some(c) = opaque_picker(ui, app, current) {
+            let _ = app.run("map.basemap", json!({"name": "blank", "color": c.hex(), "keepTiles": true}));
         }
     });
+}
+
+/// An opaque colour picker drawn in place, from `current`: the colour picked, its drag one step
+/// to undo. Drawn in the menu or gallery itself, as a colour button's picker is a popup of its own
+/// and opening it would close them.
+fn opaque_picker(ui: &mut Ui, app: &mut RustGisApp, current: rustgis_engine::map::Rgba) -> Option<rustgis_engine::map::Rgba> {
+    let mut c = crate::theme::c32(current);
+    let picked = ui.scope(|ui| egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque));
+    if !picked.inner {
+        return None;
+    }
+    crate::widgets::one_step_per_press(app, &picked.response);
+    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    Some(rustgis_engine::map::Rgba::rgb(r, g, b))
 }
 
 pub(crate) fn basemap_gallery(ui: &mut Ui, app: &mut RustGisApp) {
@@ -1190,11 +1224,12 @@ fn map_labeling_group(app: &mut RustGisApp, ui: &mut Ui) {
 }
 
 /// Runs `layout.publication` for `profile` from the New Layout menu, in `style` on a sheet: a sheet
-/// is titled with the map's name, a figure's title being its caption's.
+/// is titled with the map's name as `{map}`, so the title follows a rename of the map, a figure's
+/// title being its caption's.
 fn publication_layout(app: &mut RustGisApp, profile: &rustgis_engine::cmd::layout::PublicationProfile, style: Option<&str>) {
     let mut p = json!({"profile": profile.id});
     if profile.sheet {
-        p["title"] = json!(app.session.map().name.clone());
+        p["title"] = json!("{map}");
     }
     if let Some(style) = style {
         p["style"] = json!(style);
@@ -1233,6 +1268,7 @@ pub(crate) fn publication_style(id: &str) -> Option<(&'static str, &'static str)
         "editorial" => (tl!("Editorial"), tl!("A large serif title; the note, the locator and the legend in a column at the right.")),
         "modular" => (tl!("Modular"), tl!("Cards on a light page: the map, the locator and the legend each in one.")),
         "poster" => (tl!("Poster"), tl!("The page in colour, the title in light text and the map in a light card.")),
+        "edge" => (tl!("Edge"), tl!("The map from side to side of the page; a kicker and title over it, the footer under a thin rule.")),
         _ => return None,
     })
 }
@@ -1832,19 +1868,22 @@ fn analysis_groups(app: &mut RustGisApp, ui: &mut Ui) {
             });
         });
     });
-    group(ui, "AI", |ui| {
-        big(
-            ui,
-            app,
-            "assistant",
-            "AI\nAssistant",
-            "Ask about your data, or tell the assistant what to do with the map.",
-            "ui.pane.assistant",
-            Value::Null,
-            app.ui.right == Some(RightPane::Assistant),
-            false,
-        );
-    });
+    // The AI Assistant extension's (#1752).
+    if !crate::extensionsui::hidden(app, "ui.pane.assistant") {
+        group(ui, "AI", |ui| {
+            big(
+                ui,
+                app,
+                "assistant",
+                "AI\nAssistant",
+                "Ask about your data, or tell the assistant what to do with the map.",
+                "ui.pane.assistant",
+                Value::Null,
+                app.ui.right == Some(RightPane::Assistant),
+                false,
+            );
+        });
+    }
     group(ui, "Portal", |ui| {
         for (kind, icon, label, desc) in [
             ("feature", "buffer", "Feature\nAnalysis", "Tools that analyse features."),
@@ -1885,7 +1924,7 @@ fn analysis_groups(app: &mut RustGisApp, ui: &mut Ui) {
                 let shown: Vec<&(&str, &str)> = crate::analysispane::SECTIONS
                     .iter()
                     .filter(|s| {
-                        !matches!(s.0, "rasterFunctions" | "functionEditor" | "environments" | "models")
+                        !matches!(s.0, "rasterFunctions" | "functionEditor" | "process" | "environments" | "models")
                             && crate::analysispane::section_shown(&app.session, s.0)
                     })
                     .collect();
@@ -1915,6 +1954,16 @@ fn analysis_groups(app: &mut RustGisApp, ui: &mut Ui) {
                 "Chain raster functions.",
                 "ui.pane.workflows",
                 json!({"section": "functionEditor"}),
+                false,
+            );
+            small(
+                ui,
+                app,
+                "resample",
+                "Process",
+                "Clip a raster to polygons or the view, or resample it.",
+                "ui.pane.workflows",
+                json!({"section": "process"}),
                 false,
             );
         });
@@ -2425,16 +2474,18 @@ fn view_tab(app: &mut RustGisApp, ui: &mut Ui) {
             );
         });
         col(ui, |ui| {
-            small(
-                ui,
-                app,
-                "assistant",
-                "AI Assistant",
-                "Show or hide the AI Assistant.",
-                "ui.pane.assistant",
-                Value::Null,
-                app.ui.right == Some(RightPane::Assistant),
-            );
+            if !crate::extensionsui::hidden(app, "ui.pane.assistant") {
+                small(
+                    ui,
+                    app,
+                    "assistant",
+                    "AI Assistant",
+                    "Show or hide the AI Assistant.",
+                    "ui.pane.assistant",
+                    Value::Null,
+                    app.ui.right == Some(RightPane::Assistant),
+                );
+            }
             small(
                 ui,
                 app,
@@ -3366,7 +3417,7 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
         }
     };
     group(ui, "Page", |ui| {
-        big_menu(ui, app, "new_layout", "Page\nSize", "Change the page size and orientation.", |ui, app| {
+        big_form_menu(ui, app, "new_layout", "Page\nSize", "Change the page size and orientation.", |ui, app| {
             for (id, label, w, h) in rustgis_engine::map::layout::PAGES {
                 let landscape = layout.width > layout.height;
                 let (pw, ph) = if landscape { (h.max(*w), h.min(*w)) } else { (*w, *h) };
@@ -3386,6 +3437,7 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
                     ui.close();
                 }
             }
+            page_color(ui, app, li, &layout);
         });
         col(ui, |ui| {
             let snap = !app.layout.no_snap;
@@ -3609,6 +3661,8 @@ fn layout_groups(app: &mut RustGisApp, ui: &mut Ui) {
                     ui.close();
                 }
             }
+            let layers = crate::textform::StatLayer::of(&layout, &app.session.project.maps);
+            crate::textform::stat_menu(ui, &layers, |token| add(app, json!({"kind": "dynamicText", "text": token})));
         });
         if big(ui, app, "picture", "Picture", "Add a PNG or JPEG picture to the page.", "ui.layoutPicture", Value::Null, false, false)
             .clicked()
@@ -4886,7 +4940,6 @@ fn imagery_groups(app: &mut RustGisApp, ui: &mut Ui) {
     });
     group(ui, "Imagery Tools", |ui| {
         col(ui, |ui| {
-            small(ui, app, "resample", "Process", "Clip a raster to the view, or resample it.", "ui.pane.workflows", wf("process"), false);
             small(ui, app, "stretch", "Indices", "NDVI, NDWI, SAVI, NBR, NDBI, EVI.", "ui.pane.workflows", wf("indices"), false);
             small(ui, app, "edit", "Pixel Editor", "Set the pixels inside a polygon.", "ui.pane.workflows", wf("pixels"), false);
         });
@@ -5837,6 +5890,91 @@ mod tests {
         );
         h.run();
         h
+    }
+
+    /// The tab strip's tool indicator is a button named with its text, which stops the tool; with
+    /// the Explore tool there is none.
+    #[test]
+    fn the_tool_indicator_is_a_named_button_that_stops_the_tool() {
+        use egui::accesskit::Role;
+        const LABEL: &str = "Measure Distance tool active · Esc to stop";
+        let strip: fn(&mut RustGisApp, &mut Ui) = |app, ui| tab_strip(app, ui, &Tokens::light());
+        let mut h = tab_harness(RustGisApp::with_sample(), strip);
+        assert_eq!(h.state().session.tool, Tool::Explore);
+        assert!(h.query_by_label_contains("tool active").is_none());
+        h.state_mut().session.tool = Tool::Measure;
+        h.state_mut().map.add_sketch_point_for_tests(Default::default());
+        // The strip scrolls to the active tab again as its room changes, for a few frames.
+        h.run_steps(8);
+        h.get_by_role_and_label(Role::Button, LABEL).click();
+        h.run_steps(8);
+        assert_eq!(h.state().session.tool, Tool::Explore);
+        assert_eq!(h.state().map.sketch_len(), 0);
+        assert!(h.query_by_label(LABEL).is_none());
+    }
+
+    /// In a right-to-left language the indicator is painted in display form, and named in logical
+    /// order, so its Latin runs aren't read backwards.
+    #[test]
+    fn the_tool_indicator_is_named_in_logical_order() {
+        let previous = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::lang_from_tag("fa").unwrap());
+        let mut app = RustGisApp::with_sample();
+        app.session.tool = Tool::Measure;
+        // This test checks accessibility labels and works on runners without Persian fonts.
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().allow_missing_glyphs().with_size(vec2(2400.0, 300.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                ui.horizontal(|ui| tab_strip(app, ui, &Tokens::light()));
+            },
+            app,
+        );
+        h.run_steps(8);
+        let name = crate::i18n::fmt_raw("{tool} tool active · Esc to stop", &[("tool", tl_raw!(Tool::Measure.label()))]);
+        let shown = crate::i18n::fmt("{tool} tool active · Esc to stop", &[("tool", tl_raw!(Tool::Measure.label()))]);
+        let found = h.query_by_role_and_label(egui::accesskit::Role::Button, &name).is_some();
+        crate::i18n::set_current(previous);
+        assert!(name.contains("Esc to stop") && name != shown, "the display form reverses the Latin run");
+        assert!(found, "no button named {name:?}");
+    }
+
+    /// The Project button at the left of the tab strip is named, and opens the backstage.
+    #[test]
+    fn the_project_button_is_named_and_opens_the_backstage() {
+        use egui::accesskit::Role;
+        let strip: fn(&mut RustGisApp, &mut Ui) = |app, ui| tab_strip(app, ui, &Tokens::light());
+        let mut h = tab_harness(RustGisApp::with_sample(), strip);
+        h.run_steps(8);
+        assert!(!h.state().ui.backstage);
+        h.get_by_role_and_label(Role::Button, "Project").click();
+        h.run_steps(8);
+        assert!(h.state().ui.backstage);
+    }
+
+    /// The button at the right of the tab strip is named for what it does in the ribbon's state,
+    /// without the shortcut its tooltip adds.
+    #[test]
+    fn the_collapse_button_is_named_for_its_state_and_toggles_the_ribbon() {
+        use egui::accesskit::Role;
+        const COLLAPSE: &str = "Collapse the ribbon";
+        const EXPAND: &str = "Expand the ribbon";
+        let strip: fn(&mut RustGisApp, &mut Ui) = |app, ui| tab_strip(app, ui, &Tokens::light());
+        let mut h = tab_harness(RustGisApp::with_sample(), strip);
+        h.run_steps(8);
+        assert!(!h.state().ui.ribbon_minimized);
+        assert!(h.query_by_label(EXPAND).is_none());
+        h.get_by_role_and_label(Role::Button, COLLAPSE).click();
+        h.run_steps(8);
+        assert!(h.state().ui.ribbon_minimized);
+        assert!(h.query_by_label(COLLAPSE).is_none());
+        h.get_by_role_and_label(Role::Button, EXPAND).click();
+        h.run_steps(8);
+        assert!(!h.state().ui.ribbon_minimized);
     }
 
     /// View › Display › Graticule: the button shows or hides it, its menu picks the type (and shows
@@ -6843,6 +6981,35 @@ mod tests {
         }
     }
 
+    /// Publish › Text › Dynamic Text › Layer statistic adds a text holding the token picked, from
+    /// the layers of the first frame's map (#3036); a layout with no frame has no such section.
+    #[test]
+    fn publish_dynamic_text_adds_a_layer_statistic() {
+        use rustgis_engine::map::layout::ElementKind;
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Figures"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let before = app.session.project.layouts[li].elements.len();
+        let mut h = tab_harness(app, layout_groups);
+        for step in ["Dynamic Text", "Layer statistic", "Cities", "Count  {count:Cities}"] {
+            h.get_by_label(step).click();
+            h.run();
+        }
+        let elements = &h.state().session.project.layouts[li].elements;
+        assert_eq!(elements.len(), before + 1);
+        assert!(matches!(&elements.last().unwrap().kind, ElementKind::Text { text, .. } if text == "{count:Cities}"));
+        assert_eq!(h.state().layout.selected, Some(elements.last().unwrap().id));
+        assert!(h.query_by_label("Layer statistic").is_none(), "the menu closes");
+
+        let frame = h.state().session.project.layouts[li].first_frame().unwrap();
+        h.state_mut().run("layout.removeElement", json!({"layout": li, "element": frame})).unwrap();
+        h.run();
+        h.get_by_label("Dynamic Text").click();
+        h.run();
+        assert!(h.query_by_label_contains("Map scale").is_some(), "the menu is open");
+        assert!(h.query_by_label("Layer statistic").is_none(), "no frame, no layers");
+    }
+
     /// New Layout › Publication Layout › a sheet › a style makes that sheet in that style, titled
     /// with the map's name; a figure has no styles to pick and is made at once.
     #[test]
@@ -6881,10 +7048,9 @@ mod tests {
         let l = app.session.project.layouts.last().unwrap();
         assert!(l.elements.iter().any(|e| e.name == "Panel Box"), "the panel style");
         assert!((l.width, l.height) == (210.0, 297.0), "an A4 portrait sheet: {} × {}", l.width, l.height);
-        let title = app.session.map().name.clone();
         assert!(
-            l.elements.iter().any(|e| matches!(&e.kind, rustgis_engine::map::layout::ElementKind::Text { text, .. } if *text == title)),
-            "titled with the map's name"
+            l.elements.iter().any(|e| matches!(&e.kind, rustgis_engine::map::layout::ElementKind::Text { text, .. } if text == "{map}")),
+            "titled with the map's name as {{map}}, so a rename of the map changes it"
         );
         assert_eq!(app.ui.tab, "Publish");
         assert!(h.query_by_label("Banner").is_none(), "the menu closed");

@@ -389,8 +389,11 @@ fn notify_left_out(s: &mut Session, name: &str, left: &LeftOut) {
     }
 }
 
-/// What writing a value took from it, by field: a notice key ([`notify_loss`]).
-type Losses = Vec<(String, &'static str)>;
+/// What writing a value took from it: a notice key ([`notify_loss`]) and the loss's code.
+type CellLoss = (&'static str, LossCode);
+
+/// What writing a row's values took from them, by field.
+type Losses = Vec<(String, CellLoss)>;
 
 /// A new row's values for `fields`: those given (`"attributes"`, [`given_attributes`]), else
 /// `defaults` (a feature template's), each as its field holds it, with what that took from each
@@ -419,13 +422,19 @@ fn new_row(fields: &[Field], p: &Json, defaults: &[(String, Value)]) -> Result<(
             }
             // A date-time (a native caller's template default) keeps only its day in a date field.
             if matches!(value, Value::DateTime(t) if f.ty == FieldType::Date && !t.is_date()) {
-                losses.push((f.name.clone(), "{layer}, field '{field}', row {row}: 1 attribute value kept only its day"));
+                losses.push((
+                    f.name.clone(),
+                    ("{layer}, field '{field}', row {row}: 1 attribute value kept only its day", LossCode::DroppedTime),
+                ));
             }
             // A date (a native caller's template default) is no yes/no value: null, and said.
             if f.ty == FieldType::Boolean && coerced.is_null() && !value.asks_null() {
                 losses.push((
                     f.name.clone(),
-                    "{layer}, field '{field}', row {row}: 1 attribute value was written as null because it isn't a yes/no value",
+                    (
+                        "{layer}, field '{field}', row {row}: 1 attribute value was written as null because it isn't a yes/no value",
+                        LossCode::DroppedValue,
+                    ),
                 ));
             }
             Ok(coerced)
@@ -435,13 +444,13 @@ fn new_row(fields: &[Field], p: &Json, defaults: &[(String, Value)]) -> Result<(
 }
 
 /// Says what writing a value of `field`, in row `row` of layer or table `name`, took from it.
-fn notify_loss(s: &mut Session, key: &'static str, name: &str, field: String, row: usize) {
-    s.notify_text(
+fn notify_loss(s: &mut Session, (key, code): CellLoss, name: &str, field: String, row: usize) {
+    s.notify_loss(
+        code,
         crate::notice_text::NoticeText::format(
             key,
             [("layer", name.to_string().into()), ("field", field.into()), ("row", row.saturating_add(1).to_string().into())],
         ),
-        false,
     );
 }
 
@@ -479,13 +488,13 @@ pub(crate) fn validate(g: &Geometry) -> Result<(), String> {
     }
 }
 
-/// `v` as a value of a `ty` field. A date-time into a date field is the day it shows. A number goes into a number field as it is, not through the
-/// text it shows (which rounds a decimal to six places); a decimal, or text written as one, into a
+/// `v` as a value of a `ty` field. A date-time into a date field is the day it shows. A number
+/// goes into a number field as it is, not through the text it shows (which rounds a decimal to six
+/// places); a decimal, or text written as one, into a
 /// whole-number field loses its fraction (toward zero); a whole number past 2^53 into a decimal
 /// field is the nearest decimal. Not a number, and an infinity in a whole-number field, are null.
-/// Other values go through their text (a
-/// decimal into a text field as it's shown, to six places), and what the field can't hold is
-/// null. A number past the 64-bit range is held at the range's end, as it was; [`coerce_cut`], for
+/// A decimal goes into a text field in full, as a file writes it. Other values go through their
+/// text, and what the field can't hold is null. A number past the 64-bit range is held at the range's end, as it was; [`coerce_cut`], for
 /// callers that say what was cut, makes it null instead.
 pub(crate) fn coerce(v: Value, ty: FieldType) -> Value {
     match convert(v, ty) {
@@ -511,6 +520,10 @@ pub(crate) enum Cut {
     NotFinite,
     /// A date-time's time of day or zone: a date field keeps its day.
     Time,
+    /// Digits past those a decimal holds: a whole number past 2^53 in a decimal field, or text
+    /// with more significant digits than the decimal it is read through
+    /// ([`Value::rounds_as_double`], [`double_holds`](rustgis_data::io::double_holds)).
+    Rounded,
 }
 
 /// How many of a field's results [`coerce_cut`] cut, of each kind, for one notice per kind.
@@ -521,6 +534,7 @@ pub(crate) struct Cuts {
     not_numbers: usize,
     not_finite: usize,
     times: usize,
+    rounded: usize,
 }
 
 impl Cuts {
@@ -532,17 +546,19 @@ impl Cuts {
             Cut::NotANumber => self.not_numbers += 1,
             Cut::NotFinite => self.not_finite += 1,
             Cut::Time => self.times += 1,
+            Cut::Rounded => self.rounded += 1,
         }
     }
 
     /// The notices for what writing the whole-number or date field `field` cut, each starting with `by`
     /// (the command or rule that wrote it). Empty when nothing was cut.
+    #[cfg(test)]
     pub(crate) fn notices(&self, by: &str, field: &str) -> Vec<String> {
         self.classified(by, field).into_iter().map(|(_, text)| text).collect()
     }
 
     /// Pairs each coercion message with its cause at the point the loss is counted.
-    fn classified(&self, by: &str, field: &str) -> Vec<(LossCode, String)> {
+    pub(crate) fn classified(&self, by: &str, field: &str) -> Vec<(LossCode, String)> {
         let results = |n: usize| if n == 1 { "1 result".to_string() } else { format!("{n} results") };
         let mut out = Vec::new();
         if self.fractions > 0 {
@@ -566,6 +582,10 @@ impl Cuts {
         if self.times > 0 {
             let their = if self.times == 1 { "its" } else { "their" };
             out.push((LossCode::DroppedTime, format!("{by}: '{field}' holds dates, so {} kept only {their} day", results(self.times))));
+        }
+        if self.rounded > 0 {
+            let were = if self.rounded == 1 { "was" } else { "were" };
+            out.push((LossCode::ChangedRounded, format!("{by}: {} {were} rounded to the digits '{field}' holds", results(self.rounded))));
         }
         out
     }
@@ -609,6 +629,7 @@ impl Loss {
             Loss::Cut(Cut::NotANumber) => PreviewLoss::NotANumber,
             Loss::Cut(Cut::NotFinite) => PreviewLoss::NotFinite,
             Loss::Cut(Cut::Time) => PreviewLoss::Time,
+            Loss::Cut(Cut::Rounded) => PreviewLoss::Rounded,
             Loss::Unread => PreviewLoss::Unheld,
             Loss::Error(fault) => PreviewLoss::Error(fault),
         })
@@ -628,6 +649,8 @@ pub enum PreviewLoss {
     NotFinite,
     /// A date field keeps a date-time's day.
     Time,
+    /// Digits past those the field holds are rounded.
+    Rounded,
     /// A result the field can't hold (text that isn't a number or a date) is null.
     Unheld,
     /// The expression's error made it null.
@@ -691,6 +714,27 @@ impl WriteLosses {
         value
     }
 
+    /// What a tally of one row's write says, as a preview names it, in the order [`held`] gives
+    /// them: the error that made it null, a result the field couldn't hold, then what a cut took.
+    /// `None` for a clean write.
+    pub(crate) fn previewed(&self) -> Option<PreviewLoss> {
+        let cuts = &self.cuts;
+        if let Some((fault, ..)) = self.errors.first() {
+            return Some(PreviewLoss::Error(*fault));
+        }
+        [
+            (self.unread, PreviewLoss::Unheld),
+            (cuts.fractions, PreviewLoss::Fraction),
+            (cuts.past, PreviewLoss::Range),
+            (cuts.not_numbers, PreviewLoss::NotANumber),
+            (cuts.not_finite, PreviewLoss::NotFinite),
+            (cuts.times, PreviewLoss::Time),
+            (cuts.rounded, PreviewLoss::Rounded),
+        ]
+        .into_iter()
+        .find_map(|(n, loss)| (n > 0).then_some(loss))
+    }
+
     /// The notices for what writing `field`, of type `ty`, lost, each starting with `by` (the
     /// command or rule that wrote it). Rows are numbered from 1, as `@row_number` numbers them.
     /// The error notices are templates a translated interface shows in its language.
@@ -750,6 +794,26 @@ pub(crate) fn non_finite_input(value: &Value, ty: FieldType) -> bool {
         }
 }
 
+/// A value set once for a field and used again (a template's or subtype's default, a domain's
+/// code, a contingent combination) as a `ty` field holds it, refused when holding it would lose
+/// any of it: one that isn't finite or isn't a value of the field's type, or that the field would
+/// cut, clamp or round. It is checked when it is set, as no later edit could say what was lost.
+pub(crate) fn held_default(field: &str, value: &Value, ty: FieldType) -> Result<Value, String> {
+    if non_finite_input(value, ty) {
+        return Err(format!("field '{field}' requires a finite number"));
+    }
+    let coerced = coerce(value.clone(), ty);
+    // Named as given, not as shown (which rounds a decimal to six places).
+    let given = value.to_file_text();
+    if coerced.is_null() && !value.asks_null() {
+        return Err(format!("field '{field}': '{given}' isn't a {} value", ty.label()));
+    }
+    if numeric_loss(value, &coerced, ty).is_some() || matches!(value, Value::DateTime(t) if ty == FieldType::Date && !t.is_date()) {
+        return Err(format!("field '{field}': a {} field can't hold '{given}' as given", ty.label()));
+    }
+    Ok(coerced)
+}
+
 /// Whether a number, or a number written as text, is an infinity (not NaN).
 fn infinite(value: &Value) -> bool {
     match value {
@@ -767,7 +831,9 @@ fn convert(v: Value, ty: FieldType) -> (Value, Cut, Option<f64>) {
         (Value::Float(f), FieldType::Integer) if f.is_infinite() => (Value::Null, Cut::NotFinite, None),
         (Value::Float(f), FieldType::Integer) => whole(f),
         (Value::Float(f), FieldType::Double) => (Value::Float(f), Cut::None, None),
-        (Value::Int(i), FieldType::Double) => (Value::Float(i as f64), Cut::None, None),
+        (Value::Int(i), FieldType::Double) => {
+            (Value::Float(i as f64), if Value::Int(i).rounds_as_double() { Cut::Rounded } else { Cut::None }, None)
+        }
         // A date-time into a date field is the day it shows, and said so when it had a time or zone.
         (Value::DateTime(t), FieldType::Date) => (Value::Date(t.date()), if t.is_date() { Cut::None } else { Cut::Time }, None),
         // A date is no number or yes/no: null (and said by the caller), not read as false.
@@ -782,11 +848,29 @@ fn convert(v: Value, ty: FieldType) -> (Value, Cut, Option<f64>) {
                 (Some((v, cut)), Ok(f)) => (v, cut, Some(f)),
                 // A word the decimal reader takes ("inf", "NaN") isn't a number written as text:
                 // null, and said so, as not a number.
-                (None, Ok(f)) if f.is_finite() || t.bytes().any(|b| b.is_ascii_digit()) => whole(f),
+                // A fraction the decimal rounded away (`2.0000000000000000001e0`) is still one.
+                // A fraction the decimal rounded away (`2.0000000000000000001e0`) is still one, and
+                // digits past those it holds (`9007199254740993e0`) are rounded.
+                (None, Ok(f)) if f.is_finite() || t.bytes().any(|b| b.is_ascii_digit()) => match whole(f) {
+                    (v @ Value::Int(_), Cut::None, x) if Value::text_has_fraction(&t) => (v, Cut::Fraction, x),
+                    (v @ Value::Int(_), Cut::None, x) if !rustgis_data::io::double_holds(t.trim()) => (v, Cut::Rounded, x),
+                    held => held,
+                },
                 (None, Ok(f)) if f.is_infinite() => (Value::Null, Cut::NotFinite, None),
                 (None, Ok(_)) => (Value::Null, Cut::NotANumber, None),
                 _ => (Value::parse(&t, ty), Cut::None, None),
             },
+        },
+        // A decimal goes into a text field in full, not as the six places it's shown to.
+        (Value::Float(f), FieldType::Text) if f.is_finite() => (Value::Text(Value::Float(f).to_file_text()), Cut::None, None),
+        // A whole number is yes when it isn't 0, as a shapefile writes it.
+        (Value::Int(i), FieldType::Boolean) => (Value::Bool(i != 0), Cut::None, None),
+        (Value::Float(f), FieldType::Boolean) if f.fract() == 0.0 => (Value::Bool(f != 0.0), Cut::None, None),
+        // A fraction is no yes/no value: null, not the text it's shown as (`0.0000001` shows `0`).
+        (Value::Float(_), FieldType::Boolean) => (Value::Null, Cut::None, None),
+        (Value::Text(t), FieldType::Double) => match Value::parse_source(&t, ty) {
+            v @ Value::Float(_) if Value::Text(t).rounds_as_double() => (v, Cut::Rounded, None),
+            v => (v, Cut::None, None),
         },
         // Uncounted coercion retains source numbers until output can explain any loss.
         (Value::Text(t), _) => (Value::parse_source(&t, ty), Cut::None, None),
@@ -856,17 +940,31 @@ fn delete(s: &mut Session, _: &Json) -> CmdResult {
 }
 
 /// A numeric conversion's loss, shared by edits and feature creation. Null entered explicitly is quiet.
-fn numeric_loss(input: &Value, v: &Value, ty: FieldType) -> Option<&'static str> {
+fn numeric_loss(input: &Value, v: &Value, ty: FieldType) -> Option<CellLoss> {
     if ty.is_numeric() && v.is_null() && !input.asks_null() {
-        Some("{layer}, field '{field}', row {row}: 1 attribute value was written as null because it isn't a number")
+        Some((
+            "{layer}, field '{field}', row {row}: 1 attribute value was written as null because it isn't a number",
+            LossCode::DroppedValue,
+        ))
     } else if ty == FieldType::Integer {
         let (exact, cut) = coerce_cut(input.clone(), ty);
         match cut {
-            Cut::Fraction => Some("{layer}, field '{field}', row {row}: 1 attribute value lost its fraction"),
-            Cut::Range => Some("{layer}, field '{field}', row {row}: 1 attribute value was clamped to the 64-bit integer range"),
-            Cut::None if &exact != v => Some("{layer}, field '{field}', row {row}: 1 attribute value lost integer precision"),
+            Cut::Fraction => Some(("{layer}, field '{field}', row {row}: 1 attribute value lost its fraction", LossCode::ChangedTruncated)),
+            // The value given is gone: the range's limit stands in its place.
+            Cut::Range => Some((
+                "{layer}, field '{field}', row {row}: 1 attribute value was clamped to the 64-bit integer range",
+                LossCode::DroppedValue,
+            )),
+            Cut::Rounded => {
+                Some(("{layer}, field '{field}', row {row}: 1 attribute value lost integer precision", LossCode::ChangedRounded))
+            }
+            Cut::None if &exact != v => {
+                Some(("{layer}, field '{field}', row {row}: 1 attribute value lost integer precision", LossCode::ChangedRounded))
+            }
             _ => None,
         }
+    } else if ty == FieldType::Double && matches!(v, Value::Float(_)) && coerce_cut(input.clone(), ty).1 == Cut::Rounded {
+        Some(("{layer}, field '{field}', row {row}: 1 attribute value was rounded to the digits a decimal holds", LossCode::ChangedRounded))
     } else {
         None
     }
@@ -925,8 +1023,8 @@ fn set_value(s: &mut Session, p: &Json) -> CmdResult {
     Ok(Json::Null)
 }
 
-/// `raw` (an `edit.setValue` value) as a value of a `ty` field. A number that isn't finite, and a
-/// value a date field can't hold, are refused.
+/// `raw` (an `edit.setValue` value) as a value of a `ty` field. A number that isn't finite, a
+/// value a date field can't hold, and text that isn't a yes/no word in a yes/no field, are refused.
 fn typed(raw: Json, ty: FieldType) -> Result<Value, String> {
     Ok(match raw {
         // A number that isn't finite (NaN, infinity) is no value a number field holds, nor one a
@@ -934,16 +1032,20 @@ fn typed(raw: Json, ty: FieldType) -> Result<Value, String> {
         Json::String(t) if ty.is_numeric() && t.trim().parse::<f64>().is_ok_and(|f| !f.is_finite()) => {
             return Err(format!("'{}' isn't a finite number, which a {} field holds", t.trim(), ty.label()));
         }
-        // Text a date field can't hold (`soon`) is refused, not stored as null.
+        // Text a date or yes/no field can't hold (`soon`, `maybe`) is refused, not stored as null.
         Json::String(t) => match Value::parse(&t, ty) {
-            Value::Null if ty.is_temporal() && !t.trim().is_empty() && !t.trim().eq_ignore_ascii_case("<null>") => {
+            Value::Null
+                if (ty.is_temporal() || ty == FieldType::Boolean) && !t.trim().is_empty() && !t.trim().eq_ignore_ascii_case("<null>") =>
+            {
                 return Err(format!("'{}' isn't a {} value", t.trim(), ty.label()));
             }
             v => v,
         },
-        // So is any other value a date field can't hold (`20260305`).
+        // So is any other value a date or yes/no field can't hold (`20260305`, `0.5`).
         other => match coerce(Value::from_json(&other), ty) {
-            Value::Null if ty.is_temporal() && !other.is_null() => return Err(format!("'{other}' isn't a {} value", ty.label())),
+            Value::Null if (ty.is_temporal() || ty == FieldType::Boolean) && !other.is_null() => {
+                return Err(format!("'{other}' isn't a {} value", ty.label()));
+            }
             v => v,
         },
     })
@@ -1036,14 +1138,18 @@ fn convert_field(s: &mut Session, p: &Json) -> CmdResult {
     let (kind, one) = if ty == FieldType::Date { ("dates", "a date") } else { ("date-times", "a date-time") };
     if nulled > 0 {
         let rows = if nulled == 1 { "1 row".to_string() } else { format!("{nulled} rows") };
-        s.notify(
+        // Text that asks for null isn't counted (`to_dates`): only text that isn't a date.
+        s.say(rustgis_data::loss::Note::loss(
+            LossCode::DroppedValue,
             format!("Convert Field: '{name}' holds {kind} now, and is null in {rows} whose text isn't {one}: {}", examples.join(", ")),
-            false,
-        );
+        ));
     }
     if rounded > 0 {
         let values = if rounded == 1 { "1 value was".to_string() } else { format!("{rounded} values were") };
-        s.notify(format!("Convert Field: {values} rounded to the microsecond in '{name}', as more digits than that aren't kept"), false);
+        s.say(rustgis_data::loss::Note::loss(
+            LossCode::ChangedRounded,
+            format!("Convert Field: {values} rounded to the microsecond in '{name}', as more digits than that aren't kept"),
+        ));
     }
     Ok(json!({"converted": converted, "null": nulled}))
 }
@@ -1653,8 +1759,9 @@ fn land_layer_dates(s: &mut Session, p: &Json) -> Option<CmdResult> {
         check_layer_dates(s, id, fi, ty)?;
         let layer = s.map_mut().layer_mut(id).ok_or("no layer")?;
         (layer.dataset.fields, layer.dataset.features) = (output.fields, output.features);
+        // Each with its code, as a table's edit lands.
         for notice in notices {
-            s.notify(notice.text, notice.error);
+            s.relay_notice(notice);
         }
         Ok(answer)
     })())
@@ -1778,8 +1885,10 @@ pub fn check_calculation(expr: &str, ds: &rustgis_data::Dataset) -> Result<(), S
     Calculation::parse(expr, ds).map(|_| ())
 }
 
-/// One row of a Calculate Field preview: the value the field would get, what writing it loses,
+/// One row of a Calculate Field preview: the value the field would hold, what writing it loses,
 /// the kind the run's notices count, and the layer's check that would refuse the edit (#2837).
+/// A calculation rule that writes the field overwrites the expression's result on the run, so the
+/// value is the last such rule's result, as the field holds it, with what that write loses (#2884).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CalculationPreview {
     pub row: usize,
@@ -1793,12 +1902,15 @@ pub struct CalculationPreview {
 
 /// What Calculate Field would write with `expr` into field `field` of `rows` (rows past the end
 /// left out), parsed once as [`check_calculation`] reads it: the error is the same. With a
-/// layer's `design`, each row also says which of its checks would refuse it: its calculation
-/// rules, then its domains, allowed combinations and constraint rules, run as an edit runs them
-/// (`apply_with`, in `design`) on a copy of that row alone, its value written, which reads
-/// `@row_number` as the layer's row. The copy holds that row alone, with the layer's fields and
-/// coordinate system: nothing else of the layer is copied. Not previewed: an edit refused because
-/// an area it reads is ambiguous, which needs the whole edit's geometry.
+/// layer's `design`, each row is run as an edit runs it (`apply_with`, in `design`) on a copy of
+/// that row alone, its value written, which reads `@row_number` as the layer's row: the layer's
+/// calculation rules first, in order, so a rule that writes `field` gives the value and what
+/// writing it loses (the later of two rules wins; what Calculate's own result lost, which the run
+/// says in its notices, isn't shown then), then each row says which of its domains, allowed
+/// combinations and constraint rules would refuse it. The copy holds that row alone, with the
+/// layer's fields and coordinate system: nothing else of the layer is copied. Not previewed: an
+/// edit refused because an area it reads is ambiguous, which needs the whole edit's geometry, and
+/// a rule that no longer reads, which the run skips and says.
 pub fn preview_calculation(
     expr: &str,
     ds: &rustgis_data::Dataset,
@@ -1809,18 +1921,28 @@ pub fn preview_calculation(
     use rustgis_map::design::RuleKind;
     let calc = Calculation::parse(expr, ds)?;
     let ty = ds.fields.get(field).map(|f| f.ty).ok_or("no field")?;
-    // Only these can refuse a row: a layer with calculation rules alone refuses none.
-    let layer_checks =
-        design.filter(|d| !d.domains.is_empty() || !d.contingent.is_empty() || d.rules.iter().any(|r| r.kind == RuleKind::Constraint));
-    // The layer's fields, which its rules are read against, and its constraint rules: only for a
-    // layer with checks.
-    let prepared = layer_checks.map(|d| {
+    // The dialog asks every frame, so the one-row copy and the rules are skipped unless they
+    // change the answer: the layer has a check (a domain, an allowed combination or a constraint
+    // rule, which any calculation rule's result may feed), or a calculation rule writes `field`.
+    // A layer with only calculation rules on other fields gets the expression's value, as it
+    // would from running them.
+    let ruled = design.filter(|d| {
+        !d.domains.is_empty()
+            || !d.contingent.is_empty()
+            || d.rules.iter().any(|r| match r.kind {
+                RuleKind::Constraint => true,
+                RuleKind::Calculation => ds.field_index(&r.field) == Some(field),
+            })
+    });
+    // The layer's fields, which its rules are read against, and its constraint rules.
+    let prepared = ruled.map(|d| {
         let metadata = rustgis_data::Dataset::new(ds.name.clone(), ds.geometry_type, ds.fields.clone());
         let constraints = super::design::constraint_rules(d, &metadata);
         (d, metadata, constraints)
     });
-    // What the layer's checks would refuse the edit of `row` with, `value` written.
-    let refusal_of = |row: usize, value: &Value| {
+    // What the layer's rules leave in `field` of `row` with `value` written (the value and what
+    // the last rule writing it lost, when one does), and what its checks would refuse the edit with.
+    let ruled_row = |row: usize, value: &Value| {
         let (d, metadata, constraints) = prepared.as_ref()?;
         let before = ds.features.row(row)?.to_feature();
         // Shares the layer's rows (an `Arc`) until `one.features` is replaced on the next line, so
@@ -1828,17 +1950,22 @@ pub fn preview_calculation(
         let mut one = ds.clone();
         one.features = vec![before.clone()].into();
         one.features.set_value(0, field, value.clone());
-        let _ = super::design::calculation_rules(d, &mut one, metadata, &[0], row);
-        super::design::refusal(d, &one, constraints, 0, Some(&before), row)
+        let (cuts, _) = super::design::calculation_rules(d, &mut one, metadata, &[0], row);
+        let written = cuts.iter().rfind(|(_, name, ..)| ds.field_index(name) == Some(field)).map(|(.., losses, _)| losses.previewed());
+        let refusal = super::design::refusal(d, &one, constraints, 0, Some(&before), row);
+        Some((written.map(|lost| (one.value(0, field).clone(), lost)), refusal))
     };
     Ok(rows
         .iter()
         .filter(|r| **r < ds.features.len())
         .map(|&row| {
             let Held { value, cut, other } = held(calc.eval_or_fault(ds, row), ty);
-            let refusal = refusal_of(row, &value);
+            let (written, refused) = ruled_row(row, &value).unwrap_or((None, None));
             // The error is why the value is null; a cut alone says what it took.
-            CalculationPreview { row, value, lost: other.or(cut).and_then(Loss::previewed), refused: refusal }
+            let own = other.or(cut).and_then(Loss::previewed);
+            // A rule's write replaces the expression's: its value, and what it lost.
+            let (value, lost) = written.unwrap_or((value, own));
+            CalculationPreview { row, value, lost, refused }
         })
         .collect())
 }
@@ -2022,6 +2149,38 @@ fn split_op(e: &str) -> (&str, Option<char>, Option<&str>) {
 mod tests {
     use super::*;
     use rustgis_data::{Dataset, Field};
+
+    /// What a tally of one write says in a preview (`WriteLosses::previewed`) is what the preview
+    /// says of the same result when it holds it (`held`, then `Loss::previewed`): the two readings
+    /// of a loss don't drift apart.
+    #[test]
+    fn a_losses_tally_previews_as_the_result_it_counts() {
+        use rustgis_data::query::Fault;
+        let at = Value::parse("2026-11-23T10:30:00", FieldType::DateTime);
+        let cases: Vec<(Value, Option<Fault>, FieldType, Option<PreviewLoss>)> = vec![
+            (Value::Float(1e300), None, FieldType::Integer, Some(PreviewLoss::Range)),
+            (Value::Float(2.5), None, FieldType::Integer, Some(PreviewLoss::Fraction)),
+            (Value::Float(f64::NAN), None, FieldType::Double, Some(PreviewLoss::NotANumber)),
+            (Value::Float(f64::INFINITY), None, FieldType::Double, Some(PreviewLoss::NotFinite)),
+            (Value::Text("n/a".into()), None, FieldType::Integer, Some(PreviewLoss::Unheld)),
+            (at, None, FieldType::Date, Some(PreviewLoss::Time)),
+            (Value::Null, Some(Fault::DivisionByZero), FieldType::Double, Some(PreviewLoss::Error(Fault::DivisionByZero))),
+            (Value::Float(2.0), None, FieldType::Integer, None),
+            (Value::Null, None, FieldType::Double, None),
+        ];
+        for (value, fault, ty, expected) in cases {
+            let result = (value.clone(), fault);
+            let held = held(result.clone(), ty);
+            let by_held = held.other.or(held.cut).and_then(Loss::previewed);
+            let by_tally = {
+                let mut losses = WriteLosses::default();
+                losses.write(0, result, ty);
+                losses.previewed()
+            };
+            assert_eq!(by_held, expected, "{value:?} into {ty:?}");
+            assert_eq!(by_tally, by_held, "{value:?} into {ty:?}");
+        }
+    }
 
     /// A null an expression's error wrote says so, by kind with its count and first rows, on a
     /// layer and a table, from the language and from the earlier calculator; a clean run, and

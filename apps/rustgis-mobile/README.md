@@ -84,16 +84,29 @@ Rust calls Java and never the other way: each frame the app collects what happen
   the More sheet, removes the picks the project in the window names no file of, once the user has
   seen how many and how large and agreed; a pick goes whole, so a Shapefile's `.dbf` goes only
   with its `.shp`. It runs off the window's thread, with Cancel.
+- **Typing.** `NativeActivity` hands its window's touches and keys to Rust, so a text field in
+  that window gets none of Android's typing (paste, suggestions, dictation). A Capture field is
+  drawn as a box instead, and tapping it opens an `EditText` in a window of its own, docked above
+  the keyboard (`enterText`): its text comes back as a `text` event on each change, the form
+  showing it as it is typed, and `text-closed` when it closes. Text copied in RustGIS goes on
+  Android's clipboard too (`copyText`). Fields the desktop interface draws still use egui's own.
 - **Not yet.** Choosing a folder (Add Folder, a Zarr store) says it isn't available.
 
 ## The touch interface
 
 A phone starts in the touch interface: the map, a bar of four large buttons under it (Layers, Add
-Data, Capture, More) and sheets that rise over the map. The Layers sheet shows and hides layers,
-zooms to one and makes one the active layer; the More sheet has Full Extent, the project, undo
-and redo, and **Use the Desktop Interface**, which brings back the ribbon and panes; **Touch
+Data, Capture, More) and sheets that rise over the map. The Layers sheet switches between the
+project's maps and layouts when it has more than one, shows and hides layers, zooms to one and
+makes one the active layer; the More sheet has Full Extent, undo and redo, the project, the
+position, and **Use the Desktop Interface**, which brings back the ribbon and panes; **Touch
 Interface**, on the View tab (or Use the Touch Interface in Command Search), returns to the phone's
-interface.
+interface. The map has no zoom buttons or view tabs there: a finger pinches to zoom.
+
+A sheet is lowered by its **×**, a swipe down on its heading, a tap on the map above it, or
+Android's Back. Android 16 on sends an app targeting it no Back key, so the activity's Java half
+registers a callback while a sheet is up (`takesBack`), and asks the window for a frame when Back
+comes; older Androids send the key, which the app reads. With no sheet up, Back does what it did
+before.
 
 **Capture** adds a feature to one of the map's point, line or polygon layers. A cross marks the
 middle of the map: the map is moved under it, and the sheet's fields are filled in (one for each
@@ -234,9 +247,11 @@ own was used outside the area) is said, as a later package from the same phone r
 | HTTPS trust | The bundled Mozilla roots, not the device's certificates; the session says so once (`rustgis_data::http`) |
 | Folders | Settings, app data and the cache are in the app's internal storage, set once at start-up (`rustgis_data::dirs::set_root`) |
 | GeoLibre tools, GDAL formats, DuckDB | Not available: a phone can't run their programs. `rustgis_data::RUNS_PROGRAMS` is false on Android and iOS, so no program is looked for, and each place they would appear says so: a file read through GDAL or a DuckDB database is refused with the reason (convert it on a computer), the SQL pane says why it can't query, and the Geoprocessing pane shows a card in place of the GeoLibre tools. Add Data's Database… stays: its PostGIS, MySQL and SQL Server connections need no program. The app is built without the engine's `geolibre` feature |
+| Memory limits | The app tells the engine what Android allows (`rustgis_data::memory::set_phone`): `ActivityManager.MemoryInfo`'s `totalMem` in place of the computer's memory, and `availMem` less `threshold` as what is free, asked again for each job. (`getMemoryClass` bounds only the Java heap; the engine's memory is native.) Where the browser's floor is lower than the desktop's, the phone takes it; the Undo budget is planned from what is free at start, and the threads' scratch memory is the browser's. On a low-memory warning the app drops the tile and drawing caches: `onTrimMemory` and `onLowMemory` through Android 13, and, as Android 14 and later send an app in use neither, `MemoryInfo.lowMemory`, asked every five seconds while the app is in sight (an idle window wakes that often to ask) |
 | Recovery copies | The first foreground edit submits a recovery copy in app-private storage immediately. Edits within two seconds of a submission are grouped into a copy due at the end of that interval. When the exit hook runs, it submits the latest edit immediately and gives the writer up to two seconds to finish. Suspending or destroying the Android activity can skip this hook, so edits still waiting to be submitted can be lost. The next launch offers the last complete copy, if one exists. |
-| Preferences, the keychain | Not wired up yet |
-| Soft keyboard | It opens for a text field, and the touch interface keeps the field above it. `NativeActivity`'s text input is still poor (no suggestions, no composing): a real app moves to `GameActivity` |
+| Preferences | `prefs.json` in the app's settings folder, as on the desktop (`rustgis_engine::prefs`) |
+| Secrets | `Services::secrets` is `src/secrets.rs`: the Java half (`SecretVault.java`) encrypts each secret with AES-GCM under a key the Android Keystore makes once and never lets out, bound to its account name, and keeps it in a file of its own in the app's no-backup folder, written whole and renamed into place, so a failed save leaves the secret as it was. Nothing is kept unencrypted: when the keystore can't be used, a secret lasts for the session and the app says so. Uninstalling the app removes both. On iOS there is no store yet: the keychain crate's Apple store needs its `protected` feature there |
+| Soft keyboard | It opens for a text field, and the touch interface keeps the field above it. The Capture form's fields are typed into Android's own text box (see Typing above), with suggestions, composing, paste and dictation. Fields the desktop interface draws still get `NativeActivity`'s poor text input (no suggestions, no composing) |
 
 ## What phase 0 found
 
@@ -405,12 +420,14 @@ cp parcels.gpkg "$(xcrun simctl get_app_container booted org.rustgis.mobile data
 | Folders | Settings, app data and the cache are in `Library/Application Support` |
 | Picked copies | Kept in `picked/`, as on Android: data and projects open from their copies and are edited there. The folder is left out of the device's backups (`NSURLIsExcludedFromBackupKey`), as the documents are the user's elsewhere. Remove Unused Copies removes those the project doesn't name, as on Android |
 | Plain HTTP | App Transport Security is off for every host (`NSAllowsArbitraryLoads`): a project's tile layers and services may be any `http://` server, not known when the app is built, so a list of exceptions can't name them. The App Review notes say so |
+| Memory limits | What `os_proc_available_memory` says is left stands for the app's limit at start, and is asked again for each job; 1.5 GiB where it says nothing. A memory warning drops the tile and drawing caches, as on Android |
 | Plugins | None can be installed, and the registry isn't fetched: App Review doesn't let an app download code that adds to what it does (guideline 2.5.2), and a plugin, from the registry or a file, is such code. Each way of installing one says so (`rustgis_plugins::INSTALLS`). A later build could carry plugins reviewed with the app |
 
 `src/ios.rs` is the one module of the app with `unsafe` code beyond Android's `no_mangle`, an
 exception to the workspace's rule allowed by `#![expect(unsafe_code)]` on the module: UIKit's
 delegates are Objective-C classes made with `objc2`'s `define_class!`, which needs `unsafe impl`,
-and a few of UIKit's calls are unsafe in `objc2`. Each block says why it holds.
+a few of UIKit's calls are unsafe in `objc2`, and libSystem's `os_proc_available_memory` is
+declared there. Each block says why it holds.
 
 Two things winit 0.30 doesn't do on iOS 27 are done in `src/ios.rs`:
 

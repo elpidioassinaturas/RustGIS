@@ -1259,6 +1259,7 @@
           "graticule-color",
           "layout-element-ink",
           "layout-element-wrap",
+          "layout-text-block",
           "layout-chart-data",
           "layout-chart-look",
           "layout-chart-classes",
@@ -1276,6 +1277,7 @@
           "layout-section",
           "native-coordinates",
           "layout-text-size",
+          "layout-legend-fit",
           "layout-scale-bar-details",
           "label-guide",
           "label-weight",
@@ -1284,7 +1286,10 @@
           "label-clearance",
           "svg-markers",
           "label-duplicates",
-          "tile-resampling"
+          "tile-resampling",
+          "layout-page-color",
+          "layout-text-statistics",
+          "layout-publication-parts"
         ],
         "type": "string"
       },
@@ -1372,6 +1377,7 @@
     "graticule-color",
     "layout-element-ink",
     "layout-element-wrap",
+    "layout-text-block",
     "layout-chart-data",
     "layout-chart-look",
     "layout-chart-classes",
@@ -1389,6 +1395,7 @@
     "layout-section",
     "native-coordinates",
     "layout-text-size",
+    "layout-legend-fit",
     "layout-scale-bar-details",
     "label-guide",
     "label-weight",
@@ -1397,7 +1404,10 @@
     "label-clearance",
     "svg-markers",
     "label-duplicates",
-    "tile-resampling"
+    "tile-resampling",
+    "layout-page-color",
+    "layout-text-statistics",
+    "layout-publication-parts"
   ],
   "x-rustgis-reads-format": 2,
   "x-rustgis-writes-format": 2

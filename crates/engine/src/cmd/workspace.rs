@@ -233,8 +233,11 @@ pub fn commands() -> Vec<C> {
             }
             let out: Vec<Value> = lines.iter().take(MAX_PROFILED_LINES).map(|l| profile(s, p, l)).collect::<Result<_, _>>()?;
             if unplaced > 0 {
-                s.warn(format!(
-                    "Profile Along Selected Lines: {unplaced} line(s) have a place that can't be given in longitude/latitude, so they get no profile"
+                s.say(rustgis_data::loss::Note::loss(
+                    rustgis_data::loss::LossCode::DroppedCalculationResult,
+                    format!(
+                        "Profile Along Selected Lines: {unplaced} line(s) have a place that can't be given in longitude/latitude, so they get no profile"
+                    ),
                 ));
             }
             Ok(Value::Array(out))
@@ -284,6 +287,7 @@ pub fn commands() -> Vec<C> {
         C::new("offline.remove", "Remove", "Data › Offline", |s, p| {
             let n = ps(p, "name").ok_or("name is required")?;
             let ai = s.project.offline_areas.iter().position(|a| a.name.eq_ignore_ascii_case(n)).ok_or_else(|| format!("no offline area '{n}'"))?;
+            let named = super::layout::maps_layouts_name(&s.project);
             let area = s.project.offline_areas.remove(ai);
             let kept = offline_map_index(&s.project, &area);
             // A copy kept as the only map is no longer the area's: neither its saved association
@@ -312,6 +316,7 @@ pub fn commands() -> Vec<C> {
                 super::navigate::follow_renamed_map(s, &old, &kept);
                 s.notify(format!("The offline area's map was the only one, so it was kept as '{kept}'"), false);
             }
+            super::layout::say_map_texts(s, &named);
             Ok(Value::Null)
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .params(r#"{"name": offline area}"#),

@@ -96,14 +96,15 @@ you edit the value or choose units; click **Apply elevation** to apply the new i
   whose selection spans layers in more than one system (or some in one and some in
   longitude/latitude; graphics don't count) moves them all as below, so places they share stay
   together, and says so. Rotate and Scale turn each feature about its own middle anyway, so
-  they take each layer's own grid even then. The rest of this paragraph, about Web Mercator and the ground, is for
-  the other layers.
+  they take each layer's own grid even then. The rest of this paragraph, about Web Mercator and
+  the ground, is for the other layers.
   A selected feature with a place that can't be given in longitude/latitude (one far past where
-  its layer's own system reaches) is left as it is by Move, Rotate and Scale (except in a layer
-  edited in its own grid, where it changes with the rest), Split and Cut Polygon,
-  and a notice counts them by layer; Flip Line flips it in the layer's own coordinates. An edit
-  of that one feature (a vertex, Reshape, Trace, Merge with it, a shape conversion) is refused,
-  naming the layer and the feature; Set Geometry gives it a new shape, and Delete removes it.
+  its layer's own system reaches) is left as it is by Move, Rotate and Scale, Split and Cut
+  Polygon (in a layer edited in its own grid, each of these changes it with the rest), and a
+  notice counts them by layer; Flip Line flips it in the layer's own coordinates. An edit of that
+  one feature (a vertex, a shape conversion; Reshape, Trace or Merge with it, outside a layer
+  edited in its own grid) is refused, naming the layer and the feature; Set Geometry gives it a
+  new shape, and Delete removes it.
   Beyond 85.05°, where Web Mercator stops, Move, Rotate and Scale work on the ground: a feature
   that reaches beyond it, or that the edit would take beyond it, moves rigidly, together with the
   selected features sharing a vertex with it (their center goes the distance and direction asked,
@@ -135,6 +136,14 @@ you edit the value or choose units; click **Apply elevation** to apply the new i
   ground (once a split has worked out a million distances along segments near the point, a
   segment counts as near as the nearest point found on it so far, its nearer end at first, and the
   split says how many lines it cut that way, or left whole when that point was an end).
+- **On a layer's own segments:** in a layer held in a projected system (as for Move above),
+  Cut Polygon, Reshape, Split, Merge and Trace work on its segments as they run straight in its
+  own coordinates. The line drawn (or the point Split is given) is converted into them, a point
+  snapped to a place of a layer in that system being that place as stored; the points a cut, a
+  reshape or a split makes lie on the layer's segments there, every other place stays as
+  stored, and Merge unions the shapes as stored, converting nothing. Their distances (a
+  centimetre at a line's end, Trace's `fromOffM` and `toOffM`) are metres of its grid. Other
+  layers are edited in Web Mercator, as below.
 - **Cut Polygon** (Edit › Tools, or the Editing pane): select polygons, then click a line across
   them and double-click to finish. Each polygon the line crosses from edge to edge is cut into
   pieces; a zigzag line can make several. The pieces keep the original's attributes. The
@@ -160,17 +169,23 @@ you edit the value or choose units; click **Apply elevation** to apply the new i
   `edit.trace={"from": [lon, lat], "to": [lon, lat]}` returns the path along the nearest edge
   passing within the snapping tolerance of both points (`"layer"` keeps the search to one layer;
   add `"row"` to trace a given feature), and how far each point was from the edge (`fromOffM`, `toOffM`, in Web Mercator metres, which
-  run longer than ground metres away from the equator).
+  run longer than ground metres away from the equator; for a layer held in a projected system,
+  in metres of its grid).
 - **Edit Vertices** (Edit › Features): reshape the selected features on the map. Their vertices
   show as square handles and each edge has a round midpoint handle. Drag a vertex to move it;
   drag a midpoint, or click an edge, to insert a vertex; click a vertex and press ++delete++ to
-  remove it (a line keeps at least two vertices, a polygon ring three). A selected feature with
-  a place that can't be given in longitude/latitude (see [Places with no longitude/latitude](data-formats.md#places-with-no-longitudelatitude))
-  gets no handles, and a notice says so once, naming it or counting them. Clicking elsewhere
+  remove it (a line keeps at least two vertices, a polygon ring three). The handles sit where
+  the map draws the vertices. On a map in the layer's own coordinate system they are its stored
+  coordinates: a vertex you drag is written where you let go, in the layer's coordinates, and
+  every other vertex stays exactly as stored. On another map, a selected feature with a place
+  that can't be given in longitude/latitude (see [Places with no longitude/latitude](data-formats.md#places-with-no-longitudelatitude))
+  gets no handles, and a notice says so once, naming it or counting them; on a map in its
+  layer's own system it gets its handles. Clicking elsewhere
   selects the feature there (++shift++ adds it). Multipart features and polygon holes work the
   same way, dragged vertices snap when snapping is on, and each move, insertion or deletion is
   one undo step. ++esc++ finishes. From scripts and the command line, `edit.vertex` does the
-  same to one vertex and `edit.setGeometry` (Set Geometry) replaces a feature's whole shape.
+  same to one vertex, given in longitude/latitude (`lon`, `lat`) or in the layer's own
+  coordinates (`x`, `y`), and `edit.setGeometry` (Set Geometry) replaces a feature's whole shape.
 - **Feature templates**: named default values for new features, made from a selected feature;
   the Create tool uses the chosen template.
 - **Snapping** (**Edit › Snapping**): new and dragged vertices snap to nearby vertices, edges and
@@ -467,7 +482,8 @@ The command uses row positions and the same vertex addresses as `edit.vertex`:
 {"layer":"Parcels","row":0,"part":0,"ring":0,"index":3,"lon":12.5,"lat":41.9}
 ```
 
-Run these parameters with `edit.moveSharedVertex`. It returns the source `part`, `ring` and
+Run these parameters with `edit.moveSharedVertex`. In place of `lon` and `lat`, `x` and `y` give
+the place in the layer's own coordinates, written as given. It returns the source `part`, `ring` and
 `index`, plus `modified`: the number of features whose geometry or attributes actually changed.
 Every matched feature runs through attribute rules and archiving in one transaction; a rejection
 rolls back the whole edit. A successful command is one undo step. As with `edit.vertex`, a direct

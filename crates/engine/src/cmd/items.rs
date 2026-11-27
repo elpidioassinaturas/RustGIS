@@ -432,6 +432,22 @@ fn to_json<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, String> {
     serde_json::to_vec(v).map_err(|e| e.to_string())
 }
 
+/// A task's file: the task, with `requires` listing what its steps need when they need anything
+/// (as a model's file does). A RustGIS that checks `requires` (#2867 on) refuses what it would run
+/// without; one that doesn't ignores the key, as it does for any task file today (#2818).
+fn task_json(t: &Task) -> Result<Vec<u8>, String> {
+    // A struct, not a `serde_json::Value`, which would sort the task's keys.
+    #[derive(serde::Serialize)]
+    struct TaskFile<'a> {
+        #[serde(flatten)]
+        task: &'a Task,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        requires: Vec<&'static str>,
+    }
+    let requires = crate::project::task_capabilities(&t.steps);
+    serde_json::to_vec(&TaskFile { task: t, requires }).map_err(|e| e.to_string())
+}
+
 /// Whether command `id` can be added as a task's step (`task.addStep`): a built-in command, and
 /// not a task's own (a step doesn't run a task).
 pub fn can_be_step(s: &Session, id: &str) -> bool {
@@ -950,7 +966,7 @@ fn package_map(s: &mut Session, mobile: bool, tol: f64, linked: &mut rustgis_dat
         s.notify(said, false);
     }
     if let Some(said) = rustgis_data::unplaced_note("Mobile map package", &unplaced.1.join(", "), unplaced.0) {
-        s.notify(said, false);
+        s.say(said);
     }
     Ok(archive)
 }
@@ -986,7 +1002,7 @@ fn package_gp(s: &mut Session) -> Result<Vec<u8>, String> {
     }
     let archive = rustgis_data::zip::write(&entries)?;
     if let Some(said) = rustgis_data::unplaced_note("Geoprocessing package", &unplaced.1.join(", "), unplaced.0) {
-        s.notify(said, false);
+        s.say(said);
     }
     Ok(archive)
 }
@@ -1214,7 +1230,7 @@ fn export_3d(s: &mut Session, p: &Value) -> CmdResult {
         let (bytes, report, construction_notes) = stl_bytes(s, p)?;
         rustgis_data::io::write_atomic(Path::new(&path), &bytes).map_err(|e| format!("{path}: {e}"))?;
         for note in construction_notes {
-            s.notify(note, false);
+            s.say(note);
         }
         s.retain_written_notices(written);
         s.notify_written(format!("Exported {path}"));
@@ -1226,7 +1242,7 @@ fn export_3d(s: &mut Session, p: &Value) -> CmdResult {
     let (obj, construction_notes) = obj_text(s, p)?;
     rustgis_data::io::write_atomic(Path::new(&path), obj.as_bytes()).map_err(|e| format!("{path}: {e}"))?;
     for note in construction_notes {
-        s.notify(note, false);
+        s.say(note);
     }
     s.retain_written_notices(written);
     s.notify_written(format!("Exported {path}"));
@@ -1282,8 +1298,12 @@ struct Mesh {
     skipped: usize,
     /// Holes left out because they have fewer than 3 vertices, so their areas stay solid.
     holes_dropped: usize,
-    /// Polygons and points of zero height left out of STL, which holds solids, not flat sheets.
+    /// Polygons and points of zero height left out of STL, which holds solids, not flat sheets,
+    /// that had an area or a point to lose.
     flat: usize,
+    /// Every feature of zero height STL left out, with an area or not: what a layer of them alone
+    /// is refused for.
+    flat_seen: usize,
     /// Features whose height field isn't a finite number, so they took the default height.
     default_heights: usize,
     /// Features left out, as a place of each can't be given in longitude/latitude.
@@ -1292,6 +1312,9 @@ struct Mesh {
     layer: String,
     /// Line parts left out because they have a single vertex.
     short_lines: usize,
+    /// Every line part of two vertices or more, with a length or not: what a layer of lines alone
+    /// is refused for in STL.
+    lines_seen: usize,
 }
 
 impl Orient {
@@ -1423,8 +1446,34 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
         let below = h < 0.0;
         let orient = |o: Orient| if below { o.reversed() } else { o };
         // A solid of zero height would be two coincident caps facing apart: STL leaves it out.
+        // Counted as lost only when it had an area or a point to give: a polygon whose every outer
+        // ring encloses nothing (fewer than 3 vertices, or all on one line) has neither.
         if !mesh.keep_lines && h == 0.0 && !matches!(&*g, Geometry::Line(_)) {
-            mesh.flat += 1;
+            let shaped = match &*g {
+                Geometry::Polygon(polys) => polys.iter().any(|rings| {
+                    rings.first().is_some_and(|r| {
+                        // Twice the ring's signed area (the shoelace sum), taken from its first
+                        // vertex so that coordinates far from the origin don't cancel a small
+                        // area out; a closing vertex adds nothing. Against the rounding its terms
+                        // can carry (a few ulps each), so rounding on a ring along a slanted line
+                        // isn't taken for an area, and a real one past it is.
+                        let Some(o) = r.first() else { return false };
+                        let (mut twice, mut terms) = (0.0f64, 0.0f64);
+                        for (a, b) in r.iter().zip(r.iter().cycle().skip(1)) {
+                            let (ax, ay, bx, by) = (a.x - o.x, a.y - o.y, b.x - o.x, b.y - o.y);
+                            twice += ax * by - bx * ay;
+                            terms += (ax * by).abs() + (bx * ay).abs();
+                        }
+                        // A coordinate that isn't finite gives no sum, but a place to lose all the same.
+                        let rounding = 4.0 * f64::EPSILON * terms * r.len() as f64;
+                        !twice.is_finite() || twice.abs() > rounding
+                    })
+                }),
+                Geometry::MultiPoint(points) => !points.is_empty(),
+                _ => true,
+            };
+            mesh.flat += usize::from(shaped);
+            mesh.flat_seen += 1;
             continue;
         }
         let before = mesh.vertices;
@@ -1501,7 +1550,10 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
                         mesh.short_lines += usize::from(n == 1);
                         continue;
                     }
-                    mesh.lines += 1;
+                    // A part with all its vertices in one place has no length to lose.
+                    let long = part.first().is_some_and(|f| part.iter().any(|c| c != f));
+                    mesh.lines += usize::from(long);
+                    mesh.lines_seen += 1;
                     if !mesh.keep_lines {
                         continue;
                     }
@@ -1542,10 +1594,10 @@ fn layer_mesh(s: &Session, p: &Value, keep_lines: bool) -> Result<Mesh, String> 
         }
     }
     if mesh.vertices == 0 {
-        if mesh.flat > 0 && !mesh.keep_lines {
+        if mesh.flat_seen > 0 && !mesh.keep_lines {
             return Err("nothing to export: every polygon and point has zero height, and STL holds solids, not flat sheets".into());
         }
-        if mesh.lines + mesh.short_lines > 0 && !mesh.keep_lines {
+        if mesh.lines_seen + mesh.short_lines > 0 && !mesh.keep_lines {
             return Err("nothing to export: STL holds polygons and points, not lines".into());
         }
         return Err("nothing to export".into());
@@ -1564,7 +1616,7 @@ fn ring_area(r: &[(f64, f64)]) -> f64 {
 }
 
 /// A feature layer as Wavefront OBJ text.
-fn obj_text(s: &mut Session, p: &Value) -> Result<(String, Vec<String>), String> {
+fn obj_text(s: &mut Session, p: &Value) -> Result<(String, Vec<rustgis_data::loss::Note>), String> {
     let mesh = layer_mesh(s, p, true)?;
     mesh_notices(s, &mesh);
     let mut obj = String::new();
@@ -1636,7 +1688,7 @@ fn mesh_notices(s: &mut Session, mesh: &Mesh) {
         s.notify(format!("Skipped {} line part(s) with a single vertex", mesh.short_lines), false);
     }
     if let Some(note) = rustgis_data::unplaced_note("The 3D model", &mesh.layer, mesh.unplaced) {
-        s.notify(note, false);
+        s.say(note);
     }
     if mesh.default_heights > 0 {
         s.notify(format!("{} feature(s) without a numeric height used the default height instead", mesh.default_heights), false);
@@ -1657,15 +1709,21 @@ pub(crate) fn fanned_caps_note(n: usize) -> String {
 }
 
 /// A feature layer as binary STL, noting what it leaves out.
-fn stl_bytes(s: &mut Session, p: &Value) -> Result<(Vec<u8>, StlReport, Vec<String>), String> {
+fn stl_bytes(s: &mut Session, p: &Value) -> Result<(Vec<u8>, StlReport, Vec<rustgis_data::loss::Note>), String> {
     let mesh = layer_mesh(s, p, false)?;
     let (bytes, report) = mesh_stl(&mesh, MAX_STL_TRIANGLES)?;
     mesh_notices(s, &mesh);
     if mesh.flat > 0 {
-        s.notify(format!("Left out {} polygon(s) and point(s) of zero height: STL holds solids, not flat sheets", mesh.flat), false);
+        s.say(rustgis_data::loss::Note::loss(
+            rustgis_data::loss::LossCode::DroppedFeature,
+            format!("Left out {} polygon(s) and point(s) of zero height: STL holds solids, not flat sheets", mesh.flat),
+        ));
     }
     if report.lines > 0 {
-        s.notify(format!("STL holds triangles only: left out {} polyline(s)", report.lines), false);
+        s.say(rustgis_data::loss::Note::loss(
+            rustgis_data::loss::LossCode::DroppedFeature,
+            format!("STL holds triangles only: left out {} polyline(s)", report.lines),
+        ));
     }
     if report.degenerate > 0 {
         s.notify(
@@ -1907,7 +1965,7 @@ pub fn item_output(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Ve
         "task" => {
             let t = task_mut(s, p)?;
             let name = t.name.clone();
-            let (bytes, report) = crate::durable::output(t, None, to_json)?;
+            let (bytes, report) = crate::durable::output(t, None, task_json)?;
             crate::durable::notify(s, &report);
             (name, bytes)
         }

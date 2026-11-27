@@ -189,21 +189,12 @@ impl SourceInfo {
         }
     }
 
-    /// Notes what happened to some columns in one note, counting them and naming the first 12
-    /// with their kind ("price (decimal)"): `what` says it for one column, then for several.
-    /// Nothing when there are none.
+    /// Notes what happened to some columns in one note ([`columns_note`]). Nothing when there are
+    /// none.
     pub(crate) fn note_columns(&mut self, cols: &[(String, String)], what: [&str; 2]) {
-        const NAMED: usize = 12;
-        let [one, several] = what;
-        let n = cols.len();
-        let what = match n {
-            0 => return,
-            1 => one,
-            _ => several,
-        };
-        let named: Vec<String> = cols.iter().take(NAMED).map(|(name, kind)| format!("{name} ({kind})")).collect();
-        let more = if n > NAMED { format!(" and {} more", n - NAMED) } else { String::new() };
-        self.notes.push(format!("{n} column{} {what}: {}{more}", if n == 1 { "" } else { "s" }, named.join(", ")));
+        if let Some(note) = columns_note(cols, what) {
+            self.notes.push(note);
+        }
     }
 
     /// The source's coordinate system, when it isn't longitude/latitude: one known by its EPSG
@@ -211,6 +202,23 @@ impl SourceInfo {
     pub fn coordinate_system(&self) -> Option<Crs> {
         Crs::parse(&self.crs).ok().filter(|c| *c != Crs::LonLat)
     }
+}
+
+/// The note of some columns a reader left out, counting them and naming the first 12 with their
+/// kind ("photo (binary)"): `what` says it for one column, then for several. `None` when there
+/// are none.
+pub(crate) fn columns_note(cols: &[(String, String)], what: [&str; 2]) -> Option<String> {
+    const NAMED: usize = 12;
+    let [one, several] = what;
+    let n = cols.len();
+    let what = match n {
+        0 => return None,
+        1 => one,
+        _ => several,
+    };
+    let named: Vec<String> = cols.iter().take(NAMED).map(|(name, kind)| format!("{name} ({kind})")).collect();
+    let more = if n > NAMED { format!(" and {} more", n - NAMED) } else { String::new() };
+    Some(format!("{n} column{} {what}: {}{more}", if n == 1 { "" } else { "s" }, named.join(", ")))
 }
 
 /// A read: the features intersecting `extent` (longitude/latitude; `None` = all), at most `limit`.
@@ -257,8 +265,9 @@ pub struct Batch {
     pub complete: bool,
     /// Rows that couldn't be read.
     pub skipped: usize,
-    /// Values in date fields that weren't dates and are read as null, counted for each field by
-    /// its position; empty when there were none. Said by [`unread_dates_note`].
+    /// Values in date fields that weren't dates, and text in yes/no fields that was neither yes nor
+    /// no ([`yes_no_text`]), read as null, counted for each field by its position; empty when there
+    /// were none. Said by [`unread_dates_note`].
     pub unread_dates: Vec<usize>,
     /// Date-times of date fields that had digits past the microsecond, rounded to it, counted for
     /// each field by its position. Said by [`rounded_dates_note`].
@@ -279,6 +288,17 @@ pub struct Batch {
 /// microsecond ([`Batch::unread_dates`], [`Batch::rounded_dates`]).
 pub(crate) fn unread_date(counts: &mut Vec<usize>, k: usize) {
     unread_dates_by(counts, k, 1);
+}
+
+/// The value of the yes/no field at `k` from a file's text ([`crate::Value::yes_no`]): text that
+/// is neither yes nor no is null, counted in `counts` ([`Batch::unread_dates`]), which says it as a
+/// value that isn't yes or no ([`unread_dates_note`]). Empty text and `<Null>` are null, uncounted.
+pub(crate) fn yes_no_text(text: &str, counts: &mut Vec<usize>, k: usize) -> crate::Value {
+    let v = crate::Value::parse(text, crate::FieldType::Boolean);
+    if v.is_null() && !text.trim().is_empty() && !crate::Value::is_null_marker(text) {
+        unread_date(counts, k);
+    }
+    v
 }
 
 /// Counts one more text value `<Null>` read as null in the field at `k` ([`Batch::null_text`]).
@@ -332,7 +352,15 @@ pub fn unread_dates_note(fields: &[crate::Field], counts: &[usize]) -> Option<cr
     if total == 0 {
         return None;
     }
-    let what = if total == 1 { "1 value isn't a date and was".to_string() } else { format!("{total} values aren't dates and were") };
+    // Yes/no fields count text that isn't yes or no here too ([`yes_no_text`]).
+    let counted = |boolean: bool| fields.iter().zip(counts).any(|(f, n)| *n > 0 && (f.ty == crate::FieldType::Boolean) == boolean);
+    let what = match (counted(false), counted(true), total == 1) {
+        (false, true, true) => "1 value isn't yes or no and was".to_string(),
+        (false, true, false) => format!("{total} values aren't yes or no and were"),
+        (true, true, _) => format!("{total} values aren't dates or yes/no values and were"),
+        (_, _, true) => "1 value isn't a date and was".to_string(),
+        _ => format!("{total} values aren't dates and were"),
+    };
     let text = format!("{what} read as empty, in {}", crate::io::named_fields(fields, counts));
     Some(crate::loss::Note::loss(crate::loss::LossCode::DroppedValue, text))
 }

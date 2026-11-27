@@ -7,6 +7,8 @@ use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
+#[cfg(not(target_arch = "wasm32"))]
+use rustgis_data::loss::{LossCode, Note};
 use rustgis_data::raster::{self, Crs, zarr};
 use rustgis_map::raster::RasterLayer;
 #[cfg(not(target_arch = "wasm32"))]
@@ -415,7 +417,7 @@ pub fn pick_variable(store: &zarr::Store, sel: &mut zarr::Selection) -> Result<(
 #[cfg(not(target_arch = "wasm32"))]
 fn crs_lost(r: &mut raster::Raster, text: Option<&str>, store: &zarr::Store, variable: &str) {
     if let Some(note) = text.and_then(|t| zarr::typed_crs_note(store, variable, r, t))
-        && !r.lost.contains(&note)
+        && !r.lost.says(&note)
     {
         r.lost.push(note);
     }
@@ -547,7 +549,7 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             let mut layer = if sel.window.is_some() {
                 r.source = Some(full.clone());
                 let tif = zarr::write_project_slice(&r).map_err(|e| e.to_string())?;
-                let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&full)), tif);
+                let mut layer = RasterLayer::from_written(r, format!("{}.tif", store_name(&full)), tif);
                 layer.path = Some(full);
                 layer
             } else {
@@ -579,7 +581,7 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             // The writer refuses systems its keys cannot preserve, as for a directory window or
             // a slice handed over by the UI.
             let tif = zarr::write_project_slice(&r).map_err(|e| e.to_string())?;
-            let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&u)), tif);
+            let mut layer = RasterLayer::from_written(r, format!("{}.tif", store_name(&u)), tif);
             layer.subdataset = Some(sel.label());
             // The coordinate system given for a store that doesn't say, kept as a folder's slice
             // keeps it, so a time series read from the layer finds it.
@@ -1611,7 +1613,7 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
         let mut notes = Vec::new();
         let series = series_start(s, p)?.read(&mut notes);
         for n in notes {
-            s.warn(n);
+            s.say_warning(n);
         }
         series
     }
@@ -1663,7 +1665,7 @@ impl SeriesRun {
     /// Reads the series under `control`: its count is the steps read of those asked, and Cancel
     /// stops it before its next batch of reads, with no series. Gives the series as `zarr.series`
     /// answers it, and what reading it said, which a read that fails said too.
-    pub fn run(&self, control: &std::sync::Arc<rustgis_analysis::control::Control>) -> (Result<Value, String>, Vec<String>) {
+    pub fn run(&self, control: &std::sync::Arc<rustgis_analysis::control::Control>) -> (Result<Value, String>, Vec<Note>) {
         let mut notes = Vec::new();
         let series = rustgis_analysis::run_under("Time Series at a Point", control, || self.read(&mut notes));
         (series, notes)
@@ -1671,7 +1673,7 @@ impl SeriesRun {
 
     /// Reads the series on this thread, looking at the run's Cancel (if any) between batches;
     /// what reading it says goes in `notes` as it is found, so an error after it doesn't lose it.
-    fn read(&self, notes: &mut Vec<String>) -> Result<Value, String> {
+    fn read(&self, notes: &mut Vec<Note>) -> Result<Value, String> {
         let (lon, lat) = (self.lon, self.lat);
         let mut src = self.src.clone();
         let check = &mut |_: usize| rustgis_data::progress::check().map_err(|_| "cancelled".to_string());
@@ -1715,7 +1717,7 @@ impl SeriesRun {
             // A typed system is only a fallback. Invalid text wasn't used on degree axes either.
             let typed = if given.is_none() { src.crs.as_deref().and_then(|text| Crs::parse(text).ok()) } else { None };
             if let Some(note) = zarr::lonlat_assumption(given.as_ref().map(|(c, _)| *c), typed) {
-                notes.push(format!("{var}: {note}"));
+                notes.push(Note::loss(LossCode::AssumedCrs, format!("{var}: {note}")));
             }
         }
         let crs = if lonlat {
@@ -1726,13 +1728,19 @@ impl SeriesRun {
             let text = src.crs.as_deref().ok_or("the store doesn't say its coordinate system; give \"crs\" (such as EPSG:3035)")?;
             // Read as `parse_crs` reads it, its note said with the series'.
             let crs = Crs::parse(text)?;
+            // Plain, as the raster read says it (`crs_lost`): it can join a formula chosen for
+            // compatibility with a shift not applied, so its count isn't one of losses only.
             if let Some(note) = raster::wkt::typed_crs_note(text, crs) {
-                notes.push(format!("crs: {note}"));
+                notes.push(Note::plain(format!("crs: {note}")));
             }
             crs
         };
-        if let Some((_, Some(note))) = given {
-            notes.push(format!("{var}: {note}"));
+        // Said only of the system the series reads in: a longitude/latitude grid declared in a
+        // projected system reads in WGS 84, which the note above says.
+        if let Some((c, Some(note))) = given
+            && (!lonlat || c.is_geographic())
+        {
+            notes.push(Note::plain(format!("{var}: {note}")));
         }
         let m = crs
             .transformer()?
@@ -1835,7 +1843,7 @@ impl ReduceRun {
         let mut unwritten = 0usize;
         // What reading the slices said (a shift the store's system doesn't apply, …), once each:
         // the summary is in their grid, so it is said of it too.
-        let mut lost: Vec<String> = Vec::new();
+        let mut lost: Vec<rustgis_data::loss::Note> = Vec::new();
         for &i in &self.steps {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
@@ -1904,7 +1912,7 @@ impl ReduceRun {
             raster::Raster::new(&self.name, first.0, first.1, vec![out], first.2, first.3, None, raster::ColorHint::Gray, "Float32")
                 .map_err(|e| e.to_string())?;
         r.source = Some(self.root.clone());
-        r.lost = lost;
+        r.lost = lost.into();
         Ok(r)
     }
 }
@@ -2025,7 +2033,7 @@ fn reduce(s: &mut Session, p: &Value) -> CmdResult {
         let run = reduce_start(s, p)?;
         let r = run.run(&std::sync::atomic::AtomicBool::new(false), &std::sync::atomic::AtomicUsize::new(0))?;
         let tif = zarr::write_project_slice(&r).map_err(|e| e.to_string())?;
-        let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&run.root)), tif);
+        let mut layer = RasterLayer::from_written(r, format!("{}.tif", store_name(&run.root)), tif);
         layer.subdataset = None;
         let mut out = super::raster::add_raster(s, &run.name, layer)?;
         out["steps"] = serde_json::json!(run.total());

@@ -8,7 +8,9 @@
 </figure>
 
 Home › New Layout adds a page layout (Letter, Legal, Tabloid or A5 to A0, landscape or portrait)
-with a map frame, title, legend, north arrow, scale bar and a dynamic credits line. The command
+with a map frame, title, legend, north arrow, scale bar and a dynamic credits line. The title is
+the dynamic text `{map}`, so it follows a rename of the map in the first map frame; replace it
+with your own text for a title that stays. The command
 `layout.new` also accepts custom `width` and `height` in millimetres and `"template": "blank"`.
 Both `layout.new` and each layout in `info` include an `elements` array with each element's
 `element` ID, `name` and `kind`, ready to use in `layout.update` or `layout.removeElement`.
@@ -38,9 +40,12 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     datum under it, at 7 pt. A figure's title and sources belong in its caption, so they are
     left out, and the result says so.
   - **Step by step**: **Publication Layout Wizard…**, at the end of the same menu, asks for the
-    size (a sheet turned Auto, Portrait or Landscape, or a figure), the style, the texts (title,
-    the active map's name until one is typed; subtitle, note, sources and credit line, or none)
-    and the accent colour, then shows what was picked; **Create** makes the layout as the menu
+    size (a sheet turned Auto, Portrait or Landscape, or a figure), the style (each beside an
+    outline of where its title, map and footer go, and its column or panel if it has one, with
+    the accent colour picked, or else its own, where the sheet takes it, which Classic's doesn't;
+    a click on the outline picks the style), the texts (title, the active map's name until one is
+    typed; subtitle, note, sources and credit line, or none) and the accent colour, then shows
+    what was picked; **Create** makes the layout as the menu
     does. A figure goes from its size to the review, as it takes no style, texts or accent. A
     field left empty is left out (for the credit line, the dated default applies); the title is
     the exception: empty, it means no title. A layout the command refuses is said, and the wizard
@@ -92,8 +97,9 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     The colorbar's title is the raster's name: the legend's box widens for it, up to its cap (45% of
     the frame's width, or the side column's), and a longer name wraps there, the box taller by its lines.
     `"colorbar": "none"` leaves it out, and the legend's box is sized for the legend alone: hiding
-    the colorbar afterwards would leave its room empty in the box. The legend takes the fewest columns, up to three,
-    that fit the largest rectangle the map leaves free; when none fits, a long one is laid in more
+    the colorbar afterwards would leave its room empty in the box. The publication lays its legend
+    in the fewest columns, up to three (a legend takes up to six, below), that fit the largest
+    rectangle the map leaves free; when none fits, a long one is laid in more
     when that shows more of it, or as much while covering at least a quarter less of what the map
     draws (the answer's `legendColumns`); in a side column it stays in one. Polygon layers with no
     fill and no labels, such as neighbouring borders, don't count as what the map draws here, unless
@@ -139,6 +145,16 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     centred as near it as fits, and a warning says where. With an `extent`, a sheet on the globe
     is laid out as on a flat map. In any frame on the globe, the light space around the globe is
     room for the surrounds, as the blank page is.
+  - **Grid, scale bar and north arrow**: `"grid"`, `"scaleBar"` and `"northArrow"` each take
+    `"none"` to leave that part out, or an object with its options, and a key the part doesn't
+    read is refused. `"grid"` takes a frame grid's options (`{"step": 5}`,
+    `{"type": "measured"}`, `{"edges": ["bottom"]}`; a graticule takes no `crs`, `short` or `mgrs`,
+    and a measured grid no `format` or `hemisphere`); the strips inside the frame follow its
+    labels, edges and `labelSize`, and without a graticule the default reference text names none
+    (a `{grid}` you type reads `—`). `"scaleBar"` takes a scale bar's options
+    (`{"units": "miles", "style": "line"}`), its box growing with a larger `textSize`. A `textSize` or `labelSize` you give is in points
+    as written: unlike the defaults, it isn't scaled with the sheet.
+    `"northArrow"` also takes `{"show": "auto"|"always", "style", "fill", "outline"}`.
   - **Legend box**: over the map, the legend's box is left clear where the map shows nothing under
     it but its light plain paper or water: no layer, label, context layer, basemap shape or graticule
     line, no web tiles, and no veil. Dark basemaps keep a white backing so the dark legend text
@@ -184,9 +200,15 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     corners on a light page: the map in one, the locator and the legend in one each beside it,
     the sources and reference in tinted ones under them; `"poster"` colours the whole page, sets
     the title and subtitle in light text across the top, the map in a light card and the footer
-    in darker blocks with amber headings. `"accent"` (`#RRGGBB`) colours the band, the panel's
-    tint, the headings and rules, and a poster's page (a deep brown, green or blue by default).
-    A figure leaves the style to its caption. In the menu, each sheet opens a list of the six
+    in darker blocks with amber headings; `"edge"` runs the map from one side of the page to the
+    other with no border, a kicker, the title and subtitle over it and the footer with no boxes
+    under a thin rule. An edge sheet also takes `"paper"` (`#RRGGBB`, the page's colour; on a dark
+    one the texts are light) and `"kicker"` (a short line in spaced capitals over the title);
+    other styles and figures refuse both. Its graticule labels sit at the page's side edges, so a
+    printer with no bleed may clip them. `"accent"` (`#RRGGBB`) colours the band, the panel's
+    tint, the headings and rules, a poster's page and an edge sheet's kicker (a deep brown, green
+    or blue by default, a brick red on an edge sheet).
+    A figure leaves the style to its caption. In the menu, each sheet opens a list of the seven
     styles, each saying what it looks like, in its default accent (`"accent"` in the command
     picks another).
   - Every element is an ordinary one, to move or restyle afterwards. The command returns element
@@ -199,6 +221,14 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     "sources": ["NDVI: MOD13Q1 v6.1 (NASA LP DAAC), via the Brazil Data Cube (INPE)", "Boundaries: IBGE 2022"],
     "note": "Only cells with a significant trend (p < 0.05) are coloured."}
   ```
+
+- **Page colour**: Publish › Page Size › **Page color** paints the whole page a colour under
+  every element, in the view and in PNG, PDF and SVG exports; **White** gives the white page back.
+  `layout.page={"color": "#0B1B2B"}` sets it, `null` or `"#FFFFFF"` restores white. It is
+  opaque: a page has nothing under it to show through. The elements keep their own colours: on a
+  dark page, give texts a light colour, and legends, colorbars, tables and charts a light **Ink**
+  (below). A map frame keeps its own map's background; give the frame the blank basemap with a
+  paper colour to match a coloured page.
 
 - **Map frames**: rectangle, circle and ellipse frames, or polygon and lasso frames drawn on the
   page. Each frame shows a map of the project at its own centre and scale. Turn on **Pan/Zoom
@@ -363,15 +393,46 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     overview, which can miss a rare one the map draws at full resolution; so can the classes of a
     raster under a mask with more than about four million cells, whose masked statistics read a
     sample of them: adding the legend, and `layout.publication`, say so.
-  - **Columns** (`"columns"`, 1 to 3): its rows side by side under its title, as even as they go,
+  - **Columns** (`"columns"`, 1 to 6): its rows side by side under its title, as even as they go,
     each column as wide as its widest row, with its own column of symbols, and a layer's name
     staying with the row under it. The box keeps its size, so widen it for the columns: in a box
     too narrow they close up and long labels run into the next or past the box, and a box too
-    short fills each column in turn and leaves out the last rows.
+    short fills each column in turn and leaves out the last rows (a **Fit**, below, can change
+    that).
     A legend says when its box loses rows or closes its columns up when it is given `"columns"`,
-    `"textSize"` (`null` included), `"showNoData"` or `"labels"`, and, in columns or at a text
-    size of its own, when its box or what it lists changes. A legend in one column at the default
-    size is told so only when given one of those.
+    `"textSize"` (`null` included), `"showNoData"`, `"labels"`, `"fit"` or `"showLayerNames"`, and,
+    in columns, at a text size of its own or with a fit, when its box or what it lists changes. A
+    legend in one column at the default size and with no fit is told so only when given one of
+    those. A manual legend is checked when it is added or changed, as it always has been, not again
+    when the map's layers change later. A legend with a fit is checked then too, and again by every
+    export, which says, in the same words, when its fit no longer makes it fit (a layer added to the
+    map, the frame's scale changed); the drawing itself fits again on every draw, as below.
+  - **Fit** (`"fit"`): what gives way when the rows don't fit the box. **Manual** (`"manual"`, the
+    default) keeps the text's size and the columns and leaves out the last rows, as legends always
+    have. **Shrink the text** (`"adjustSize"`) draws the rows' text a quarter point smaller at a
+    time, down to 4 points, until they fit; **Add columns** (`"adjustColumns"`) adds columns, up to
+    six, until they fit, never more than fit across the box, so columns never run into each other
+    because a column was added; **Add columns, then shrink the text** (`"adjustColumnsAndSize"`)
+    adds columns first. Under a fit, **Text size** is the size the text shrinks from. **Columns**
+    is the fewest columns a fit that adds columns starts at; under **Shrink the text** the rows are
+    laid in exactly the columns set. Both stay settable. The title keeps its size, and point
+    symbols keep the size the map draws them at (a row is never shorter than its symbol), but a web
+    layer's legend picture and the length and height of line and polygon swatches shrink with the
+    text. A fitted legend is drawn just as a manual one of the size and columns it fitted to, in
+    the layout view and every export, and it fits itself again on every draw, so when the map's
+    layers change it follows them. A legend that can't fit even at 4 points or in the most columns
+    its box takes says so, naming what it tried; one that fits says nothing.
+  - **Layer names** (`"showLayerNames"`, on by default): off, the name over each layer's classes,
+    and over a web layer's legend picture, is left off. A layer drawn in one symbol keeps its name
+    beside its swatch, since that is what labels it; classes that carry no label of their own
+    (some raster classes) are then drawn as bare swatches.
+  - **In scripts and files**: scripts set `"fit": "adjustSize"` and `"showLayerNames": false` on
+    `layout.addElement` and `layout.update` (a scale bar's `fit` takes its own values); an unknown
+    fit is refused, and `null` leaves each as it is. Each change is one undo step, and a value set
+    back to its default (`"manual"`, names on) is no longer saved. A project with a legend that has
+    a fit, leaves its layer names off or has more than three columns can't be opened by an older
+    RustGIS, and a layout file (`.rgislayout`) with such a legend lists that in its header, so an
+    older RustGIS refuses it as well.
   - **Text size** (`"textSize"`, 4 to 100 points, 9 by default; a size outside that range is
     refused): the size of its layers' names and classes' labels. Its title, rows, indents and the
     gap between columns follow in proportion, and so do a web layer's legend pictures and the length
@@ -479,27 +540,56 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   a legend's title, which has no wrap, is told to add line breaks. Lines left out below a text's
   box are said as soon as they are: `layout.addElement` and `layout.update` warn how many lines
   don't fit when they set a text, its size, font or fallback font, bold, italic, alignment,
-  spacing, wrap or box, or show it, and the Format pane shows the count under **Wrap to the
-  box** (a text wrapped past the 200 lines a text draws counts them as "or more"). A text draws
-  200 lines at most, whatever its box: lines past them are said apart, with the advice to split
-  the text into more than one, since a taller box doesn't draw them. A text whose ink crosses the
-  page's edge is said in a notice of its own when one of these commands puts it there, so a text
-  both cut below its box and past the edge is told each: `layout.addElement` and `layout.update` add a text whose ink
-  crosses it, set what its lines or box are, show it, move it (`x`, `y`) or turn it (`rotation`),
-  and `layout.duplicateElement` copies it past the edge, and each advises moving it inside the
-  page, resizing it or reducing its size. A move, a turn or a copy alone says only that, not the
-  lines again; a text turned within the page, or with no letter or ink to show, says nothing.
+  spacing, line spacing, case, wrap or box, or show it, and the Format pane shows the count under
+  **Wrap to the box** (a text wrapped past the 200 lines a text draws counts them as "or more"). A
+  text draws 200 lines at most, whatever its box: lines past them are said apart, with the advice
+  to split the text into more than one, since a taller box doesn't draw them. A text whose ink
+  crosses the page's edge is said in a notice of its own when one of these commands puts it there,
+  so a text both cut below its box and past the edge is told each: `layout.addElement` and
+  `layout.update` add a text whose ink crosses it, set what its lines or box are, show it, move it
+  (`x`, `y`), turn it (`rotation`) or set its vertical alignment (`valign`), and
+  `layout.duplicateElement` copies it past the edge, and each advises moving it inside the page,
+  resizing it or reducing its size. A move, a turn, an alignment or a copy alone says only that, not
+  the lines again; a text turned within the page, or with no letter or ink to show, says nothing.
   Resizing the page (`layout.page`) measures no text, so a text a smaller page cuts is told only
   by the export and the layout view.
 - **Text** and **Dynamic Text**: `{date}`, `{time}`, `{scale}`, `{map}`, `{crs}`, `{page}`,
   `{pages}`, `{pageName}` and `{layout}` fill in when the page is drawn; the Format pane's
-  **Insert Dynamic Text** menu, under the text, lists each with what it shows. The text, its
-  size (2 to 400 points, as text graphics on the map), colour, bold, **Italic** (slanted, as water
-  and ocean names are; the built-in fonts have no italic face, so the letters are slanted 12°),
-  **Alignment** (left, center or right within the element) and **Letter spacing** in points
-  (spaced-out names such as O C E A N O, or a negative value to tighten) are the same form a text
-  on the map has in the pane; Enter ends the text and Shift+Enter starts a new line. Scripts set them with `italic`, `align` and
-  `letterSpacing` on `layout.addElement` and `layout.update`. A layout's text also takes a **Font**:
+  **Insert Dynamic Text** menu, under the text, lists each with what it shows. A layer's figures
+  fill in too (#2853): `{count:Cities}` is how many features the layer has, and `{sum:Cities:pop}`,
+  `{mean:Cities:pop}`, `{min:Cities:pop}` and `{max:Cities:pop}` add up, average or pick the least
+  or greatest number of a field, read as a chart reads its values. **Layer statistic** writes them,
+  in a layout text's **Insert Dynamic Text** menu and in **Publish › Text › Dynamic Text** (which
+  adds a text holding one): a submenu for each layer of the first map frame's map, with **Count**
+  and, under each numeric field, **Sum**, **Mean**, **Least** and **Greatest** (raster layers,
+  graphics layers and names a token can't hold are not listed). They follow the layer's
+  definition query (one that no longer compiles keeps every feature, as the map draws it), take the
+  map of the layout's first map frame (in a series, the whole layer, not the page's part of it, so
+  a definition query that reads the series page's values keeps nothing there), and are written as a
+  chart writes its values: thousands apart, up to two decimals with the zeros at the end dropped,
+  and the decimal comma when the layout uses one. Renaming the layer renames it in these tokens, as
+  it does for a chart's or table's layer (in the layouts whose first map frame shows its map, and
+  in a presentation's map pages of it); a text that a longer name would take past the characters a
+  text holds, or that a name with a brace (which a token can't hold) would break, keeps the old
+  name, and the rename says so; deleting it leaves them as written, and when layout elements still
+  name it (a text's tokens, or a chart's, table's or colorbar's layer), says how many. It also says
+  how many map series (by their index layer) and presentation map page titles (by their tokens)
+  name it. A layer read in place covers what is loaded, as a chart does, and a warning says so. A
+  token with no figure (no such layer or field, a field with no numbers, a raster layer, or a sum,
+  mean, least or greatest written without its field) stays as written, and a warning names what is
+  missing.
+  Both warnings come when the text is added or changed, or its layout is made or imported, or when
+  another map frame becomes the first (it is given another map, the one before it is deleted or
+  drawn over it, or its map is deleted), not when the page is exported. A presentation map page's
+  title is checked against the page's map when the page is added with it, when it is changed or
+  when the presentation is imported. The text, its size (2 to 400 points, as text graphics on the
+  map), colour, bold, **Italic** (slanted, as water and ocean names are; the built-in fonts have
+  no italic face, so the letters are slanted 12°), **Alignment** (left, center or right within the
+  element) and **Letter spacing** in points (spaced-out names such as O C E A N O, or a negative
+  value to tighten) are the same form a text on the map has in the pane; Enter ends the text and
+  Shift+Enter starts a new line. Scripts set them with `italic`, `align` and `letterSpacing` on
+  `layout.addElement` and `layout.update`.
+  A layout's text also takes a **Font**:
   Sans-serif (the default) or Serif, for a title or a classic atlas look. The serif is one installed
   on the computer (Georgia or Times New Roman on Windows and macOS, Noto, DejaVu or Liberation Serif
   on Linux), with its own bold and italic faces, so italic there is a true italic rather than
@@ -540,8 +630,23 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   Scripts give the family's name: `"font": "Garamond"`, with `"fallback": "serif"` if wanted;
   `labels.fonts` lists the installed families. The project keeps the name, never a file. A PDF
   sets its text in the letters' own outlines, so it shows the family wherever it is opened, and
-  the text can still be searched and copied; no font file goes into it. **Picture** places a PNG
-  or JPEG.
+  the text can still be searched and copied; no font file goes into it.
+  **Vertical alignment** puts a text's block of lines at the **Top** of its box (the default, as
+  texts always were), in its **Middle**, or at its **Bottom**, its last line on the box's lower
+  edge: a caption under a picture, a note at a panel's foot. A block taller than its box is drawn
+  from the top whatever its alignment, so its first lines are kept and the last ones left out, as
+  for a top-aligned text, and said. **Line spacing** sets the distance between lines as a multiple
+  of the usual (0.5 to 3, default 1): tighter for a long address, looser for a title over two
+  lines. **Case** draws a text in **Upper case** or **Lower case** whatever was typed, once its
+  dynamic text is filled in (`{map}` and `{date}` too), before it wraps; the text itself is kept
+  as typed, so it can be set back to **As typed**. The layout view and every export (PNG, PDF,
+  GeoPDF, SVG) draw them alike. Scripts set `"valign": "middle"`, `"lineSpacing": 1.5` and
+  `"case": "upper"` on `layout.addElement` and `layout.update`; a name not listed or a spacing
+  outside 0.5 to 3 is refused, and `null` leaves each as it is. Each change is one undo step, and
+  a setting put back to its default is no longer saved. A project that uses them can't be opened
+  by an older RustGIS, and a layout file (`.rgislayout`) with such a text lists them in its
+  header, so an older RustGIS refuses it as well.
+  **Picture** places a PNG or JPEG.
 - **Map Series**: one page per feature of an index layer; see [Map series](#map-series) for setup,
   page names, scales and a locator.
 - Click an element to select it, drag to move, drag its handles to resize, and edit it in the
@@ -551,7 +656,10 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   **Delete** (or **Backspace**, the delete key on a
   Mac) deletes the selected element, and **Ctrl+D** (**⌘D** on a Mac) duplicates it: the copy is
   placed 5 mm down and to the right, on top, and selected. The **arrow keys** nudge it 1 mm, or
-  10 mm with **Shift**, and keep it moving while held; a run of nudges is one step to undo.
+  10 mm with **Shift**, and keep it moving while held; a run of nudges is one step to undo. After
+  a click or a scroll in the attribute table, the arrows move between its cells instead.
+  **Right-click** an element to select it and open a menu of Duplicate, Delete, the four Arrange
+  steps and, on a map frame, **Zoom Frame** (the map view's extent, as a double-click does).
 - **Arrange**: elements later in the layout are drawn over earlier ones, and a click picks the one
   on top. Under Duplicate and Delete, **Bring to Front** and **Send to Back** put the selected
   element over or under every other, and **Bring Forward** and **Send Backward** move it one
@@ -771,7 +879,8 @@ The locator outlines the main frame's changing extent as the series turns its pa
 **Export Layout** writes all pages to PDF by default, but only the **first 500** when there are
 more, with a warning. Split longer books' index data into layers of at most 500 features.
 `layout.export` with `"allPages":false` writes only the current PDF page; PNG and SVG always
-write the current page.
+write the current page. When the index layer is no longer in the series frame's map (it was
+removed, say), the PDF holds only the current page, and the export says so.
 
 ### Mark the page's own feature
 

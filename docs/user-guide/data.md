@@ -205,7 +205,9 @@ say), one in another system is drawn by the transformation PROJ picks between th
 two datums, the one for that pair, not one through WGS 84); on a world projection, such a layer
 goes through WGS 84 longitude/latitude. On a map in a coordinate system, Zoom To Layer, Zoom To
 Selection and Full Extent frame a layer in the map's system by its own coordinates, and its
-simplified drawing at small scales is made from them, with nothing converted.
+simplified drawing at small scales is made from them, with nothing converted. Labels, the
+selection and hit-testing read its coordinates too, so the map keeps no second copy of such a
+layer; a layer read in place keeps none of the view it reads either.
 
 Coordinate systems are read and transformed as PROJ 9.9.0 does, through terrio-crs. A few EPSG
 and ESRI codes PROJ 9.9.0 dropped or can't compute (EPSG:3752 and 22700, ESRI:10820 and 65162)
@@ -1492,7 +1494,9 @@ past 32 MiB starts at Link, and stays linked even when it holds few features). A
 the file's path (relative to the project's folder when it can, so a folder moved whole keeps it),
 not its features: to edit it or define its projection, choose **Load All Features** first. A file
 too large to read whole can only be linked. A GeoPackage of several tables asks once, at the foot
-of **Choose Layers**; one table read in place links them all. A GeoPackage table's size is the
+of **Choose Layers**, starting at **Link to the file** if any table would be linked. While that
+answer is untouched, a note says each table follows its own size (a large one is linked, a small
+one copied); clicking either answer sends it for every table. A GeoPackage table's size is the
 feature count GDAL keeps in `gpkg_ogr_contents`, when the file has one along with the triggers GDAL
 keeps it up to date by, so a large table isn't scanned to count it; otherwise its rows are counted
 (a table with Z or M on every geometry is always counted, as that also counts its geometries). A
@@ -1687,12 +1691,19 @@ web](data-formats.md#files-on-the-web)).
 On the desktop, a tiled GeoTIFF on this computer too large to hold, with overviews, is read in
 place too: the map draws the part in view at the level it needs. Commands that make a raster from
 it read the file again as they run. **Clip** by an extent reads only the part under the extent,
-at the file's full resolution when that part fits. **Indices** work a block of tiles at a time at
-the file's full resolution. A result of up to 120 million pixels is held, as any other; a larger
-one is written to a tiled GeoTIFF in the project's results folder beside it (`Survey.rgis.data`
-for `Survey.rgis`), or in RustGIS's own folder for a project not saved yet, and the new layer
-reads it in place; a notice says where it is. The other commands read the finest level of the file
-they can hold, and say which.
+at the file's full resolution when that part fits. **Indices**, **Raster Functions** (band math,
+NDVI, remap, threshold, slope, aspect and hillshade, those over a cell's neighbours reading each
+block with the cells around it), the **Function Editor** with those steps, and **Classification
+Tools** (each class's mean summed from the rows of the file under the training polygons, as
+from the whole raster) work a block of tiles at a time at the file's full resolution, as does
+**Process**'s resample. A result of up to 120 million pixels is held, as any other (a
+resample's, 120 million values of all its bands); a larger one is written to a tiled GeoTIFF in
+the project's results folder beside it (`Survey.rgis.data` for `Survey.rgis`), or in RustGIS's
+own folder for a project not saved yet, and the new layer reads it in place; a notice says where
+it is. A resample's file holds its means as 32-bit floats, every band. A chain that remaps or
+thresholds after a step over neighbours, or has a slope in percent before its last step, a
+resample the computer can't give the memory for, one of more than 32 bands too large to hold,
+and the other commands read the finest level of the file they can hold, and say which.
 
 The web app opens a picked or dropped file of up to 256 MB whole. A larger GeoTIFF is read a part
 at a time instead: its header, then only the tiles of the overview it opens from. A

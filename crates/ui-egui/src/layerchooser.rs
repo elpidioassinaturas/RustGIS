@@ -43,6 +43,8 @@ struct Link {
     linked: bool,
     copy: bool,
     rule: bool,
+    /// The file holds several tables, one answer for all of them (a GeoPackage).
+    tables: bool,
     answered: bool,
 }
 
@@ -50,8 +52,15 @@ struct Link {
 /// reads in place on the desktop (`info.fileLayers` says how, [`Link`]). A `.json` may be a city
 /// model, and LiDAR is always linked: neither asks. The browser has no paths to link.
 fn links(path: &str) -> bool {
-    let lower = path.trim().to_ascii_lowercase();
-    !cfg!(target_arch = "wasm32") && [".geojson", ".shp", ".gpkg", ".parquet", ".geoparquet", ".fgb"].iter().any(|e| lower.ends_with(e))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        rustgis_engine::cmd::layer::asks_link(path.trim())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        false
+    }
 }
 
 /// Whether a file lists its layers without reading their features, so it can ask which to add:
@@ -99,19 +108,8 @@ pub fn add_file(app: &mut RustGisApp, path: &str) -> Result<Value, String> {
     if !pick && !links(path) {
         return add(app, json!({"path": path}));
     }
-    // Listed off the frame: a geodatabase's or GDAL's listing can take a while.
-    let slot: crate::Slot<Result<Value, String>> = crate::Slot::default();
-    let out = slot.clone();
-    let listed = path.to_string();
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stopped = stop.clone();
-    crate::work_off_frame("rustgis-list-layers", &slot, move || {
-        // A chooser cancelled or closed stops it between a GeoPackage's tables.
-        let _stop = rustgis_engine::data::progress::also_stop_when(stopped);
-        let mut session = rustgis_engine::Session::new(rustgis_engine::Project::default());
-        let result = session.run("info.fileLayers", &json!({"path": listed, "link": true}));
-        *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
-    });
+    let slot = list_in_background(path, stop.clone(), |slot, work| crate::work_off_frame("rustgis-list-layers", slot, work));
     let opened = app.session.opened;
     app.ui.choosing.push(Chooser {
         path: path.to_string(),
@@ -124,6 +122,37 @@ pub fn add_file(app: &mut RustGisApp, path: &str) -> Result<Value, String> {
         stop,
     });
     Ok(json!({"choosing": path}))
+}
+
+/// Lists `path`'s layers (and Add Data's question about it) off the frame: a geodatabase's or
+/// GDAL's listing can take a while. A `stop` set, by a chooser cancelled or closed, ends the
+/// question between a GeoPackage's tables ([`list_layers`]). `start` starts the thread with the
+/// work (a test runs the work where it stands).
+fn list_in_background(
+    path: &str,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    start: impl FnOnce(&crate::Slot<Result<Value, String>>, Box<dyn FnOnce() + Send>),
+) -> crate::Slot<Result<Value, String>> {
+    let slot: crate::Slot<Result<Value, String>> = crate::Slot::default();
+    let out = slot.clone();
+    let listed = path.to_string();
+    start(
+        &slot,
+        Box::new(move || {
+            let result = list_layers(&listed, stop);
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+        }),
+    );
+    slot
+}
+
+/// What [`list_in_background`] runs on its thread: `info.fileLayers` with Add Data's question,
+/// which a `stop` already set (or set while it runs) leaves unmade. The listing itself still runs to
+/// the end.
+fn list_layers(path: &str, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<Value, String> {
+    let _stop = rustgis_engine::data::progress::also_stop_when(stop);
+    let mut session = rustgis_engine::Session::new(rustgis_engine::Project::default());
+    session.run("info.fileLayers", &json!({"path": path, "link": true}))
 }
 
 /// Adds a file, read on a thread of its own when the desktop app reads it so ([`crate::readjob`]).
@@ -153,6 +182,11 @@ fn add_chosen(app: &mut RustGisApp, path: &str, layers: &[String], linked: Optio
     app.map.invalidate();
 }
 
+/// Whether a listing found several layers in the file.
+fn several(listing: &Value) -> bool {
+    listing["count"].as_u64().is_some_and(|n| n > 1)
+}
+
 /// Shows the first file waiting to be chosen from; one that turns out to hold a single layer (or
 /// can't be listed) is added as it would have been.
 pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
@@ -164,15 +198,15 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         let landed = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
         match landed {
             None => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
-            Some(Ok(v)) if (c.pick && v["count"].as_u64().is_some_and(|n| n > 1)) || v["link"].is_object() => {
-                if c.pick && v["count"].as_u64().is_some_and(|n| n > 1) {
+            Some(Ok(v)) if (c.pick && several(&v)) || v["link"].is_object() => {
+                if c.pick && several(&v) {
                     c.layers =
                         v["layers"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|l| (l.to_string(), true)).collect();
                 }
                 // One that can't be read whole can only be linked.
                 c.link = v["link"]["copy"].as_bool().map(|copy| {
                     let rule = v["link"]["linked"] == true;
-                    Link { linked: !copy || rule, copy, rule, answered: false }
+                    Link { linked: !copy || rule, copy, rule, tables: several(&v), answered: false }
                 });
                 c.listing = None;
             }
@@ -292,6 +326,9 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
 
 /// Copy into the project or link to the file (#2350), with what each means: a linked layer is
 /// read in place, so editing it or defining its projection asks for Load All Features first.
+/// While the question is unanswered for a file of several tables ([`Link::tables`]), and it starts
+/// at "Link to the file" for a rule that would link some table, the dialog says each table follows
+/// its own size (#2977).
 fn link_choice(ui: &mut egui::Ui, link: &mut Link, t: &Tokens) {
     let dim = |text: &str| egui::RichText::new(text.to_string()).color(t.text_dim);
     ui.add_enabled_ui(link.copy, |ui| {
@@ -307,6 +344,12 @@ fn link_choice(ui: &mut egui::Ui, link: &mut Link, t: &Tokens) {
         )))
         .wrap(),
     );
+    if link.tables && link.rule && !link.answered {
+        ui.add(
+            egui::Label::new(dim(tl!("Until you choose, each table follows its own size: large ones are linked, small ones copied.")))
+                .wrap(),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -339,6 +382,14 @@ mod tests {
         );
         h.run_steps(4);
         h
+    }
+
+    /// Writes `ds` to a GeoPackage at `path` as two tables, `a` and `b`.
+    fn two_table_gpkg(ds: &rustgis_engine::data::Dataset, path: &std::path::Path) {
+        for table in ["a", "b"] {
+            let add = rustgis_engine::data::io::GpkgTable { mode: rustgis_engine::data::io::GpkgMode::AddTable, name: Some(table.into()) };
+            rustgis_engine::data::io::write_path_to(ds, path, rustgis_engine::data::raster::Crs::LonLat, &add).unwrap();
+        }
     }
 
     /// A chooser whose listing has already landed, for the project `opened`.
@@ -458,6 +509,15 @@ mod tests {
         assert_eq!(h.state().session.map().layers.len(), fresh);
     }
 
+    /// The dialog asks by the engine's list ([`rustgis_engine::cmd::layer::asks_link`]), reading
+    /// a typed path without the spaces around it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_dialog_asks_by_the_engines_list_of_formats() {
+        assert!(super::links("roads.gpkg") && super::links("  ROADS.GeoJSON "));
+        assert!(!super::links("roads.json") && !super::links(" scan.laz ") && !super::links(""));
+    }
+
     /// A file Add Data can link asks whether to copy it into the project or link to it (#2350),
     /// starting from what Add Data does without asking; a GeoPackage of several tables asks once,
     /// at the foot of Choose Layers, or on its own with Ask Which Layers to Add off.
@@ -473,10 +533,7 @@ mod tests {
         let fgb = dir.path().join("one.fgb");
         rustgis_engine::data::io::write_path(&ds, &fgb).unwrap();
         let gpkg = dir.path().join("two.gpkg");
-        for table in ["a", "b"] {
-            let add = rustgis_engine::data::io::GpkgTable { mode: rustgis_engine::data::io::GpkgMode::AddTable, name: Some(table.into()) };
-            rustgis_engine::data::io::write_path_to(&ds, &gpkg, rustgis_engine::data::raster::Crs::LonLat, &add).unwrap();
-        }
+        two_table_gpkg(&ds, &gpkg);
         let (fgb, gpkg) = (fgb.display().to_string(), gpkg.display().to_string());
         let mut app = RustGisApp::new(Session::new(Project::default()));
         // Dropped, picked or double-clicked, it waits for the answer.
@@ -566,7 +623,8 @@ mod tests {
         h.state_mut().ui.choosing.push(c);
         h.run_steps(2);
         h.get_by_label("Link to the file").click();
-        h.run_steps(1);
+        // The note goes with the answer and moves the buttons up; the Add button is found a frame later.
+        h.run_steps(2);
         h.get_by_label("Add 2").click();
         h.run_steps(2);
         let layers = &h.state().session.map().layers;
@@ -584,6 +642,36 @@ mod tests {
         let layers = &h.state().session.map().layers;
         assert_eq!(layers.len(), before + 4);
         assert!(layers[..2].iter().all(|l| !l.is_streamed()));
+    }
+
+    /// A GeoPackage whose question starts at "Link to the file" for a rule that links some table
+    /// says, until the user answers, that each table follows its own size (#2977), with the list of
+    /// tables or without it (Ask Which Layers to Add off); a file answered, one that copies all,
+    /// and a file of one table say nothing of the kind.
+    #[test]
+    fn a_link_question_says_each_table_follows_its_size_until_answered() {
+        use egui_kittest::kittest::Queryable;
+        const NOTE: &str = "Until you choose, each table follows its own size: large ones are linked, small ones copied.";
+        // Whether the note is there before the answer and after a click on Link.
+        let shown = |listing: Value, pick: bool| {
+            let mut h = harness(RustGisApp::new(Session::new(Project::default())));
+            let opened = h.state().session.opened;
+            let mut c = listed(opened, "/nonexistent/survey.gpkg", Ok(listing));
+            c.pick = pick;
+            h.state_mut().ui.choosing.push(c);
+            h.run_steps(2);
+            let before = h.query_by_label(NOTE).is_some();
+            h.get_by_label("Link to the file").click();
+            h.run_steps(2);
+            (before, h.query_by_label(NOTE).is_some())
+        };
+        let mixed = json!({"count": 2, "layers": ["a", "b"], "link": {"linked": true, "copy": true}});
+        assert_eq!(shown(mixed.clone(), true), (true, false), "said until the answer, then no longer");
+        assert_eq!(shown(mixed, false), (true, false), "the same with no list of tables");
+        let small = json!({"count": 2, "layers": ["a", "b"], "link": {"linked": false, "copy": true}});
+        assert_eq!(shown(small, true), (false, false), "every table copied: nothing to say");
+        let one = json!({"count": 1, "layers": ["a"], "link": {"linked": true, "copy": true}});
+        assert_eq!(shown(one, false), (false, false), "one table: no rule to follow per table");
     }
 
     /// Cancel, or the window closed, stops the listing still on its way (AGENTS.md › Never hold
@@ -604,6 +692,30 @@ mod tests {
         h.run_steps(2);
         assert!(h.state().ui.choosing.is_empty());
         assert!(stop.load(std::sync::atomic::Ordering::Relaxed), "the listing is told to stop");
+    }
+
+    /// The listing Add Data starts stops when Cancel sets its flag (#2827): through
+    /// [`list_in_background`], a flag already set on a GeoPackage of two tables lands a listing
+    /// with no question made, one still clear lands it with one. Deleting `also_stop_when` from
+    /// [`list_layers`], or `list_in_background` passing it another flag, fails the first.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_listing_told_to_stop_makes_no_question() {
+        use rustgis_engine::data::{Coord, Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+        use std::sync::{Arc, atomic::AtomicBool};
+        let dir = tempfile::tempdir().unwrap();
+        let mut ds = Dataset::new("points", GeometryType::Point, vec![Field::new("name", FieldType::Text)]);
+        ds.push(Some(Geometry::Point(Coord::new(0.0, 1.0))), vec![V::Text("p".into())]);
+        let gpkg = dir.path().join("two.gpkg");
+        two_table_gpkg(&ds, &gpkg);
+        let gpkg = gpkg.display().to_string();
+        let inline = |_: &crate::Slot<Result<Value, String>>, work: Box<dyn FnOnce() + Send>| work();
+        let landed = |slot: crate::Slot<Result<Value, String>>| slot.lock().unwrap().take().expect("the work ran").unwrap();
+        let told = landed(list_in_background(&gpkg, Arc::new(AtomicBool::new(true)), inline));
+        assert_eq!(told["layers"], json!(["a", "b"]));
+        assert!(told.get("link").is_none(), "stopped: no question made: {told}");
+        let free = landed(list_in_background(&gpkg, Arc::new(AtomicBool::new(false)), inline));
+        assert_eq!(free["link"], json!({"linked": false, "copy": true}), "not stopped: a question: {free}");
     }
 
     /// Another project opened while the listing is on its way drops the chooser, and the listing

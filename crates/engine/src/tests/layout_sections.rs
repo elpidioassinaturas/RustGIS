@@ -110,10 +110,13 @@ fn section_lines_are_added_changed_removed_and_undone() {
         p[key] = json!("x");
         assert!(s.run("layout.addElement", &p).unwrap_err().contains("only sections"), "{key}");
     }
-    for kind in ["rectangle", "grid"] {
-        let mark = s.notice_mark();
-        s.run("layout.addElement", &json!({"kind": kind, "name": "x"})).unwrap();
-        assert!(said(&s, mark)[0].contains("ignores \"name\""), "{:?}", said(&s, mark));
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "rectangle", "name": "x"})).unwrap();
+    assert!(said(&s, mark)[0].contains("ignores \"name\""), "{:?}", said(&s, mark));
+    // A grid and an extent indicator refuse any key they don't read (#2890).
+    for kind in ["grid", "extentIndicator"] {
+        let e = s.run("layout.addElement", &json!({"kind": kind, "name": "x"})).unwrap_err();
+        assert!(e.contains("takes no \"name\""), "{e}");
     }
     let rect = s.run("layout.addElement", &json!({"kind": "rectangle"})).unwrap()["element"].clone();
     let err = s.run("layout.update", &json!({"element": rect, "section": {"name": "A"}})).unwrap_err();
@@ -185,6 +188,61 @@ fn a_section_line_not_drawn_is_said() {
     }
 }
 
+/// A report's layout page is drawn as the layout's own export is, and says the same of a section
+/// line it can't draw, once a layout, as an image as in a PDF.
+#[test]
+fn a_report_says_a_section_line_its_layout_page_does_not_draw() {
+    let (mut s, _) = with_frame();
+    s.run("layout.addElement", &json!({"kind": "section", "at": [-150, 0]})).unwrap();
+    let layout = s.project.layouts[0].name.clone();
+    s.run("report.new", &json!({"layer": "Countries", "name": "R", "fields": ["name"], "where": "name LIKE 'F%'"})).unwrap();
+    s.run("report.existingTemplate", &json!({"report": "R", "layout": layout})).unwrap();
+    s.run("report.existingTemplate", &json!({"report": "R", "layout": layout, "end": true})).unwrap();
+    /// Removed however the test ends.
+    struct Dir(std::path::PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+    let dir = Dir(std::env::temp_dir().join(format!("rustgis-report-sections-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    for file in ["r.pdf", "r.png"] {
+        let mark = s.notice_mark();
+        s.run("report.export", &json!({"report": "R", "path": dir.0.join(file).display().to_string(), "dpi": 36})).unwrap();
+        let note: Vec<_> = said(&s, mark).into_iter().filter(|t| t.contains("section line(s)")).collect();
+        assert_eq!(note.len(), 1, "{file}: {note:?}");
+        assert!(
+            note[0].contains(&format!("'{layout}'")) && note[0].contains("'A' of ") && note[0].ends_with("its place is outside the frame"),
+            "{note:?}"
+        );
+    }
+    // Two layouts that each leave one out: one notice counting both, each named with its layout.
+    s.run("layout.new", &json!({"page": "a4", "template": "map"})).unwrap();
+    let second = s.project.layouts[1].name.clone();
+    let other = u64::from(s.project.layouts[1].first_frame().unwrap());
+    s.run("layout.update", &json!({"layout": 1, "element": other, "center": [10, 50], "scale": 1e7})).unwrap();
+    s.run("layout.addElement", &json!({"layout": 1, "kind": "section", "at": [-150, 0]})).unwrap();
+    s.run("report.existingTemplate", &json!({"report": "R", "layout": second})).unwrap();
+    let mark = s.notice_mark();
+    s.run("report.export", &json!({"report": "R", "path": dir.0.join("r.pdf").display().to_string(), "dpi": 36})).unwrap();
+    let note: Vec<_> = said(&s, mark).into_iter().filter(|t| t.contains("section line(s)")).collect();
+    assert_eq!(note.len(), 1, "{note:?}");
+    assert!(
+        note[0].contains("2 section line(s) not drawn")
+            && note[0].contains(&format!("'{layout}'"))
+            && note[0].contains(&format!("'{second}'")),
+        "{note:?}"
+    );
+    s.run("layout.update", &json!({"layout": 1, "element": other, "section": {"name": "A", "remove": true}})).unwrap();
+    // Brought into the frame, nothing is said.
+    let frame = u64::from(s.project.layouts[0].first_frame().unwrap());
+    s.run("layout.update", &json!({"layout": 0, "element": frame, "section": {"name": "A", "at": [10, 50]}})).unwrap();
+    let mark = s.notice_mark();
+    s.run("report.export", &json!({"report": "R", "path": dir.0.join("r.pdf").display().to_string(), "dpi": 36})).unwrap();
+    assert!(!said(&s, mark).iter().any(|t| t.contains("section line(s)")));
+}
+
 /// Section lines are required where they are saved, so an older reader refuses the project instead
 /// of drawing its frames without them and saving it so. A layout without one needs nothing.
 #[test]
@@ -216,6 +274,9 @@ fn section_capability_follows_saved_layouts_and_commands() {
         ("layout.update", json!({"element": 2, "section": null}), false),
         ("layout.import", layout(&saved), true),
         ("layout.import", layout(&base), false),
+        // A report's template is a layout file read as `layout.import` reads it.
+        ("report.existingTemplate", layout(&saved), true),
+        ("report.existingTemplate", layout(&base), false),
     ] {
         let script = format!("{command} {params}");
         for step in [

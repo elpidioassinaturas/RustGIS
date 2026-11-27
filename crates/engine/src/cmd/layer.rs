@@ -58,7 +58,7 @@ pub fn commands() -> Vec<C> {
         C::new("layer.addEncodedPolyline", "Add Encoded Polyline", "Home › Add", add_encoded_polyline).roles(&[]).effects(crate::policy::Effects::NONE).params(
             r#"{"polyline": "encoded polyline text" | [texts] (one line each), "precision"?: 5 (Google) | 6 (OSRM, Valhalla), "name"?: text}"#,
         ),
-        C::new("layer.addDataText", "Add Data (from text)", "Home › Add", add_data_text).roles(&[]).effects(crate::policy::Effects::NONE).params(r#"{"fileName": "name.geojson|.csv|.tsv|.city.json|.gml|.dxf (CityJSON and CityGML: all their layers)", "text": string, "name"?: text, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"? (as layer.addData, for delimited text; crs also for a CityJSON or CityGML model, and for a DXF), "layer"?, "paperSpace"?, "blocks"? (as layer.addData, for a DXF)}"#),
+        C::new("layer.addDataText", "Add Data (from text)", "Home › Add", add_data_text).roles(&[]).effects(crate::policy::Effects::NONE).params(r#"{"fileName": "name.geojson|.csv|.tsv|.city.json|.gml|.dxf|.kml|.gpx|.rss|.xml (LandXML, GeoRSS) (a file of several layers, such as a city model, KML or GPX: all its layers)", "text": string, "name"?: text, "x"?, "y"?, "wkt"?, "crs"?, "delimiter"? (as layer.addData, for delimited text; crs also for a CityJSON or CityGML model, and for a DXF), "layer"?, "paperSpace"?, "blocks"? (as layer.addData, for a DXF)}"#),
         C::new("layer.addSample", "Add Sample Data", "Home › Add › Add Data", add_sample).roles(&[]).effects(crate::policy::Effects::NONE).params(r#"{"name": "countries"|"cities"|"rivers"|"lakes"}"#),
         C::new("layer.remove", "Remove", "Layers", remove).roles(&[]).effects(crate::policy::Effects::NONE)
             .key("Delete")
@@ -2348,11 +2348,7 @@ fn read_layers_file(p: &Value, path: &str) -> LayersRead {
     let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty());
     let reads = match crs {
         Some(text) if full.to_ascii_lowercase().ends_with(".zip") => {
-            rustgis_data::io::read_zip_in(&full, &bytes, Some(rustgis_data::raster::Crs::parse(text)?))
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .map(|(dataset, report)| rustgis_data::io::LayerRead { dataset, report, styles: Vec::new() })
-                .collect()
+            rustgis_data::io::read_zip_layers(&full, &bytes, Some(rustgis_data::raster::Crs::parse(text)?)).map_err(|e| e.to_string())?
         }
         Some(text) if rustgis_data::io::is_city_model(&full, &bytes) => {
             city_reads(&full, &bytes, Some(rustgis_data::raster::Crs::parse(text)?))?
@@ -2518,6 +2514,19 @@ fn streams_by_count(count: Option<u64>) -> bool {
     count.is_none_or(|c| c > rustgis_map::source::STREAM_ABOVE)
 }
 
+/// Whether Add Data asks whether to copy the file at `path` into the project or link to it
+/// (#2350): a `.geojson` file, a Shapefile, and a source read in place
+/// ([`rustgis_data::source::EXTENSIONS`]) but LiDAR. The one list of those formats: the dialog
+/// asks by it and [`link_choice`] decides by it. Not asked: a `.json` (it may be a city model),
+/// LiDAR (always linked), files read whole. Case doesn't count; the path is read as given, so the
+/// dialog trims what was typed before it asks.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn asks_link(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let ends = |ext: &str| lower.strip_suffix(ext).is_some_and(|rest| rest.ends_with('.'));
+    ends("geojson") || ends("shp") || rustgis_data::source::EXTENSIONS.iter().any(|e| !matches!(*e, "las" | "laz") && ends(e))
+}
+
 /// What Add Data's question, copy a file into the project or link to it (#2350), starts from:
 /// `{"linked", "copy"}`, or `None` for a file it doesn't ask about. Asked about: a `.geojson`
 /// file, a Shapefile, a GeoPackage (one choice for all of `tables`), GeoParquet and FlatGeobuf.
@@ -2534,6 +2543,9 @@ fn streams_by_count(count: Option<u64>) -> bool {
 /// [`rustgis_data::io::max_bytes`]; a source's whole read is bounded where it is read.
 #[cfg(not(target_arch = "wasm32"))]
 fn link_choice(path: &str, tables: &[String]) -> Option<Value> {
+    if !asks_link(path) {
+        return None;
+    }
     let lower = path.to_ascii_lowercase();
     let unset = json!({});
     let fits = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.len() <= rustgis_data::io::max_bytes());
@@ -2543,7 +2555,8 @@ fn link_choice(path: &str, tables: &[String]) -> Option<Value> {
         let shp = Path::new(path);
         let linked = past_cap_shapefile(path, &unset).is_some() || streams_shapefile(&unset, path);
         (linked, fits(shp) && fits(&rustgis_data::io::dbf_sidecar(shp)))
-    } else if rustgis_data::source::is_source_name(path) && !lower.ends_with(".las") && !lower.ends_with(".laz") {
+    } else {
+        // What is left to ask about is a source read in place ([`asks_link`]).
         let gpkg = lower.ends_with(".gpkg");
         let mut linked = false;
         for table in tables.iter().map(|t| gpkg.then_some(t.as_str())) {
@@ -2559,8 +2572,6 @@ fn link_choice(path: &str, tables: &[String]) -> Option<Value> {
         // And after the last one opened: a Cancel that came while it opened gives no question.
         rustgis_data::progress::check().ok()?;
         (linked, true)
-    } else {
-        return None;
     };
     Some(json!({"linked": linked, "copy": copy}))
 }
@@ -2801,17 +2812,30 @@ pub(crate) fn add_layers(s: &mut Session, p: &Value, file_name: &str, bytes: &[u
     let lower = file_name.to_ascii_lowercase();
     let kml = lower.ends_with(".kml") || lower.ends_with(".kmz");
     // A KML's ground overlays (pictures) are raster layers, added after its placemarks.
-    let overlays = if kml && ps(p, "layer").is_none() { ground_overlays(s, file_name, bytes, local_file) } else { Vec::new() };
+    // Past the size a KML is read within, it is refused below without being scanned first.
+    let within = bytes.len() as u64 <= rustgis_data::io::BYTES_FLOOR;
+    let picked = ps(p, "layer").is_some_and(|l| !l.trim().is_empty());
+    let overlays = if kml && !picked && within { ground_overlays(s, file_name, bytes, local_file) } else { Vec::new() };
+    // A layer picked leaves the document's ground overlays (pictures, not layers) out: said.
+    if kml && picked && within {
+        match rustgis_data::kml::ground_overlays(file_name, bytes) {
+            Ok((found, undrawn, over_budget)) if found.len() + undrawn + over_budget > 0 => s.notify(
+                format!(
+                    "{file_name}: {} ground overlays (pictures) aren't added with a layer picked; add the file without \"layer\" to draw them",
+                    found.len() + undrawn + over_budget
+                ),
+                false,
+            ),
+            Ok(_) => {}
+            Err(e) => s.notify(format!("{file_name}: its ground overlays (pictures) couldn't be read, so none is added: {e}"), false),
+        }
+    }
     // A DXF drawing: its coordinate system (it never says) and one of its own layers.
     let dxf = rustgis_data::dxf::is_dxf_name(file_name);
     let reads = match crs.filter(|_| landxml) {
         _ if lower.ends_with(".zip") && crs.is_some() => {
             let crs = crs.map(|text| super::parse_crs(s, text)).transpose()?;
-            rustgis_data::io::read_zip_in(file_name, bytes, crs)
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .map(|(dataset, report)| rustgis_data::io::LayerRead { dataset, report, styles: Vec::new() })
-                .collect()
+            rustgis_data::io::read_zip_layers(file_name, bytes, crs).map_err(|e| e.to_string())?
         }
         // A city model (CityJSON or CityGML) with a coordinate system given, which takes the place
         // of any it names.
@@ -2872,6 +2896,11 @@ fn add_picked(
             })
             .map(|(_, r)| {
                 let mut said = r.report.clone();
+                // What the zip says of itself goes to the picked layer once, below.
+                if lower.ends_with(".zip") {
+                    let prefix = format!("{file_name}: ");
+                    said.messages.retain(|n| !n.text.starts_with(&prefix));
+                }
                 // The layer's own Z/M note, by its code: that layer says it.
                 if r.dataset.zm_dropped
                     && let Some(at) = said.messages.iter().position(|n| n.loss == Some(rustgis_data::loss::LossCode::DroppedZm))
@@ -2881,9 +2910,21 @@ fn add_picked(
                 (r.dataset.source.clone(), said)
             })
             .collect();
+        // What a zip says of itself (members skipped, overlays not drawn) sits on its first layer,
+        // named by the zip: it goes with whichever layer is picked.
+        let zip_wide: Vec<rustgis_data::loss::Note> = match reads.first() {
+            Some(first) if lower.ends_with(".zip") && !pick(&first.dataset.name) => {
+                let prefix = format!("{file_name}: ");
+                first.report.messages.iter().filter(|n| n.text.starts_with(&prefix)).cloned().collect()
+            }
+            _ => Vec::new(),
+        };
         reads.retain(|r| pick(&r.dataset.name));
         if reads.is_empty() {
             return Err(format!("{file_name}: no layer '{want}' (layers: {})", names.join(", ")));
+        }
+        if let Some(kept) = reads.first_mut() {
+            kept.report.messages.extend(zip_wide);
         }
         for (source, said) in file_wide {
             if let Some(kept) = reads.iter_mut().find(|r| r.dataset.source == source) {
@@ -2979,7 +3020,11 @@ fn add_reads(
 fn ground_overlays(s: &mut Session, file_name: &str, bytes: &[u8], local_file: bool) -> Vec<(String, rustgis_data::raster::Raster)> {
     match rustgis_data::kml::ground_overlays(file_name, bytes) {
         Ok(overlays) => overlays_drawn(s, file_name, overlays, local_file),
-        Err(_) => Vec::new(),
+        // Overlays that can't even be listed (a KMZ entry too large to expand) are said.
+        Err(e) => {
+            s.notify(format!("{file_name}: its ground overlays (pictures) couldn't be read, so none is added: {e}"), false);
+            Vec::new()
+        }
     }
 }
 
@@ -4459,7 +4504,11 @@ pub(crate) fn duckdb_parts(
     origin: impl Fn(rustgis_data::source::Family) -> rustgis_map::source::DuckdbOrigin,
 ) -> Vec<Converted> {
     if out.skipped > 0 {
-        s.notify(format!("{name}: {} rows without a geometry were left out", out.skipped), false);
+        // A row is a layer's feature: one without geometry isn't added, and its values go with it.
+        s.say(rustgis_data::loss::Note::loss(
+            rustgis_data::loss::LossCode::DroppedFeature,
+            format!("{name}: {} rows without a geometry were left out", out.skipped),
+        ));
     }
     // Z and M values are dropped as DuckDB writes the result: one notice for all its parts.
     let zm = out.parts.iter().fold(0u64, |n, p| n.saturating_add(p.zm_dropped));
@@ -4726,14 +4775,14 @@ pub(crate) fn add_layer_text_within(s: &mut Session, text: &str, reach: crate::r
     s.active_layer = Some(id);
     // What reading its raster left out is said, as for a raster added (one still read in the
     // background isn't here yet).
-    let lost: Vec<String> = s
+    let lost: Vec<rustgis_data::loss::Note> = s
         .map()
         .layer(id)
         .and_then(|l| Some((&l.name, l.raster.as_ref()?.data.as_ref()?)))
-        .map(|(name, d)| d.lost.iter().map(|l| format!("{name}: {l}")).collect())
+        .map(|(name, d)| d.lost.iter().map(|l| l.clone().prefixed(name)).collect())
         .unwrap_or_default();
     for l in lost {
-        s.notify(l, false);
+        s.say(l);
     }
     Ok(json!({"layer": id}))
 }
@@ -5934,6 +5983,11 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
     // (which follow the time slider) and AlphaEarth's quantised embeddings (which raster styles
     // don't dequantise) are tile layers.
     let (file, mut look) = crate::render::rustgis_tiles::cog::split(url);
+    // A header not read first (a plugin's command in the app, a data cube's file) whose connection
+    // dropped is read again by what draws the layer now, as a probed one is (#2886).
+    if !probed {
+        crate::render::rustgis_tiles::cog::forget_dropped(file);
+    }
     // A key given as `null` (a script's unused one) asks for nothing.
     let given = |k: &str| p.get(k).filter(|v| !v.is_null());
     // A data cube's file stays a tile layer, its project opened again too: its address says so.
@@ -5961,7 +6015,14 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
         let dated = s.map().tiles.get(index).ok_or("added GeoTIFF tile is missing")?.url.clone();
         // Its header read now (natively) as an undated address's is before it is added.
         #[cfg(not(target_arch = "wasm32"))]
-        let probe = if s.leave_downloads { Ok(false) } else { crate::render::rustgis_tiles::cog::probe_blocking(&dated) };
+        // Not probed off the frame: the file shown (not the template) is read again by the map's
+        // draw if its connection dropped (#2886).
+        let probe = if s.leave_downloads {
+            crate::render::rustgis_tiles::cog::forget_dropped(&dated);
+            Ok(false)
+        } else {
+            crate::render::rustgis_tiles::cog::probe_blocking(&dated)
+        };
         #[cfg(target_arch = "wasm32")]
         let probe: Result<bool, String> = Ok(false);
         (dated, probe == Ok(true), probe.err())
@@ -6003,7 +6064,7 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
             }
         }
         for line in cog_tile_losses(&info) {
-            s.notify(format!("{shown}: {line}"), false);
+            s.say(line.prefixed(&shown));
         }
     } else if probed || why.is_some() || r.get("dated").is_some() {
         // Added, but its (first date's) file couldn't be read: the view stays where it was.
@@ -6043,16 +6104,18 @@ pub(crate) fn cog_tile_where(t: &rustgis_map::tiles::TileLayer, address: &str) -
 /// drawn in place, its tiles are drawn as values (a palette image's by its colour table), so what
 /// the header holds beside them (band and class names, wavelengths) comes only with a window. Said
 /// as the layer is added, or once its header lands ([`Session::notice_landed_rasters`]).
-pub(crate) fn cog_tile_losses(info: &crate::render::rustgis_tiles::cog::Info) -> Vec<String> {
+pub(crate) fn cog_tile_losses(info: &crate::render::rustgis_tiles::cog::Info) -> Vec<rustgis_data::loss::Note> {
     let l = &info.layout;
     let named = l
         .described
         .as_ref()
         .is_some_and(|d| d.bands.iter().any(|b| b.description.is_some() || !b.categories.is_empty() || b.wavelength.is_some()));
-    let mut said: Vec<String> = l.lost.clone();
-    said.extend(l.described.iter().flat_map(|d| d.lost.iter().map(|x| format!("{}: {x}", rustgis_data::raster::pam::GDAL_METADATA))));
+    let mut said: Vec<rustgis_data::loss::Note> = l.lost.to_vec();
+    said.extend(l.described.iter().flat_map(|d| d.lost.iter().map(|x| x.clone().prefixed(rustgis_data::raster::pam::GDAL_METADATA))));
     if named {
-        said.push("drawn in place without its band names, class names or wavelengths: a window (\"bbox\") reads them".into());
+        said.push(rustgis_data::loss::Note::plain(
+            "drawn in place without its band names, class names or wavelengths: a window (\"bbox\") reads them",
+        ));
     }
     said
 }
@@ -6595,7 +6658,10 @@ pub(crate) fn read_window_raster(asked: &WindowAsked, stop: &std::sync::atomic::
         r.rounded = rounded;
     }
     if overflowed > 0 {
-        r.lost.push(format!("{overflowed} value(s) past the range of 32-bit floats left out: those cells have no value"));
+        r.lost.push(rustgis_data::loss::Note::loss(
+            rustgis_data::loss::LossCode::DroppedValue,
+            format!("{overflowed} value(s) past the range of 32-bit floats left out: those cells have no value"),
+        ));
     }
     // What the header holds but isn't read (a colour table, names): said when the layer is added.
     r.lost.extend(layout.lost.iter().cloned());
@@ -6653,7 +6719,11 @@ pub fn read_cog_window_until(asked: &WindowAsked, stop: &std::sync::atomic::Atom
             bytes
         }
     };
-    let layer = rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes);
+    let layer = if plain.is_some() {
+        rustgis_map::RasterLayer::from_written(r, format!("{name}.tif"), bytes)
+    } else {
+        rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)
+    };
     let mut notes = vec![read];
     notes.extend(plain);
     notes.extend(finer);
@@ -6684,9 +6754,10 @@ pub(crate) struct WindowRaster {
 impl WindowRaster {
     /// What to say of the read, in order, and what its raster left out (`lost`: what the header
     /// holds but isn't read, values past `f32`'s range), for a caller that makes another raster
-    /// from it and so doesn't add this one (whose `lost` the layer would say).
-    pub(crate) fn notes(&self) -> Vec<String> {
-        self.read_notes().into_iter().chain(self.raster.lost.iter().cloned()).collect()
+    /// from it and so doesn't add this one (whose `lost` the layer would say). The read's own notes
+    /// are plain (the box's edges are empty ground, not data left out); `lost` keeps its codes.
+    pub(crate) fn notes(&self) -> Vec<rustgis_data::loss::Note> {
+        self.read_notes().into_iter().map(rustgis_data::loss::Note::plain).chain(self.raster.lost.iter().cloned()).collect()
     }
 
     /// What to say of the read alone (its size and level, a cell size finer than the file's, the
@@ -6995,7 +7066,9 @@ pub(crate) fn add_data_text_after(s: &mut Session, p: &Value, zoom: Option<bool>
     let text = s_req(p, "text")?;
     // A city model: all its layers, in the coordinate system given or with a layer picked. A DXF
     // drawing too, which takes its coordinate system and whether its blocks are drawn from here.
+    // Every other file of several layers too (KML, GPX, GeoRSS, LandXML), as its bytes are read.
     if rustgis_data::dxf::is_dxf_name(name)
+        || rustgis_data::io::is_multi_layer_name(name)
         || rustgis_data::cityjson::is_cityjson_name(name)
         || rustgis_data::io::is_citygml(name, text.as_bytes())
         || (["crs", "layer"].iter().any(|k| ps(p, k).is_some_and(|c| !c.trim().is_empty()))
@@ -7148,6 +7221,46 @@ pub(crate) fn legends_follow_layer(s: &mut Session, old: &str, new: Option<&str>
     }
 }
 
+/// What a layer rename does to a text's layer statistics (#2853).
+enum Renamed {
+    /// No statistic names the layer.
+    Same,
+    /// The text with the new name written in.
+    To(String),
+    /// The new name would take the text past `limit` characters, which the file would cut.
+    TooLong,
+    /// The new name holds a brace, which ends a token early.
+    Braces,
+}
+
+/// `text` with the layer a rename moves (`replace` says the name that takes the old one's place)
+/// written into its statistic tokens, held to `limit` characters.
+fn renamed_statistics(text: &str, limit: usize, braces: bool, replace: &mut impl FnMut(&mut String)) -> Renamed {
+    let renamed = rustgis_map::layout::rename_stat_layers(text, |layer| {
+        let mut name = layer.to_string();
+        replace(&mut name);
+        (name != layer).then_some(name)
+    });
+    match renamed {
+        None => Renamed::Same,
+        Some(_) if braces => Renamed::Braces,
+        Some(renamed) if renamed.chars().count() <= limit => Renamed::To(renamed),
+        Some(_) => Renamed::TooLong,
+    }
+}
+
+/// The ids of `layout`'s map frames showing the map `map`.
+fn frames_showing(layout: &rustgis_map::layout::Layout, map: &str) -> Vec<u32> {
+    layout
+        .elements
+        .iter()
+        .filter_map(|e| match &e.kind {
+            rustgis_map::layout::ElementKind::MapFrame { map: m, .. } if m.eq_ignore_ascii_case(map) => Some(e.id),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Carries typed references to a renamed layer along with it. Map-local references and layout
 /// frames stay in their map. A name still present there keeps its references, as legends do;
 /// project-wide references without a map stay unchanged when another map still has that name.
@@ -7245,21 +7358,28 @@ fn references_follow_layer(s: &mut Session, old: &str, new: &str) {
     if let Elevation::Surface(layer) = &mut editing.settings.elevation {
         replace(layer);
     }
+    let mut texts_too_long = 0usize;
+    let mut texts_with_braces = 0usize;
+    // A name with a brace can't be written into a token: the texts keep the old one.
+    let braces = new.contains(['{', '}']);
     for layout in &mut s.project.layouts {
-        let frames: Vec<u32> = layout
-            .elements
-            .iter()
-            .filter_map(|e| match &e.kind {
-                ElementKind::MapFrame { map, .. } if map.eq_ignore_ascii_case(&map_name) => Some(e.id),
-                _ => None,
-            })
-            .collect();
+        let frames = frames_showing(layout, &map_name);
+        // A text's layer statistics (#2853) read the map of the layout's first frame.
+        let texts_read_this_map = layout.first_frame().is_some_and(|f| frames.contains(&f));
         for element in &mut layout.elements {
             match &mut element.kind {
                 ElementKind::Table { frame, layer, .. } | ElementKind::Chart { frame, layer, .. } if frames.contains(frame) => {
                     replace(layer)
                 }
                 ElementKind::Colorbar { frame, layer: Some(layer), .. } if frames.contains(frame) => replace(layer),
+                ElementKind::Text { text, .. } if texts_read_this_map => {
+                    match renamed_statistics(text, rustgis_map::layout::MAX_TEXT_CHARS, braces, &mut replace) {
+                        Renamed::To(renamed) => *text = renamed,
+                        Renamed::TooLong => texts_too_long += 1,
+                        Renamed::Braces => texts_with_braces += 1,
+                        Renamed::Same => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -7267,6 +7387,20 @@ fn references_follow_layer(s: &mut Session, old: &str, new: &str) {
             && frames.contains(&series.frame)
         {
             replace(&mut series.layer);
+        }
+    }
+    // A presentation's map page draws its title over its own map, where a layer statistic is filled
+    // in (#2853).
+    let mut titles_too_long = 0usize;
+    let mut titles_with_braces = 0usize;
+    for page in s.project.presentations.iter_mut().flat_map(|p| &mut p.pages) {
+        if matches!(&page.kind, rustgis_map::presentation::PageKind::Map { map, .. } if map.eq_ignore_ascii_case(&map_name)) {
+            match renamed_statistics(&page.title, rustgis_map::presentation::MAX_TITLE, braces, &mut replace) {
+                Renamed::To(renamed) => page.title = renamed,
+                Renamed::TooLong => titles_too_long += 1,
+                Renamed::Braces => titles_with_braces += 1,
+                Renamed::Same => {}
+            }
         }
     }
     // These items do not record a map; changing an ambiguous name would redirect references
@@ -7309,6 +7443,34 @@ fn references_follow_layer(s: &mut Session, old: &str, new: &str) {
             project_reference(image);
         }
     }
+    for (count, what) in [(texts_with_braces, "layout text(s)"), (titles_with_braces, "presentation title(s)")] {
+        if count > 0 {
+            s.notify_text(crate::notice_text::NoticeText::format(
+                "{count} {what} keep the old layer name '{old}' in their statistics: the new name has a brace, which a token can't hold",
+                [("count", count.to_string().into()), ("what", what.to_string().into()), ("old", old.to_string().into())],
+            ), false);
+        }
+    }
+    if titles_too_long > 0 {
+        s.notify_text(crate::notice_text::NoticeText::format(
+            "{count} presentation title(s) keep the old layer name '{old}' in their statistics: the new name would take them past the {limit} characters a title holds",
+            [
+                ("count", titles_too_long.to_string().into()),
+                ("old", old.to_string().into()),
+                ("limit", rustgis_map::presentation::MAX_TITLE.to_string().into()),
+            ],
+        ), false);
+    }
+    if texts_too_long > 0 {
+        s.notify_text(crate::notice_text::NoticeText::format(
+            "{count} layout text(s) keep the old layer name '{old}' in their statistics: the new name would take them past the {limit} characters a text holds",
+            [
+                ("count", texts_too_long.to_string().into()),
+                ("old", old.to_string().into()),
+                ("limit", rustgis_map::layout::MAX_TEXT_CHARS.to_string().into()),
+            ],
+        ), false);
+    }
     if left > 0 {
         s.notify_text(crate::notice_text::NoticeText::format(
             "{count} project reference(s) still name '{old}': another map has a layer of the old or new name; choose the intended layer in those items",
@@ -7344,10 +7506,114 @@ pub(crate) fn drop_layers(s: &mut Session, ids: &[u32]) {
     // The tile layers drawn over them keep their place.
     m.release_tiles(ids);
     m.layers.retain(|l| !ids.contains(&l.id));
-    terrain_follows_removal(s, &names);
-    square_labels_follow_removal(s, &names);
-    for n in &names {
+    follow_removal(s, &names);
+}
+
+/// What follows the removal of the layers called `names` from the active map.
+fn follow_removal(s: &mut Session, names: &[String]) {
+    terrain_follows_removal(s, names);
+    square_labels_follow_removal(s, names);
+    layouts_follow_removal(s, names);
+    pages_follow_removal(s, names);
+    // A legend that left it out forgets it.
+    for n in names {
         legends_follow_layer(s, n, None);
+    }
+}
+
+/// The notice that `count` items name the removed layers `named`, in the first of `keys` for one
+/// name and the second for more. `None` when no item does.
+fn removed_notice(keys: [&'static str; 2], count: usize, named: &[&str]) -> Option<crate::notice_text::NoticeText> {
+    if count == 0 {
+        return None;
+    }
+    let [one, more] = keys;
+    let key = if named.len() == 1 { one } else { more };
+    let names = named.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
+    Some(crate::notice_text::NoticeText::format(key, [("count", count.to_string().into()), ("names", names.into())]))
+}
+
+/// After layers called `names` are removed: a table's, chart's or colorbar's layer, and a text's
+/// layer statistics (#2853), keep the name, so a layer of that name brings them back, and are drawn
+/// without it meanwhile: how many elements, said once. Which elements read the active map is as for
+/// a rename (`references_follow_layer`).
+fn layouts_follow_removal(s: &mut Session, names: &[String]) {
+    use rustgis_map::layout::ElementKind;
+
+    let gone: Vec<&String> = names.iter().filter(|n| named_layers(s, n) == 0).collect();
+    let map_name = &s.map().name;
+    // The removed names some element reads, each once.
+    let mut named: Vec<&str> = Vec::new();
+    let mut count = 0usize;
+    for layout in &s.project.layouts {
+        let frames = frames_showing(layout, map_name);
+        let texts_read_this_map = layout.first_frame().is_some_and(|f| frames.contains(&f));
+        for element in &layout.elements {
+            let reads: Vec<&str> = match &element.kind {
+                ElementKind::Table { frame, layer, .. } | ElementKind::Chart { frame, layer, .. } if frames.contains(frame) => {
+                    vec![layer]
+                }
+                ElementKind::Colorbar { frame, layer: Some(layer), .. } if frames.contains(frame) => vec![layer],
+                ElementKind::Text { text, .. } if texts_read_this_map => {
+                    rustgis_map::layout::stat_tokens(text).iter().map(|t| t.layer).collect()
+                }
+                _ => continue,
+            };
+            count += usize::from(reads_removed(&reads, &gone, &mut named));
+        }
+    }
+    let keys = [
+        "{count} layout element(s) name the removed layer {names}: they are drawn without it until a layer of that name comes back",
+        "{count} layout element(s) name the removed layers {names}: they are drawn without it until a layer of that name comes back",
+    ];
+    if let Some(notice) = removed_notice(keys, count, &named) {
+        s.notify_text(notice, false);
+    }
+}
+
+/// Whether `reads`, the layer names one item reads, hold a removed one: each of `gone` it reads
+/// joins `named`, once.
+fn reads_removed<'a>(reads: &[&str], gone: &[&'a String], named: &mut Vec<&'a str>) -> bool {
+    let mut lost = false;
+    for name in gone.iter().filter(|n| reads.iter().any(|r| r.eq_ignore_ascii_case(n))) {
+        lost = true;
+        if !named.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            named.push(name.as_str());
+        }
+    }
+    lost
+}
+
+/// After layers called `names` are removed: a map series' index layer, and the layer statistics
+/// (#2853) in a presentation map page's title, keep the name, so a layer of that name brings them
+/// back: how many series and titles, said once (#3075). Which of them read the active map is as for
+/// a rename (`references_follow_layer`).
+fn pages_follow_removal(s: &mut Session, names: &[String]) {
+    use rustgis_map::presentation::PageKind;
+
+    let gone: Vec<&String> = names.iter().filter(|n| named_layers(s, n) == 0).collect();
+    let map_name = &s.map().name;
+    let mut named: Vec<&str> = Vec::new();
+    let mut count = 0usize;
+    for layout in &s.project.layouts {
+        if let Some(series) = &layout.series
+            && frames_showing(layout, map_name).contains(&series.frame)
+        {
+            count += usize::from(reads_removed(&[&series.layer], &gone, &mut named));
+        }
+    }
+    for page in s.project.presentations.iter().flat_map(|p| &p.pages) {
+        if matches!(&page.kind, PageKind::Map { map, .. } if map.eq_ignore_ascii_case(map_name)) {
+            let reads: Vec<&str> = rustgis_map::layout::stat_tokens(&page.title).iter().map(|t| t.layer).collect();
+            count += usize::from(reads_removed(&reads, &gone, &mut named));
+        }
+    }
+    let keys = [
+        "{count} map series or presentation title(s) name the removed layer {names}: a series exports only its current page, and a title shows the figure as written, until a layer of that name comes back",
+        "{count} map series or presentation title(s) name the removed layers {names}: a series exports only its current page, and a title shows the figure as written, until a layer of that name comes back",
+    ];
+    if let Some(notice) = removed_notice(keys, count, &named) {
+        s.notify_text(notice, false);
     }
 }
 
@@ -7452,12 +7718,7 @@ fn remove(s: &mut Session, p: &Value) -> CmdResult {
     }
     let next = m.layers.get(at.min(m.layers.len().saturating_sub(1))).map(|l| l.id);
     s.set_layer_selection(next.into_iter().collect(), next);
-    terrain_follows_removal(s, &names);
-    square_labels_follow_removal(s, &names);
-    // A legend that left it out forgets it.
-    for name in names {
-        legends_follow_layer(s, &name, None);
-    }
+    follow_removal(s, &names);
     Ok(Value::Null)
 }
 
@@ -8500,5 +8761,42 @@ mod geodatabase_tests {
         assert_eq!(LiveTable::Sqlserver(t).display(), "Mains");
         let e = super::class_table(&item, &[], None).unwrap_err().to_string();
         assert!(e.contains("utility.gis.Mains is stored in a format RustGIS doesn't read (SDEBINARY"), "{e}");
+    }
+
+    /// Add Data's question (#2350) is asked about the six formats read in place, in any case; not
+    /// about a `.json`, LiDAR, files read whole, no extension, a folder or a path with spaces.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn asks_link_names_the_formats_read_in_place() {
+        for ext in ["geojson", "shp", "gpkg", "parquet", "geoparquet", "fgb"] {
+            for path in [format!("a.{ext}"), format!("A.{}", ext.to_ascii_uppercase())] {
+                assert!(super::asks_link(&path), "{path:?} asks");
+            }
+        }
+        for path in ["a.json", "a.las", "a.laz", "a.LAZ", "a.csv", "a.kml", "a.tif", "a", "", "data.parquet/", "a.gpkg "] {
+            assert!(!super::asks_link(path), "{path:?} doesn't ask");
+        }
+    }
+
+    /// A format added to the sources that are read in place asks with no other edit.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn asks_link_follows_the_source_extensions() {
+        for ext in rustgis_data::source::EXTENSIONS.iter().filter(|e| !matches!(**e, "las" | "laz")) {
+            assert!(super::asks_link(&format!("a.{ext}")), "{ext}");
+        }
+    }
+
+    /// `link_choice` makes no question for a path `asks_link` says no to, and one for a `.geojson`
+    /// file or Shapefile it says yes to.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn link_choice_asks_where_asks_link_does() {
+        for path in ["a.json", "a.las", "a.laz", "a.csv", "a.kml", "a.tif", "a", "", "data.parquet/"] {
+            assert!(!super::asks_link(path) && super::link_choice(path, &[]).is_none(), "{path:?}");
+        }
+        for path in ["a.geojson", "A.SHP"] {
+            assert!(super::asks_link(path) && super::link_choice(path, &[]).is_some(), "{path:?}");
+        }
     }
 }

@@ -8,9 +8,9 @@ description: Make a printable page layout — map frame, title, legend, north ar
 1. Get the map right first: symbology, labels and extent. A layout's map frame shows the map's current view.
 2. For a finished sheet or a figure for a paper in one step, use `layout.publication` with a `"profile"`
    (a page size alone, `"a4"`, `"letter"`, `"legal"`, `"tabloid"`, `"a5"` to `"a0"`, for a sheet turned to the area's shape, or with its orientation, `"a4-portrait"`, `"letter-landscape"`, … to choose; `"figure-1col"`, `"thesis-full"`, … for a figure), the `"extent"`
-   to fit, and the texts: `"title"`, `"subtitle"`, `"sources"`, `"note"`, a `"locator"` (`"globe"`: the visible polygon layers held in the project, not streamed ones, over the basemap; `"inset"` or `"none"`; when omitted, `"globe"` on a sheet and `"none"` on a figure), and `"decimal": ","` for a map in a language with a decimal comma. A sheet's `"style"` arranges it: `"classic"` (the default), `"banner"`, `"panel"`, `"editorial"`, `"modular"` or `"poster"` (for a poster-like sheet), with an `"accent"` colour as `"#RRGGBB"`. Its
+   to fit, and the texts: `"title"`, `"subtitle"`, `"sources"`, `"note"`, a `"locator"` (`"globe"`: the visible polygon layers held in the project, not streamed ones, over the basemap; `"inset"` or `"none"`; when omitted, `"globe"` on a sheet and `"none"` on a figure), and `"decimal": ","` for a map in a language with a decimal comma. A sheet's `"style"` arranges it: `"classic"` (the default), `"banner"`, `"panel"`, `"editorial"`, `"modular"`, `"poster"` (for a poster-like sheet) or `"edge"` (the map from side to side of the page; it also takes `"paper"`, the page colour as `"#RRGGBB"`, and `"kicker"`, a short line over the title), with an `"accent"` colour as `"#RRGGBB"`. Its
    surrounds (locator, north arrow, legend, scale bar) start from an `"arrangement"` (`"classic"`, `"mirrored"`, `"legendRight"`, `"legendTop"`, or a corner for each; `"best"`, the default, tries the user's favourite, set with `layout.arrangement`, and the others), and one over the data moves to the freest place in the frame, the largest first (the legend, as a rule); read its `"arrangement"`, `"moved"` and `"warnings"`. It places the frame at a round scale, the
-   graticule, legend (a long one in up to three columns), scale bar and north arrow, and wraps the footer. Its result lists every element's id and name
+   graticule, legend (a long one in up to three columns: its own choice, though a legend takes up to six), scale bar and north arrow, and wraps the footer. `"grid"`, `"scaleBar"` and `"northArrow"` take `"none"` to leave that part out, or an object of its options (the grid's `"step"` or `"type"`, the bar's `"units"` or `"style"`, the arrow's `"style"`, `"fill"`, `"outline"` and `"show"`). Its result lists every element's id and name
    (`"elements"`), so skip to step 5 to adjust them. Otherwise,
    `layout.new` `{"name": N, "page": "letter"|"a4"|…, "orientation": "landscape"|"portrait"}` creates the layout and
    opens it.
@@ -24,9 +24,13 @@ description: Make a printable page layout — map frame, title, legend, north ar
    `"subdivisions"` (0–10), `"divisionsBeforeZero"` (0–2), `"labelPosition"` (`"above"`, `"below"`), `"unitLabel"`
    (text; `""` for none), `"unitLabelPosition"` (`"afterLabels"`, `"afterBar"`, `"above"`, `"below"`), `"decimals"`
    (`"auto"`, the default, or 0–3 fixed with the thousands set apart, as a chart's), `"textSize"` (4–100 pt, its
-   labels' size) and `"fit"` (`"adjustDivisionValue"`, `"adjustDivision"`, `"adjustWidth"`). `"grid"` adds a graticule to the frame
+   labels' size) and `"fit"` (`"adjustDivisionValue"`, `"adjustDivision"`, `"adjustWidth"`). A `"legend"` can take
+   `"columns"` (1–6), `"fit"` (`"manual"`, `"adjustSize"`, `"adjustColumns"`, `"adjustColumnsAndSize"`: shrink its
+   text or add columns to fit its box) and `"showLayerNames": false`. A `"text"` or `"dynamicText"` can take
+   `"valign"` (`"top"`, `"middle"`, `"bottom"`), `"lineSpacing"` (0.5–3, default 1) and `"case"`
+   (`"none"`, `"upper"`, `"lower"`; applied when drawn, the text kept as typed). `"grid"` adds a graticule to the frame
    (`"style": "ticks"` for neatline ticks, `"format": "dms"`, `"edges"`).
-5. Adjust with `layout.update` (`{"element": id, "x", "y", "w", "h", "text", "size", "bold"}`). The ids come from the
+5. Adjust with `layout.update` (`{"element": id, "x", "y", "w", "h", "text", "size", "bold", "valign", "lineSpacing", "case"}`). The ids come from the
    results of the earlier calls.
 6. `layout.export` `{"path": "map.pdf"}`, or `.png` with a `dpi` (300 for print). Exporting writes a file, so the
    user is asked first. `layout.close` goes back to the map.

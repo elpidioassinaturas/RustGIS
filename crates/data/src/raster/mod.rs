@@ -87,7 +87,7 @@ fn no_memory(w: usize, h: usize) -> DataError {
 /// overview is chosen.
 pub const BROWSER_SAMPLES: usize = 32_000_000;
 /// The fewest samples [`max_samples`] allows: 120 million (480 MB) on the desktop, and
-/// [`BROWSER_SAMPLES`] (its limit) in the browser.
+/// [`BROWSER_SAMPLES`] (its limit) in the browser. A phone takes the browser's ([`samples_floor`]).
 #[cfg(not(target_arch = "wasm32"))]
 pub const SAMPLES_FLOOR: usize = 120_000_000;
 #[cfg(target_arch = "wasm32")]
@@ -95,12 +95,18 @@ pub const SAMPLES_FLOOR: usize = BROWSER_SAMPLES;
 /// The most [`max_samples`] allows, however much memory the computer has: a billion (4 GB).
 pub const SAMPLES_CEILING: usize = 1_000_000_000;
 
+/// The fewest samples [`max_samples`] allows here: [`SAMPLES_FLOOR`], or on a phone
+/// ([`crate::memory::on_phone`]) the browser's [`BROWSER_SAMPLES`].
+pub fn samples_floor() -> usize {
+    if crate::memory::on_phone() { BROWSER_SAMPLES } else { SAMPLES_FLOOR }
+}
+
 /// Most samples (pixels × bands) held in memory: on the desktop, as many as a quarter of the
 /// computer's memory holds at 8 bytes each (a sample takes 4, and reading briefly needs about
-/// twice that), from [`SAMPLES_FLOOR`] up to [`SAMPLES_CEILING`] (#1291 step 2, #1318).
+/// twice that), from [`samples_floor`] up to [`SAMPLES_CEILING`] (#1291 step 2, #1318).
 /// Less once RustGIS holds more than half the memory, never below the floor ([`crate::memory::planned`], #2431).
 pub fn max_samples() -> usize {
-    crate::memory::planned(SAMPLES_FLOOR, SAMPLES_CEILING, 8)
+    crate::memory::planned(samples_floor(), SAMPLES_CEILING, 8)
 }
 
 // Shared by the elevation readers ([`hgt`], [`dted`]) and pictures read at a step.
@@ -308,7 +314,7 @@ impl BandStats {
                 let x = v as f64;
                 n += 1;
                 (min, max) = (lower(min, x), higher(max, x));
-                whole &= x.fract() == 0.0;
+                whole &= is_whole(x);
                 if sum {
                     sums = (sums.0 + x, sums.1 + x * x);
                 }
@@ -368,6 +374,40 @@ impl BandStats {
         BandStats { count: n, min, max, mean, std_dev, histogram, categories }
     }
 
+    /// Statistics of a band of whole numbers from 0 to 255, from how many of its cells hold each
+    /// (`counts`, by value), leaving out `nodata`: the same, to the bit, as [`Raster::new`] makes
+    /// by reading the cells, for a caller that counted them as it made them. The sums of whole
+    /// numbers are exact in `f64` as long as they stay below 2⁵³, so a pass over the cells in any
+    /// order makes the same mean and spread; `None` past that (some 1.4 × 10¹¹ cells), or past
+    /// what a count of cells holds here (`usize`, 32 bits in the browser).
+    pub fn of_byte_counts(counts: &[u64; 256], nodata: Option<u8>) -> Option<BandStats> {
+        let kept = || counts.iter().enumerate().filter(|&(v, &c)| c > 0 && nodata != Some(v as u8)).map(|(v, &c)| (v as u64, c));
+        let n: u64 = kept().map(|(_, c)| c).sum();
+        if n == 0 {
+            return Some(BandStats::default());
+        }
+        if n > (1u64 << 53) / (255 * 255) {
+            return None;
+        }
+        let (sum, sum2) = kept().fold((0u64, 0u64), |(s, s2), (v, c)| (s + v * c, s2 + v * v * c));
+        let count = usize::try_from(n).ok()?;
+        let (min, max) = (kept().next()?.0 as f64, kept().next_back()?.0 as f64);
+        let mean = sum as f64 / n as f64;
+        let std_dev = (sum2 as f64 / n as f64 - mean * mean).max(0.0).sqrt();
+        // The bins as [`Tally::run`] makes them, for whole numbers within 16 bits.
+        let span = max - min;
+        let k = (HISTOGRAM_BINS as f64 - 1.0) / if span > 0.0 { span } else { 1.0 };
+        let mut histogram = vec![0u64; HISTOGRAM_BINS];
+        for (v, c) in kept() {
+            let bin = round_positive((v as f64 - min) * k) as usize;
+            if let Some(h) = histogram.get_mut(bin.min(HISTOGRAM_BINS - 1)) {
+                *h += c;
+            }
+        }
+        let categories = Some(kept().map(|(v, _)| v as f64).collect());
+        Some(BandStats { count, min, max, mean, std_dev, histogram, categories })
+    }
+
     /// The value below which `p` (0–100) percent of pixels fall, from the histogram.
     pub fn percentile(&self, p: f64) -> f64 {
         let total: u64 = self.histogram.iter().sum();
@@ -410,6 +450,21 @@ struct Tally {
 /// Values below which a band is counted on one thread (#1252): threads pay off past about a
 /// million.
 const PARALLEL_VALUES: usize = 1 << 20;
+
+/// Whether `x` is a whole number: `x.fract() == 0.0`, without the call to the C library
+/// that `fract` makes where the processor has no instruction for it (x86-64's baseline). From 2⁵²
+/// up every `f64` is whole.
+fn is_whole(x: f64) -> bool {
+    x.is_finite() && (x.abs() >= 4_503_599_627_370_496.0 || x == x as i64 as f64)
+}
+
+/// `x.round()` for `x` from 0 to 2⁵², halves away from zero, without the call to the C library
+/// that `round` makes where the processor has no instruction for it (x86-64's baseline): for a
+/// histogram's bins here, and a hillshade's cells.
+pub fn round_positive(x: f64) -> f64 {
+    let whole = x as u64 as f64;
+    if x - whole >= 0.5 { whole + 1.0 } else { whole }
+}
 
 /// `x` when it is below `min`, else `min`: equal values (−0 and 0) keep the first.
 fn lower(min: f64, x: f64) -> f64 {
@@ -479,7 +534,7 @@ impl Tally {
                 continue;
             }
             let x = v as f64;
-            let bin = ((x - b.min) * b.k).round() as usize;
+            let bin = round_positive((x - b.min) * b.k) as usize;
             if let Some(h) = histogram.get_mut(bin.min(HISTOGRAM_BINS - 1)) {
                 *h += 1;
             }
@@ -737,7 +792,7 @@ pub struct Raster {
     /// What reading it left out or cut (a colour table, names), one line a kind with a count,
     /// for whoever adds it to the map to say (AGENTS.md, Never silent). Empty when nothing was
     /// left out.
-    pub lost: Vec<String>,
+    pub lost: crate::loss::Notes,
     /// How many values of each band changed when read as `f32` (Int32 IDs past 16,777,216, Float64
     /// values with more digits than `f32` holds), by band; empty when none did. NaN values and
     /// samples that are the no-data value aren't counted (one that rounds onto it is). The two are
@@ -931,7 +986,7 @@ impl Raster {
             posts: false,
             georeferenced: true,
             crs_assumed: false,
-            lost: Vec::new(),
+            lost: Default::default(),
             rounded: Vec::new(),
             rounded_some: Vec::new(),
             copyright: None,
@@ -951,7 +1006,8 @@ impl Raster {
     /// overview's only approximate them). What it left out is said as `from`'s ("its GDAL
     /// metadata", "its .aux.xml sidecar").
     pub fn apply_pam(&mut self, pam: &pam::Pam, from: &str) {
-        self.lost.extend(pam.lost.iter().map(|l| format!("{from}: {l}")));
+        // Each with its code, named by where it came from.
+        self.lost.extend(pam.lost.iter().map(|l| l.clone().prefixed(from)));
         // Names and wavelengths for bands the raster doesn't have have nowhere to go.
         let beyond = pam
             .bands
@@ -1301,9 +1357,16 @@ impl Raster {
 
     /// Ground size of a pixel in metres (approximate for geographic rasters).
     pub fn cell_size_m(&self) -> (f64, f64) {
+        self.cell_size_m_on(&self.extent)
+    }
+
+    /// [`Raster::cell_size_m`] as on `ground` (longitude/latitude): a cell of a geographic raster
+    /// measured at its middle's latitude, as a raster covering that ground measures its cells. A
+    /// part of a raster measures its cells so as the whole of it does.
+    pub fn cell_size_m_on(&self, ground: &Extent) -> (f64, f64) {
         let (x, y) = self.cell_size();
         if self.crs.is_geographic() {
-            let lat = self.extent.center().y.to_radians().cos().abs().max(0.01);
+            let lat = ground.center().y.to_radians().cos().abs().max(0.01);
             (x * 111_320.0 * lat, y * 110_574.0)
         } else {
             (x, y)
@@ -1506,6 +1569,13 @@ pub struct PartRead {
     pub full: (u32, u32),
 }
 
+/// The columns and rows of a tile of the GeoTIFF at `path` (a strip's: the image's width), which a
+/// part read decodes whole ([`read_path_part`]); `None` when they can't be read.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn chunk_size(path: &Path) -> Option<(u32, u32)> {
+    geotiff::chunk_size(path)
+}
+
 /// `part` of the GeoTIFF at `path`, as [`read_path`] reads the file but holding only that part,
 /// at the finest level whose part fits `max` samples: the full image when it does, read from the
 /// strips or tiles that hold it alone. The `.aux.xml` beside it is applied as it is to the whole
@@ -1684,7 +1754,10 @@ pub fn read_converted(path: &Path, c: &gdal::Converted) -> Result<Raster> {
     // it is read, as a reload says them again.
     if c.assumed_lonlat {
         r.crs_assumed = true;
-        r.lost.push(format!("{} (give \"crs\" if not)", assumed_wgs84_note("it doesn't say its coordinate system")));
+        r.lost.push(crate::loss::Note::loss(
+            crate::loss::LossCode::AssumedCrs,
+            format!("{} (give \"crs\" if not)", assumed_wgs84_note("it doesn't say its coordinate system")),
+        ));
     }
     if !c.others.is_empty() {
         let shown: Vec<&str> = c.others.iter().take(20).map(String::as_str).collect();
@@ -2309,6 +2382,31 @@ pub(crate) mod tests {
         assert_eq!(BandStats::compute_on(&vec![f32::NAN; n], valid, None, 4), BandStats::default());
     }
 
+    /// A band of whole numbers to 255 has the same statistics, to the bit, from how many cells
+    /// hold each value as from the cells: on one thread and on several (past a million cells), with
+    /// no-data among them, one value, three, and nothing but no-data.
+    #[test]
+    fn byte_counts_make_the_statistics_of_the_cells() {
+        let gt = GeoTransform { origin_x: 500_000.0, origin_y: 4_800_000.0, pixel_width: 1.0, pixel_height: -1.0 };
+        let utm = Crs::from_epsg(32611).unwrap();
+        let spread = |n: u32| (0..n).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as f32).collect::<Vec<f32>>();
+        let three = (0..1000).map(|i| [0.0, 1.0, 255.0][i % 3]).collect::<Vec<f32>>();
+        for (w, h, cells) in [
+            (1000, 100, spread(100_000)),
+            (1500, 1000, spread(1_500_000)),
+            (10, 10, vec![7.0; 100]),
+            (100, 10, three),
+            (5, 2, vec![0.0; 10]),
+        ] {
+            let mut counts = [0u64; 256];
+            for v in &cells {
+                counts[*v as usize] += 1;
+            }
+            let r = Raster::new("bytes", w, h, vec![cells], gt, utm, Some(0.0), ColorHint::Gray, "UInt8").unwrap();
+            assert_eq!(BandStats::of_byte_counts(&counts, Some(0)), Some(r.bands[0].stats.clone()), "{w} × {h}");
+        }
+    }
+
     /// Cells a raster's alpha draws see-through are left out of its colour bands' statistics,
     /// whatever their values (#1810): −3.4e38 in a Float32 image, a stray byte in an 8-bit one. An
     /// opaque black cell counts, the alpha band counts every cell, and a raster without alpha (or
@@ -2537,7 +2635,7 @@ pub(crate) mod tests {
         one.apply_pam(
             &pam::Pam {
                 bands: vec![pam::PamBand { band: 2, description: Some("NIR".into()), ..Default::default() }],
-                lost: vec!["1 band record(s) for no band from 1 to 65536 left out".into()],
+                lost: vec!["1 band record(s) for no band from 1 to 65536 left out"].into(),
             },
             pam::SIDECAR,
         );
@@ -2550,7 +2648,7 @@ pub(crate) mod tests {
         let mut zero = small();
         zero.nodata = None;
         zero.apply_pam(
-            &pam::Pam { bands: vec![pam::PamBand { band: 2, nodata: Some(0.0), ..Default::default() }], lost: Vec::new() },
+            &pam::Pam { bands: vec![pam::PamBand { band: 2, nodata: Some(0.0), ..Default::default() }], lost: Default::default() },
             pam::SIDECAR,
         );
         assert_eq!(zero.nodata, None);
@@ -2562,7 +2660,7 @@ pub(crate) mod tests {
                 pam::PamBand { band: 1, nodata: Some(a), ..Default::default() },
                 pam::PamBand { band: 1, nodata: Some(b), ..Default::default() },
             ],
-            lost: Vec::new(),
+            lost: Default::default(),
         };
         two.apply_pam(&both(0.0, 255.0), pam::SIDECAR);
         assert_eq!(two.nodata, None);
@@ -2802,7 +2900,7 @@ pub(crate) mod tests {
         std::fs::write(dir.join("g.prj"), "not a coordinate system").unwrap();
         let r = read_path(&asc).unwrap();
         assert_eq!(r.lost.len(), 1, "{:?}", r.lost);
-        let note = &r.lost[0];
+        let note = &r.lost[0].text;
         assert!(note.starts_with("the .prj file: ") && note.contains("so it's read as WGS 84"), "{note}");
         assert!(!note.contains("it doesn't say its coordinate system"), "{note}");
         std::fs::write(&asc, "ncols 2\nnrows 1\nxllcorner 1000\nyllcorner 4000\ncellsize 1\n1 2\n").unwrap();

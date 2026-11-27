@@ -52,7 +52,7 @@ copernicus.logout
 copernicus.status
 cube.catalog theme? bbox? query?
 cube.open id bbox? start? end? maxCloud? range? name?
-cube.reduce cube? layers? layer? path? url? collection variable? index? crs? asset? mask? bbox? maxCloud? cellSize? resampling? band? dates? stat order? above? classes? by? start? end? months? minValid? name?
+cube.reduce cube? layers? layer? path? url? collection variable? index? crs? asset? assets? mask? bbox? maxCloud? cellSize? resampling? band? dates? stat order? above? classes? by? start? end? months? minValid? name?
 cube.trend cube? layers? layer? collection url? asset? mask? bbox? maxCloud? cellSize? resampling? band? dates? start? end? months? test? seasons? alpha? minValid? per? name? ran?
 data.archive layer? on?
 data.archiveHistory layer?
@@ -102,7 +102,7 @@ edit.flip
 edit.groundToGrid on? scale? rotation?
 edit.merge
 edit.move dx dy units?
-edit.moveSharedVertex layer? row part? ring? index lon lat
+edit.moveSharedVertex layer? row part? ring? index lon? lat? x? y?
 edit.paste layer? text?
 edit.pasteSpecial name? text?
 edit.previewShapeConversion layer? row featureId? kind request? image? frame?
@@ -124,7 +124,7 @@ edit.traverse layer? start units? legs
 edit.undo
 edit.updateBox layer? row featureId? box
 edit.updateCircle layer? row featureId? circle
-edit.vertex layer? row action part? ring? index lon? lat?
+edit.vertex layer? row action part? ring? index lon? lat? x? y?
 embeddings.add dataset url? year? bands? stretch? dimension? bbox? name? ran?
 embeddings.addCube dataset bbox? start? end? bands? stretch? name? found? complete? unusable?
 embeddings.change dataset from? to? bbox? cellSize? name? ran?
@@ -161,7 +161,7 @@ gpkg.addLayer path table? limit? name?
 gpkg.discardEdits layer?
 gpkg.pendingEdits layer?
 gpkg.saveEdits layer?
-graphics.add shape points layer? text? fill? outline? width? size? fontSize? bold? italic? align? letterSpacing? image? path?
+graphics.add shape points layer? text? fill? outline? width? size? fontSize? bold? italic? align? letterSpacing? image? path? frame?
 graphics.edit layer row points? text? fontSize? bold? italic? align? letterSpacing? fill? outline? width? size?
 graphics.keepTool on?
 graphics.newLayer name?
@@ -282,7 +282,7 @@ layer.transparency layer? value
 layer.visibility layer? visible?
 layer.zoomTo layer?
 layout.activate name layout
-layout.addElement layout? kind frame? of? text? size? color? bold? italic? align? letterSpacing? rotation? wrap? font? fallback? title? allClasses? hideOther? showNoData? exclude? columns? textSize? orientation? ticks? tickSide? reverse? fill? width? radius? dash? dir? head? angle? length? image? path? layer? field? label? group? statistic? order? bars? other? stack? values? decimals? barColor? classes? labelAlign? mirror? max? hideLabels? barOutline? rows? step? type? crs? short? mgrs? labels? style? tickLength? format? hemisphere? edges? labelOrientation? labelSize? off? name? direction? at? outline? units? divisions? subdivisions? divisionsBeforeZero? labelPosition? unitLabel? unitLabelPosition? fit? x? y? w? h? background?
+layout.addElement layout? kind frame? of? text? size? color? bold? italic? align? letterSpacing? rotation? wrap? valign? lineSpacing? case? font? fallback? title? allClasses? hideOther? showNoData? exclude? columns? textSize? showLayerNames? orientation? ticks? tickSide? reverse? fill? width? radius? dash? dir? head? angle? length? image? path? layer? field? label? group? statistic? order? bars? other? stack? values? decimals? barColor? classes? labelAlign? mirror? max? hideLabels? barOutline? rows? step? type? crs? short? mgrs? labels? style? tickLength? format? hemisphere? edges? labelOrientation? labelSize? off? name? direction? at? outline? units? divisions? subdivisions? divisionsBeforeZero? labelPosition? unitLabel? unitLabelPosition? fit? x? y? w? h? background?
 layout.addFrame layout? shape? points? map? x? y? w? h?
 layout.arrange layout? element to
 layout.arrangement favourite? save? arrangement? remove?
@@ -295,8 +295,8 @@ layout.guides layout? x? y? clear?
 layout.import path? text?
 layout.move name? layout? to
 layout.new name? page? orientation? width? height? template?
-layout.page layout? page? orientation? width? height? decimal?
-layout.publication profile? extent? name? title? subtitle? sources? reference? note? author? headings? locator? decimal? colorbar? veil? contextInLegend? northArrow? legendBox? style? accent? arrangement? coverage?
+layout.page layout? page? orientation? width? height? decimal? color?
+layout.publication profile? extent? name? title? subtitle? sources? reference? note? author? headings? locator? decimal? colorbar? veil? contextInLegend? northArrow? grid? scaleBar? legendBox? style? paper? kicker? accent? arrangement? coverage?
 layout.remove name? layout?
 layout.removeElement layout? element
 layout.rename name? layout? newName
@@ -304,7 +304,7 @@ layout.save layout? path
 layout.series layout? layer nameField? frame? margin? off?
 layout.seriesPage layout? page
 layout.seriesRefresh layout?
-layout.update layout? element x? y? w? h? name? visible? locked? text? size? color? bold? italic? align? letterSpacing? rotation? wrap? font? fallback? title? allClasses? hideOther? showNoData? exclude? labels? columns? textSize? orientation? ticks? tickSide? reverse? style? fill? outline? radius? width? dash? dir? head? angle? length? units? divisions? subdivisions? divisionsBeforeZero? labelPosition? unitLabel? unitLabelPosition? fit? map? scale? center? bearing? pitch? grid? extentIndicator? border? section? layer? field? label? group? statistic? order? bars? other? stack? values? decimals? barColor? classes? labelAlign? mirror? max? barOutline? hideLabels? rows? background?
+layout.update layout? element x? y? w? h? name? visible? locked? text? size? color? bold? italic? align? letterSpacing? rotation? wrap? valign? lineSpacing? case? font? fallback? title? allClasses? hideOther? showNoData? exclude? labels? columns? textSize? showLayerNames? orientation? ticks? tickSide? reverse? style? fill? outline? radius? width? dash? dir? head? angle? length? units? divisions? subdivisions? divisionsBeforeZero? labelPosition? unitLabel? unitLabelPosition? fit? map? scale? center? bearing? pitch? grid? extentIndicator? border? section? layer? field? label? group? statistic? order? bars? other? stack? values? decimals? barColor? classes? labelAlign? mirror? max? barOutline? hideLabels? rows? background?
 locator.find locator? text limit? zoom?
 map.activate name
 map.addTiles url kind? name? bounds? attribution? minZoom? maxZoom? tileSize? singleImage? tms? subdomains? layers? styleLayers? opacity? blend? resampling? overlay? top? replace? id? view? start? end? unit? interval? dates? legend? connection?
@@ -477,7 +477,7 @@ raster.info layer?
 raster.mask layer? values? min? max? inside? clear?
 raster.measure layer? kind points base?
 raster.measurements clear?
-raster.mosaic inputs name? path?
+raster.mosaic inputs name? path? ran?
 raster.process layer operation extent? polygon? selectedOnly? factor? name? ran?
 raster.project layer crs? cellSize? origin? extent? grid? resampling? name? path?
 raster.rasterize layer field? value? nodata? crs? cellSize? origin? extent? grid? name? path? ran?
