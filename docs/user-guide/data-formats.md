@@ -154,8 +154,9 @@ makes the overviews. A tile a sparse file leaves out is empty. A tile, the file'
 overview a layer holds, that fails to arrive is asked for again a minute later, or when its server
 says to in a `Retry-After` header (with a 429 or 503 answer, within the hour); the map draws again
 then. On the desktop, the command line and in Python, a part of the file whose connection the server
-drops before it is in is first asked for again, up to four times over about four seconds; if it
-still drops, adding the layer again asks the server at once. An overview that fails again waits
+drops before it is in is first asked for again, up to four times over about four seconds; if a
+COG's header still drops, adding the layer again asks for it at once (this is for COGs only: a
+PMTiles header, a tile or an overview waits the minute). An overview that fails again waits
 twice as long each time, up to an hour. On the command line and in Python, which don't draw, the
 next command run once the wait is over reads a failed overview again, waiting for it as the
 project did.
