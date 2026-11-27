@@ -2682,9 +2682,7 @@ mod native {
             return String::new();
         };
         let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        let authority = rest.get(..end).unwrap_or(rest);
-        // Credentials in the address aren't part of the server.
-        authority.rsplit_once('@').map_or(authority, |(_, h)| h).to_ascii_lowercase()
+        crate::schedule::server(rest.get(..end).unwrap_or(rest))
     }
 
     /// How many fetches may be under way at once from `host`.
@@ -3685,6 +3683,8 @@ mod native {
         omit: &'static [u16],
     ) -> Result<Fetched, Failure> {
         use std::io::Read;
+        // Kept over the tries of a dropped range: once any try carried a login, what comes back is
+        // scrubbed, as after a single try that did.
         let mut carried_login = false;
         // Local file failures are not network traffic.
         let local = crate::mbtiles::is_tile(url) || url.starts_with(LOCAL);
@@ -7188,6 +7188,11 @@ Connection: close
         }
         assert_eq!(native::cap("stac.dataspace.copernicus.eu"), native::cap("example.org"));
         assert_eq!(native::cap("download.dataspace.copernicus.eu.example.org"), native::cap("example.org"));
+        // An absolute name (a trailing dot) is its server, as the token is sent to it (#2886).
+        let absolute = "https://Download.Dataspace.Copernicus.eu./a.tif";
+        assert!(crate::copernicus::is_data_host(absolute));
+        assert_eq!(native::host(absolute), "download.dataspace.copernicus.eu");
+        assert_eq!(native::host("http://example.org.:8080/a"), "example.org:8080");
         // The newest job whose server has room.
         let full = native::cap("a.org");
         let active: HashMap<String, usize> = [("a.org".to_string(), full)].into();
