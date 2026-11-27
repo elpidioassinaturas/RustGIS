@@ -217,9 +217,27 @@ fn a_report_says_a_section_line_its_layout_page_does_not_draw() {
             "{note:?}"
         );
     }
+    // Two layouts that each leave one out: one notice counting both, each named with its layout.
+    s.run("layout.new", &json!({"page": "a4", "template": "map"})).unwrap();
+    let second = s.project.layouts[1].name.clone();
+    let other = u64::from(s.project.layouts[1].first_frame().unwrap());
+    s.run("layout.update", &json!({"layout": 1, "element": other, "center": [10, 50], "scale": 1e7})).unwrap();
+    s.run("layout.addElement", &json!({"layout": 1, "kind": "section", "at": [-150, 0]})).unwrap();
+    s.run("report.existingTemplate", &json!({"report": "R", "layout": second})).unwrap();
+    let mark = s.notice_mark();
+    s.run("report.export", &json!({"report": "R", "path": dir.0.join("r.pdf").display().to_string(), "dpi": 36})).unwrap();
+    let note: Vec<_> = said(&s, mark).into_iter().filter(|t| t.contains("section line(s)")).collect();
+    assert_eq!(note.len(), 1, "{note:?}");
+    assert!(
+        note[0].contains("2 section line(s) not drawn")
+            && note[0].contains(&format!("'{layout}'"))
+            && note[0].contains(&format!("'{second}'")),
+        "{note:?}"
+    );
+    s.run("layout.update", &json!({"layout": 1, "element": other, "section": {"name": "A", "remove": true}})).unwrap();
     // Brought into the frame, nothing is said.
     let frame = u64::from(s.project.layouts[0].first_frame().unwrap());
-    s.run("layout.update", &json!({"element": frame, "section": {"name": "A", "at": [10, 50]}})).unwrap();
+    s.run("layout.update", &json!({"layout": 0, "element": frame, "section": {"name": "A", "at": [10, 50]}})).unwrap();
     let mark = s.notice_mark();
     s.run("report.export", &json!({"report": "R", "path": dir.0.join("r.pdf").display().to_string(), "dpi": 36})).unwrap();
     assert!(!said(&s, mark).iter().any(|t| t.contains("section line(s)")));

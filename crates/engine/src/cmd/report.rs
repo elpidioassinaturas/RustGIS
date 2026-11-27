@@ -1216,10 +1216,12 @@ fn report_pages_bytes(
     Ok((rustgis_render::pdf::write(&out, &doc.title), pages.len()))
 }
 
-/// Says the section lines (#2863) the layouts of the first `n` of `pages` don't draw, once a
-/// layout however many pages show it, as the layout's own export says them.
+/// Says the section lines (#2863) the layouts of the first `n` of `pages` don't draw, as the
+/// layout's own export says them: in one notice however many layouts leave one out, each line named
+/// with its layout, and a layout on several pages counted once.
 fn say_sections_not_drawn(s: &mut Session, pages: &[rustgis_render::report::Page], n: usize) {
     let mut seen = Vec::new();
+    let mut gaps = std::collections::BTreeMap::new();
     for page in pages.iter().take(n) {
         let rustgis_render::report::Page::Layout(li) = page else { continue };
         if seen.contains(li) {
@@ -1227,11 +1229,13 @@ fn say_sections_not_drawn(s: &mut Session, pages: &[rustgis_render::report::Page
         }
         seen.push(*li);
         let Some(layout) = s.project.layouts.get(*li) else { continue };
-        let gaps = rustgis_render::layout::sections_not_drawn(layout, &s.project.maps).into_iter().map(|g| (g, 1)).collect();
-        if let Some(note) = rustgis_render::layout::sections_notice(&gaps, 1) {
-            let note = format!("The report's layout '{}': {note}", layout.name);
-            s.warn(note);
+        for mut gap in rustgis_render::layout::sections_not_drawn(layout, &s.project.maps) {
+            gap.frame_name = format!("{} in layout '{}'", gap.frame_name, layout.name);
+            gaps.insert(gap, 1);
         }
+    }
+    if let Some(note) = rustgis_render::layout::sections_notice(&gaps, 1) {
+        s.warn(format!("The report: {note}"));
     }
 }
 

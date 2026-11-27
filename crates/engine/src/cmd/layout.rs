@@ -180,7 +180,7 @@ pub fn commands() -> Vec<C> {
         C::new("layout.addElement", "Add Element", "Publish › Map Surrounds", add_element).inputs(element_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             concat!(
                 r##"{"layout"?, "##,
-                r##""kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle" (a neatline framing the page unless any of x, y, w, h is given)|"ellipse"|"circle"|"line"|"arrow"|"extentIndicator"|"grid"|"section" (a section line over a map frame, named at both ends, A and A', up to 26 a frame), "##,
+                r##""kind": "northArrow"|"scaleBar"|"legend"|"colorbar"|"text"|"dynamicText"|"picture"|"table"|"chart"|"rectangle" (a neatline framing the page unless any of x, y, w, h is given)|"ellipse"|"circle"|"line"|"arrow"|"extentIndicator"|"grid"|"section" (a section line over a map frame, named at both ends, A and A', up to 26 a frame; as a grid or an extentIndicator, it adds no element: the reply's "element" is its frame, the one layout.update changes it on with "section", and "section" its name), "##,
                 r##""frame"?: element id (default: the first map frame), "##,
                 r##""of"?: frame id (extentIndicator, which also takes "color" and "width" in points, default red and 2), "##,
                 r##""text"? (a text's words; {count:Layer}, {sum:Layer:field}, {mean:Layer:field}, {min:Layer:field} and {max:Layer:field} show the layer's figure, as {scale} shows the scale: of the first map frame's map, over the features the layer's definition query keeps, with the layout's decimal mark; one with no figure shows as written and says why), "##,
