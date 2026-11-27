@@ -201,8 +201,9 @@ pub struct MosaicForm {
     /// The GeoTIFF to write; empty: none.
     pub path: String,
     /// The project ([`rustgis_engine::Session::opened`]) and the map in it the list's layers are
-    /// from.
-    pub project: Option<(u64, usize)>,
+    /// from, by its name (a project's maps have names of their own, case aside, as commands find
+    /// them by it): a map's place changes when another one is deleted.
+    pub project: Option<(u64, String)>,
 }
 
 /// A Script pane run, as the line above its results tells it: its number since the project opened
@@ -1654,12 +1655,12 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
 fn mosaic_section(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     heading(ui, "Join tiles of one grid into one raster");
     ui.label(egui::RichText::new(tl!("Where tiles overlap, the first in the list with data wins.")).small().weak());
-    let opened = (app.session.opened, app.session.project.active_map);
+    let opened = (app.session.opened, app.session.map().name.to_ascii_lowercase());
     let m = &mut app.workflow.mosaic;
-    // Another project opened, however it came, or another map shown: the list's layers were the
-    // old map's, a same-named one too, so they leave it. A layer removed leaves it too. A file
-    // stays.
-    if m.project.is_some_and(|p| p != opened) {
+    // Another project opened, however it came, or another map shown (the one shown deleted, or
+    // renamed, too): the list's layers were the old map's, a same-named one too, so they leave
+    // it. A layer removed leaves it too. A file stays.
+    if m.project.as_ref().is_some_and(|p| *p != opened) {
         m.inputs.retain(|(_, file)| *file);
     }
     m.project = Some(opened);
@@ -1717,7 +1718,14 @@ fn mosaic_section(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
             m.inputs.push((path, true));
         }
     });
-    if let Some(name) = shared {
+    // A listed layer whose name another layer has too (renamed, or moved before it, since it was
+    // added) can't be told apart by the command, which reads the first: Mosaic waits for a rename.
+    let clash = m
+        .inputs
+        .iter()
+        .find(|(n, file)| !file && map.layers.iter().filter(|l| l.name.eq_ignore_ascii_case(n)).count() > 1)
+        .map(|(n, _)| n.clone());
+    if let Some(name) = clash.as_ref().or(shared) {
         let text = crate::i18n::fmt(
             "{name}: another layer has this name, and the mosaic reads the first layer with it: rename one of them",
             &[("name", name.as_str())],
@@ -1757,9 +1765,11 @@ fn mosaic_section(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
             m.path.clear();
         }
     });
-    let ready = m.inputs.len() >= 2;
+    let ready = m.inputs.len() >= 2 && clash.is_none();
     let button = ui.add_enabled(ready, egui::Button::new(tl!("Mosaic")));
-    if button.on_disabled_hover_text(tl!("Add two or more rasters")).clicked() {
+    let why =
+        if clash.is_some() { tl!("Another layer has a listed layer's name: rename one of them") } else { tl!("Add two or more rasters") };
+    if button.on_disabled_hover_text(why).clicked() {
         let mut p = json!({"inputs": m.inputs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()});
         if !m.name.trim().is_empty() {
             p["name"] = json!(m.name.trim());
@@ -3875,6 +3885,17 @@ mod tests {
         app.session.run("map.new", &json!({"name": "Other"})).unwrap();
         draw(&mut app);
         assert_eq!(app.workflow.mosaic.inputs, vec![("tiles/east.tif".to_string(), true)]);
+        // The map shown deleted: the next one takes its place (index 0) and is another map.
+        let first = app.session.project.maps[0].name.clone();
+        app.session.run("map.activate", &json!({"name": first})).unwrap();
+        draw(&mut app);
+        app.workflow.mosaic.inputs.insert(0, ("west".to_string(), false));
+        draw(&mut app);
+        assert_eq!(app.workflow.mosaic.inputs.len(), 2, "kept on its own map");
+        app.session.run("map.remove", &json!({"name": first})).unwrap();
+        assert_eq!(app.session.project.active_map, 0);
+        draw(&mut app);
+        assert_eq!(app.workflow.mosaic.inputs, vec![("tiles/east.tif".to_string(), true)]);
     }
 
     /// Commands find a raster by its name, case aside: a layer whose name another listed one has
@@ -3893,6 +3914,39 @@ mod tests {
         let rasters = ["cities".to_string(), "west".to_string()];
         ctx.run_ui(egui::RawInput::default(), |ui| mosaic_section(&mut app, ui, &rasters)).textures_delta.clear();
         assert_eq!(app.workflow.mosaic.add, "west", "\"cities\" would be read as the vector layer \"Cities\"");
+    }
+
+    /// A listed layer whose name another layer comes to have (renamed, or moved before it) can't be
+    /// told apart by the command, so Mosaic waits until one of them is renamed.
+    #[test]
+    fn a_listed_name_another_layer_comes_to_share_holds_the_mosaic() {
+        let mut app = RustGisApp::with_sample();
+        let (listed, other) = {
+            let layers = &app.session.map().layers;
+            (layers[0].name.clone(), layers[1].id)
+        };
+        app.workflow.mosaic.inputs = vec![(listed.clone(), false), ("tiles/east.tif".to_string(), true)];
+        let rasters = [listed.clone()];
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 600.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                mosaic_section(app, ui, &rasters);
+            },
+            app,
+        );
+        h.run();
+        let off = |h: &egui_kittest::Harness<'_, RustGisApp>| {
+            egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Mosaic")).is_disabled()
+        };
+        assert!(!off(&h), "two inputs, each its own");
+        h.state_mut().session.run("layer.rename", &json!({"layer": other, "name": listed.to_lowercase()})).unwrap();
+        h.run();
+        assert!(off(&h), "{listed} is now two layers' name");
     }
 
     /// Interpolate runs on a thread of its own from the pane (#1291 step 3): the pane goes on while
