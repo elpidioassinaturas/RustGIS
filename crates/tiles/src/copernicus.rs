@@ -39,9 +39,10 @@ pub const DATA_HOSTS: &[&str] = &["download.dataspace.copernicus.eu", "zipper.da
 /// The hosts where a request counts against the account's quota: [`DATA_HOSTS`] and CDSE's S3
 /// endpoint.
 const QUOTA_HOSTS: &[&str] = &["download.dataspace.copernicus.eu", "zipper.dataspace.copernicus.eu", "eodata.dataspace.copernicus.eu"];
-/// Requests under way at once to each of [`QUOTA_HOSTS`]: the connections a general account may
-/// have open (<https://documentation.dataspace.copernicus.eu/Quotas.html>). One more is refused
-/// with 429.
+/// Requests under way at once to each of [`QUOTA_HOSTS`], counted per host: the connections a
+/// general account may have open (<https://documentation.dataspace.copernicus.eu/Quotas.html>).
+/// One more is refused with 429. The quota counts an account's connections over all its hosts, so
+/// layers read from two hosts at once may still meet one.
 pub(crate) const PER_HOST: usize = 4;
 /// Where an account is made.
 pub const SIGN_UP: &str = "https://dataspace.copernicus.eu";
