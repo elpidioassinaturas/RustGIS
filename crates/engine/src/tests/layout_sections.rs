@@ -185,8 +185,6 @@ fn a_section_line_not_drawn_is_said() {
     }
 }
 
-/// Section lines are required where they are saved, so an older reader refuses the project instead
-/// of drawing its frames without them and saving it so. A layout without one needs nothing.
 /// A report's layout page is drawn as the layout's own export is, and says the same of a section
 /// line it can't draw, once a layout, as an image as in a PDF.
 #[test]
@@ -224,6 +222,8 @@ fn a_report_says_a_section_line_its_layout_page_does_not_draw() {
     assert!(!said(&s, mark).iter().any(|t| t.contains("section line(s)")));
 }
 
+/// Section lines are required where they are saved, so an older reader refuses the project instead
+/// of drawing its frames without them and saving it so. A layout without one needs nothing.
 #[test]
 fn section_capability_follows_saved_layouts_and_commands() {
     let fixture = Project::from_json(include_str!("../../../../schema/fixtures/layout_section.rgis")).unwrap();
