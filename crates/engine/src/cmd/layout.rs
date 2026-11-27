@@ -245,7 +245,7 @@ pub fn commands() -> Vec<C> {
                 r##""labelOrientation"?: "horizontal"|"vertical", "##,
                 r##""labelSize"?: points, 4 to 100 (its labels, their room from the frame's edge and MGRS squares' names following; default 8; null gives it back; refused outside that range, and for other kinds unless null), "##,
                 r##""off"?: bool (grid; options not given keep the grid's), "##,
-                r##""name"?: a section's name, up to 20 characters, its frame's only one of that name (section, default the first free letter; other kinds say they ignore it), "##,
+                r##""name"?: a section's name, up to 20 characters, its frame's only one of that name (section, default the first free letter; a grid and an extent indicator refuse it, other kinds say they ignore it), "##,
                 r##""direction"?: "horizontal" (the default)|"vertical" (section: across the whole frame, straight on the page, named at its left and right ends or its top and bottom ones; refused for other kinds), "##,
                 r##""at"?: [longitude, latitude] (section: the place the line runs through and keeps to when the frame is moved, turned or rescaled, default the frame's centre; a line whose place is outside the frame isn't drawn, which a notice and exports say; refused for other kinds), "##,
                 r##""outline"?: "#RRGGBB" (northArrow, or a rectangle's, ellipse's or circle's outline instead of color; refused for other kinds), "##,

@@ -110,10 +110,13 @@ fn section_lines_are_added_changed_removed_and_undone() {
         p[key] = json!("x");
         assert!(s.run("layout.addElement", &p).unwrap_err().contains("only sections"), "{key}");
     }
-    for kind in ["rectangle", "grid"] {
-        let mark = s.notice_mark();
-        s.run("layout.addElement", &json!({"kind": kind, "name": "x"})).unwrap();
-        assert!(said(&s, mark)[0].contains("ignores \"name\""), "{:?}", said(&s, mark));
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "rectangle", "name": "x"})).unwrap();
+    assert!(said(&s, mark)[0].contains("ignores \"name\""), "{:?}", said(&s, mark));
+    // A grid and an extent indicator refuse any key they don't read (#2890).
+    for kind in ["grid", "extentIndicator"] {
+        let e = s.run("layout.addElement", &json!({"kind": kind, "name": "x"})).unwrap_err();
+        assert!(e.contains("takes no \"name\""), "{e}");
     }
     let rect = s.run("layout.addElement", &json!({"kind": "rectangle"})).unwrap()["element"].clone();
     let err = s.run("layout.update", &json!({"element": rect, "section": {"name": "A"}})).unwrap_err();
