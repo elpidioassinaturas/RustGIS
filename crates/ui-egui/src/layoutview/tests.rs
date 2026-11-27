@@ -553,6 +553,29 @@ fn a_selected_frames_section_line_is_dragged() {
     let half = layout.element(frame).unwrap().h as f32 * page_rect(&h.state().layout, area.get(), &layout).1 / 2.0;
     assert_eq!(drag(&mut h, (0.25, 0.5), vec2(0.0, -half - 5.0)).1, CursorIcon::NotAllowed);
     assert_eq!(held(h.state()), after);
+    // A line removed by a command while it is dragged: the drop moves no other line in its place.
+    let layout = h.state().session.project.layouts[li].clone();
+    let e = layout.element(frame).unwrap();
+    let (page, s) = page_rect(&h.state().layout, area.get(), &layout);
+    let from = to_screen(page, s, (e.x + e.w * 0.25, e.y + e.h * 0.5));
+    h.event(Event::PointerMoved(from));
+    h.step();
+    h.event(button(from, true));
+    h.step();
+    h.event(Event::PointerMoved(from + vec2(20.0, 20.0)));
+    h.step();
+    h.state_mut().run("layout.update", json!({"element": frame, "section": {"name": "A", "remove": true}})).unwrap();
+    h.event(Event::PointerMoved(from + vec2(20.0, 40.0)));
+    h.step();
+    h.event(button(from + vec2(20.0, 40.0), false));
+    h.step();
+    h.run_steps(2);
+    let e = h.state().session.project.layouts[li].element(frame).unwrap().clone();
+    let ElementKind::MapFrame { sections, .. } = &e.kind else { panic!("a map frame") };
+    assert!(sections.len() == 1 && sections[0].name == "B" && sections[0].line.at() == after.1, "{sections:?}");
+    h.state_mut().run("edit.undo", json!({})).unwrap();
+    assert_eq!(held(h.state()), after);
+    h.run_steps(2);
     // Map frames being navigated, a drag on the line pans the frame's map.
     h.state_mut().layout.navigate = true;
     drag(&mut h, (0.25, 0.5), vec2(0.0, 30.0));

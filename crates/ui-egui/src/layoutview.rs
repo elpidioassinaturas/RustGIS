@@ -572,8 +572,8 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
         painter.text(top + vec2(0.0, -4.0), Align2::LEFT_BOTTOM, &e.name, regular(11.0), accent);
     }
     // A section line being dragged: where it will be, and its place.
-    if let (Some(Drag::Section(id, i, start)), Some(p)) = (app.layout.drag, pointer)
-        && let Some((e, name, at, ends)) = section_landing(app, &layout, (id, i, start), to_mm(page, s, p))
+    if let (Some(Drag::Section(id, i, line, start)), Some(p)) = (app.layout.drag, pointer)
+        && let Some((e, name, at, ends)) = section_landing(app, &layout, (id, i, line, start), to_mm(page, s, p))
     {
         painter.line_segment(section_on_screen(e, page, s, ends), Stroke::new(2.0, accent));
         let label = format!("{name}: {:.4}°, {:.4}°", at.x, at.y);

@@ -3,7 +3,7 @@
 use super::*;
 use crate::RustGisApp;
 use egui::{CursorIcon, Pos2, Rect, Ui};
-use rustgis_engine::map::layout::{ElementKind, Layout, MAX_FRAME_SCALE, MIN_FRAME_SCALE, PT_PER_MM, frame_camera};
+use rustgis_engine::map::layout::{ElementKind, Layout, MAX_FRAME_SCALE, MIN_FRAME_SCALE, PT_PER_MM, SectionLine, frame_camera};
 use serde_json::json;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -22,9 +22,10 @@ pub(super) enum Drag {
     NewGuide(bool),
     /// Moving a guide: vertical or horizontal, and its index.
     Guide(bool, usize),
-    /// Moving a map frame's section line across itself: the frame, the line's index, and the
-    /// pointer's page position (mm) at the start.
-    Section(u32, usize, (f64, f64)),
+    /// Moving a map frame's section line across itself: the frame, the line's index and the line
+    /// as it was when taken (a command that changes the frame's lines meanwhile lets it go), and
+    /// the pointer's page position (mm) at the start.
+    Section(u32, usize, SectionLine, (f64, f64)),
     /// Turning a line or arrow by its rotation handle: its id, its angle at the start, and the
     /// pointer's angle about its centre then (degrees).
     Rotate(u32, f64, f64),
@@ -105,7 +106,7 @@ pub(super) fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response,
             Some(Drag::Move(id, p)) => Some(Drag::Move(id, rebase(p))),
             Some(Drag::Resize(id, h, p)) => Some(Drag::Resize(id, h, rebase(p))),
             Some(Drag::PanFrame(id, p)) => Some(Drag::PanFrame(id, rebase(p))),
-            Some(Drag::Section(id, i, p)) => Some(Drag::Section(id, i, rebase(p))),
+            Some(Drag::Section(id, i, line, p)) => Some(Drag::Section(id, i, line, rebase(p))),
             d => d,
         };
     }
@@ -163,8 +164,8 @@ pub(super) fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response,
         let knob = app.layout.drag.is_none() && rotate_at(app, layout, page, s, p).is_some();
         // A section line shows which way it can be dragged, and where it can't be put.
         let section = match app.layout.drag {
-            Some(Drag::Section(id, i, start)) => {
-                let lands = section_landing(app, layout, (id, i, start), to_mm(page, s, p)).is_some();
+            Some(Drag::Section(id, i, line, start)) => {
+                let lands = section_landing(app, layout, (id, i, line, start), to_mm(page, s, p)).is_some();
                 Some(if lands { section_cursor(section_vertical(layout, id, i)) } else { CursorIcon::NotAllowed })
             }
             None if !knob => {
@@ -262,7 +263,9 @@ pub(super) fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response,
                 (None, Some((id, h)), ..) => Some(Drag::Resize(id, h, p)),
                 (None, None, Some((vertical, i)), _) => Some(Drag::Guide(vertical, i)),
                 // The selected frame's section line, over its map.
-                (None, None, None, Some(_)) if section.is_some() => section.map(|(id, i, _)| Drag::Section(id, i, p)),
+                (None, None, None, Some(_)) if section.is_some() => {
+                    section.and_then(|(id, i, _)| section_line(layout, id, i)).map(|(id, i, line)| Drag::Section(id, i, line, p))
+                }
                 // A locked element is selected and stays put, its map too.
                 (None, None, None, Some(id)) if locked(layout, id) => {
                     app.layout.selected = Some(id);
@@ -309,10 +312,10 @@ pub(super) fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response,
                 let at = ui.input(|i| i.pointer.latest_pos());
                 drop_guide(app, layout, li, page, s, resp.rect, v, Some(i), at);
             }
-            (Some(Drag::Section(id, i, start)), Some(end)) => {
+            (Some(Drag::Section(id, i, line, start)), Some(end)) => {
                 // A press that hardly moved is a click; dropped where it isn't drawn, the line stays.
                 if ((end.0 - start.0).abs() > 0.2 || (end.1 - start.1).abs() > 0.2)
-                    && let Some((_, name, at, _)) = section_landing(app, layout, (id, i, start), end)
+                    && let Some((_, name, at, _)) = section_landing(app, layout, (id, i, line, start), end)
                 {
                     let section = json!({"name": name, "at": [at.x, at.y]});
                     let _ = app.run("layout.update", json!({"layout": li, "element": id, "section": section}));
