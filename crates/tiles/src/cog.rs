@@ -1634,6 +1634,12 @@ fn ask_again_if_dropped(url: &str) {
     }
 }
 
+/// [`ask_again_if_dropped`] for a layer added without its header read first (a plugin's command in
+/// the app, a data cube's file): the map's draw that follows reads it again.
+pub fn forget_dropped(url: &str) {
+    ask_again_if_dropped(split(url).0);
+}
+
 /// Whether the file at `url` is a cloud-optimised GeoTIFF, waiting for the answer (the command
 /// line): `Ok(false)` for any other file, read whole instead.
 #[cfg(not(target_arch = "wasm32"))]

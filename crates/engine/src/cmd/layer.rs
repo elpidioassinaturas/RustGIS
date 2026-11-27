@@ -5934,6 +5934,11 @@ pub(crate) fn add_cog_with(s: &mut Session, p: &Value, url: &str, strict: bool, 
     // (which follow the time slider) and AlphaEarth's quantised embeddings (which raster styles
     // don't dequantise) are tile layers.
     let (file, mut look) = crate::render::rustgis_tiles::cog::split(url);
+    // A header not read first (a plugin's command in the app, a data cube's file) whose connection
+    // dropped is read again by what draws the layer now, as a probed one is (#2886).
+    if !probed {
+        crate::render::rustgis_tiles::cog::forget_dropped(file);
+    }
     // A key given as `null` (a script's unused one) asks for nothing.
     let given = |k: &str| p.get(k).filter(|v| !v.is_null());
     // A data cube's file stays a tile layer, its project opened again too: its address says so.
