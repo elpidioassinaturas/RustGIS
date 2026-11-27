@@ -3526,7 +3526,9 @@ mod native {
         matches!(e.kind(), BrokenPipe | ConnectionAborted | ConnectionReset | UnexpectedEof)
     }
 
-    /// Waits `wait` out, or stops once the request is no longer wanted.
+    /// Waits `wait` out, or stops once the request is no longer wanted. A queued fetch keeps its
+    /// place at its server meanwhile, so a server that drops connections isn't asked for more at
+    /// once while it does.
     fn pause(wait: std::time::Duration) -> Result<(), String> {
         let end = std::time::Instant::now() + wait;
         loop {
