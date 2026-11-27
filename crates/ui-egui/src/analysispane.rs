@@ -200,8 +200,9 @@ pub struct MosaicForm {
     pub name: String,
     /// The GeoTIFF to write; empty: none.
     pub path: String,
-    /// The project ([`rustgis_engine::Session::opened`]) the list's layers are from.
-    pub project: Option<u64>,
+    /// The project ([`rustgis_engine::Session::opened`]) and the map in it the list's layers are
+    /// from.
+    pub project: Option<(u64, usize)>,
 }
 
 /// A Script pane run, as the line above its results tells it: its number since the project opened
@@ -1653,10 +1654,11 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
 fn mosaic_section(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     heading(ui, "Join tiles of one grid into one raster");
     ui.label(egui::RichText::new(tl!("Where tiles overlap, the first in the list with data wins.")).small().weak());
-    let opened = app.session.opened;
+    let opened = (app.session.opened, app.session.project.active_map);
     let m = &mut app.workflow.mosaic;
-    // Another project opened, however it came: the list's layers were the old project's, a
-    // same-named one too, so they leave it. A layer removed leaves it too. A file stays.
+    // Another project opened, however it came, or another map shown: the list's layers were the
+    // old map's, a same-named one too, so they leave it. A layer removed leaves it too. A file
+    // stays.
     if m.project.is_some_and(|p| p != opened) {
         m.inputs.retain(|(_, file)| *file);
     }
@@ -1685,13 +1687,14 @@ fn mosaic_section(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
         Some((i, None)) => drop(m.inputs.remove(i)),
         None => {}
     }
-    // Commands find a raster by its name, case aside (`layer_by_name`): a layer whose name a
-    // listed or an earlier one has would be read as that one, so it isn't offered, and the
-    // section says so.
+    // Commands find a layer by its name, case aside (`layer_by_name`), of any kind: a raster whose
+    // name a listed raster, an earlier one or a vector layer before it has would be read as that
+    // one, so it isn't offered, and the section says so.
+    let map = app.session.map();
     let mut left: Vec<String> = Vec::new();
     let mut shared = None;
     for (i, r) in rasters.iter().enumerate() {
-        if rasters[..i].iter().any(|o| o.eq_ignore_ascii_case(r)) {
+        if rasters[..i].iter().any(|o| o.eq_ignore_ascii_case(r)) || map.layer_by_name(r).is_some_and(|l| !l.is_raster()) {
             shared.get_or_insert(r);
         } else if !m.inputs.iter().any(|(n, f)| !f && n.eq_ignore_ascii_case(r)) {
             left.push(r.clone());
@@ -1716,14 +1719,13 @@ fn mosaic_section(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     });
     if let Some(name) = shared {
         let text = crate::i18n::fmt(
-            "{name}: another layer has this name, so only the first can be joined: rename one of them",
+            "{name}: another layer has this name, and the mosaic reads the first layer with it: rename one of them",
             &[("name", name.as_str())],
         );
         ui.label(egui::RichText::new(text).small().weak());
     }
     // The command's own name, unless one is typed: its first raster's (a layer renamed keeps its
     // raster's name), or a file's name.
-    let map = app.session.map();
     let named = m.inputs.first().map_or_else(String::new, |(n, file)| {
         let n = if *file {
             std::path::Path::new(n).file_stem().and_then(|f| f.to_str()).unwrap_or(n)
@@ -3850,8 +3852,8 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Another project opening leaves the Mosaic list's layers, a same-named one there too: they
-    /// were the old project's. Its files stay, as they are on no map.
+    /// Another project opening, or another map shown, leaves the Mosaic list's layers, a
+    /// same-named one there too: they were the old map's. Its files stay, as they are on no map.
     #[test]
     fn another_project_leaves_the_mosaic_list_layers() {
         let mut app = RustGisApp::with_sample();
@@ -3866,6 +3868,13 @@ mod tests {
         app.session.run("project.new", &Value::Null).unwrap();
         draw(&mut app);
         assert_eq!(app.workflow.mosaic.inputs, vec![("tiles/east.tif".to_string(), true)]);
+        // Another map of the same project.
+        app.workflow.mosaic.inputs.insert(0, ("west".to_string(), false));
+        draw(&mut app);
+        assert_eq!(app.workflow.mosaic.inputs.len(), 2, "kept on its own map");
+        app.session.run("map.new", &json!({"name": "Other"})).unwrap();
+        draw(&mut app);
+        assert_eq!(app.workflow.mosaic.inputs, vec![("tiles/east.tif".to_string(), true)]);
     }
 
     /// Commands find a raster by its name, case aside: a layer whose name another listed one has
@@ -3878,6 +3887,12 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.run_ui(egui::RawInput::default(), |ui| mosaic_section(&mut app, ui, &rasters)).textures_delta.clear();
         assert_eq!(app.workflow.mosaic.add, "west", "\"dem\" would be read as \"DEM\"");
+        // A raster named as a vector layer before it ("Cities", case aside) is read as that one.
+        app.workflow.mosaic.inputs.clear();
+        app.workflow.mosaic.add.clear();
+        let rasters = ["cities".to_string(), "west".to_string()];
+        ctx.run_ui(egui::RawInput::default(), |ui| mosaic_section(&mut app, ui, &rasters)).textures_delta.clear();
+        assert_eq!(app.workflow.mosaic.add, "west", "\"cities\" would be read as the vector layer \"Cities\"");
     }
 
     /// Interpolate runs on a thread of its own from the pane (#1291 step 3): the pane goes on while
