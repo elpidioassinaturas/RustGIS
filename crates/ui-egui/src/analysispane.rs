@@ -1685,7 +1685,18 @@ fn mosaic_section(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
         Some((i, None)) => drop(m.inputs.remove(i)),
         None => {}
     }
-    let left: Vec<String> = rasters.iter().filter(|r| !m.inputs.iter().any(|(n, f)| !f && n == *r)).cloned().collect();
+    // Commands find a raster by its name, case aside (`layer_by_name`): a layer whose name a
+    // listed or an earlier one has would be read as that one, so it isn't offered, and the
+    // section says so.
+    let mut left: Vec<String> = Vec::new();
+    let mut shared = None;
+    for (i, r) in rasters.iter().enumerate() {
+        if rasters[..i].iter().any(|o| o.eq_ignore_ascii_case(r)) {
+            shared.get_or_insert(r);
+        } else if !m.inputs.iter().any(|(n, f)| !f && n.eq_ignore_ascii_case(r)) {
+            left.push(r.clone());
+        }
+    }
     if !left.contains(&m.add) {
         m.add = left.first().cloned().unwrap_or_default();
     }
@@ -1703,6 +1714,13 @@ fn mosaic_section(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
             m.inputs.push((path, true));
         }
     });
+    if let Some(name) = shared {
+        let text = crate::i18n::fmt(
+            "{name}: another layer has this name, so only the first can be joined: rename one of them",
+            &[("name", name.as_str())],
+        );
+        ui.label(egui::RichText::new(text).small().weak());
+    }
     // The command's own name, unless one is typed: its first raster's (a layer renamed keeps its
     // raster's name), or a file's name.
     let map = app.session.map();
@@ -3848,6 +3866,18 @@ mod tests {
         app.session.run("project.new", &Value::Null).unwrap();
         draw(&mut app);
         assert_eq!(app.workflow.mosaic.inputs, vec![("tiles/east.tif".to_string(), true)]);
+    }
+
+    /// Commands find a raster by its name, case aside: a layer whose name another listed one has
+    /// isn't offered, as it would be read as that one, and the section says so.
+    #[test]
+    fn a_name_two_layers_share_is_offered_once() {
+        let mut app = RustGisApp::with_sample();
+        app.workflow.mosaic.inputs = vec![("DEM".to_string(), false)];
+        let rasters = ["DEM".to_string(), "dem".to_string(), "west".to_string()];
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| mosaic_section(&mut app, ui, &rasters)).textures_delta.clear();
+        assert_eq!(app.workflow.mosaic.add, "west", "\"dem\" would be read as \"DEM\"");
     }
 
     /// Interpolate runs on a thread of its own from the pane (#1291 step 3): the pane goes on while
