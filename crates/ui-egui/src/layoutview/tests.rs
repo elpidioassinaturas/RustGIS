@@ -610,6 +610,23 @@ fn a_selected_frames_section_line_is_dragged() {
     let quarter = layout.element(frame).unwrap().w as f32 * page_rect(&h.state().layout, area.get(), &layout).1 / 4.0;
     assert_eq!(drag(&mut h, (0.75, 0.5), vec2(quarter + 10.0, 10.0)).1, CursorIcon::NotAllowed);
     assert_eq!(held(h.state()), after);
+    // An ellipse's frame: dropped in a corner of its box, outside the ellipse, it stays too.
+    let shaped = |h: &mut egui_kittest::Harness<RustGisApp>, to: rustgis_engine::map::layout::FrameShape| {
+        let e = h.state_mut().session.project.layouts[li].elements.iter_mut().find(|e| e.id == frame).unwrap();
+        let ElementKind::MapFrame { shape, .. } = &mut e.kind else { panic!("a map frame") };
+        *shape = to;
+        h.state_mut().session.revision += 1;
+    };
+    shaped(&mut h, rustgis_engine::map::layout::FrameShape::Ellipse);
+    h.run_steps(2);
+    let layout = h.state().session.project.layouts[li].clone();
+    let e = layout.element(frame).unwrap();
+    let s = page_rect(&h.state().layout, area.get(), &layout).1;
+    let corner = vec2(-0.2 * e.w as f32 * s, -0.4 * e.h as f32 * s);
+    assert_eq!(drag(&mut h, (0.25, 0.5), corner).1, CursorIcon::NotAllowed);
+    assert_eq!(held(h.state()), after);
+    shaped(&mut h, rustgis_engine::map::layout::FrameShape::Rectangle);
+    h.run_steps(2);
     // Map frames being navigated, a drag on the line pans the frame's map.
     h.state_mut().layout.navigate = true;
     drag(&mut h, (0.25, 0.5), vec2(0.0, 30.0));
@@ -1979,6 +1996,24 @@ fn a_frame_adds_names_and_removes_section_lines() {
     h.key_press(egui::Key::Enter);
     h.run_steps(3);
     assert_eq!(held(h.state()), [("Serra".to_string(), "vertical")]);
+    // A name another line has is refused, and that is said.
+    h.get_by_label("Add Vertical").click();
+    h.run_steps(3);
+    let said = h.state().session.notices.len();
+    let name = h.get_all_by_role(egui::accesskit::Role::TextInput).find(|n| n.value().as_deref() == Some("A")).unwrap();
+    name.focus();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(1);
+    h.event(egui::Event::Text("serra".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(held(h.state()), [("Serra".to_string(), "vertical"), ("A".to_string(), "vertical")]);
+    let notices = &h.state().session.notices;
+    assert!(notices.len() > said && notices.iter().skip(said).any(|n| n.text.contains("Serra")), "{notices:?}");
+    h.state_mut().run("layout.update", json!({"element": frame, "section": {"name": "A", "remove": true}})).unwrap();
+    h.run_steps(3);
     // Moved off the frame, it says so.
     h.state_mut().run("layout.update", json!({"element": frame, "section": {"name": "Serra", "at": [-150, 0]}})).unwrap();
     h.run_steps(3);

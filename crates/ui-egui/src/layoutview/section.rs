@@ -4,7 +4,7 @@
 use super::*;
 use egui::{CursorIcon, Pos2, Rect};
 use rustgis_engine::geom::Coord;
-use rustgis_engine::map::layout::{Element, Layout, Section, SectionLine};
+use rustgis_engine::map::layout::{Element, FrameShape, Layout, Section, SectionLine};
 use rustgis_engine::map::{Camera, Map};
 use rustgis_engine::render::layout::{SectionEnds, section_ends, section_moved};
 
@@ -77,6 +77,24 @@ pub(super) fn section_cursor(vertical: bool) -> CursorIcon {
     if vertical { CursorIcon::ResizeHorizontal } else { CursorIcon::ResizeVertical }
 }
 
+/// Whether page point `at` (mm) is on frame `e`, within its `shape` (a circle as wide as the
+/// shorter side, as it is drawn), counted as the shape is filled: by its winding number.
+fn in_shape(e: &Element, shape: &FrameShape, at: (f64, f64)) -> bool {
+    let (x, y) = e.unturned(at.0, at.1);
+    let (x, y) = (x - e.x, y - e.y);
+    let side = e.w.min(e.h);
+    let (bw, bh) = if *shape == FrameShape::Circle { (side, side) } else { (e.w, e.h) };
+    let outline: Vec<(f64, f64)> =
+        shape.outline().into_iter().map(|(u, v)| ((e.w - bw) / 2.0 + u * bw, (e.h - bh) / 2.0 + v * bh)).collect();
+    let winding: i32 = outline
+        .iter()
+        .zip(outline.iter().cycle().skip(1))
+        .filter(|(a, b)| (a.1 <= y) != (b.1 <= y) && a.0 + (y - a.1) / (b.1 - a.1) * (b.0 - a.0) <= x)
+        .map(|(a, _)| if a.1 <= y { 1 } else { -1 })
+        .sum();
+    winding != 0
+}
+
 /// Where a section line being dragged (its frame, its index, the line taken and the drag's start)
 /// lands with the pointer at `at` (mm): the frame, the line's name, its place, and its ends in the
 /// frame's points; `None` off the frame, or where the frame would not draw it.
@@ -89,9 +107,9 @@ pub(super) fn section_landing<'a>(
     let e = layout.element(id)?;
     let ElementKind::MapFrame { shape, sections, .. } = &e.kind else { return None };
     // The line taken, still at its index: one removed, moved, renamed or replaced meanwhile isn't
-    // moved. Dropped off the frame, it stays.
+    // moved. Dropped off the frame or outside its shape, it stays.
     let l = sections.get(i).filter(|l| Taken::of(l) == taken)?;
-    if !e.contains(at.0, at.1) {
+    if !in_shape(e, shape, at) {
         return None;
     }
     let (map, cam) = frame_map(app, e)?;
