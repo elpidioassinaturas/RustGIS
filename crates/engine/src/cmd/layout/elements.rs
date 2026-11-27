@@ -572,7 +572,6 @@ pub(in crate::cmd::layout) fn add_element(s: &mut Session, p: &Value) -> CmdResu
             }
             let range = (rustgis_map::layout::MIN_INDICATOR_WIDTH, rustgis_map::layout::MAX_INDICATOR_WIDTH);
             say_held(s, "Add Element", held_width(p, "extent indicator width", range).into_iter().collect());
-            say_name_ignored(s, p, kind);
             return Ok(json!({"element": frame}));
         }
         "grid" => {
@@ -594,7 +593,6 @@ pub(in crate::cmd::layout) fn add_element(s: &mut Session, p: &Value) -> CmdResu
             {
                 crate::cmd::say_crs_note(s, text);
             }
-            say_name_ignored(s, p, kind);
             return Ok(json!({"element": frame}));
         }
         "section" => {

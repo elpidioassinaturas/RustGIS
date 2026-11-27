@@ -6896,11 +6896,9 @@ fn a_section_line_runs_across_its_frame_through_its_place() {
     assert!(ends(&globe, whole, &rect, far).unwrap_err().contains("map shows"));
 }
 
-/// A frame's section lines are drawn over its map in their colour, dashed, with their names at
-/// both ends, clipped to its shape, as pixels and as vectors in a layer of their own; a frame
-/// without one draws the same page as before.
-/// A section's names stay in their frame across the line as along it, and the frame's credit
-/// keeps clear of every one of them, the left one too once it has gone left of the right one.
+/// A section's names stay in their frame across the line as along it, each clear of the other on
+/// a short line, and the frame's credit keeps clear of every one of them and in the frame: the
+/// left one too once it has gone left of the right one, and both of a vertical line's.
 #[test]
 fn section_names_stay_in_the_frame_and_clear_of_the_credit() {
     let (w, h) = (200.0f32, 100.0f32);
@@ -6920,19 +6918,56 @@ fn section_names_stay_in_the_frame_and_clear_of_the_credit() {
     }
     // A credit 170 points wide goes left of the right name at the foot of the frame, and then
     // not over the left one.
-    let mut pm = Canvas::new(w as u32, h as u32).unwrap();
+    // A credit 100 points wide on a frame 37 points tall beside a vertical line near its right edge
+    // goes left of both its names, not above them out of the frame.
+    let credit_clear = |(w, h): (f32, f32), s: &Section, ends: SectionEnds, tw: f32| {
+        let mut pm = Canvas::new(w as u32, h as u32).unwrap();
+        let names = draw_sections(&mut pm, &[(s, ends)], 1.0);
+        let (bottom, right) = attribution_inset((w, h), tw, &names);
+        let size = crate::ATTRIBUTION_SIZE;
+        let (cx, cy) = (crate::attribution_center(w, tw, right), h - bottom - size * 0.9);
+        let (x0, x1, y0, y1) = (cx - tw / 2.0, cx + tw / 2.0, cy - size * 0.8, cy + size * 0.8);
+        assert!(x0 >= 0.0 && y0 >= 0.0 && y1 <= h, "the credit {:?} leaves the frame", (x0, y0, x1, y1));
+        for (_, b) in &names {
+            assert!(!(x0 < b[2] && b[0] < x1 && y0 < b[3] && b[1] < y1), "the credit {:?} covers {b:?}", (x0, y0, x1, y1));
+        }
+    };
     let (s, ends) = &near_edges[1];
-    let names = draw_sections(&mut pm, &[(s, *ends)], 1.0);
-    let tw = 170.0;
-    let (bottom, right) = attribution_inset((w, h), tw, &names);
-    let size = crate::ATTRIBUTION_SIZE;
-    let (cx, cy) = (crate::attribution_center(w, tw, right), h - bottom - size * 0.9);
-    let (x0, x1, y0, y1) = (cx - tw / 2.0, cx + tw / 2.0, cy - size * 0.8, cy + size * 0.8);
-    for (_, b) in &names {
-        assert!(!(x0 < b[2] && b[0] < x1 && y0 < b[3] && b[1] < y1), "the credit {:?} covers {b:?}", (x0, y0, x1, y1));
+    credit_clear((w, h), s, *ends, 170.0);
+    credit_clear((200.0, 37.0), &section(SectionLine::Vertical(at)), [(185.0, 0.0), (185.0, 37.0)], 100.0);
+    // On a line too short for both names at their size, they are drawn smaller, each clear of the
+    // other; on a long one, at their size.
+    for (length, smaller) in [(18.0, true), (30.0, true), (100.0, false)] {
+        for vertical in [true, false] {
+            let (line, ends) = if vertical {
+                (SectionLine::Vertical(at), [(100.0, 0.0), (100.0, length)])
+            } else {
+                (SectionLine::Horizontal(at), [(0.0, 50.0), (length, 50.0)])
+            };
+            let mut pm = Canvas::new(w as u32, h as u32).unwrap();
+            let names = draw_sections(&mut pm, &[(&section(line), ends)], 1.0);
+            let [(_, a), (_, b)] = names[..] else { panic!("two names") };
+            assert!(a[2] <= b[0] + 1e-3 || a[3] <= b[1] + 1e-3, "{length} {vertical}: {a:?} {b:?}");
+            let tall = a[3] - a[1];
+            assert_eq!(tall < SECTION_NAME_PT * 1.33 * 1.6 - 0.01, smaller, "{length} {vertical}: {tall}");
+        }
     }
 }
 
+/// A place a flat Web Mercator frame can't show, nearer a pole than its 85.05°, isn't drawn at the
+/// latitude it is held to, but said; one just inside is drawn.
+#[test]
+fn a_section_line_past_mercators_reach_is_not_drawn() {
+    let map = Map::new("m");
+    let cam = frame_camera(&map, Coord::new(0.0, 84.9), 1e7, 0.0, 0.0);
+    let end = |lat: f64| section_ends(&map, &cam, (400.0, 200.0), &FrameShape::Rectangle, SectionLine::Horizontal(Coord::new(0.0, lat)));
+    assert_eq!(end(89.0), Err("its place isn't one the frame's map shows"));
+    assert!(end(85.0).is_ok(), "{:?}", end(85.0));
+}
+
+/// A frame's section lines are drawn over its map in their colour, dashed, with their names at
+/// both ends, clipped to its shape, as pixels and as vectors in a layer of their own; a frame
+/// without one draws the same page as before.
 #[test]
 fn section_lines_are_drawn_over_their_frame() {
     use rustgis_map::layout::{FRAME_BORDER_COLOR, FRAME_BORDER_WIDTH, INDICATOR_COLOR, INDICATOR_WIDTH};

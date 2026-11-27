@@ -29,7 +29,11 @@ pub fn section_ends(
     }
     let (px, py) = match &globe {
         Some(g) => g.forward(at),
-        None => map.to_map(at).and_then(|m| cam.try_to_screen(m, w, h)),
+        // A projection that holds a place to its reach (Web Mercator past 85.05°) gives another
+        // place, back: that one isn't the frame's to show.
+        None => {
+            map.to_map(at).filter(|&m| map.to_lonlat(m).is_none_or(|back| same_place(back, at))).and_then(|m| cam.try_to_screen(m, w, h))
+        }
     }
     .filter(|(x, y)| x.is_finite() && y.is_finite())
     .ok_or(NOT_SHOWN)?;
@@ -74,6 +78,13 @@ pub fn section_ends(
         on
     };
     Ok([swap((reach(from), across)), swap((reach(to), across))])
+}
+
+/// Whether `back`, `at` taken there and back through a projection, is `at`: its longitude a
+/// whole turn apart aside, and any at a pole.
+fn same_place(back: Coord, at: Coord) -> bool {
+    let turns = ((back.x - at.x) / 360.0).round() * 360.0;
+    (back.y - at.y).abs() < 1e-6 && (at.y.abs() > 90.0 - 1e-6 || (back.x - turns - at.x).abs() < 1e-6)
 }
 
 /// A section line its frame doesn't draw ([`section_ends`]).
@@ -125,12 +136,16 @@ pub fn sections_notice(gaps: &BTreeMap<SectionGap, usize>, pages: usize) -> Opti
 }
 
 /// The size of a section's name at its ends, in points.
-const SECTION_NAME_PT: f32 = 8.0;
+pub(super) const SECTION_NAME_PT: f32 = 8.0;
+/// The least share of [`SECTION_NAME_PT`] a line too short for both its names draws them at.
+const SECTION_NAME_LEAST: f32 = 0.4;
 
 /// A frame's section lines, each from end to end with its name in a box of its colour at both (A
-/// and A'), just inside them and wholly in the frame. Gives the names drawn, as [`draw_grid`]
-/// gives its labels, each with the edge the credit treats it as: a horizontal line's right name
-/// as a right label, which it goes left of, and every other as a bottom one, which it goes above.
+/// and A'), just inside them and wholly in the frame; on a line too short for both at their size,
+/// smaller (down to [`SECTION_NAME_LEAST`] of it), each clear of the other. Gives the names drawn, as [`draw_grid`]
+/// gives its labels, each with the edge the credit treats it as: a vertical line's names and a
+/// horizontal line's right one as right labels, which it goes left of (above, where it can't), and
+/// a horizontal line's left one as a bottom label, which it goes above.
 pub(super) fn draw_sections(pm: &mut Canvas, sections: &[(&Section, SectionEnds)], ppp: f64) -> Vec<(Edge, [f32; 4])> {
     let k = ppp as f32;
     let (fw, fh) = (pm.width() as f32, pm.height() as f32);
@@ -150,17 +165,25 @@ pub(super) fn draw_sections(pm: &mut Canvas, sections: &[(&Section, SectionEnds)
     // The names over every line.
     for (s, ends) in sections {
         let [a, b] = ends.map(|(x, y)| (x as f32 * k, y as f32 * k));
-        let px = SECTION_NAME_PT * 1.33 * k;
         let vertical = matches!(s.line, SectionLine::Vertical(_));
+        // Half a name's box along the line, its text `px` pixels.
+        let half_along =
+            |px: f32, name: &str| if vertical { px * 0.8 } else { (text::measure(name, px / 1.33, true) / 2.0 + px * 0.35).max(px * 0.8) };
+        let names = [s.name.clone(), format!("{}'", s.name)];
+        let length = (b.0 - a.0).max(b.1 - a.1);
+        // Each name takes a point at its end and its box's length: smaller where both don't fit.
+        let full = SECTION_NAME_PT * 1.33 * k;
+        let boxes_long = names.iter().map(|n| 2.0 * half_along(full, n)).sum::<f32>();
+        let px = full * ((length - 2.0 * k) / boxes_long).clamp(SECTION_NAME_LEAST, 1.0);
         // Dark on a light colour, or one the map shows through, else white.
         let [r, g, b_, alpha] = s.color.0.map(f32::from);
         let ink = if alpha < 128.0 || 0.299 * r + 0.587 * g + 0.114 * b_ > 150.0 { INK } else { Rgba::rgb(255, 255, 255) };
-        let boxes = [(a, 1.0, s.name.clone()), (b, -1.0, format!("{}'", s.name))];
+        let [first, second] = names;
+        let boxes = [(a, 1.0, first), (b, -1.0, second)];
         for ((x, y), inward, name) in boxes {
             let hh = px * 0.8;
             let hw = (text::measure(&name, px / 1.33, true) / 2.0 + px * 0.35).max(hh);
             // Inside the end by a point, but never past the line's middle.
-            let length = (b.0 - a.0).max(b.1 - a.1);
             let inset = inward * (k + if vertical { hh } else { hw }).min(length / 2.0);
             // Across the line, the whole box inside the frame too.
             let (cx, cy) = if vertical { (inside(x, hw, fw), y + inset) } else { (x + inset, inside(y, hh, fh)) };
@@ -170,7 +193,9 @@ pub(super) fn draw_sections(pm: &mut Canvas, sections: &[(&Section, SectionEnds)
             text::text_at(pm, &name, cx, cy, px, ink, true, text::Align::Center, false);
             // Section names lie anywhere in the frame, not only along its edges as a grid's labels
             // do, so the credit keeps clear of every one, whichever end it is.
-            let edge = if !vertical && inward < 0.0 { Edge::Right } else { Edge::Bottom };
+            // A vertical line's two names are one above the other: going left clears both, where
+            // going above one can meet the other.
+            let edge = if vertical || inward < 0.0 { Edge::Right } else { Edge::Bottom };
             drawn.push((edge, [(cx - hw) / k, (cy - hh) / k, (cx + hw) / k, (cy + hh) / k]));
         }
     }
