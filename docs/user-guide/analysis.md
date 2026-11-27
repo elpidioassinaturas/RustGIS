@@ -157,8 +157,9 @@ match ignoring case; an ambiguous name is refused. When two keys reach the same 
 names the key left out.
 
 A table's rows live in the project, as they were copied in when it was added: edits change the
-project, not the CSV or other file the table came from. **Export Table** (`share.exportTable`)
-writes the edited table to a file. Tables have no selection yet, so rows can't be deleted.
+project, not the CSV or other file the table came from. **Export Table** writes the edited table
+to a file: right-click the table in the Layers pane, or search for it in Command Search (scripts
+use `share.exportTable`). Tables have no selection yet, so rows can't be deleted.
 
 ```text
 edit.setValue={"table":"sites","row":0,"field":"street","value":"Rue Cler"}
@@ -1841,7 +1842,9 @@ off with nothing to clear, and while a run is under way. **Load…**, off then t
 from a file (a `.txt` file in the browser; any file on the desktop and phone) in place of the pane's, emptying its
 results as Clear does, and Ctrl+Z (⌘+Z) brings the old script back; in the browser it uses the
 browser's file picker. A file that isn't UTF-8 text, or is over 1 MB, is refused with a notice
-naming it, and the script stays. Opening a
+naming it, and the script stays. A paste into the box that would take the script over 1 MB is
+refused too, with a notice: nothing is pasted, rather than part of it (a script already over 1 MB
+takes a paste that doesn't make it larger). Opening a
 project (New, Open, the sample, a template, or the same one again), from the app, a script, the
 assistant or an agent, starts the pane blank: the script, its results, the count and the Details
 window go with the old project, and the find bar closes, forgetting what was in it. A script that

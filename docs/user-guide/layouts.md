@@ -39,17 +39,21 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     thesis (160 × 225 or 160 × 110 mm): the map edge to edge with a line of its projection and
     datum under it, at 7 pt. A figure's title and sources belong in its caption, so they are
     left out, and the result says so.
-  - **Step by step**: **Publication Layout Wizard…**, at the end of the same menu, asks for the
-    size (a sheet turned Auto, Portrait or Landscape, or a figure), the style (each beside an
-    outline of where its title, map and footer go, and its column or panel if it has one, with
-    the accent colour picked, or else its own, where the sheet takes it, which Classic's doesn't;
-    a click on the outline picks the style), the texts (title, the active map's name until one is
-    typed; subtitle, note, sources and credit line, or none) and the accent colour, then shows
-    what was picked; **Create** makes the layout as the menu
-    does. A figure goes from its size to the review, as it takes no style, texts or accent. A
-    field left empty is left out (for the credit line, the dated default applies); the title is
-    the exception: empty, it means no title. A layout the command refuses is said, and the wizard
-    stays open.
+  - **Step by step**: **Publication Layout Wizard…**, at the end of the same menu, asks for the size
+    (a sheet turned Auto, Portrait or Landscape, or a figure), the style (each beside an outline of
+    where its title, map and footer go, and its column or panel if it has one, with the accent
+    colour picked, or else its own, where the sheet takes it, which Classic's doesn't; a click on
+    the outline picks the style), the texts (title, the active map's name until one is typed;
+    subtitle, note and credit line, or none; an Editorial sheet's column heading), the sources and
+    reference (each one per line, with its heading; the reference can be left out) and the accent
+    colour, then shows what was picked; **Create** makes the layout as the menu does. **Insert
+    Statistic**, on the texts and sources steps, adds a layer figure of the active map to the field
+    the cursor was last in there (the note or the sources, where it was in none). A figure goes from
+    its size to the review, as it takes no style, texts or accent. A field left empty is left out
+    (for the credit line, the reference and the headings, the command's default applies); the title
+    is the exception: empty, it means no title. A layout the command refuses is said, and the wizard
+    stays open. The window can be resized. Its steps are listed on the left, and a click goes to
+    one; a narrow screen leaves the list out, and the heading still says which step this is.
   - **The map**: the `extent` given (or the view) fitted north-up, without tilt, at a round scale,
     two significant figures, rounded up so it still fits within the strips the graticule's labels
     take inside the frame. A graticule's step follows the extent (2° for a state, 15′ for a city),
@@ -203,11 +207,13 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     in darker blocks with amber headings; `"edge"` runs the map from one side of the page to the
     other with no border, a kicker, the title and subtitle over it and the footer with no boxes
     under a thin rule. An edge sheet also takes `"paper"` (`#RRGGBB`, the page's colour; on a dark
-    one the texts are light) and `"kicker"` (a short line in spaced capitals over the title);
-    other styles and figures refuse both. Its graticule labels sit at the page's side edges, so a
-    printer with no bleed may clip them. `"accent"` (`#RRGGBB`) colours the band, the panel's
-    tint, the headings and rules, a poster's page and an edge sheet's kicker (a deep brown, green
-    or blue by default, a brick red on an edge sheet).
+    one the texts are light), `"kicker"` (a short line in spaced capitals over the title) and
+    `"figures"` (up to three `{"value", "label"}`, the label optional, in columns of one width
+    under the map, the value large and bold; a value or label may hold layer statistics such as
+    `{count:Cities}`); other styles and figures refuse the three. Its graticule labels sit at the
+    page's side edges, so a printer with no bleed may clip them. `"accent"` (`#RRGGBB`) colours the
+    band, the panel's tint, the headings and rules, a poster's page and an edge sheet's kicker (a
+    deep brown, green or blue by default, a brick red on an edge sheet).
     A figure leaves the style to its caption. In the menu, each sheet opens a list of the seven
     styles, each saying what it looks like, in its default accent (`"accent"` in the command
     picks another).
@@ -681,16 +687,17 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   `layout.update={"element":4,"background":{"fill":"#FFFFFFCC","radius":1,"padding":1.5}}`; the keys
   not given keep theirs, and `"background":null` removes it. `layout.addElement` takes it too. A
   map frame draws its own map and paper, so a background on one is refused.
-- **Ink**: a legend, a colorbar, a table and a chart draw their text and lines in dark grey; turn
-  on **Ink** in the Format pane and pick its colour to read them on a dark page or over imagery.
-  It starts white over a dark background and dark grey otherwise, and turned off it is the dark
-  grey again. A legend's title, layer names and
-  class labels, a colorbar's title, outline, ticks and labels, a table's text and a chart's title
-  and labels take it; a chart's bars and a colorbar's colours keep theirs. A table with an ink
-  draws no white cells of its own, only its header and every other row in a light tint of the ink,
-  so it reads on whatever is behind it: give it a **Background** for a box. From a command:
-  `layout.update={"element":5,"color":"#FFFFFF"}`, and `"color":null` for the default;
-  `layout.addElement` takes it too.
+- **Ink**: a legend, a colorbar, a table and a chart draw their text and lines in dark grey; turn on
+  **Ink** in the Format pane and pick its colour to read them on a dark page or over imagery. It
+  starts white when the colour shown at the element's centre is dark, and dark grey otherwise: that
+  colour is the page's, with the backgrounds, rectangles and ellipses under the element and its own
+  background over it (maps and pictures aren't read). Turned off it is the dark grey again. A
+  legend's title, layer names and class labels, a colorbar's title, outline, ticks and labels, a
+  table's text and a chart's title and labels take it; a chart's bars and a colorbar's colours keep
+  theirs. A table with an ink draws no white cells of its own, only its header and every other row
+  in a light tint of the ink, so it reads on whatever is behind it: give it a **Background** for a
+  box. From a command: `layout.update={"element":5,"color":"#FFFFFF"}`, and `"color":null` for the
+  default; `layout.addElement` takes it too.
 - **Chart frame**: a bar chart of a layer of the frame's map. Its properties pick the **Layer**
   and the numeric **Field**, and by default draw a bar per feature, the largest first, each
   labelled by the **Label** field. **Group by** a field draws a bar per value of that field

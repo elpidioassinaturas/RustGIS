@@ -14,6 +14,27 @@ pub(in crate::cmd::layout) const GRID_STEPS: &[f64] = &[0.01, 0.02, 0.05, 0.1, 0
 pub(in crate::cmd::layout) const LABEL_ROOM_SIDE: f64 = 9.0;
 pub(in crate::cmd::layout) const LABEL_ROOM_END: f64 = 6.0;
 
+/// An edge sheet's headline figures (#3104): up to three values, each with an optional label.
+pub(in crate::cmd::layout) fn headline_figures(p: &Value) -> Result<Vec<(String, Option<String>)>, String> {
+    const SHAPE: &str = "figures is a list of up to three {\"value\", \"label\"}, the value a text that isn't empty";
+    let figure = |v: &Value| {
+        let o = v.as_object().filter(|o| o.keys().all(|k| k == "value" || k == "label")).ok_or(SHAPE)?;
+        let within = |t: &str| crate::cmd::within("figures", "a publication layout's text", t, MAX_PUBLICATION_TEXT);
+        let value = o.get("value").and_then(Value::as_str).filter(|t| !t.trim().is_empty()).ok_or(SHAPE)?;
+        let label = match o.get("label") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(t)) => Some(within(t)?).filter(|t| !t.trim().is_empty()),
+            Some(_) => return Err(SHAPE.to_string()),
+        };
+        Ok((within(value)?, label))
+    };
+    match p.get("figures") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(a)) if a.len() <= 3 => a.iter().map(figure).collect(),
+        Some(_) => Err(SHAPE.into()),
+    }
+}
+
 /// A scale denominator rounded up to two significant figures (1:1,234,567 to 1:1,300,000), so the
 /// extent fitted at it still fits.
 pub(crate) fn round_scale(scale: f64) -> f64 {
@@ -81,19 +102,19 @@ pub(crate) fn datum_of(def: &str) -> Option<String> {
     param("+R=").map(|_| "a sphere".into())
 }
 
-/// Texts given as one or a list (up to 50), each of at most [`MAX_PUBLICATION_TEXT`] characters: a
-/// longer one is refused, not cut.
+/// Texts given as one or a list (up to [`MAX_PUBLICATION_LINES`]), each of at most
+/// [`MAX_PUBLICATION_TEXT`] characters: a longer one is refused, not cut.
 pub(in crate::cmd::layout) fn texts_of(p: &Value, k: &str) -> Result<Option<Vec<String>>, String> {
     let within = |t: &str| crate::cmd::within(k, "a publication layout's text", t, MAX_PUBLICATION_TEXT);
     match p.get(k) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(t)) => Ok(Some(vec![within(t)?])),
-        Some(Value::Array(a)) if a.len() <= 50 => a
+        Some(Value::Array(a)) if a.len() <= MAX_PUBLICATION_LINES => a
             .iter()
             .map(|v| v.as_str().ok_or_else(|| format!("{k} is a text or a list of texts")).and_then(within))
             .collect::<Result<_, _>>()
             .map(Some),
-        Some(_) => Err(format!("{k} is a text or a list of up to 50 texts")),
+        Some(_) => Err(format!("{k} is a text or a list of up to {MAX_PUBLICATION_LINES} texts")),
     }
 }
 

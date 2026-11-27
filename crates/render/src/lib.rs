@@ -27,6 +27,7 @@ mod line_markers;
 pub mod logo;
 mod mapgrid;
 mod mesh;
+mod mesh_tiles;
 mod native_tiles;
 mod pattern_fill;
 pub mod pdf;
@@ -4732,6 +4733,12 @@ fn render_frame(
     };
     // GPU meshes reach further (`GPU_CULL_MARGIN`), so the camera fast path can move them.
     let mesh_cull = cull_extent(view, GPU_CULL_MARGIN);
+    // A tilted view widens a far stroke past a tile's reach (the shader scales it by depth), so
+    // it keeps one mesh a layer; a flat one cuts its layers into tiles of the cull. A tilted
+    // view's bands are drawn as flat views (their cameras look straight down) for the shader to
+    // tilt, so they're told apart by what their labels are for.
+    let tilted = view.camera.pitch != 0.0 || matches!(labels_to, Labels::Tilted(..) | Labels::Shared);
+    let mesh_tiled = (!tilted).then_some(&mesh_cull);
     let mesh_visible = |e: &Extent| match &globe {
         Some(g) => g.may_see(e),
         None => e.intersects(&mesh_cull),
@@ -5574,9 +5581,10 @@ fn render_frame(
                 && layer.renderer.expression().is_none()
                 && !upright.contains(&layer.id);
             // Lyon refuses degenerate geometry tiny-skia draws fine, a layer too dense to mesh
-            // (`MAX_LAYER_VERTICES`) is quicker splatted, and zoomed in far, features reaching too
-            // far for f32 are drawn where they are by the CPU (#902): collect_layer reports all
-            // three, and the layer runs the CPU branch below like any ineligible one. It meshes the
+            // (`MAX_LAYER_VERTICES`) is quicker splatted, and zoomed in far, markers reaching too
+            // far for f32 are drawn where they are by the CPU (#902; lines and polygons are meshed
+            // in tiles, each from its own corner, `mesh_tiles`): collect_layer reports all three,
+            // and the layer runs the CPU branch below like any ineligible one. It meshes the
             // thinned copy the CPU draws. A turned or tilted view takes no CPU pictures
             // (`gpu_turned`), so there such a layer sends the whole view to the CPU renderer, not
             // just itself.
@@ -5616,6 +5624,7 @@ fn render_frame(
                             extents,
                             &rows,
                             &mesh_visible,
+                            mesh_tiled,
                             ctx.wireframe,
                             ctx.ppp,
                             map_per_px,
@@ -11499,30 +11508,32 @@ mod tests {
         }
     }
 
-    /// So does one with a layer drawn on the CPU for another reason: a polygon reaching too far
-    /// from its origin for f32, zoomed in all the way. The layer above it is never meshed.
+    /// So does a turned one with a layer drawn on the CPU for another reason: markers too far
+    /// apart for f32 from their origin, zoomed in all the way (a tilted view stands markers up,
+    /// drawn otherwise). The layer above it is never meshed.
     #[test]
-    fn a_turned_or_tilted_view_stops_trying_the_gpu_after_a_layer_drawn_on_the_cpu() {
+    fn a_turned_view_stops_trying_the_gpu_after_a_layer_drawn_on_the_cpu() {
         let mut m = Map::new("Map");
         // The world's outline is too far for f32 this far in as well: none.
         m.basemap = rustgis_map::Basemap::Blank;
-        // About 5 km across, over a view of a few centimetres.
-        square_layer(&mut m, "far", 1.0 - 0.025, 0.5 - 0.025, 0.05);
+        // One feature's markers about 5 km apart, one of them in a view of a few centimetres.
+        let mut far = Dataset::new("far", GeometryType::Point, vec![]);
+        far.push(Some(Geometry::MultiPoint(vec![Coord::new(1.0, 0.5), Coord::new(1.05, 0.5)])), vec![]);
+        m.add_dataset(far);
         square_layer(&mut m, "near", 1.0, 0.5, 1e-7);
         let at = lonlat_to_merc(Coord::new(1.0, 0.5));
-        for (bearing, pitch) in [(30.0, 0.0), (0.0, 50.0)] {
-            let camera = Camera { center: at, res: rustgis_map::camera::MIN_RES, bearing, pitch };
-            let view = View { width: 400.0, height: 600.0, pixels_per_point: 1.0, camera, sky: false };
-            MESHED.with(|m| m.borrow_mut().clear());
-            let Some(RenderOutput::Cpu(gpu)) = render_backend(&mut m, &view, Backend::Gpu) else {
-                panic!("turned {bearing}°, tilted {pitch}°: drawn on the CPU")
-            };
-            let meshed = MESHED.with(|m| m.borrow().clone());
-            assert!(meshed.contains(&("far".into(), false)), "turned {bearing}°, tilted {pitch}°: tried: {meshed:?}");
-            assert!(!meshed.iter().any(|(n, _)| n == "near"), "turned {bearing}°, tilted {pitch}°: went on: {meshed:?}");
-            let cpu = render(&mut m, &view).expect("cpu");
-            assert!(gpu.pixmap.data() == cpu.pixmap.data(), "turned {bearing}°, tilted {pitch}°: as the CPU draws it");
-        }
+        let (bearing, pitch) = (30.0, 0.0);
+        let camera = Camera { center: at, res: rustgis_map::camera::MIN_RES, bearing, pitch };
+        let view = View { width: 400.0, height: 600.0, pixels_per_point: 1.0, camera, sky: false };
+        MESHED.with(|m| m.borrow_mut().clear());
+        let Some(RenderOutput::Cpu(gpu)) = render_backend(&mut m, &view, Backend::Gpu) else {
+            panic!("turned {bearing}°, tilted {pitch}°: drawn on the CPU")
+        };
+        let meshed = MESHED.with(|m| m.borrow().clone());
+        assert!(meshed.contains(&("far".into(), false)), "turned {bearing}°, tilted {pitch}°: tried: {meshed:?}");
+        assert!(!meshed.iter().any(|(n, _)| n == "near"), "turned {bearing}°, tilted {pitch}°: went on: {meshed:?}");
+        let cpu = render(&mut m, &view).expect("cpu");
+        assert!(gpu.pixmap.data() == cpu.pixmap.data(), "turned {bearing}°, tilted {pitch}°: as the CPU draws it");
     }
 
     #[test]
@@ -11639,10 +11650,11 @@ mod tests {
     }
 
     #[test]
-    fn zoomed_in_past_f32_large_features_are_drawn_on_the_cpu_where_they_are() {
+    fn zoomed_in_past_f32_large_features_are_meshed_in_tiles_near_their_origins() {
         // A 10° square's west edge at the deepest zoom (#902): its vertices lie hundreds of km
-        // from the mesh's origin, which f32 can't hold to a pixel at a tenth of a millimetre per
-        // pixel, so the layer is drawn on the CPU, with the edge through the middle of the view.
+        // from the view, which f32 can't hold to a pixel at a tenth of a millimetre per pixel
+        // from one origin. Cut into tiles (#2541), each mesh holds only its tile's part, from the
+        // tile's corner: the edge lies where it belongs, through the middle of the view.
         let mut m = Map::new("Map");
         m.basemap = rustgis_map::Basemap::Blank;
         square_layer(&mut m, "s", 0.0, 40.0, 10.0);
@@ -11652,25 +11664,35 @@ mod tests {
         let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
         let Some(RenderOutput::Gpu(scene)) = render_backend(&mut m, &view, Backend::Gpu) else { panic!("gpu scene") };
         let kinds = cmd_kinds(&scene);
-        assert!(!kinds.contains(&"mesh"), "no mesh f32 would misplace: {kinds:?}");
-        let Some(pixmap) = scene.cmds.iter().find_map(|c| match c {
-            gpu_scene::DrawCmd::Image { pixmap, .. } => Some(pixmap),
-            _ => None,
-        }) else {
-            panic!("the square is drawn on the CPU: {kinds:?}")
-        };
-        let alpha = |x: u32| pixmap.pixel(x, 150).map_or(0, |p| p.alpha());
-        assert_eq!(alpha(195), 0, "west of the edge is outside the square");
-        assert!(alpha(205) > 0, "east of the edge is inside it");
+        assert!(kinds.contains(&"mesh") && !kinds.contains(&"image"), "meshed: {kinds:?}");
+        let map_per_px = rustgis_map::camera::MIN_RES;
+        assert!(gpu_scene::f32_holds(gpu_scene::reach(&scene.cmds), map_per_px), "every tile within f32's reach");
+        let mut west = f64::INFINITY;
+        for c in &scene.cmds {
+            if let gpu_scene::DrawCmd::Mesh { origin, vertices, square, .. } = c {
+                assert!(square.is_some(), "a tile");
+                west = vertices.iter().map(|v| origin[0] + f64::from(v.position[0])).fold(west, f64::min);
+            }
+        }
+        assert!(west.abs() < map_per_px, "the edge where it belongs: {west}");
 
-        // Zoomed out, the same square is a mesh, and the scene says how far in it holds.
+        // Zoomed out, the same square is cut into tiles too, and the scene says how far in it
+        // holds: as far as a tile's side (and its outline's reach past it) from its corner.
         let mut camera = view.camera;
         camera.res = 1_000.0;
         let view = View { camera, ..view };
         let Some(RenderOutput::Gpu(scene)) = render_backend(&mut m, &view, Backend::Gpu) else { panic!("gpu scene") };
         assert!(cmd_kinds(&scene).contains(&"mesh"));
-        let half = (rustgis_geom::lonlat_to_merc(Coord::new(10.0, 50.0)).y - rustgis_geom::lonlat_to_merc(Coord::new(0.0, 40.0)).y) / 2.0;
-        assert!((gpu_scene::reach(&scene.cmds) - half).abs() < 1.0, "reach {} vs {half}", gpu_scene::reach(&scene.cmds));
+        let side = crate::mesh_tiles::tile_side(1_000.0).expect("tiles");
+        let reach = gpu_scene::reach(&scene.cmds);
+        assert!(reach >= side && reach < side * 1.01, "reach {reach} vs a tile's side {side}");
+
+        // Tilted, its bands (each drawn as a flat view for the shader to tilt) keep one mesh a
+        // layer: a far stroke widens past a tile's reach.
+        let view = View { camera: Camera { pitch: 45.0, ..camera }, ..view };
+        let Some(RenderOutput::Gpu(scene)) = render_backend(&mut m, &view, Backend::Gpu) else { panic!("gpu scene") };
+        assert!(scene.tilt.is_some() && cmd_kinds(&scene).contains(&"mesh"), "a tilted scene: {:?}", cmd_kinds(&scene));
+        assert!(scene.cmds.iter().all(|c| !matches!(c, gpu_scene::DrawCmd::Mesh { square: Some(_), .. })), "no tiles in a tilted view");
     }
 
     #[test]
@@ -12830,6 +12852,140 @@ mod tests {
         // Just under the wall's top at its far end, nothing in front: the wall.
         let seen = px(&cut, screen(0.0, 900.0, 440.0));
         assert!(sandy(seen), "{seen:?}");
+    }
+
+    #[test]
+    fn a_polygon_blocks_hole_is_a_well_with_its_far_wall_and_its_floor() {
+        // #2318: flat ground 500 m high cut to a 2 km square with a 600 m hole in its middle,
+        // seen from the south. Down the hole the far (north) wall shows, and seen from nearly
+        // above, its floor at the base: both in the walls' sandy brown, where without the hole
+        // the grey ground showed.
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let gt = GeoTransform { origin_x: -5000.0, origin_y: 5000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let dem =
+            Raster::new("dem", 500, 500, vec![vec![500.0; 500 * 500]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
+        let deg = |x: f64, y: f64| rustgis_geom::merc_to_lonlat(Coord::new(x, y));
+        let ring = |r: f64| [(-r, -r), (r, -r), (r, r), (-r, r), (-r, -r)].iter().map(|&(x, y)| deg(x, y)).collect::<Vec<_>>();
+        let mut d = Dataset::new("area", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+        d.push(Some(Geometry::Polygon(vec![vec![ring(1000.0), ring(300.0)]])), vec![Value::Text("holed".into())]);
+        d.push(Some(Geometry::Polygon(vec![vec![ring(1000.0)]])), vec![Value::Text("plain".into())]);
+        m.add_dataset(d);
+        let frame = |m: &mut Map, name: &str, pitch: f64| {
+            let camera = Camera { center: Coord::new(0.0, 0.0), res: 10.0, bearing: 0.0, pitch };
+            let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+            let shape = rustgis_map::view::BlockShape::Polygon { layer: "area".into(), filter: Some(format!("name = '{name}'")) };
+            m.view.terrain = Some(rustgis_map::view::Terrain {
+                source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+                exaggeration: 1.0,
+                block: Some(rustgis_map::view::TerrainBlock {
+                    extent: None,
+                    depth: Some(1000.0),
+                    walls: rustgis_map::view::BLOCK_WALLS,
+                    walls_layer: None,
+                    water: None,
+                    shape,
+                }),
+                water: None,
+            });
+            let g = terrain::Ground::of(m, &camera).expect("terrain");
+            let per_unit = g.per_unit(Coord::new(0.0, 0.0));
+            let r = render(m, &view).expect("a frame");
+            let at = move |x: f64, y: f64, metres: f64| {
+                let (u, v) = camera.ground_px(Coord::new(x, y));
+                camera.project_raised(u, v, metres / per_unit / camera.res, view.width, view.height).expect("in view")
+            };
+            (r, at)
+        };
+        let px = |r: &Rendered, p: (f64, f64)| r.pixmap.pixel(p.0 as u32, p.1 as u32).expect("in the frame").demultiply();
+        let sandy = |c: tiny_skia::ColorU8| c.red() > c.green() && c.green() > c.blue() + 8;
+        // The far wall, just under its top: the ray meets nothing in front of it.
+        let (holed, at) = frame(&mut m, "holed", 60.0);
+        let (plain, _) = frame(&mut m, "plain", 60.0);
+        let wall = at(0.0, 300.0, 440.0);
+        assert!(sandy(px(&holed, wall)), "{:?}", px(&holed, wall));
+        assert!(!sandy(px(&plain, wall)), "{:?}", px(&plain, wall));
+        // Nearly from above, the hole's middle at the base: the floor, darker than the wall's top.
+        let (holed, at) = frame(&mut m, "holed", 10.0);
+        let (plain, _) = frame(&mut m, "plain", 10.0);
+        let floor = px(&holed, at(0.0, 0.0, -500.0));
+        assert!(sandy(floor) && floor.red() < 140, "{floor:?}");
+        assert!(!sandy(px(&plain, at(0.0, 0.0, -500.0))));
+        // The ground round the hole is drawn as over a whole square.
+        assert_eq!(px(&holed, at(600.0, 600.0, 500.0)), px(&plain, at(600.0, 600.0, 500.0)));
+    }
+
+    #[test]
+    fn a_polygon_blocks_hole_shows_its_floor_reaching_behind_the_eye_or_round_the_whole_view() {
+        // #2318: flat ground 500 m high cut to a polygon whose hole, 2 km wide, runs from 1 km
+        // north of the view's centre to 8 km south, past the eye of a view tilted 60°. The hole's
+        // southern corners project nowhere; down the well, the centre's floor still shows at the
+        // base in the walls' sandy brown.
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let gt = GeoTransform { origin_x: -10_000.0, origin_y: 10_000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let dem =
+            Raster::new("dem", 1000, 1000, vec![vec![500.0; 1000 * 1000]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
+        let deg = |x: f64, y: f64| rustgis_geom::merc_to_lonlat(Coord::new(x, y));
+        let rect = |x: f64, s: f64, n: f64| [(-x, s), (x, s), (x, n), (-x, n), (-x, s)].iter().map(|&(x, y)| deg(x, y)).collect::<Vec<_>>();
+        let mut d = Dataset::new("area", GeometryType::Polygon, vec![Field::new("name", FieldType::Text)]);
+        d.push(
+            Some(Geometry::Polygon(vec![vec![rect(3000.0, -9000.0, 3000.0), rect(1000.0, -8000.0, 1000.0)]])),
+            vec![Value::Text("holed".into())],
+        );
+        d.push(
+            Some(Geometry::Polygon(vec![vec![rect(9500.0, -9500.0, 9500.0), rect(8000.0, -8000.0, 8000.0)]])),
+            vec![Value::Text("wide".into())],
+        );
+        m.add_dataset(d);
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 10.0, bearing: 0.0, pitch: 60.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let shape = rustgis_map::view::BlockShape::Polygon { layer: "area".into(), filter: Some("name = 'holed'".into()) };
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 1.0,
+            block: Some(rustgis_map::view::TerrainBlock {
+                extent: None,
+                depth: Some(1000.0),
+                walls: rustgis_map::view::BLOCK_WALLS,
+                walls_layer: None,
+                water: None,
+                shape,
+            }),
+            water: None,
+        });
+        let g = terrain::Ground::of(&m, &camera).expect("terrain");
+        let per_unit = g.per_unit(Coord::new(0.0, 0.0));
+        let base = |x: f64, y: f64| {
+            let (u, v) = camera.ground_px(Coord::new(x, y));
+            camera.project_raised(u, v, -500.0 / per_unit / camera.res, view.width, view.height)
+        };
+        // The hole's southern corners are behind the eye, its northern ones in front of it.
+        assert!(base(-1000.0, -8000.0).is_none() && base(1000.0, -8000.0).is_none());
+        assert!(base(-1000.0, 1000.0).is_some() && base(1000.0, 1000.0).is_some());
+        let floor_at = |m: &mut Map, view: &View| {
+            let r = render(m, view).expect("a frame");
+            let (u, v) = view.camera.ground_px(Coord::new(0.0, 0.0));
+            let p = view.camera.project_raised(u, v, -500.0 / per_unit / view.camera.res, view.width, view.height).expect("in view");
+            r.pixmap.pixel(p.0 as u32, p.1 as u32).expect("in the frame").demultiply()
+        };
+        let sandy = |c: tiny_skia::ColorU8| c.red() > c.green() && c.green() > c.blue() + 8 && c.red() < 140;
+        let floor = floor_at(&mut m, &view);
+        assert!(sandy(floor), "{floor:?}");
+        // Seen nearly from above, wholly inside a hole 16 km across with none of its sides in
+        // view: the floor still shows.
+        if let Some(rustgis_map::view::BlockShape::Polygon { filter, .. }) =
+            m.view.terrain.as_mut().and_then(|t| t.block.as_mut()).map(|b| &mut b.shape)
+        {
+            *filter = Some("name = 'wide'".into());
+        }
+        let camera = Camera { pitch: 10.0, ..camera };
+        let floor = floor_at(&mut m, &View { camera, ..view });
+        assert!(sandy(floor), "{floor:?}");
     }
 
     #[test]
