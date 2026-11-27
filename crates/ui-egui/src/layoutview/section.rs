@@ -43,10 +43,27 @@ pub(super) fn section_at(app: &RustGisApp, layout: &Layout, page: Rect, s: f32, 
     sections.iter().enumerate().rev().filter_map(under).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, i, vertical)| (e.id, i, vertical))
 }
 
+/// A section line as a drag takes it: its place, and a key of its name (a frame's only one of that
+/// name), so that one put at the same place meanwhile isn't taken for it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Taken {
+    line: SectionLine,
+    name: u64,
+}
+
+impl Taken {
+    fn of(l: &Section) -> Self {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        l.name.trim().to_lowercase().hash(&mut h);
+        Taken { line: l.line, name: h.finish() }
+    }
+}
+
 /// Section line `i` of frame `id`, with them, as a drag takes it.
-pub(super) fn section_line(layout: &Layout, id: u32, i: usize) -> Option<(u32, usize, SectionLine)> {
+pub(super) fn section_line(layout: &Layout, id: u32, i: usize) -> Option<(u32, usize, Taken)> {
     let ElementKind::MapFrame { sections, .. } = &layout.element(id)?.kind else { return None };
-    Some((id, i, sections.get(i)?.line))
+    Some((id, i, Taken::of(sections.get(i)?)))
 }
 
 /// Whether section line `i` of frame `id` is vertical.
@@ -60,19 +77,23 @@ pub(super) fn section_cursor(vertical: bool) -> CursorIcon {
     if vertical { CursorIcon::ResizeHorizontal } else { CursorIcon::ResizeVertical }
 }
 
-/// Where a section line being dragged (its frame, its index and the drag's start) lands with the
-/// pointer at `at` (mm): the frame, the line's name, its place, and its ends in the frame's points;
-/// `None` where the frame would not draw it.
+/// Where a section line being dragged (its frame, its index, the line taken and the drag's start)
+/// lands with the pointer at `at` (mm): the frame, the line's name, its place, and its ends in the
+/// frame's points; `None` off the frame, or where the frame would not draw it.
 pub(super) fn section_landing<'a>(
     app: &RustGisApp,
     layout: &'a Layout,
-    (id, i, taken, start): (u32, usize, SectionLine, (f64, f64)),
+    (id, i, taken, start): (u32, usize, Taken, (f64, f64)),
     at: (f64, f64),
 ) -> Option<(&'a Element, &'a str, Coord, SectionEnds)> {
     let e = layout.element(id)?;
     let ElementKind::MapFrame { shape, sections, .. } = &e.kind else { return None };
-    // The line taken, still at its index: one removed, moved or replaced meanwhile isn't moved.
-    let l = sections.get(i).filter(|l| l.line == taken)?;
+    // The line taken, still at its index: one removed, moved, renamed or replaced meanwhile isn't
+    // moved. Dropped off the frame, it stays.
+    let l = sections.get(i).filter(|l| Taken::of(l) == taken)?;
+    if !e.contains(at.0, at.1) {
+        return None;
+    }
     let (map, cam) = frame_map(app, e)?;
     let size = (e.w * PT_PER_MM, e.h * PT_PER_MM);
     let (by, along) = match l.line {

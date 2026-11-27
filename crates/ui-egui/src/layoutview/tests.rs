@@ -576,6 +576,40 @@ fn a_selected_frames_section_line_is_dragged() {
     h.state_mut().run("edit.undo", json!({})).unwrap();
     assert_eq!(held(h.state()), after);
     h.run_steps(2);
+    // Replaced meanwhile by another line of the same direction at the same place, at the same
+    // index: the drop doesn't move that one either.
+    let layout = h.state().session.project.layouts[li].clone();
+    let e = layout.element(frame).unwrap();
+    let (page, s) = page_rect(&h.state().layout, area.get(), &layout);
+    let from = to_screen(page, s, (e.x + e.w * 0.25, e.y + e.h * 0.5));
+    h.event(Event::PointerMoved(from));
+    h.step();
+    h.event(button(from, true));
+    h.step();
+    h.event(Event::PointerMoved(from + vec2(20.0, 20.0)));
+    h.step();
+    h.state_mut().run("layout.update", json!({"element": frame, "section": {"name": "B", "remove": true}})).unwrap();
+    h.state_mut().run("layout.update", json!({"element": frame, "section": {"name": "A", "remove": true}})).unwrap();
+    let add = json!({"kind": "section", "frame": frame, "name": "Z", "direction": "horizontal", "at": [after.0.x, after.0.y]});
+    h.state_mut().run("layout.addElement", add).unwrap();
+    h.event(Event::PointerMoved(from + vec2(20.0, 40.0)));
+    h.step();
+    h.event(button(from + vec2(20.0, 40.0), false));
+    h.step();
+    h.run_steps(2);
+    let e = h.state().session.project.layouts[li].element(frame).unwrap().clone();
+    let ElementKind::MapFrame { sections, .. } = &e.kind else { panic!("a map frame") };
+    assert!(sections.len() == 1 && sections[0].name == "Z" && sections[0].line.at() == after.0, "{sections:?}");
+    for _ in 0..3 {
+        h.state_mut().run("edit.undo", json!({})).unwrap();
+    }
+    assert_eq!(held(h.state()), after);
+    h.run_steps(2);
+    // Dropped beside the frame, at a height inside it: off the frame, it stays.
+    let layout = h.state().session.project.layouts[li].clone();
+    let quarter = layout.element(frame).unwrap().w as f32 * page_rect(&h.state().layout, area.get(), &layout).1 / 4.0;
+    assert_eq!(drag(&mut h, (0.75, 0.5), vec2(quarter + 10.0, 10.0)).1, CursorIcon::NotAllowed);
+    assert_eq!(held(h.state()), after);
     // Map frames being navigated, a drag on the line pans the frame's map.
     h.state_mut().layout.navigate = true;
     drag(&mut h, (0.25, 0.5), vec2(0.0, 30.0));

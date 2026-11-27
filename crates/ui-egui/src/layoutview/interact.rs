@@ -3,7 +3,7 @@
 use super::*;
 use crate::RustGisApp;
 use egui::{CursorIcon, Pos2, Rect, Ui};
-use rustgis_engine::map::layout::{ElementKind, Layout, MAX_FRAME_SCALE, MIN_FRAME_SCALE, PT_PER_MM, SectionLine, frame_camera};
+use rustgis_engine::map::layout::{ElementKind, Layout, MAX_FRAME_SCALE, MIN_FRAME_SCALE, PT_PER_MM, frame_camera};
 use serde_json::json;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,9 +23,9 @@ pub(super) enum Drag {
     /// Moving a guide: vertical or horizontal, and its index.
     Guide(bool, usize),
     /// Moving a map frame's section line across itself: the frame, the line's index and the line
-    /// as it was when taken (a command that changes the frame's lines meanwhile lets it go), and
-    /// the pointer's page position (mm) at the start.
-    Section(u32, usize, SectionLine, (f64, f64)),
+    /// as it was when taken, its place and name (a command that changes the frame's lines meanwhile
+    /// lets it go), and the pointer's page position (mm) at the start.
+    Section(u32, usize, Taken, (f64, f64)),
     /// Turning a line or arrow by its rotation handle: its id, its angle at the start, and the
     /// pointer's angle about its centre then (degrees).
     Rotate(u32, f64, f64),
