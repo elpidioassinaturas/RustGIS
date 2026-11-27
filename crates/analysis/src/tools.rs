@@ -8774,22 +8774,80 @@ fn zonal_stats_on(inp: &dyn Inputs, p: &Json, threads: Option<usize>) -> Result<
     Ok(ToolResult { losses, output: Output::Layer(out), messages })
 }
 
-/// Returns a borrowed dataset when rows match the full dataset in identity order, or a new dataset containing
-/// only the selected rows, in table order, with schema, CRS, and windowed flag preserved.
-fn subset<'a>(ds: &'a Dataset, selected_rows: &[usize]) -> Cow<'a, Dataset> {
-    // Selections keep the order they were picked in: sort and dedupe so the table's order wins.
-    let mut rows: Vec<usize> = selected_rows.iter().copied().filter(|&r| r < ds.features.len()).collect();
-    rows.sort_unstable();
-    rows.dedup();
-    if rows.len() == ds.features.len() {
-        Cow::Borrowed(ds)
-    } else {
-        let mut sub = Dataset::new(ds.name.clone(), ds.geometry_type, ds.fields.clone());
-        sub.crs = ds.crs;
-        sub.crs_incomplete = ds.crs_incomplete;
-        sub.windowed = ds.windowed;
-        sub.features = rows.iter().filter_map(|&r| ds.features.get(r).cloned()).collect::<Vec<_>>().into();
-        Cow::Owned(sub)
+/// Normalized row selection for `joinField`: either the full dataset (no index buffer or sort)
+/// or a sorted, deduplicated list of in-bounds row indices.
+enum SelectedSubset {
+    All(usize),
+    Rows(Vec<usize>),
+}
+
+impl SelectedSubset {
+    /// Builds a normalized selection for `ds`. Skips allocating and sorting when `sel` is empty
+    /// (full table). For a non-empty selection, fallibly reserves the in-bounds index buffer, then
+    /// sorts and deduplicates it in one pass (an uninterruptible `usize` sort, fast even on
+    /// millions of indices) so table order wins.
+    fn from_selection(ds: &Dataset, sel: &[usize]) -> Result<Self, String> {
+        if sel.is_empty() {
+            return Ok(Self::All(ds.features.len()));
+        }
+        let in_bounds = sel.iter().filter(|&&r| r < ds.features.len()).count();
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(in_bounds)
+            .map_err(|e| format!("Join Field: not enough memory for {in_bounds} selected row indices: {e}"))?;
+        rows.extend(sel.iter().copied().filter(|&r| r < ds.features.len()));
+        rows.sort_unstable();
+        rows.dedup();
+        if rows.len() == ds.features.len() { Ok(Self::All(ds.features.len())) } else { Ok(Self::Rows(rows)) }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::All(n) => *n,
+            Self::Rows(rows) => rows.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn copy_work(&self) -> usize {
+        match self {
+            Self::All(_) => 0,
+            Self::Rows(rows) => rows.len(),
+        }
+    }
+}
+
+/// Returns a borrowed dataset when `selection` covers the full dataset, or a new dataset
+/// containing only the selected rows with schema, CRS, and windowed flag preserved.
+///
+/// Consumes `selection` so its index buffer is released before joining, advances progress within
+/// the caller's active `control::begin` step, reserves fallibly, and returns `Err` when the run is
+/// cancelled before allocating or between cloned rows.
+fn subset<'a>(ds: &'a Dataset, selection: SelectedSubset) -> Result<Cow<'a, Dataset>, String> {
+    match selection {
+        SelectedSubset::All(_) => Ok(Cow::Borrowed(ds)),
+        SelectedSubset::Rows(rows) => {
+            let mut sub = Dataset::new(ds.name.clone(), ds.geometry_type, ds.fields.clone());
+            sub.crs = ds.crs;
+            sub.crs_incomplete = ds.crs_incomplete;
+            sub.windowed = ds.windowed;
+            crate::control::check()?;
+            let mut features = Vec::new();
+            features
+                .try_reserve_exact(rows.len())
+                .map_err(|e| format!("Join Field: not enough memory for {} selected rows: {e}", rows.len()))?;
+            for r in rows {
+                crate::control::check()?;
+                if let Some(row) = ds.features.row(r) {
+                    features.push(row.to_feature());
+                }
+                crate::control::advance(1);
+            }
+            sub.features = features.into();
+            Ok(Cow::Owned(sub))
+        }
     }
 }
 
@@ -8867,18 +8925,18 @@ fn join_field_tool(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     let mut messages = Vec::new();
 
     let target_sel = inp.selection(s(p, "target"));
-    let target_rows = rows(inp, p, "target", target);
+    let target_subset = SelectedSubset::from_selection(target, target_sel)?;
     if !target_sel.is_empty() {
-        if target_rows.is_empty() {
+        if target_subset.is_empty() {
             messages.push(format!(
                 "Warning: the selection on target '{}' contains only stale indices (0/{} features selected); output is empty",
                 target.name,
                 target.features.len()
             ));
-        } else if target_rows.len() < target.features.len() {
+        } else if target_subset.len() < target.features.len() {
             messages.push(format!(
                 "Processing {} selected feature(s) from target '{}' (out of {})",
-                target_rows.len(),
+                target_subset.len(),
                 target.name,
                 target.features.len()
             ));
@@ -8886,26 +8944,23 @@ fn join_field_tool(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
     }
 
     let source_sel = inp.selection(s(p, "joinTable"));
-    let source_rows = rows(inp, p, "joinTable", source);
+    let source_subset = SelectedSubset::from_selection(source, source_sel)?;
     if !source_sel.is_empty() {
-        if source_rows.is_empty() {
+        if source_subset.is_empty() {
             messages.push(format!(
                 "Warning: the selection on source '{}' contains only stale indices (0/{} records selected); no attributes will match",
                 source.name,
                 source.features.len()
             ));
-        } else if source_rows.len() < source.features.len() {
+        } else if source_subset.len() < source.features.len() {
             messages.push(format!(
                 "Joining against {} selected record(s) from source '{}' (out of {})",
-                source_rows.len(),
+                source_subset.len(),
                 source.name,
                 source.features.len()
             ));
         }
     }
-
-    let target_ref = subset(target, &target_rows);
-    let source_ref = subset(source, &source_rows);
 
     let target_field = s(p, "targetField");
     if target_field.is_empty() {
@@ -8962,7 +9017,15 @@ fn join_field_tool(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String> {
         output_name,
     };
 
-    let (out, report) = crate::attribute_join::join_field(&target_ref, &source_ref, &opts)?;
+    let keys = crate::attribute_join::ResolvedKeys::resolve(target, source, opts.target_field, opts.join_field)?;
+    let join_work = keys.work(target_subset.len(), source_subset.len());
+    crate::control::begin(target_subset.copy_work().saturating_add(source_subset.copy_work()).saturating_add(join_work));
+
+    let target_ref = subset(target, target_subset)?;
+    let source_ref = subset(source, source_subset)?;
+
+    let (out, report) =
+        crate::attribute_join::join_field_prepared(&target_ref, &source_ref, &opts, keys, crate::attribute_join::JoinProgress::Continue)?;
     messages.push(report.message(&target.name));
     messages.extend(report.leading_zero_notice());
 
@@ -18058,5 +18121,97 @@ mod tests {
         );
         assert!(res18.is_err());
         assert_eq!(res18.unwrap_err(), "Transfer Fields must be a string or JSON array");
+    }
+
+    #[test]
+    fn join_field_partial_selection_subset_checks_cancel_and_reports_progress() {
+        use crate::control::Control;
+
+        struct SelectedInputs {
+            datasets: HashMap<String, Dataset>,
+            selections: HashMap<String, Vec<usize>>,
+        }
+        impl Inputs for SelectedInputs {
+            fn dataset(&self, layer: &str) -> Option<&Dataset> {
+                self.datasets.get(layer)
+            }
+            fn table(&self, _id: u32) -> Option<&Dataset> {
+                None
+            }
+            fn selection(&self, layer: &str) -> &[usize] {
+                self.selections.get(layer).map(|v| v.as_slice()).unwrap_or(&[])
+            }
+        }
+
+        let mut target = Dataset::new("target", GeometryType::None, vec![Field::new("id", FieldType::Integer)]);
+        for i in 0..4 {
+            target.push(None, vec![Value::Int(i)]);
+        }
+        let mut source =
+            Dataset::new("source", GeometryType::None, vec![Field::new("id", FieldType::Integer), Field::new("tag", FieldType::Integer)]);
+        for i in 0..4 {
+            source.push(None, vec![Value::Int(i), Value::Int(i * 10)]);
+        }
+        let inp = SelectedInputs {
+            datasets: HashMap::from([("target".to_string(), target), ("source".to_string(), source)]),
+            selections: HashMap::from([("target".to_string(), vec![0, 1, 2]), ("source".to_string(), vec![0, 1])]),
+        };
+        let params = serde_json::json!({
+            "target": "target",
+            "targetField": "id",
+            "joinTable": "source",
+            "joinField": "id"
+        });
+
+        // Shared progress total across target subset (3), source subset (2), source index (2), and target join (3) = 10.
+        let counting = Control::cancelled_at_look(u64::MAX);
+        let res = crate::run_with("joinField", &inp, &params, &counting).unwrap();
+        let Output::Table(out) = res.output else { panic!("expected Output::Table") };
+        assert_eq!(out.features.len(), 3);
+        assert_eq!(out.features[0].attrs[1], Value::Int(0));
+        assert_eq!(out.features[1].attrs[1], Value::Int(10));
+        assert_eq!(out.features[2].attrs[1], Value::Null);
+        assert_eq!(counting.progress(), Some((10, 10)));
+
+        // Cancel mid-target subset (look 1 before alloc, look 2 row 0 -> advance 1, look 3 row 1).
+        let cancel_target = Control::cancelled_at_look(3);
+        let err = crate::run_with("joinField", &inp, &params, &cancel_target).unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        assert_eq!(cancel_target.looked(), 3);
+        assert_eq!(cancel_target.progress(), Some((1, 10)));
+
+        // Cancel mid-source subset (4 looks in target subset -> 3 done; look 5 before alloc, look 6 row 0 -> 4 done, look 7 row 1).
+        let cancel_source = Control::cancelled_at_look(7);
+        let err = crate::run_with("joinField", &inp, &params, &cancel_source).unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        assert_eq!(cancel_source.looked(), 7);
+        assert_eq!(cancel_source.progress(), Some((4, 10)));
+
+        // Cancel mid-join (7 subset looks -> 5 done; look 8 pre-index, look 9 source row 0 -> 6 done, look 10 source row 1).
+        let cancel_join = Control::cancelled_at_look(10);
+        let err = crate::run_with("joinField", &inp, &params, &cancel_join).unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        assert_eq!(cancel_join.looked(), 10);
+        assert_eq!(cancel_join.progress(), Some((6, 10)));
+
+        // Duplicate selection indices deduplicate before reporting counts and copy work.
+        let inp_dup = SelectedInputs {
+            datasets: inp.datasets.clone(),
+            selections: HashMap::from([("target".to_string(), vec![2, 0, 2, 1]), ("source".to_string(), vec![1, 1, 0])]),
+        };
+        let counting_dup = Control::cancelled_at_look(u64::MAX);
+        let res_dup = crate::run_with("joinField", &inp_dup, &params, &counting_dup).unwrap();
+        assert!(res_dup.messages.iter().any(|m| m.contains("Processing 3 selected feature(s) from target 'target' (out of 4)")));
+        assert!(res_dup.messages.iter().any(|m| m.contains("Joining against 2 selected record(s) from source 'source' (out of 4)")));
+        assert_eq!(counting_dup.progress(), Some((10, 10)));
+
+        // Unselected join skips subsetting work completely: progress counts only source (4) + target (4) = 8.
+        let inp_all = SelectedInputs { datasets: inp.datasets, selections: HashMap::new() };
+        let counting_all = Control::cancelled_at_look(u64::MAX);
+        let res_all = crate::run_with("joinField", &inp_all, &params, &counting_all).unwrap();
+        let Output::Table(out_all) = res_all.output else { panic!("expected Output::Table") };
+        assert_eq!(out_all.features.len(), 4);
+        assert_eq!(counting_all.progress(), Some((8, 8)));
+        assert_eq!(counting_all.looked(), 9);
     }
 }

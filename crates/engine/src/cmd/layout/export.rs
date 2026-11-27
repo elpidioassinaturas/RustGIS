@@ -66,13 +66,20 @@ pub fn layout_png(s: &mut Session, li: usize, dpi: f64, region: Option<[f64; 4]>
     if let Some(r) = region {
         gaps.retain(|g, _| layout.element(g.frame).is_some_and(|e| rustgis_render::layout::meets(e, r, 0.0)));
     }
-    let img = crate::cmd::share::saying_shadows(s, "The layout", |s| match region {
-        Some(r) => rustgis_render::layout::render_region(&layout, &mut s.project.maps, dpi, &info, r),
-        None => rustgis_render::layout::render(&layout, &mut s.project.maps, dpi, &info),
-    })?;
+    let (img, mut unfitted) = rustgis_render::layout::unfitted_legends(|| {
+        crate::cmd::share::saying_shadows(s, "The layout", |s| match region {
+            Some(r) => rustgis_render::layout::render_region(&layout, &mut s.project.maps, dpi, &info, r),
+            None => rustgis_render::layout::render(&layout, &mut s.project.maps, dpi, &info),
+        })
+    });
+    let img = img?;
+    if let Some(r) = region {
+        unfitted.retain(|l| layout.element(l.id).is_some_and(|e| rustgis_render::layout::meets(e, r, 0.0)));
+    }
     if let Some(note) = rustgis_render::layout::clipped_text_notice(&layout, &clipped) {
         s.warn(note);
     }
+    say_unfitted_legends(s, &unfitted);
     if let Some(note) = rustgis_render::layout::sections_notice(&gaps, 1) {
         s.warn(note);
     }
@@ -206,7 +213,8 @@ pub(in crate::cmd::layout) fn layout_bytes_inner(
     // Layers its frames drew without their cast shadows (read in place, too large for the
     // browser, no memory, still being worked out on the interface's thread): said, as the map's
     // export says them.
-    let (result, said) = rustgis_render::shadows_said(render_pages);
+    // And the legends a fit drew that still don't fit, each once, whatever the page.
+    let ((result, said), unfitted) = rustgis_render::layout::unfitted_legends(|| rustgis_render::shadows_said(render_pages));
     if result.is_ok() {
         for w in crate::cmd::share::shadow_warnings("The layout", &said) {
             s.warn(w);
@@ -223,6 +231,7 @@ pub(in crate::cmd::layout) fn layout_bytes_inner(
     if let Some(note) = rustgis_render::layout::sections_notice(&gaps, pages.len()) {
         s.warn(note);
     }
+    say_unfitted_legends(s, &unfitted);
     pictured_notices(s, &frames_pictured, &pages_pictured);
     georeference_notices(s, &left_out, &by_corners, pages.len());
     if !pdf {
@@ -446,10 +455,13 @@ pub(in crate::cmd::layout) fn layout_svg(s: &mut Session, li: usize, dpi: f64) -
     let clipped = rustgis_render::layout::clipped_text(layout, &s.project.maps, dpi, &info);
     let note = rustgis_render::layout::clipped_text_notice(layout, &clipped);
     let gaps = rustgis_render::layout::sections_not_drawn(layout, &s.project.maps).into_iter().map(|g| (g, 1)).collect();
-    let (text, pictured) = rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)?;
+    let (drawn, unfitted) =
+        rustgis_render::layout::unfitted_legends(|| rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info));
+    let (text, pictured) = drawn?;
     for note in [note, rustgis_render::layout::sections_notice(&gaps, 1)].into_iter().flatten() {
         s.warn(note);
     }
+    say_unfitted_legends(s, &unfitted);
     pictured_notices(s, &pictured, &[]);
     Ok(text)
 }

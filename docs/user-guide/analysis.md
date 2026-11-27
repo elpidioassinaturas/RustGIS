@@ -1633,6 +1633,7 @@ click them on the map:
 | Raster Functions | Slope in degrees or percent, aspect, hillshade (8-bit shades from 1 to 255, with 0 for no data), NDVI, band math (`(b4-b3)/(b4+b3)`), remapping, thresholds, resampling |
 | Function Editor | Chains raster functions, each on the previous output |
 | Process | Clips a raster to the view or to a polygon layer, or resamples it ([below](#zonal-statistics-and-polygon-clipping)) |
+| Mosaic Rasters | Joins tiles of one grid into one raster, in the order listed, and can write it to a GeoTIFF ([under Imagery](#imagery)) |
 | Suitability Modeler | Scores rasters 1–10 and adds them with weights |
 | Visibility Analysis | A viewshed from a point on an elevation raster, with the Earth's curvature and the refraction of visible light (1/7, as `gdal_viewshed`). The ground along each ray is the cell each point falls in by default; `heights: "bilinear"` (**Ground heights › Between cells (bilinear)** in the Workflows pane) reads it between the cells' centres instead. Both are estimates of the ground between cell centres; between cells is closer on ground that bulges (a hill seen from its top), where the nearest cell can hide cells just inside the horizon. With no radius, or one longer than the raster's diagonal, the viewshed covers the whole raster. The map's **Viewshed N km Here** reads the ground as the Workflows pane's **Ground heights** says. On a raster round the whole Earth the rays don't cross its east–west edge, which the analysis says when the radius reaches it and the way across is shorter: the ground just across the edge is left out, worked out the long way round where the radius reaches the far edge through the raster too (always with no radius), or partly both, near the observer's row and not farther from it. The observer's height must be from 0 to 10,000 m. Ground with no data hides nothing, and next to it bilinear heights take the nearest cell's height; the analysis says how many cells this touched, in a notice. The answer gives both counts (0 when there is nothing to say): `acrossNoData` counts the visible cells whose rays crossed ground with no data (a hidden cell stays hidden whatever that ground is, so it isn't counted, and 0 doesn't mean no ray crossed any); `readNearest` counts every cell, visible or hidden, whose ray took a nearest height next to no data in bilinear mode |
 | Exploratory 3D Analysis | A line of sight between two points, split into seen and hidden parts, with the same curvature and refraction |
@@ -2104,9 +2105,16 @@ commands described here aren't on the tab or part of the extension, and run whet
   EVI) and the **Pixel Editor** (set the pixels inside a polygon).
 - **Mosaic Rasters** (`raster.mosaic`) merges tiles of one grid, such as the 1 km tiles of a state
   elevation model, into one raster in their own coordinate system and cell size, optionally
-  written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. It has no
-  pane yet: run it from the Script pane, the AI Assistant, the command line or Python. Inputs
-  are layers or file paths; where they overlap, the first one with data wins. Tiles in different
+  written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. Inputs
+  are layers or file paths; where they overlap, the first one with data wins. Its section in the
+  Workflows pane (Analyze › Workflows, or Command Search) lists them in that order: **Add** puts a
+  raster layer at the end, **Add File…** a file read as the mosaic runs and not added to the map,
+  and ↑ and ↓ move one. **Name** is the new layer's (by default the first input's, with
+  `_mosaic`), and **GeoTIFF › Choose…** writes the file too (none by default). In the desktop app
+  it runs on a thread of its own, its progress and Cancel in the pane, and a GeoTIFF it writes
+  replaces the file only once it is done (Cancel leaves the file as it was). The web app's section
+  joins layers only. From the Script pane, the AI Assistant, the command line or Python it runs in
+  place. Tiles in different
   coordinate systems or cell sizes, or opened from an overview, are refused rather than quietly
   resampled, as are tiles whose cells don't line up; the mosaic has to fit in memory (120 million
   values, cells times bands, or more on a computer with more memory: see Environments).
@@ -2321,6 +2329,17 @@ is the data cube summary's only.
   values below). The example below keeps SCL's dark areas (2) and unclassified pixels (7), which a
   hilly area needs (they can hold shadows or low cloud): drop them for a stricter mask.
 
+- **Several bands:** `"assets": ["B04", "B03", "B02"]` (instead of `"asset"`) reads 2 to 16 of a
+  collection's bands from the same items and makes one layer of a band for each, drawn as RGB when
+  there are three. It takes **mean**, **median** and **first**, which keep each cell's bands
+  together: a pixel goes in at a date only with a value in every band (one with a value in only
+  some is left out at that date, and said with how many), so an averaged cell's bands are the mean
+  of the same pixels, first takes all its bands from the
+  same date, and median takes them from one date too, the one whose bands' sum is the middle (the
+  lower of the two middle ones for an even count), not each band's own middle, which can mix dates
+  into a colour no date had. The bands have to be on one grid of pixels (one cell size); a
+  band on another is refused, and an item without all of them is left out and said.
+
 - **Classes:** a series of categorical rasters, such as yearly land-cover maps (MapBiomas, ESA
   WorldCover), is summarised as classes with eight more statistics:
   - **mode**, each cell's most frequent class, the least of those tied (`"majority"` too);
@@ -2373,6 +2392,7 @@ rustgis-cli run --cmd 'cube.reduce={"layers":["ndvi_2015","ndvi_2016","ndvi_2017
 rustgis-cli run --data cobertura_1985.tif --data cobertura_1986.tif --data cobertura_1987.tif --cmd 'cube.reduce={"layers":["cobertura_1985","cobertura_1986","cobertura_1987"],"stat":"changes"}'
 rustgis-cli run --cmd 'cube.reduce={"url":"https://data.inpe.br/bdc/stac/v1","collection":"mod13q1-6.1","asset":"NDVI","bbox":[-44.8,-7.5,-44.3,-7.0],"start":"2001","end":"2025","cellSize":1000,"stat":"mean","by":"year","minValid":0.5,"name":"NDVI"}' --save urucui.rgis
 rustgis-cli run --cmd 'cube.reduce={"url":"https://data.inpe.br/bdc/stac/v1","collection":"S2-16D-2","asset":"B04","mask":{"asset":"SCL","keep":[2,4,5,6,7]},"bbox":[-43.003,-20.838,-42.754,-20.655],"start":"2025-06-01","end":"2025-08-31","stat":"first","name":"B04 cloud-free"}' --save vicosa.rgis
+rustgis-cli run --cmd 'cube.reduce={"url":"https://data.inpe.br/bdc/stac/v1","collection":"S2-16D-2","assets":["B04","B03","B02"],"mask":{"asset":"SCL","keep":[2,4,5,6,7]},"bbox":[-43.003,-20.838,-42.754,-20.655],"start":"2025-06-01","end":"2025-08-31","stat":"median","name":"RGB cloud-free"}' --save vicosa_rgb.rgis
 ```
 
 ## Categorical raster area by zone
