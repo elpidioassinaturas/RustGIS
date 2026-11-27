@@ -1173,6 +1173,7 @@ fn report_pages_bytes(
         rustgis_data::progress::step(1).map_err(|e| e.to_string())?;
         if !pdf {
             let (img, ..) = rustgis_render::report::draw_page(doc, pages, k, dpi, &s.project.layouts, &mut s.project.maps)?;
+            say_sections_not_drawn(s, pages, 1);
             return Ok((img.encode_png().map_err(|e| e.to_string())?, pages.len()));
         }
         let (page, pictured) = rustgis_render::report::pdf_page(doc, pages, k, dpi, &s.project.layouts, &mut s.project.maps)?;
@@ -1191,7 +1192,27 @@ fn report_pages_bytes(
         }
     }
     super::layout::pictured_notices(s, &frames_pictured, &pages_pictured);
+    say_sections_not_drawn(s, pages, n);
     Ok((rustgis_render::pdf::write(&out, &doc.title), pages.len()))
+}
+
+/// Says the section lines (#2863) the layouts of the first `n` of `pages` don't draw, once a
+/// layout however many pages show it, as the layout's own export says them.
+fn say_sections_not_drawn(s: &mut Session, pages: &[rustgis_render::report::Page], n: usize) {
+    let mut seen = Vec::new();
+    for page in pages.iter().take(n) {
+        let rustgis_render::report::Page::Layout(li) = page else { continue };
+        if seen.contains(li) {
+            continue;
+        }
+        seen.push(*li);
+        let Some(layout) = s.project.layouts.get(*li) else { continue };
+        let gaps = rustgis_render::layout::sections_not_drawn(layout, &s.project.maps).into_iter().map(|g| (g, 1)).collect();
+        if let Some(note) = rustgis_render::layout::sections_notice(&gaps, 1) {
+            let note = format!("The report's layout '{}': {note}", layout.name);
+            s.warn(note);
+        }
+    }
 }
 
 /// Resolves the report creator's string-name or active/default layer convention.

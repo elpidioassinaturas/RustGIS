@@ -196,7 +196,7 @@ impl Section {
         Section { name, line, color: SECTION_COLOR, width: SECTION_WIDTH, dash: None }
     }
 
-    /// The first letter, A to Z, none of `sections` is named: none left only with all 26 named so.
+    /// The first letter from A to Z that no section of `sections` is named, or `None` when all 26 are.
     pub fn free_name(sections: &[Section]) -> Option<String> {
         ('A'..='Z').map(String::from).find(|n| Section::find(sections, n).is_none())
     }

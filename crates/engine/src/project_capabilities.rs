@@ -383,7 +383,8 @@ fn command_uses_section(id: &str, params: &Value) -> bool {
     match id {
         "layout.addElement" => params.get("kind").and_then(Value::as_str).is_some_and(|k| k.trim().eq_ignore_ascii_case("section")),
         "layout.update" => params.get("section").is_some_and(|v| !v.is_null()),
-        "layout.import" => imported_layout_uses(params, &["\"sections\""], |e| e.kind.has_sections()),
+        // A layout file, read as `layout.import` reads it, which `report.existingTemplate` also does.
+        "layout.import" | "report.existingTemplate" => imported_layout_uses(params, &["\"sections\""], |e| e.kind.has_sections()),
         "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_uses_section)),
         _ => false,
     }

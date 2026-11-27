@@ -187,6 +187,43 @@ fn a_section_line_not_drawn_is_said() {
 
 /// Section lines are required where they are saved, so an older reader refuses the project instead
 /// of drawing its frames without them and saving it so. A layout without one needs nothing.
+/// A report's layout page is drawn as the layout's own export is, and says the same of a section
+/// line it can't draw, once a layout, as an image as in a PDF.
+#[test]
+fn a_report_says_a_section_line_its_layout_page_does_not_draw() {
+    let (mut s, _) = with_frame();
+    s.run("layout.addElement", &json!({"kind": "section", "at": [-150, 0]})).unwrap();
+    let layout = s.project.layouts[0].name.clone();
+    s.run("report.new", &json!({"layer": "Countries", "name": "R", "fields": ["name"], "where": "name LIKE 'F%'"})).unwrap();
+    s.run("report.existingTemplate", &json!({"report": "R", "layout": layout})).unwrap();
+    s.run("report.existingTemplate", &json!({"report": "R", "layout": layout, "end": true})).unwrap();
+    /// Removed however the test ends.
+    struct Dir(std::path::PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+    let dir = Dir(std::env::temp_dir().join(format!("rustgis-report-sections-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    for file in ["r.pdf", "r.png"] {
+        let mark = s.notice_mark();
+        s.run("report.export", &json!({"report": "R", "path": dir.0.join(file).display().to_string(), "dpi": 36})).unwrap();
+        let note: Vec<_> = said(&s, mark).into_iter().filter(|t| t.contains("section line(s)")).collect();
+        assert_eq!(note.len(), 1, "{file}: {note:?}");
+        assert!(
+            note[0].contains(&format!("'{layout}'")) && note[0].contains("'A' of ") && note[0].ends_with("its place is outside the frame"),
+            "{note:?}"
+        );
+    }
+    // Brought into the frame, nothing is said.
+    let frame = u64::from(s.project.layouts[0].first_frame().unwrap());
+    s.run("layout.update", &json!({"element": frame, "section": {"name": "A", "at": [10, 50]}})).unwrap();
+    let mark = s.notice_mark();
+    s.run("report.export", &json!({"report": "R", "path": dir.0.join("r.pdf").display().to_string(), "dpi": 36})).unwrap();
+    assert!(!said(&s, mark).iter().any(|t| t.contains("section line(s)")));
+}
+
 #[test]
 fn section_capability_follows_saved_layouts_and_commands() {
     let fixture = Project::from_json(include_str!("../../../../schema/fixtures/layout_section.rgis")).unwrap();
@@ -216,6 +253,9 @@ fn section_capability_follows_saved_layouts_and_commands() {
         ("layout.update", json!({"element": 2, "section": null}), false),
         ("layout.import", layout(&saved), true),
         ("layout.import", layout(&base), false),
+        // A report's template is a layout file read as `layout.import` reads it.
+        ("report.existingTemplate", layout(&saved), true),
+        ("report.existingTemplate", layout(&base), false),
     ] {
         let script = format!("{command} {params}");
         for step in [

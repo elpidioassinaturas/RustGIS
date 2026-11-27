@@ -2205,9 +2205,14 @@ pub fn sections_notice(gaps: &BTreeMap<SectionGap, usize>, pages: usize) -> Opti
 const SECTION_NAME_PT: f32 = 8.0;
 
 /// A frame's section lines, each from end to end with its name in a box of its colour at both (A
-/// and A'), just inside them. Gives the names drawn, as [`draw_grid`] gives its labels.
+/// and A'), just inside them and wholly in the frame. Gives the names drawn, as [`draw_grid`]
+/// gives its labels, each with the edge the credit treats it as: a horizontal line's right name
+/// as a right label, which it goes left of, and every other as a bottom one, which it goes above.
 fn draw_sections(pm: &mut Canvas, sections: &[(&Section, SectionEnds)], ppp: f64) -> Vec<(Edge, [f32; 4])> {
     let k = ppp as f32;
+    let (fw, fh) = (pm.width() as f32, pm.height() as f32);
+    // A centre `c` of a box `half` across, inside `0..size` when the box fits there.
+    let inside = |c: f32, half: f32, size: f32| if size >= 2.0 * half { c.clamp(half, size - half) } else { c };
     let mut drawn = Vec::new();
     for (s, ends) in sections {
         let [a, b] = ends.map(|(x, y)| (x as f32 * k, y as f32 * k));
@@ -2234,17 +2239,15 @@ fn draw_sections(pm: &mut Canvas, sections: &[(&Section, SectionEnds)], ppp: f64
             // Inside the end by a point, but never past the line's middle.
             let length = (b.0 - a.0).max(b.1 - a.1);
             let inset = inward * (k + if vertical { hh } else { hw }).min(length / 2.0);
-            let (cx, cy) = if vertical { (x, y + inset) } else { (x + inset, y) };
+            // Across the line, the whole box inside the frame too.
+            let (cx, cy) = if vertical { (inside(x, hw, fw), y + inset) } else { (x + inset, inside(y, hh, fh)) };
             if let Some(path) = Rect::from_ltrb(cx - hw, cy - hh, cx + hw, cy + hh).and_then(|r| rounded_rect(r, hh)) {
                 pm.fill_path(&path, &paint(s.color, 1.0), FillRule::Winding, Transform::identity(), None);
             }
             text::text_at(pm, &name, cx, cy, px, ink, true, text::Align::Center, false);
-            let edge = match (vertical, inward > 0.0) {
-                (true, true) => Edge::Top,
-                (true, false) => Edge::Bottom,
-                (false, true) => Edge::Left,
-                (false, false) => Edge::Right,
-            };
+            // Section names lie anywhere in the frame, not only along its edges as a grid's labels
+            // do, so the credit keeps clear of every one, whichever end it is.
+            let edge = if !vertical && inward < 0.0 { Edge::Right } else { Edge::Bottom };
             drawn.push((edge, [(cx - hw) / k, (cy - hh) / k, (cx + hw) / k, (cy + hh) / k]));
         }
     }
@@ -12555,6 +12558,40 @@ Elaboração: RustGIS",
     /// A frame's section lines are drawn over its map in their colour, dashed, with their names at
     /// both ends, clipped to its shape, as pixels and as vectors in a layer of their own; a frame
     /// without one draws the same page as before.
+    /// A section's names stay in their frame across the line as along it, and the frame's credit
+    /// keeps clear of every one of them, the left one too once it has gone left of the right one.
+    #[test]
+    fn section_names_stay_in_the_frame_and_clear_of_the_credit() {
+        let (w, h) = (200.0f32, 100.0f32);
+        let section = |line| Section::new("A".into(), line);
+        let at = Coord::new(0.0, 0.0);
+        let near_edges: [(Section, SectionEnds); 4] = [
+            (section(SectionLine::Horizontal(at)), [(0.0, 1.0), (200.0, 1.0)]),
+            (section(SectionLine::Horizontal(at)), [(0.0, 99.0), (200.0, 99.0)]),
+            (section(SectionLine::Vertical(at)), [(1.0, 0.0), (1.0, 100.0)]),
+            (section(SectionLine::Vertical(at)), [(199.0, 0.0), (199.0, 100.0)]),
+        ];
+        for (s, ends) in &near_edges {
+            let mut pm = Canvas::new(w as u32, h as u32).unwrap();
+            for (_, b) in draw_sections(&mut pm, &[(s, *ends)], 1.0) {
+                assert!(b[0] >= 0.0 && b[1] >= 0.0 && b[2] <= w && b[3] <= h, "{ends:?}: {b:?}");
+            }
+        }
+        // A credit 170 points wide goes left of the right name at the foot of the frame, and then
+        // not over the left one.
+        let mut pm = Canvas::new(w as u32, h as u32).unwrap();
+        let (s, ends) = &near_edges[1];
+        let names = draw_sections(&mut pm, &[(s, *ends)], 1.0);
+        let tw = 170.0;
+        let (bottom, right) = attribution_inset((w, h), tw, &names);
+        let size = crate::ATTRIBUTION_SIZE;
+        let (cx, cy) = (crate::attribution_center(w, tw, right), h - bottom - size * 0.9);
+        let (x0, x1, y0, y1) = (cx - tw / 2.0, cx + tw / 2.0, cy - size * 0.8, cy + size * 0.8);
+        for (_, b) in &names {
+            assert!(!(x0 < b[2] && b[0] < x1 && y0 < b[3] && b[1] < y1), "the credit {:?} covers {b:?}", (x0, y0, x1, y1));
+        }
+    }
+
     #[test]
     fn section_lines_are_drawn_over_their_frame() {
         use rustgis_map::layout::{FRAME_BORDER_COLOR, FRAME_BORDER_WIDTH, INDICATOR_COLOR, INDICATOR_WIDTH};
