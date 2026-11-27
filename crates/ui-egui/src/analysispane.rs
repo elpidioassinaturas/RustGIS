@@ -200,6 +200,8 @@ pub struct MosaicForm {
     pub name: String,
     /// The GeoTIFF to write; empty: none.
     pub path: String,
+    /// The project ([`rustgis_engine::Session::opened`]) the list's layers are from.
+    pub project: Option<u64>,
 }
 
 /// A Script pane run, as the line above its results tells it: its number since the project opened
@@ -1651,8 +1653,14 @@ pub fn workflows(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
 fn mosaic_section(app: &mut RustGisApp, ui: &mut Ui, rasters: &[String]) {
     heading(ui, "Join tiles of one grid into one raster");
     ui.label(egui::RichText::new(tl!("Where tiles overlap, the first in the list with data wins.")).small().weak());
+    let opened = app.session.opened;
     let m = &mut app.workflow.mosaic;
-    // A layer removed, or another project opened, leaves the list; a file stays.
+    // Another project opened, however it came: the list's layers were the old project's, a
+    // same-named one too, so they leave it. A layer removed leaves it too. A file stays.
+    if m.project.is_some_and(|p| p != opened) {
+        m.inputs.retain(|(_, file)| *file);
+    }
+    m.project = Some(opened);
     m.inputs.retain(|(name, file)| *file || rasters.contains(name));
     let (count, mut change) = (m.inputs.len(), None);
     for (i, (name, file)) in m.inputs.iter().enumerate() {
@@ -3822,6 +3830,24 @@ mod tests {
         assert!(h.state().workflow.job.is_none());
         drop(h);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Another project opening leaves the Mosaic list's layers, a same-named one there too: they
+    /// were the old project's. Its files stay, as they are on no map.
+    #[test]
+    fn another_project_leaves_the_mosaic_list_layers() {
+        let mut app = RustGisApp::with_sample();
+        app.workflow.mosaic.inputs = vec![("west".to_string(), false), ("tiles/east.tif".to_string(), true)];
+        let rasters = ["west".to_string()];
+        let ctx = egui::Context::default();
+        let draw = |app: &mut RustGisApp| {
+            ctx.run_ui(egui::RawInput::default(), |ui| mosaic_section(app, ui, &rasters)).textures_delta.clear();
+        };
+        draw(&mut app);
+        assert_eq!(app.workflow.mosaic.inputs.len(), 2, "kept in its own project");
+        app.session.run("project.new", &Value::Null).unwrap();
+        draw(&mut app);
+        assert_eq!(app.workflow.mosaic.inputs, vec![("tiles/east.tif".to_string(), true)]);
     }
 
     /// Interpolate runs on a thread of its own from the pane (#1291 step 3): the pane goes on while
