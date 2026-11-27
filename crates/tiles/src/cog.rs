@@ -1623,9 +1623,10 @@ fn read_whole(e: &str) -> bool {
     e.contains(NOT_COG) || e.contains("not a GeoTIFF")
 }
 
-/// Has a file whose header's connection dropped ([`crate::cache::connection_dropped`]) read again
-/// now, for a caller that asks for the file itself (a layer added, an analysis) rather than draws
-/// it. The map's draws ([`info`]) keep their wait, as every other failure does.
+/// Forgets a header that failed because its connection dropped
+/// ([`crate::cache::connection_dropped`]), so a caller that asks for the file itself (a layer
+/// added, an analysis) rather than draws it has the header read again now. The map's draws
+/// ([`info`]) keep their wait, as after every other failure.
 fn ask_again_if_dropped(url: &str) {
     let mut i = infos().lock().unwrap_or_else(|e| e.into_inner());
     if matches!(i.get(url), Some(State::Failed(e, ..)) if crate::cache::connection_dropped(e)) {
