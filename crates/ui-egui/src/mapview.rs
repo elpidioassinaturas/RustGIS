@@ -700,6 +700,12 @@ impl MapView {
         }
     }
 
+    /// Adds a point to the unfinished sketch.
+    #[cfg(test)]
+    pub(crate) fn add_sketch_point_for_tests(&mut self, point: Coord) {
+        self.sketch.push(point);
+    }
+
     #[cfg(test)]
     pub(crate) fn label_dragging_for_tests(&self) -> bool {
         self.moving_label.is_some()
@@ -846,7 +852,11 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     app.map.follow_project(app.session.opened);
     let t = Tokens::get(ui.ctx());
     crate::modelbuilder::follow_view(app);
-    view_tabs(app, ui, &t);
+    // A shell with its own interface (the touch interface) switches views itself.
+    if app.chrome.is_none() {
+        view_tabs(app, ui, &t);
+    }
+    app.ui.in_use.drawn(crate::inuse::Pane::View, ui.layer_id(), ui.available_rect_before_wrap());
     crate::vertexedit::cancel_stale_drag(app);
     crate::vertexedit::say_unplaced(app);
     if app.mb.shown() {
@@ -3065,8 +3075,10 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
     }
     // Arrow keys pan; Shift+Left and Shift+Right turn the map, Shift+Up and Shift+Down tilt it
     // (as in MapLibre). With Alt or Mod held the arrows are shortcuts (Alt+Shift+arrows move the
-    // active layer in the Layers pane's outline, #836), not map moves.
-    if !ui.ctx().egui_wants_keyboard_input() {
+    // active layer in the Layers pane's outline, #836), not map moves. With the attribute table
+    // in use they move its current cell, and the map stays: held keys are read here, so the
+    // table taking the key presses wouldn't stop them.
+    if !ui.ctx().egui_wants_keyboard_input() && crate::inuse::pane(app) != crate::inuse::Pane::Table {
         let (mut dx, mut dy, mut turn, mut tilt) = (0.0, 0.0, 0.0, 0.0);
         ui.input(|i| {
             if i.modifiers.alt || i.modifiers.command {
@@ -4083,7 +4095,15 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
         p.rect_filled(r, CornerRadius::same(3), t.ribbon.gamma_multiply(0.75));
         p.galley(r.min + vec2(5.0, 2.0), g, t.text_dim);
     }
-    // Navigation buttons (zoom in/out/full) in the top-right corner.
+    // Navigation buttons (zoom in/out/full) in the top-right corner. A shell with its own
+    // interface has none: a finger pinches to zoom, and the shell offers Full Extent.
+    if app.chrome.is_none() {
+        navigation(app, ui, p, rect, t);
+    }
+}
+
+/// The map's Zoom In, Zoom Out and Full Extent buttons, in the top-right corner of `rect`.
+fn navigation(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t: &Tokens) {
     let mut y = rect.min.y + 12.0;
     for (icon, id, tip) in
         [("zoom_in", "map.zoomIn", "Zoom in"), ("zoom_out", "map.zoomOut", "Zoom out"), ("zoom_full", "map.zoomFull", "Full extent")]
@@ -4434,6 +4454,7 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
     // Keyed by the feature: egui remembers an area's (and a scroll area's and grid's) size, and
     // the next popup mustn't start from the last one's.
     let key = (&layer, &title, attrs.len());
+    let mut drawn = None;
     egui::Area::new(egui::Id::unique(("identify_popup", key))).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
         let frame = egui::Frame::NONE
             .fill(t.menu)
@@ -4619,7 +4640,12 @@ fn popup(app: &mut RustGisApp, ui: &mut Ui, rect: Rect) {
             new_limit = Some(vec2(limit.x + d.x, r.height() + d.y).clamp(vec2(240.0, 120.0), space));
         }
         ui.ctx().data_mut(|d| d.insert_temp(shown_id, r.height()));
+        drawn = Some((ui.layer_id(), r));
     });
+    // The pop-up is the map's: a press in it leaves the layer list, as one on the map does.
+    if let Some((layer, r)) = drawn {
+        app.ui.in_use.drawn(crate::inuse::Pane::View, layer, r);
+    }
     if let Some(l) = new_limit {
         ui.ctx().data_mut(|d| d.insert_temp(limit_id, l));
     }
@@ -4798,6 +4824,7 @@ fn next_view_tab(ui: &mut Ui, w: f32) -> Rect {
 /// is always in sight.
 fn view_tabs(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+    app.ui.in_use.drawn(crate::inuse::Pane::Tabs, ui.layer_id(), r);
     ui.painter().rect_filled(r, 0.0, t.tab_strip);
     ui.painter().line_segment([pos2(r.min.x, r.max.y - 0.5), pos2(r.max.x, r.max.y - 0.5)], Stroke::new(1.0, t.border));
     // The tabs take the strip but the New Map button's room and the gaps around it.
@@ -4824,12 +4851,13 @@ fn view_tabs(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let area = egui::ScrollArea::horizontal().id_salt("view_tabs").max_width(room);
     let tips = [tl!("Scroll the map tabs left"), tl!("Scroll the map tabs right")];
     let mut close = None;
-    crate::ribbon::arrow_scroll_area(&mut tabs_ui, t, "view_tabs", area, tips, |ui| {
+    let strip_area = crate::ribbon::arrow_scroll_area(&mut tabs_ui, t, "view_tabs", area, tips, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
             close = view_tab_row(app, ui, t, follow);
         });
     });
+    crate::widgets::yield_touch_drag(ui.ctx(), strip_area);
     // Right after the tabs, or at the strip's right edge once they scroll.
     let x = tabs_ui.min_rect().max.x + 2.0;
     let pr = Rect::from_min_size(pos2(x + 2.0, r.min.y + 6.0), vec2(NEW_TAB_W, 20.0));
@@ -4857,7 +4885,7 @@ fn view_tab_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, follow: bool) -> 
     let mut map_tabs = Vec::with_capacity(names.len());
     for (i, n) in names.iter().enumerate() {
         let tr = next_view_tab(ui, view_tab_w(ui, n));
-        let resp = ui.interact(tr, egui::Id::unique(("maptab", i)), Sense::click_and_drag());
+        let resp = ui.interact(tr, egui::Id::unique(("maptab", i)), crate::widgets::reorder_sense(ui, true));
         // Painted, so named for screen readers (and tests).
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, n));
         let dragging = drag_tab(ui, &resp, false, n);
@@ -4908,7 +4936,7 @@ fn view_tab_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens, follow: bool) -> 
     let mut layout_tabs = Vec::with_capacity(layouts.len());
     for (i, n) in layouts.iter().enumerate() {
         let tr = next_view_tab(ui, view_tab_w(ui, n));
-        let resp = ui.interact(tr, egui::Id::unique(("layouttab", i)), Sense::click_and_drag());
+        let resp = ui.interact(tr, egui::Id::unique(("layouttab", i)), crate::widgets::reorder_sense(ui, true));
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, n));
         let dragging = drag_tab(ui, &resp, true, n);
         layout_tabs.push(tr);
@@ -5011,7 +5039,7 @@ struct DraggedTab {
 /// Starts dragging the map or layout tab or row `name` when `resp` starts a drag; whether that one
 /// is being dragged.
 pub(crate) fn drag_tab(ui: &Ui, resp: &egui::Response, layout: bool, name: &str) -> bool {
-    if resp.drag_started_by(egui::PointerButton::Primary) {
+    if crate::widgets::reorder_drag(ui, resp, true) {
         egui::DragAndDrop::set_payload(ui.ctx(), DraggedTab { layout, name: name.to_string() });
     }
     egui::DragAndDrop::payload::<DraggedTab>(ui.ctx()).is_some_and(|d| d.layout == layout && d.name == name)

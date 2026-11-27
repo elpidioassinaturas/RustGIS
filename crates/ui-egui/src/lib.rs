@@ -50,6 +50,7 @@ mod extensionsui;
 mod failureui;
 mod fieldlists;
 mod fieldmenu;
+mod fieldvalues;
 #[cfg(not(target_arch = "wasm32"))]
 mod filedialog;
 mod fill_editor;
@@ -61,6 +62,7 @@ mod geometrycalc;
 mod globe_drape;
 mod graphicformat;
 pub mod icons;
+mod inuse;
 mod keymap;
 mod labelfonts;
 mod labelpane;
@@ -114,6 +116,8 @@ mod s3ui;
 mod saveprompt;
 mod scriptcolor;
 mod scriptcomplete;
+mod scriptfind;
+pub use scriptfind::FindChords;
 mod searchbox;
 mod serviceui;
 mod sessionlog;
@@ -996,6 +1000,7 @@ pub struct UiState {
     /// A minimized ribbon temporarily opened from its tab strip.
     pub ribbon_peek: bool,
     pub command_search: Option<String>,
+    command_search_composing: bool,
     /// A ribbon button being shown by a task step's Show Me.
     pub show_me: Option<showme::ShowMe>,
     pub about: bool,
@@ -1010,6 +1015,8 @@ pub struct UiState {
     pub tab_strip_rect: Option<egui::Rect>,
     /// Where the left and right panes were drawn on the last frame, while they show.
     pub pane_rects: [Option<egui::Rect>; 2],
+    /// The pane the user is working in, for the keys that act on it.
+    pub(crate) in_use: inuse::InUse,
     /// Tabs hidden from the ribbon (Settings › Customize › Ribbon).
     pub hidden_tabs: Vec<String>,
     /// Extra Quick Access Toolbar commands.
@@ -1262,6 +1269,7 @@ impl Default for UiState {
             ribbon_minimized: false,
             ribbon_peek: false,
             command_search: None,
+            command_search_composing: false,
             show_me: None,
             about: false,
             shortcuts: false,
@@ -1271,6 +1279,7 @@ impl Default for UiState {
             shortcut_preferences_full: false,
             tab_strip_rect: None,
             pane_rects: [None; 2],
+            in_use: inuse::InUse::default(),
             copy_out: None,
             open_url: None,
             copy_image: None,
@@ -1685,6 +1694,12 @@ impl RustGisApp {
         keys
     }
 
+    /// The chords the Script box and its find bar take now, none while neither has the focus: with
+    /// [`Self::command_keys`], what the web app keeps from the browser's own shortcuts.
+    pub fn script_find_keys(&self, ctx: &egui::Context) -> FindChords {
+        scriptfind::browser_keys(ctx, &self.workflow.script_find)
+    }
+
     /// The keyboard shortcuts of a command run without parameters, in the keymap's order, for a
     /// native menu to show (the macOS menu bar).
     pub fn shortcuts_of(&self, command: &str) -> Vec<egui::KeyboardShortcut> {
@@ -1712,10 +1727,17 @@ impl RustGisApp {
         widgets::enabled(self, command)
     }
 
+    /// Whether `command` belongs to an extension that is off, so that a menu offering it leaves
+    /// it out.
+    pub fn command_hidden(&self, command: &str) -> bool {
+        extensionsui::hidden(self, command)
+    }
+
     /// A fingerprint of the keymap's key combinations and what they run: cheap to take every
     /// frame (no allocation), it changes when a shortcut is added, removed or rebound (to
-    /// another key or another command), or Command Search opens or closes, so a caller can
-    /// rebuild [`RustGisApp::command_keys`] only then.
+    /// another key or another command), Command Search opens or closes, or an extension is
+    /// turned on or off, so a caller can rebuild [`RustGisApp::command_keys`], or a menu, only
+    /// then.
     pub fn shortcuts_fingerprint(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1741,6 +1763,9 @@ impl RustGisApp {
         self.ui.keymap.bindings.len().hash(&mut h);
         // Command Search takes the number keys while it is open.
         self.ui.command_search.is_some().hash(&mut h);
+        for e in rustgis_engine::extensions::ALL {
+            self.session.extensions().is_on(e.id).hash(&mut h);
+        }
         h.finish()
     }
 
@@ -2527,7 +2552,11 @@ impl RustGisApp {
         if let Some(name) = name.strip_prefix(ASSISTANT_PICK) {
             // An answer with no name is a cancelled picker.
             if !name.is_empty() {
-                assistantpictures::received(self, name, bytes.to_vec());
+                if extensionsui::hidden(self, "ui.pane.assistant") {
+                    self.assistant.late_pictures += 1;
+                } else {
+                    assistantpictures::received(self, name, bytes.to_vec());
+                }
             }
             return Ok(Value::Null);
         }
@@ -3196,8 +3225,9 @@ impl RustGisApp {
         readjob::stop(self, std::time::Duration::from_secs(5));
     }
 
-    /// Draws the map into `ui`, with its own controls (zoom, compass, scale bar): for a shell
-    /// that lays out its own interface ([`RustGisApp::chrome`]).
+    /// Draws the map into `ui`, with its compass and scale bar: for a shell that lays out its own
+    /// interface ([`RustGisApp::chrome`]). With one in place, the map has no zoom buttons and no
+    /// view tabs: the shell offers what it needs of them.
     pub fn map_view(&mut self, ui: &mut egui::Ui) {
         mapview::show(self, ui);
     }
@@ -3217,7 +3247,8 @@ impl RustGisApp {
         chrome::background_busy(self)
     }
 
-    /// Draws that work's progress and Cancel into `ui`, as the desktop's status bar does.
+    /// Draws that work's progress and Cancel into `ui`, as the desktop's status bar does; with a
+    /// shell's interface in place ([`RustGisApp::chrome`]), at a finger's size.
     pub fn background_status(&mut self, ui: &mut egui::Ui) {
         chrome::background_status(self, ui);
     }
@@ -3985,6 +4016,10 @@ impl RustGisApp {
 
     /// Runs a `ui.*` command: panes, dialogs and the app's own settings.
     fn run_ui(&mut self, id: &str, p: &Value) -> Result<Value, String> {
+        // A pane of an extension that is off says so, as its other commands do (#1752).
+        if let Some(why) = self.session.extensions().blocks(id) {
+            return Err(why);
+        }
         // A pane's command toggles it; `{"close": true}` closes it, in view or not (a tab's ✕),
         // whatever else the command is given (SQL to run, a question to ask).
         if p.get("close").and_then(Value::as_bool) == Some(true) && panes::close_pane_of(self, id) {
@@ -7084,6 +7119,9 @@ impl RustGisApp {
         if ctx.current_pass_index() == 0 {
             self.frame_start = Some(web_time::Instant::now());
         }
+        // An extension turned off while the last frame was drawn stops its work first: the AI
+        // Assistant's agent threads lose their relay access before the relay runs anything.
+        extensionsui::persist(self);
         // The MCP relay: what attached agents sent runs here, on this session, before the frame
         // draws (Session lives on this thread; the listener only queues messages).
         #[cfg(not(target_arch = "wasm32"))]
@@ -7517,6 +7555,8 @@ impl RustGisApp {
         let t = theme::Tokens::get(&ctx);
         // Before the shortcuts and the fields: the row picked in a text field's menu, as its keys.
         fieldmenu::play(self, &ctx);
+        // Before the shortcuts: a key acts on the pane this frame's press is in.
+        inuse::follow(self, &ctx);
         chrome::shortcuts(self, &ctx);
         panes::follow_layer_filter(self);
         // A Zarr summary or point series, a trend, a workflow, an export or a read running on its thread lands
@@ -7572,6 +7612,9 @@ impl RustGisApp {
         chrome::about(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
         agentthreads::windows(self, &ctx);
+        // The keys that follow a click of this frame, now that the panes have taken it and the
+        // dialogs it opened are up. Before the notices, which a key that can't run adds to.
+        chrome::late_keys(self, &ctx);
         chrome::notices(self, &ctx);
         // After every field is drawn: one right-clicked opens its menu.
         fieldmenu::show(self, &ctx);

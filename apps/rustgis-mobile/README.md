@@ -95,11 +95,18 @@ Rust calls Java and never the other way: each frame the app collects what happen
 ## The touch interface
 
 A phone starts in the touch interface: the map, a bar of four large buttons under it (Layers, Add
-Data, Capture, More) and sheets that rise over the map. The Layers sheet shows and hides layers,
-zooms to one and makes one the active layer; the More sheet has Full Extent, the project, undo
-and redo, and **Use the Desktop Interface**, which brings back the ribbon and panes; **Touch
+Data, Capture, More) and sheets that rise over the map. The Layers sheet switches between the
+project's maps and layouts when it has more than one, shows and hides layers, zooms to one and
+makes one the active layer; the More sheet has Full Extent, undo and redo, the project, the
+position, and **Use the Desktop Interface**, which brings back the ribbon and panes; **Touch
 Interface**, on the View tab (or Use the Touch Interface in Command Search), returns to the phone's
-interface.
+interface. The map has no zoom buttons or view tabs there: a finger pinches to zoom.
+
+A sheet is lowered by its **×**, a swipe down on its heading, a tap on the map above it, or
+Android's Back. Android 16 on sends an app targeting it no Back key, so the activity's Java half
+registers a callback while a sheet is up (`takesBack`), and asks the window for a frame when Back
+comes; older Androids send the key, which the app reads. With no sheet up, Back does what it did
+before.
 
 **Capture** adds a feature to one of the map's point, line or polygon layers. A cross marks the
 middle of the map: the map is moved under it, and the sheet's fields are filled in (one for each
@@ -242,7 +249,8 @@ own was used outside the area) is said, as a later package from the same phone r
 | GeoLibre tools, GDAL formats, DuckDB | Not available: a phone can't run their programs. `rustgis_data::RUNS_PROGRAMS` is false on Android and iOS, so no program is looked for, and each place they would appear says so: a file read through GDAL or a DuckDB database is refused with the reason (convert it on a computer), the SQL pane says why it can't query, and the Geoprocessing pane shows a card in place of the GeoLibre tools. Add Data's Database… stays: its PostGIS, MySQL and SQL Server connections need no program. The app is built without the engine's `geolibre` feature |
 | Memory limits | The app tells the engine what Android allows (`rustgis_data::memory::set_phone`): `ActivityManager.MemoryInfo`'s `totalMem` in place of the computer's memory, and `availMem` less `threshold` as what is free, asked again for each job. (`getMemoryClass` bounds only the Java heap; the engine's memory is native.) Where the browser's floor is lower than the desktop's, the phone takes it; the Undo budget is planned from what is free at start, and the threads' scratch memory is the browser's. On a low-memory warning the app drops the tile and drawing caches: `onTrimMemory` and `onLowMemory` through Android 13, and, as Android 14 and later send an app in use neither, `MemoryInfo.lowMemory`, asked every five seconds while the app is in sight (an idle window wakes that often to ask) |
 | Recovery copies | The first foreground edit submits a recovery copy in app-private storage immediately. Edits within two seconds of a submission are grouped into a copy due at the end of that interval. When the exit hook runs, it submits the latest edit immediately and gives the writer up to two seconds to finish. Suspending or destroying the Android activity can skip this hook, so edits still waiting to be submitted can be lost. The next launch offers the last complete copy, if one exists. |
-| Preferences, the keychain | Not wired up yet |
+| Preferences | `prefs.json` in the app's settings folder, as on the desktop (`rustgis_engine::prefs`) |
+| Secrets | `Services::secrets` is `src/secrets.rs`: the Java half (`SecretVault.java`) encrypts each secret with AES-GCM under a key the Android Keystore makes once and never lets out, bound to its account name, and keeps it in a file of its own in the app's no-backup folder, written whole and renamed into place, so a failed save leaves the secret as it was. Nothing is kept unencrypted: when the keystore can't be used, a secret lasts for the session and the app says so. Uninstalling the app removes both. On iOS there is no store yet: the keychain crate's Apple store needs its `protected` feature there |
 | Soft keyboard | It opens for a text field, and the touch interface keeps the field above it. The Capture form's fields are typed into Android's own text box (see Typing above), with suggestions, composing, paste and dictation. Fields the desktop interface draws still get `NativeActivity`'s poor text input (no suggestions, no composing) |
 
 ## What phase 0 found

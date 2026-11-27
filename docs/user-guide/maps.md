@@ -71,7 +71,9 @@ view to it, and says so.
 **Rotating and tilting the map.** Drag with the right mouse button, or hold ++ctrl++ and drag
 with the Pan tool, to turn the map about the centre of the view (to the right turns it clockwise)
 and to tilt it (up tilts it further), as in MapLibre; or hold ++shift++ and press ++arrow-left++ or ++arrow-right++ to turn it, ++arrow-up++ or ++arrow-down++
-to tilt it. The north arrow turns with the map to point north and leans back as it tilts; click
+to tilt it (after a click or a scroll in the
+[attribute table](analysis.md#the-attribute-table), the arrow keys move between its cells
+instead). The north arrow turns with the map to point north and leans back as it tilts; click
 it to face north and look straight down again. The bearing (the compass direction the top of the
 view faces, in degrees clockwise from north) and the pitch (the tilt from looking straight down,
 0 to 85 degrees) work as in MapLibre. They are saved with the project, its bookmarks and bookmark
@@ -79,17 +81,18 @@ files, and exported maps are drawn turned and tilted. A tilted map keeps the sca
 of the view: nearer ground is larger, farther ground smaller and drawn coarser, fading into fog
 and, past about 72 degrees, a sky above the horizon. Labels stay upright, and those too far away
 to read are left out. Point markers stand upright, facing you, as MapLibre's circles do, smaller
-with distance (aggregated, masked, blended or diagrammed point layers, and layers of more than 50,000 points,
-keep their markers on the ground). Extruded layers (Style › Extrusion) stand up in perspective on a tilted
-map, as in MapLibre: walls lit by the way they face and darker toward their foot, roofs at their
-height, with the labels of extruded features on their roofs. While a tilted map moves, the
-picture drawn last is laid over the ground and the extrusions and markers are moved with it, and the map is
-drawn again once it settles. `map.setBearing` sets the bearing (`{"bearing": 90}`
-puts east at the top; `{"by": 15}` turns it further), `map.setPitch` the pitch (`{"pitch": 60}`,
-or `{"by": 10}`), `map.resetNorth` faces north and looks straight down, and `map.goToXY` takes a
-`bearing` and a `pitch` too. Page layout map frames take their own bearing and pitch (see
-[Layouts](layouts.md)), and the globe turns and tilts the same way: tilted, its camera swings
-back about the centre of view, so the horizon comes into sight past the curve of the Earth.
+with distance and fading into the fog, image markers too (aggregated, masked, blended or diagrammed
+point layers, and layers of more than 50,000 points, keep their markers on the ground). Extruded
+layers (Style › Extrusion) stand up in perspective on a tilted map, as in MapLibre: walls lit by the
+way they face and darker toward their foot, roofs at their height, with the labels of extruded
+features on their roofs. While a tilted map moves, the picture drawn last is laid over the ground
+and the extrusions and markers are moved with it, and the map is drawn again once it settles.
+`map.setBearing` sets the bearing (`{"bearing": 90}` puts east at the top; `{"by": 15}` turns it
+further), `map.setPitch` the pitch (`{"pitch": 60}`, or `{"by": 10}`), `map.resetNorth` faces north
+and looks straight down, and `map.goToXY` takes a `bearing` and a `pitch` too. Page layout map
+frames take their own bearing and pitch (see [Layouts](layouts.md)), and the globe turns and tilts
+the same way: tilted, its camera swings back about the centre of view, so the horizon comes into
+sight past the curve of the Earth.
 
 <figure markdown="span">
   ![Countries extruded by population on a map tilted 55° and turned 20°, lit and shaded, with labels on their roofs](https://assets.rustgis.app/images/extrusion.webp)
@@ -768,8 +771,10 @@ project switches its countries when the new borders arrive; others keep the laye
 ## Projections
 
 The flat map is drawn in Web Mercator by default. **View › Projection** switches it to another
-projection, and clicking the coordinate system in the status bar opens the **Coordinate
-System** dialog, which also takes a projected EPSG code (such as `3035`, `32633` for UTM zone
+projection. The coordinate system button in the status bar opens the **Coordinate System**
+dialog, as does **Coordinate System…** on the right-click menu of the map's entry at the top of
+the Layers pane (also on the menus of the map's tab and of its entry in the Browser, for the map
+in view). The dialog also takes a projected EPSG code (such as `3035`, `32633` for UTM zone
 33N or `2056` for Switzerland) or an ESRI code, the one `.prj` files and ArcGIS name (such as
 `ESRI:102033` for South America Albers Equal Area Conic, or `ESRI:54030` for World Robinson). A
 code whose projection method RustGIS can't compute is refused with the reason, rather than drawn

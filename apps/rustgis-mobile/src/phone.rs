@@ -15,6 +15,27 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use winit::platform::android::activity::AndroidApp;
 
+/// A reference of RustGIS's own to the activity `android` runs, or why its Java side can't be
+/// reached.
+pub fn activity(android: &AndroidApp) -> Result<Global<JObject<'static>>, String> {
+    let raw = android.activity_as_ptr().cast();
+    JavaVM::singleton()
+        .and_then(|vm| {
+            vm.attach_current_thread(|env| {
+                // SAFETY: `android-activity` keeps this global reference to the activity alive
+                // for as long as `android_main` runs, and it is only borrowed here to make a
+                // global reference of our own.
+                #[expect(unsafe_code, reason = "see SAFETY above")]
+                let activity = unsafe { JObject::from_raw(env, raw) };
+                let held = env.new_global_ref(&activity);
+                // The borrowed reference is `android-activity`'s to delete, not ours.
+                let _ = activity.into_raw();
+                held
+            })
+        })
+        .map_err(|e| i18n::fmt("Android's Java side can't be reached: {error}", &[("error", &e.to_string())]))
+}
+
 /// The phone, through its activity.
 pub struct Phone {
     activity: Arc<Global<JObject<'static>>>,
@@ -27,23 +48,7 @@ impl Phone {
     /// The phone `android` runs on, or why its Java half can't be reached (an APK built without
     /// it): the app then runs without a file picker and says so.
     pub fn new(android: &AndroidApp) -> Result<Phone, String> {
-        let raw = android.activity_as_ptr().cast();
-        let activity = JavaVM::singleton()
-            .and_then(|vm| {
-                vm.attach_current_thread(|env| {
-                    // SAFETY: `android-activity` keeps this global reference to the activity alive
-                    // for as long as `android_main` runs, and it is only borrowed here to make a
-                    // global reference of our own.
-                    #[expect(unsafe_code, reason = "see SAFETY above")]
-                    let activity = unsafe { JObject::from_raw(env, raw) };
-                    let held = env.new_global_ref(&activity);
-                    // The borrowed reference is `android-activity`'s to delete, not ours.
-                    let _ = activity.into_raw();
-                    held
-                })
-            })
-            .map_err(|e| i18n::fmt("Android's Java side can't be reached: {error}", &[("error", &e.to_string())]))?;
-        let phone = Phone { activity: Arc::new(activity), unreachable: RefCell::new(None) };
+        let phone = Phone { activity: Arc::new(activity(android)?), unreachable: RefCell::new(None) };
         let owner = phone.java(|env, activity| {
             let token = env.call_method(activity, jni_str!("copyOwner"), jni_sig!(() -> JString), &[])?.l()?;
             env.cast_local::<JString>(token)?.try_to_string(env)
@@ -99,6 +104,25 @@ impl Phone {
         if let Err(e) = asked {
             log::warn!("{e}");
         }
+    }
+
+    /// Takes Android's Back from the system (`on`) or gives it up, where the system keeps it from
+    /// an app that doesn't ask (Android 16 on).
+    pub fn takes_back(&self, on: bool) {
+        let asked = self.java(|env, activity| {
+            env.call_method(activity, jni_str!("takesBack"), jni_sig!((on: boolean) -> void), &[JValue::Bool(on)])?.v()
+        });
+        if let Err(e) = asked {
+            log::warn!("{e}");
+        }
+    }
+
+    /// Whether Back, taken from the system, came since this was last asked. A refusal is logged,
+    /// as `takes_back`'s is, and counts as no Back.
+    pub fn take_back(&self) -> bool {
+        self.java(|env, activity| env.call_method(activity, jni_str!("takeBack"), jni_sig!(() -> boolean), &[])?.z())
+            .inspect_err(|e| log::warn!("{e}"))
+            .unwrap_or(false)
     }
 
     /// Whether a picker for opening is on the screen and hasn't answered.

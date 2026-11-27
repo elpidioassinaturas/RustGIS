@@ -774,19 +774,23 @@ pub fn showing(app: &RustGisApp) -> bool {
 /// The read under way in the status bar: its name, progress, how many wait, and Cancel.
 pub fn status(app: &RustGisApp, ui: &mut Ui, t: &Tokens) {
     let Some(job) = &app.reads.job else { return };
+    let size = crate::chrome::StripSize::of(app);
+    let cancellable = !job.control.is_cancelled();
     ui.spinner();
+    let mut cancel = size.cancel_first(ui, cancellable);
     // Two labels, not one sentence put together from translated pieces.
-    ui.label(egui::RichText::new(tl!("Running…")).size(11.5).color(t.text_dim));
-    ui.label(egui::RichText::new(tl!(job.name)).size(11.5).strong());
+    ui.label(egui::RichText::new(tl!("Running…")).size(size.text).color(t.text_dim));
+    ui.label(egui::RichText::new(tl!(job.name)).size(size.text).strong());
     // How far its current step has come, when its reader counts.
     if let Some((done, total)) = job.control.progress() {
-        ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).show_percentage().desired_width(120.0).desired_height(12.0));
+        size.progress(ui, done as f32 / total.max(1) as f32);
     }
     let n = app.reads.waiting.len();
     if n > 0 {
-        ui.label(egui::RichText::new(crate::i18n::fmt("{n} waiting", &[("n", &n.to_string())])).size(11.5).color(t.text_dim));
+        ui.label(egui::RichText::new(crate::i18n::fmt("{n} waiting", &[("n", &n.to_string())])).size(size.text).color(t.text_dim));
     }
-    if ui.add_enabled(!job.control.is_cancelled(), egui::Button::new(tl!("Cancel")).small()).clicked() {
+    cancel |= size.cancel_last(ui, cancellable);
+    if cancel {
         job.control.cancel();
     }
 }
@@ -1707,7 +1711,7 @@ mod tests {
         assert_eq!(step.params["layer"], json!("towns"));
     }
 
-    /// Import QGIS Style reads its file and its raster image markers' images on a thread first
+    /// Import QGIS Style reads its file and its raster image and SVG markers' images on a thread first
     /// (#2620): the layer is styled when they have been read, with the notes the command gives.
     #[test]
     fn a_qgis_style_is_read_on_a_thread_before_it_lands() {

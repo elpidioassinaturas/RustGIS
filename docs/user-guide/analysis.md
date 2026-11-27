@@ -32,6 +32,26 @@ deletes the selection, adds or calculates a field, and calculates geometry attri
 The first column, **Feature ID**, shows each feature's identifier, not its current row position
 after sorting or filtering. It is not a dataset field: do not use it as a geoprocessing field name.
 
+The cell last clicked is the current cell, shown with an outline. After a click or a scroll in the
+table, the **arrow keys** move it: up and down through the rows as the table sorts and filters them,
+left and right through the columns shown, **Feature ID** first. It stops at the edges, the table
+scrolls to keep it in view, and a held key keeps moving. With no current cell, or with its row or
+column no longer shown, an arrow starts at the first row or column shown. Moving it doesn't change
+the selection. **Enter** edits it, as a double-click does (Feature ID can't be edited). While the
+table is in use the arrow keys don't pan, turn or tilt the map or nudge a layout element; click or
+scroll the map or layout and they do again. While you type in a cell or in **Filter rows…**, the
+keys are the text box's. A shortcut you give an arrow key or Enter still runs its command.
+
+Right-click a row for **Zoom To**, **Remove from Selection**, **Copy** (the feature, as
+**Copy** in the ribbon does), **Copy Value** (the text of the cell clicked; a number is copied in
+full and a picture gives its stored data) and **Delete** (Undo brings the rows back; greyed while
+editing is off and on a layer read in place from its file). A right-click on a row that isn't selected selects it alone first, as a click
+on it does. One on a selected row keeps the selection, and Zoom To, Copy and Delete then act on the
+layer's whole selection, as their labels count it and as the table's toolbar does (selected rows a
+filter hides are among them); choosing one of them clears any selection in other layers.
+**Remove from Selection** takes out only the row clicked. In a standalone table only Copy Value
+can be chosen; the other rows are greyed.
+
 Right-click a column header for **Hide Column**, **Move Left**, **Move Right** and **Show All
 Columns**. A hidden column is only left out of the table: export, selection, expressions and the
 map are unchanged. The toolbar says how many columns are hidden, and clicking it shows them all.
@@ -1823,9 +1843,10 @@ browser's file picker. A file that isn't UTF-8 text, or is over 1 MB, is refused
 naming it, and the script stays. Opening a
 project (New, Open, the sample, a template, or the same one again), from the app, a script, the
 assistant or an agent, starts the pane blank: the script, its results, the count and the Details
-window go with the old project. A script that opens a project itself stays, with its results, as
-the new project's Run #1. On the desktop, a script's tools, models and batches, with selections, layer
-renames and definition queries, the environment, the projection and spectral zones between them, are worked out
+window go with the old project, and the find bar closes, forgetting what was in it. A script that
+opens a project itself stays, with its results, as the new project's Run #1. On the desktop, a
+script's tools, models and batches, with selections, layer renames and definition queries, the
+environment, the projection and spectral zones between them, are worked out
 in the background first, so the map and the rest of the window stay in use: the status bar shows
 **Run Script** and **Cancel**, and the results say **Running…** until the run is added. From the
 first line of any other kind (an edit, Add Data, a save, an export, a style or a zoom, a plugin
@@ -1900,6 +1921,23 @@ so does a `"` where a string can start (after a space, `{`, `[`, `,` or `:`). A 
 before the same one steps over it, as does a `"` typed before the quote that ends its string, and
 Backspace in an empty `{}`, `[]` or `""` deletes both. The lists open in a quote that closed
 itself, and accepting keeps that quote. Pasting adds nothing.
+
+Ctrl+F (⌘+F on macOS) in the Script box opens a find bar over the box's top right, as a code editor
+does, with the selected text, if it is one line of up to 200 characters (the most each field takes:
+a longer paste is cut, and the bar and Messages say how many characters were left out), in its
+field. Every match is highlighted in the box, the current one stronger and outlined, and the bar
+says which it is (`3 of 12`, or `No results`). Enter and Shift+Enter (or F3 and Shift+F3), or the up
+and down arrows, go to the next and the previous match, round the ends, and scroll it into view. Two
+toggles inside the field make capitals count (**Aa**) and match only whole words (**ab** under a
+bracket: no letter, digit or `_` against the match); the search is plain text, without patterns. The
+arrow at the bar's left (or Ctrl+H, ⌥⌘F on macOS) shows a second field, for what to replace with,
+and two buttons: Replace changes the current match and Replace All every one, each as one step of
+the box's Undo (Ctrl+Z); both are off while a run is under way, and Replace All is off too when
+there are more matches than the bar keeps (10,000); one that would make the script larger than 1 MB
+replaces nothing and says so in Messages. The bar's shortcuts work from its fields, its buttons and
+the box. Escape in the bar, or the close button, closes it and leaves the current match selected in
+the box. Escape in the box closes it too, once no list or help is open over the box, and the cursor
+stays where it is.
 
 ## ModelBuilder
 
