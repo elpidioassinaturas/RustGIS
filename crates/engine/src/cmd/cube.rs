@@ -1094,6 +1094,14 @@ fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
         let (_, rasters, dates) = s.trend_results.remove(at);
         return add_outputs(s, rasters, dates);
     }
+    // A plugin's command the app runs reads a STAC collection off the frame (#3183), with the
+    // panes' bound, as the Workflows pane's thread does.
+    if let Some(left) = super::plugins::summary::left(s, "cube.trend", p, |s| {
+        let run = trend_start(s, p)?;
+        Ok(super::plugins::summary::Work::new(run.total(), run.dates(), move |cancel, done| run.run(cancel, done)))
+    }) {
+        return left;
+    }
     // Worked out here, waited for with no Cancel: in the app (a script, the assistant) and Python a
     // run of seconds, not minutes; where only a shell waits on it (`rustgis-cli run`), the panes'
     // bound, its progress told.
@@ -2205,6 +2213,13 @@ pub fn reduce_start(s: &mut Session, p: &Value) -> Result<ReduceRun, String> {
 /// `cube.reduce`: the summary computed here (blocking), its progress told where only a shell waits
 /// on it (`rustgis-cli run`), its layers added, each kept in the project as a GeoTIFF.
 fn reduce_cmd(s: &mut Session, p: &Value) -> CmdResult {
+    // A plugin's command the app runs reads a STAC collection off the frame (#3183).
+    if let Some(left) = super::plugins::summary::left(s, "cube.reduce", p, |s| {
+        let run = reduce_start(s, p)?;
+        Ok(super::plugins::summary::Work::new(run.total(), run.dates(), move |cancel, done| run.run(cancel, done)))
+    }) {
+        return left;
+    }
     let run = reduce_start(s, p)?;
     let rasters = run_here(s.long_runs, "cube.reduce", run.total(), |cancel, done| run.run(cancel, done))?;
     let added = add_outputs(s, rasters, run.dates());

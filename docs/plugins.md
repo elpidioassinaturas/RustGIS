@@ -708,6 +708,18 @@ area's files or none. When they are left to download, a file that fails stops th
 error that says how many landed before it. Those stay, each its own undo step.
 It also fetches the catalog on each run, which waits with the window held.
 
+`cube.reduce` and `cube.trend` over a STAC collection (`"collection"`, or a catalogue's `"cube"`
+entry of one) do the same on the desktop: the call checks its parameters and searches the
+collection, with the window held as before, then answers `{"pending": true}` and leaves the slices
+to read on a thread of their own. The status bar names the command, with the read's progress and a
+Cancel. Once the read has landed the command runs again, and the same call, with the same
+parameters, adds the layers at once and answers them as it would have (`{"layers", "dates"}`):
+they are part of the command's own undo step. Cancelled, or failed, the read is that call's error.
+Several in one call are read one after another, and the command runs again once all have landed;
+up to 4 wait at a time, and asking for more fails. Their layers are held in memory until the
+command has run again. A cube of layers, bands or a Zarr store is read in the call, as before, and
+`rustgis-cli`, a script or a task waits for the read.
+
 While a command waits the window answers, so the user can work and the project can change. The
 status bar says the command is running, and asking for it again with the same parameters does
 nothing. A run again sees the view the command first ran with, and the window's size then, unless

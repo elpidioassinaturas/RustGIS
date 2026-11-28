@@ -1150,6 +1150,9 @@ pub struct Session {
     /// The download requests of the plugin call running now (none outside one): each one's
     /// number, and what was asked.
     pub(crate) call_requests: Option<Vec<(u64, serde_json::Value)>>,
+    /// The data cube summaries the plugin call running now left to read off the frame (#3183),
+    /// until the call is kept to run again.
+    pub(crate) call_summaries: Vec<cmd::plugins::summary::Left>,
     /// While a plugin command runs again for its downloads: what each one asked for, and what
     /// adding it answered, for its `layer.addUrl` to answer once.
     pub(crate) rerun_landed: Vec<(serde_json::Value, CmdResult, cmd::plugins::fetch::Added)>,
@@ -1612,6 +1615,7 @@ impl Session {
             url_waits: cmd::plugins::fetch::UrlWaits::default(),
             next_request: 0,
             call_requests: None,
+            call_summaries: Vec::new(),
             rerun_landed: Vec::new(),
             rerun_told: Vec::new(),
             rerun_said: Vec::new(),
