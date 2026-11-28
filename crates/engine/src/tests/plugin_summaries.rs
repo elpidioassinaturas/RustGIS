@@ -5,9 +5,15 @@ use super::*;
 /// A collection "s2" of `dates` dates of a 4 × 4 band over [10, 11] × [45, 46], date k's cells all
 /// 10 (k + 1): its STAC API's address.
 fn collection(dates: usize) -> String {
+    collection_of(dates, 0.25)
+}
+
+/// A collection "s2" of `dates` dates of a 4 × 4 band of `pixel`° cells from (10, 46), date k's
+/// cells all 10 (k + 1), its items over [10, 11] × [45, 46]: its STAC API's address.
+fn collection_of(dates: usize, pixel: f64) -> String {
     use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
     let band = |k: usize| {
-        let t = GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: 0.25, pixel_height: -0.25 };
+        let t = GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: pixel, pixel_height: -pixel };
         let r = Raster::new("r", 4, 4, vec![vec![10.0 * (k + 1) as f32; 16]], t, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
         rustgis_data::raster::cogwrite::write(&r, 0).unwrap()
     };
@@ -289,4 +295,64 @@ fn a_new_project_stops_the_summaries_of_the_old() {
     assert_eq!(ran.len(), 1, "the new project's read lands: {ran:?}");
     assert!(ran[0].1.is_ok(), "{ran:?}");
     rustgis_plugins::unload("eng-summary-new-project");
+}
+
+/// A command that replaced the project and then failed gives the old one back: the summaries the
+/// replacement started stop with it, so the old project's next one isn't held behind them.
+#[test]
+fn a_project_given_back_stops_the_summaries_of_its_replacement() {
+    let mut s = world();
+    plugin("eng-summary-given-back", &["edit", "files", "network"]);
+    fetch_mode(true, true);
+    let api = collection(3);
+    let e = s.guarded("test", true, |s| {
+        s.run("project.sample", &Value::Null)?;
+        // A read of the replacement that lasts until it is stopped.
+        s.start_test_summary("plugin:eng-summary-given-back/f");
+        Err("failed once the project was replaced".to_string())
+    });
+    assert!(e.is_err());
+    assert!(s.plugin_summaries().is_empty(), "not the replacement's");
+    s.run_leaving_downloads("plugin:eng-summary-given-back/f", &reduce_call(&api, "mean")).unwrap();
+    let ran = ran_again(&mut s);
+    assert_eq!(ran.len(), 1, "the old project's read lands: {ran:?}");
+    assert!(ran[0].1.is_ok(), "{ran:?}");
+    rustgis_plugins::unload("eng-summary-given-back");
+}
+
+/// A trend over a large grid plans all four of its outputs, with their GeoTIFFs: its run doesn't
+/// cap them, only its area (`MAX_TREND_CELLS`).
+#[test]
+fn a_large_trend_plans_its_whole_output() {
+    let mut s = world();
+    fetch_mode(true, true);
+    // 1° in cells of 0.000201°: about 4,976 × 4,976 cells, within a trend's area.
+    let api = collection_of(4, 0.000201);
+    let mut p = reduce(&api, "mean");
+    p.as_object_mut().unwrap().remove("stat");
+    let run = crate::cmd::cube::trend_start(&mut s, &p).unwrap();
+    let whole = 4_975u64 * 4_975 * 4 * 8;
+    assert!(run.output_bytes() >= whole, "{} bytes planned, not the {whole} its outputs hold", run.output_bytes());
+}
+
+/// A command that failed leaves the summaries as they were before it: one it started stops, so the
+/// next isn't held behind it.
+#[test]
+fn a_failed_command_stops_the_summaries_it_started() {
+    let mut s = world();
+    plugin("eng-summary-failed", &["edit", "files", "network"]);
+    fetch_mode(true, true);
+    let api = collection(3);
+    let e = s.guarded("test", true, |s| {
+        // A read that lasts until it is stopped.
+        s.start_test_summary("plugin:eng-summary-failed/f");
+        Err("failed once the read had started".to_string())
+    });
+    assert!(e.is_err());
+    assert!(s.plugin_summaries().is_empty(), "not the failed command's");
+    s.run_leaving_downloads("plugin:eng-summary-failed/f", &reduce_call(&api, "mean")).unwrap();
+    let ran = ran_again(&mut s);
+    assert_eq!(ran.len(), 1, "the next read lands: {ran:?}");
+    assert!(ran[0].1.is_ok(), "{ran:?}");
+    rustgis_plugins::unload("eng-summary-failed");
 }

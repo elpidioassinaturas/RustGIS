@@ -2726,6 +2726,8 @@ impl Session {
         self.request_only = outer_request_only;
         if res.is_err() {
             self.restore_url_request_checkpoint(requests);
+            // The summaries it started stop: those before it are kept, and nothing waits for the others.
+            self.url_waits.stop_summaries_beside(&retry_state.1);
             (self.plugin_retries, self.url_waits) = retry_state;
             // Keep only still-present old identities: drained bytes and terminal refusals stay consumed.
             let (kept, mut dropped): (Vec<_>, Vec<_>) =
@@ -2907,6 +2909,8 @@ impl Session {
         (self.path, self.model_run, self.style_view) = (path, model_run, style_view);
         self.opened_package = opened_package;
         self.file_identity = file_identity;
+        // The replacement's summaries being read for plugin commands stop: its project is gone.
+        self.url_waits.stop_every_summary();
         (self.pending, self.plugin_runs, self.plugin_retries, self.url_waits) = (pending, plugin_runs, plugin_retries, url_waits);
         let replaced = std::mem::replace(&mut self.file_outputs, file_outputs);
         (self.downloading, self.downloaded, self.url_requests) = (downloading, downloaded, url_requests);

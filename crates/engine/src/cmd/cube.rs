@@ -592,11 +592,12 @@ pub struct TrendRun {
 }
 
 impl TrendRun {
-    /// About the bytes its four outputs hold once made, with their GeoTIFFs: the most a run can
-    /// make when the cube doesn't know its size.
+    /// About the bytes its four outputs hold once made, with their GeoTIFFs: all of them, for a
+    /// cube that knows its size, as the run doesn't cap its outputs (only its pairs); when it
+    /// doesn't, those of a block of [`MAX_VALUES`] cells.
     pub fn output_bytes(&self) -> u64 {
         let cells = self.cube.size().map_or(MAX_VALUES, |(w, h)| (w as u64).saturating_mul(h as u64));
-        output_bytes(cells.saturating_mul(4).min(MAX_VALUES))
+        output_bytes(cells.saturating_mul(OUTPUTS as u64))
     }
 
     /// The work, for a progress bar: the slices read (every piece's), then the cells worked out,

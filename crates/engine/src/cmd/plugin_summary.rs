@@ -116,9 +116,8 @@ impl std::fmt::Debug for Summary {
     }
 }
 
-/// `rasters`, of `dates` dates, as the layers a summary adds: made on its thread, and counted in
-/// what the app holds.
-fn held(rasters: Vec<Raster>, dates: usize) -> Result<Held, String> {
+/// `rasters` as the layers a summary adds, made on its thread, and the bytes they hold.
+fn made(rasters: Vec<Raster>) -> Result<(Vec<(String, RasterLayer)>, u64), String> {
     let layers = rasters.into_iter().map(super::super::cube::output_layer).collect::<Result<Vec<_>, _>>()?;
     let bytes = layers
         .iter()
@@ -127,7 +126,7 @@ fn held(rasters: Vec<Raster>, dates: usize) -> Result<Held, String> {
             pixels + l.embedded.as_ref().map_or(0, |e| e.len() as u64)
         })
         .sum();
-    Ok(Held { layers, dates, _holding: memory::Holding::of(bytes) })
+    Ok((layers, bytes))
 }
 
 impl PartialEq for Summary {
@@ -228,12 +227,11 @@ impl Session {
                     ));
                 }
                 let work = start(self)?;
-                // What those still to land will hold, with this one: those landed are counted in
-                // what the app holds already.
-                let planned = work.bytes
-                    + self.url_waits.summaries.iter().map(|r| r.bytes).sum::<u64>()
-                    + self.call_summaries.iter().map(|l| l.work.bytes).sum::<u64>();
-                if let Some(room) = memory::share(memory::physical(), memory::held(), memory::available())
+                // What those still being read will hold, with this one: those made or landed are
+                // counted in what the app holds already.
+                let (reading, held) = self.url_waits.reading_and_held();
+                let planned = work.bytes + reading + self.call_summaries.iter().map(|l| l.work.bytes).sum::<u64>();
+                if let Some(room) = memory::share(memory::physical(), held, memory::available())
                     && planned > room
                 {
                     let mb = |b: u64| b.div_ceil(1 << 20);
@@ -336,8 +334,11 @@ impl super::fetch::UrlWaits {
                 if cancel.load(Ordering::Relaxed) { Err(cancelled(command)) } else { r }
             };
             // Its layers made here too, their GeoTIFFs written: the run again only adds them.
-            let out = out.and_then(|rasters| held(rasters, dates));
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);
+            let out = out.and_then(made);
+            // Counted in what the app holds as they are put in the slot, under its lock: a new
+            // read's plan finds them there or still to come, never both (`reading_and_held`).
+            let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+            *slot = Some(out.map(|(layers, bytes)| Held { layers, dates, _holding: memory::Holding::of(bytes) }));
         });
         if let Err(e) = spawned {
             *reading.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(format!("{command} couldn't start: {e}")));
@@ -365,6 +366,15 @@ impl super::fetch::UrlWaits {
         }
     }
 
+    /// What the summaries still being read will hold, by what each planned, and what the app holds
+    /// now, read together under their slots' locks: one whose layers are made is counted in what
+    /// the app holds, and not again among those still being read.
+    pub(super) fn reading_and_held(&self) -> (u64, u64) {
+        let slots: Vec<_> = self.summaries.iter().map(|r| (r.bytes, r.slot.lock().unwrap_or_else(|e| e.into_inner()))).collect();
+        let reading = slots.iter().filter(|(_, slot)| slot.is_none()).map(|(bytes, _)| bytes).sum();
+        (reading, memory::held())
+    }
+
     /// How many summaries have landed whose commands haven't run again: each holds its layers.
     fn held_summaries(&self) -> usize {
         self.landed.iter().filter(|(.., added)| added.summary.is_some()).count()
@@ -373,6 +383,14 @@ impl super::fetch::UrlWaits {
     /// Stops every summary being read: their project is gone (replaced, or closed).
     pub(crate) fn stop_every_summary(&self) {
         for r in &self.summaries {
+            r.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Stops the summaries being read that `kept` doesn't have: a failed command's, as its waits
+    /// go back to `kept`, from before it.
+    pub(crate) fn stop_summaries_beside(&self, kept: &Self) {
+        for r in self.summaries.iter().filter(|r| !kept.summarising(r.n)) {
             r.cancel.store(true, Ordering::Relaxed);
         }
     }
@@ -431,6 +449,42 @@ mod tests {
         waits.summaries_in();
         let landed = waits.landed.iter().find(|(m, ..)| *m == 1).map(|(_, _, answer, _)| answer.clone());
         assert_eq!(landed, Some(Err("cube.reduce was cancelled".to_string())));
+    }
+
+    /// A read whose layers are made is counted in what the app holds, and no more among those still
+    /// to hold theirs: a new read's plan counts it once.
+    #[test]
+    fn a_read_made_is_counted_once() {
+        let mut waits = super::super::fetch::UrlWaits::default();
+        let raster = || {
+            let t = rustgis_data::raster::GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: 0.25, pixel_height: -0.25 };
+            Raster::new(
+                "r",
+                4,
+                4,
+                vec![vec![1.0; 16]],
+                t,
+                rustgis_data::raster::Crs::LonLat,
+                None,
+                rustgis_data::raster::ColorHint::Gray,
+                "Float32",
+            )
+            .unwrap()
+        };
+        let left = |n, work| Left { n, command: "cube.reduce", work, still: None, capture: rustgis_data::diagnostics::Capture::current() };
+        waits.wait(1, asked("cube.reduce", &json!({"n": "made"})));
+        waits.read_summary(left(1, Work::new(1, 2, 1000, move |_: &AtomicBool, _: &AtomicUsize| Ok(vec![raster()]))), "plugin:p/f");
+        let started = web_time::Instant::now();
+        while waits.summaries[0].slot.lock().unwrap().is_none() && started.elapsed() < web_time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: the read ends on its thread
+        }
+        assert_eq!(waits.reading_and_held().0, 0, "made: in what the app holds");
+        // One that hasn't started is counted by what it planned.
+        let turn = hold_turn();
+        waits.wait(2, asked("cube.reduce", &json!({"n": "waits"})));
+        waits.read_summary(left(2, Work::new(1, 2, 700, |_: &AtomicBool, _: &AtomicUsize| Ok(Vec::new()))), "plugin:p/f");
+        assert_eq!(waits.reading_and_held().0, 700);
+        drop(turn);
     }
 
     /// A summary read off the frame lands for the command waiting for it, a cancelled one as its
