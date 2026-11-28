@@ -9,6 +9,12 @@
 //! read one after another, and the command runs again once all have landed. Cancel, or a read that
 //! failed, is that call's answer in the run again, and the plugin says it as it says any error.
 //!
+//! The read's thread also makes the layers (their GeoTIFFs written), and the run again adds those
+//! very layers, sharing their pixels: what was read is held once, counted in what the app holds
+//! ([`memory::held`]), until no command waits for it. A new read is refused when the reads waiting
+//! would hold more than the memory the app plans for ([`memory::share`]), or more than
+//! [`MAX_SUMMARIES`] would wait, landed ones included.
+//!
 //! Only a plugin's command the app runs ([`Session::run_leaving_downloads`]) leaves the read: the
 //! command line, scripts, the assistant and Python wait for it, as before, and layers, bands and
 //! Zarr stores, quick to read, are read where the call is made.
@@ -16,14 +22,16 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use rustgis_data::memory;
 use rustgis_data::raster::Raster;
+use rustgis_map::raster::RasterLayer;
 use serde_json::{Value, json};
 
 use crate::render::rustgis_tiles::cache;
 use crate::{CmdResult, Session};
 
-/// The most summaries plugin commands may have left to read at once: each holds its layers until
-/// its command has run again.
+/// The most summaries plugin commands may have left to read at once, being read or landed: each
+/// holds its layers until its command has run again.
 pub const MAX_SUMMARIES: usize = 4;
 
 /// The key a summary's request names its command by (`{"summary": "cube.reduce", "params": …}`),
@@ -39,17 +47,20 @@ type Run = Box<dyn FnOnce(&AtomicBool, &AtomicUsize) -> Result<Vec<Raster>, Stri
 pub(crate) struct Work {
     total: usize,
     dates: usize,
+    /// About the bytes its layers will hold, planned before it starts.
+    bytes: u64,
     run: Run,
 }
 
 impl Work {
-    /// `run`, `total` steps of work, of `dates` dates.
+    /// `run`, `total` steps of work, of `dates` dates, its layers holding about `bytes`.
     pub(crate) fn new(
         total: usize,
         dates: usize,
+        bytes: u64,
         run: impl FnOnce(&AtomicBool, &AtomicUsize) -> Result<Vec<Raster>, String> + Send + 'static,
     ) -> Work {
-        Work { total, dates, run: Box::new(run) }
+        Work { total, dates, bytes, run: Box::new(run) }
     }
 }
 
@@ -75,23 +86,48 @@ impl Left {
 #[derive(Clone)]
 pub(crate) struct Reading {
     n: u64,
+    command: &'static str,
     /// The plugin command it is read for.
     owner: String,
     total: usize,
+    /// About the bytes its layers will hold.
+    bytes: u64,
     cancel: Arc<AtomicBool>,
     done: Arc<AtomicUsize>,
-    slot: Arc<Mutex<Option<Result<(Vec<Raster>, usize), String>>>>,
+    slot: Arc<Mutex<Option<Result<Held, String>>>>,
 }
 
-/// What a summary read off the frame made (its layers, and how many dates), held for its command's
-/// run again, which adds a copy of it: a run waiting again, for another read, adds it again.
+/// What a summary's thread made: its layers (with their names) and how many dates, and its part of
+/// what the app holds.
+pub(crate) struct Held {
+    layers: Vec<(String, RasterLayer)>,
+    dates: usize,
+    _holding: memory::Holding,
+}
+
+/// What a summary read off the frame made, held for its command's run again, which adds those
+/// layers, sharing their pixels: a run waiting again, for another read, adds them again.
 #[derive(Clone)]
-pub(crate) struct Summary(Arc<(Vec<Raster>, usize)>);
+pub(crate) struct Summary(Arc<Held>);
 
 impl std::fmt::Debug for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Summary({} layers of {} dates)", self.0.0.len(), self.0.1)
+        write!(f, "Summary({} layers of {} dates)", self.0.layers.len(), self.0.dates)
     }
+}
+
+/// `rasters`, of `dates` dates, as the layers a summary adds: made on its thread, and counted in
+/// what the app holds.
+fn held(rasters: Vec<Raster>, dates: usize) -> Result<Held, String> {
+    let layers = rasters.into_iter().map(super::super::cube::output_layer).collect::<Result<Vec<_>, _>>()?;
+    let bytes = layers
+        .iter()
+        .map(|(_, l)| {
+            let pixels = l.data.as_ref().map_or(0, |r| r.bands.len() as u64 * u64::from(r.width) * u64::from(r.height) * 4);
+            pixels + l.embedded.as_ref().map_or(0, |e| e.len() as u64)
+        })
+        .sum();
+    Ok(Held { layers, dates, _holding: memory::Holding::of(bytes) })
 }
 
 impl PartialEq for Summary {
@@ -164,8 +200,7 @@ impl Session {
         let asked = asked(command, p);
         if let Some((answer, added)) = self.rerun_answer(&asked) {
             let held = answer.and_then(|_| added.summary.ok_or_else(|| format!("{command}: nothing was read")))?;
-            let (rasters, dates) = held.0.as_ref().clone();
-            return super::super::cube::add_outputs(self, rasters, dates);
+            return super::super::cube::add_output_layers(self, &held.0.layers, held.0.dates);
         }
         // Asked for already in this call, or by a run before it for the same caller: that read,
         // not another (as a document's is, `left_document`).
@@ -184,13 +219,30 @@ impl Session {
         let number = match known {
             Some(n) => n,
             None => {
-                let reading = self.url_waits.summaries.len() + now.iter().filter(|(_, q)| is_summary(q)).count();
-                if reading >= MAX_SUMMARIES {
+                // Those being read, those landed whose commands haven't run again, and this call's
+                // new ones: each counted once.
+                let waiting = self.url_waits.summaries.len() + self.url_waits.held_summaries() + self.call_summaries.len();
+                if waiting >= MAX_SUMMARIES {
                     return Err(format!(
                         "{MAX_SUMMARIES} data cube summaries are already being read for plugin commands; try again when they have come"
                     ));
                 }
                 let work = start(self)?;
+                // What those still to land will hold, with this one: those landed are counted in
+                // what the app holds already.
+                let planned = work.bytes
+                    + self.url_waits.summaries.iter().map(|r| r.bytes).sum::<u64>()
+                    + self.call_summaries.iter().map(|l| l.work.bytes).sum::<u64>();
+                if let Some(room) = memory::share(memory::physical(), memory::held(), memory::available())
+                    && planned > room
+                {
+                    let mb = |b: u64| b.div_ceil(1 << 20);
+                    return Err(format!(
+                        "{command}: the summaries plugin commands are reading would hold about {} MB until their commands run again, more than the {} MB there is room for: take a smaller area or a coarser cell size, or try again once the reads under way have come",
+                        mb(planned),
+                        mb(room)
+                    ));
+                }
                 self.next_request += 1;
                 let n = self.next_request;
                 let (still, capture) = (cache::current_still(), rustgis_data::diagnostics::Capture::current());
@@ -231,10 +283,10 @@ impl Session {
 
     /// Tests in other crates: a summary under way for plugin command `owner`, read until it is
     /// cancelled (one of its 4 slices read), and its number. Only in a test build.
-    #[cfg(all(feature = "testing", debug_assertions))]
+    #[cfg(any(test, all(feature = "testing", debug_assertions)))]
     #[doc(hidden)]
     pub fn start_test_summary(&mut self, owner: &str) -> u64 {
-        let work = Work::new(4, 4, |cancel: &AtomicBool, done: &AtomicUsize| {
+        let work = Work::new(4, 4, 0, |cancel: &AtomicBool, done: &AtomicUsize| {
             done.store(1, Ordering::Relaxed);
             while !cancel.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: a read that lasts until it is cancelled
@@ -256,11 +308,13 @@ impl super::fetch::UrlWaits {
     /// started before it.
     pub(crate) fn read_summary(&mut self, left: Left, owner: &str) {
         let Left { n, command, work, still, capture } = left;
-        let Work { total, dates, run } = work;
+        let Work { total, dates, bytes, run } = work;
         let reading = Reading {
             n,
+            command,
             owner: owner.to_string(),
             total: total.max(1),
+            bytes,
             cancel: Arc::default(),
             done: Arc::default(),
             slot: Arc::default(),
@@ -281,7 +335,9 @@ impl super::fetch::UrlWaits {
                 .unwrap_or_else(|_| Err(format!("{command} failed unexpectedly")));
                 if cancel.load(Ordering::Relaxed) { Err(cancelled(command)) } else { r }
             };
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(out.map(|rasters| (rasters, dates)));
+            // Its layers made here too, their GeoTIFFs written: the run again only adds them.
+            let out = out.and_then(|rasters| held(rasters, dates));
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);
         });
         if let Err(e) = spawned {
             *reading.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(format!("{command} couldn't start: {e}")));
@@ -297,6 +353,8 @@ impl super::fetch::UrlWaits {
                 self.summaries.push(r);
                 continue;
             };
+            // Cancelled after its thread had finished, it is cancelled all the same.
+            let out = if r.cancel.load(Ordering::Relaxed) { Err(cancelled(r.command)) } else { out };
             match out {
                 Ok(held) => {
                     self.land(r.n, Ok(json!({})), super::fetch::Added::of_summary(Summary(Arc::new(held))));
@@ -304,6 +362,18 @@ impl super::fetch::UrlWaits {
                 Err(e) => self.land(r.n, Err(e), super::fetch::Added::default()),
             }
             self.refused(r.n);
+        }
+    }
+
+    /// How many summaries have landed whose commands haven't run again: each holds its layers.
+    fn held_summaries(&self) -> usize {
+        self.landed.iter().filter(|(.., added)| added.summary.is_some()).count()
+    }
+
+    /// Stops every summary being read: their project is gone (replaced, or closed).
+    pub(crate) fn stop_every_summary(&self) {
+        for r in &self.summaries {
+            r.cancel.store(true, Ordering::Relaxed);
         }
     }
 
@@ -342,13 +412,34 @@ mod tests {
         assert!(!waits.holds(7, &json!({"request": 7})));
     }
 
+    /// Cancelled once its thread had finished, before it landed, a read lands as cancelled: its
+    /// command adds nothing.
+    #[test]
+    fn a_cancel_after_the_read_ended_is_its_answer() {
+        let mut waits = super::super::fetch::UrlWaits::default();
+        waits.wait(1, asked("cube.reduce", &json!({"n": "ended"})));
+        let work = Work::new(1, 2, 0, |_: &AtomicBool, _: &AtomicUsize| Ok(Vec::new()));
+        waits.read_summary(
+            Left { n: 1, command: "cube.reduce", work, still: None, capture: rustgis_data::diagnostics::Capture::current() },
+            "plugin:p/f",
+        );
+        let started = web_time::Instant::now();
+        while waits.summaries[0].slot.lock().unwrap().is_none() && started.elapsed() < web_time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(5)); // test-wait: the read ends on its thread
+        }
+        waits.summaries[0].cancel.store(true, Ordering::Relaxed);
+        waits.summaries_in();
+        let landed = waits.landed.iter().find(|(m, ..)| *m == 1).map(|(_, _, answer, _)| answer.clone());
+        assert_eq!(landed, Some(Err("cube.reduce was cancelled".to_string())));
+    }
+
     /// A summary read off the frame lands for the command waiting for it, a cancelled one as its
     /// error; one no command waits for any more is stopped.
     #[test]
     fn summaries_land_or_are_stopped() {
         let mut waits = super::super::fetch::UrlWaits::default();
         let work = |rasters: Vec<Raster>| {
-            Work::new(2, 2, move |_: &AtomicBool, done: &AtomicUsize| {
+            Work::new(2, 2, 0, move |_: &AtomicBool, done: &AtomicUsize| {
                 done.fetch_add(2, Ordering::Relaxed);
                 Ok(rasters)
             })

@@ -592,6 +592,13 @@ pub struct TrendRun {
 }
 
 impl TrendRun {
+    /// About the bytes its four outputs hold once made, with their GeoTIFFs: the most a run can
+    /// make when the cube doesn't know its size.
+    pub fn output_bytes(&self) -> u64 {
+        let cells = self.cube.size().map_or(MAX_VALUES, |(w, h)| (w as u64).saturating_mul(h as u64));
+        output_bytes(cells.saturating_mul(4).min(MAX_VALUES))
+    }
+
     /// The work, for a progress bar: the slices read (every piece's), then the cells worked out,
     /// in [`CELL_PARTS`] parts.
     pub fn total(&self) -> usize {
@@ -1098,7 +1105,7 @@ fn trend_cmd(s: &mut Session, p: &Value) -> CmdResult {
     // panes' bound, as the Workflows pane's thread does.
     if let Some(left) = super::plugins::summary::left(s, "cube.trend", p, |s| {
         let run = trend_start(s, p)?;
-        Ok(super::plugins::summary::Work::new(run.total(), run.dates(), move |cancel, done| run.run(cancel, done)))
+        Ok(super::plugins::summary::Work::new(run.total(), run.dates(), run.output_bytes(), move |cancel, done| run.run(cancel, done)))
     }) {
         return left;
     }
@@ -1206,15 +1213,37 @@ fn run_telling<T: Send>(
     })
 }
 
+/// About the bytes `values` output cells hold as a raster (4 bytes each) and as its GeoTIFF.
+fn output_bytes(values: u64) -> u64 {
+    values.saturating_mul(8)
+}
+
 /// Adds a trend's (or a summary's) layers, each as a GeoTIFF the project keeps.
 pub fn add_outputs(s: &mut Session, rasters: Vec<Raster>, dates: usize) -> CmdResult {
     let mut layers = Vec::new();
     for r in rasters {
-        let name = r.name.clone();
-        let tif = raster::geotiff::write_all(&r).map_err(|e| e.to_string())?;
-        let file: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect();
-        let layer = rustgis_map::raster::RasterLayer::from_written(r, format!("{file}.tif"), tif);
+        let (name, layer) = output_layer(r)?;
         let out = super::raster::add_raster(s, &name, layer)?;
+        layers.push(out["layer"].clone());
+    }
+    Ok(json!({ "layers": layers, "dates": dates }))
+}
+
+/// A trend's (or a summary's) output as the layer it adds, with its name: its GeoTIFF written, so
+/// it is made on any thread.
+pub(crate) fn output_layer(r: Raster) -> Result<(String, rustgis_map::raster::RasterLayer), String> {
+    let name = r.name.clone();
+    let tif = raster::geotiff::write_all(&r).map_err(|e| e.to_string())?;
+    let file: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect();
+    Ok((name, rustgis_map::raster::RasterLayer::from_written(r, format!("{file}.tif"), tif)))
+}
+
+/// Adds layers [`output_layer`] made (a summary read off the frame, #3183), sharing their pixels
+/// and GeoTIFFs with whatever holds them.
+pub(crate) fn add_output_layers(s: &mut Session, made: &[(String, rustgis_map::raster::RasterLayer)], dates: usize) -> CmdResult {
+    let mut layers = Vec::new();
+    for (name, layer) in made {
+        let out = super::raster::add_raster(s, name, layer.clone())?;
         layers.push(out["layer"].clone());
     }
     Ok(json!({ "layers": layers, "dates": dates }))
@@ -1740,6 +1769,15 @@ pub struct ReduceRun {
 }
 
 impl ReduceRun {
+    /// About the bytes its outputs hold once made, with their GeoTIFFs: the most a run can make
+    /// ([`MAX_REDUCED`] values) when the cube doesn't know its size, or for frequency, whose
+    /// classes aren't known before it is read.
+    pub fn output_bytes(&self) -> u64 {
+        let slots = (self.groups.len() * self.cube.assets().len().max(1)) as u64;
+        let cells = self.cube.size().filter(|_| self.stat != Stat::Frequency).map(|(w, h)| (w as u64).saturating_mul(h as u64));
+        output_bytes(cells.map_or(MAX_REDUCED, |c| c.saturating_mul(slots).min(MAX_REDUCED)))
+    }
+
     /// The work, for a progress bar: the slices read, every piece's, and the dates' clear shares
     /// when first takes them in that order.
     pub fn total(&self) -> usize {
@@ -2216,7 +2254,7 @@ fn reduce_cmd(s: &mut Session, p: &Value) -> CmdResult {
     // A plugin's command the app runs reads a STAC collection off the frame (#3183).
     if let Some(left) = super::plugins::summary::left(s, "cube.reduce", p, |s| {
         let run = reduce_start(s, p)?;
-        Ok(super::plugins::summary::Work::new(run.total(), run.dates(), move |cancel, done| run.run(cancel, done)))
+        Ok(super::plugins::summary::Work::new(run.total(), run.dates(), run.output_bytes(), move |cancel, done| run.run(cancel, done)))
     }) {
         return left;
     }

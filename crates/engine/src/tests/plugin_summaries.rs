@@ -176,3 +176,117 @@ fn a_plugins_trend_of_a_collection_is_read_off_the_frame() {
     assert_eq!(s.map().layers.len(), layers + 4);
     rustgis_plugins::unload("eng-summary-trend");
 }
+
+/// Loads plugin `id`, whose commands make `commands`' calls (each its list, by its one-letter id).
+fn calls_plugin(id: &str, commands: &[(char, &[Value])]) {
+    let wasm = rustgis_plugins::testing::wasm_with_host_calls_by_command(commands);
+    assert!(!wasm.is_empty());
+    let manifest = rustgis_plugins::testing::manifest(id, &["edit", "files", "network"]);
+    let package = rustgis_plugins::testing::zip_of(&[("plugin.json", manifest.as_bytes()), ("plugin.wasm", &wasm)]);
+    rustgis_plugins::load(rustgis_plugins::Package::from_zip(&package).unwrap(), "test").unwrap();
+}
+
+/// `cube.reduce` of the collection at `api` with `stat`, as a plugin's call.
+fn reduce_call(api: &str, stat: &str) -> Value {
+    json!({"op": "cube.reduce", "params": reduce(api, stat)})
+}
+
+/// Two commands waiting for one read add what it read without copying it: their layers hold the
+/// same pixels and GeoTIFF, made on the read's thread.
+#[test]
+fn commands_sharing_a_summary_share_its_pixels() {
+    let mut s = world();
+    fetch_mode(true, true);
+    let api = collection(3);
+    let id = "eng-summary-shared";
+    let mean = [reduce_call(&api, "mean")];
+    calls_plugin(id, &[('h', &mean), ('f', &mean)]);
+    // Held back, so both commands ask for it before it lands.
+    let turn = crate::cmd::plugins::summary::hold_turn();
+    for command in ["h", "f"] {
+        let answer = s.run_leaving_downloads(&format!("plugin:{id}/{command}"), &json!({})).unwrap();
+        assert_eq!(answer, json!({"pending": true, "reading": ["cube.reduce"]}), "{command}");
+    }
+    assert_eq!(s.plugin_summaries().len(), 1, "one read for both");
+    drop(turn);
+    let ran = ran_again(&mut s);
+    assert_eq!(ran.len(), 2, "{ran:?}");
+    let raster = |answer: &crate::CmdResult| {
+        let id = u32::try_from(answer.as_ref().unwrap()["layers"][0].as_u64().unwrap()).unwrap();
+        s.map().layer(id).unwrap().raster.clone().unwrap()
+    };
+    let (a, b) = (raster(&ran[0].1), raster(&ran[1].1));
+    assert!(std::sync::Arc::ptr_eq(a.data.as_ref().unwrap(), b.data.as_ref().unwrap()), "the same pixels");
+    assert!(std::sync::Arc::ptr_eq(a.embedded.as_ref().unwrap(), b.embedded.as_ref().unwrap()), "the same GeoTIFF");
+    rustgis_plugins::unload(id);
+}
+
+/// A summary that has landed, its command still waiting for another of its requests, counts among
+/// those held: no more than [`MAX_SUMMARIES`] are held at once.
+///
+/// [`MAX_SUMMARIES`]: crate::cmd::plugins::summary::MAX_SUMMARIES
+#[test]
+fn a_summary_landed_and_held_counts_among_those_read() {
+    let mut s = world();
+    fetch_mode(true, true);
+    let api = collection(3);
+    let id = "eng-summary-held";
+    let first = [reduce_call(&api, "mean"), json!({"op": "layer.addUrl", "params": {"url": "https://x.org/held.csv"}})];
+    let more: Vec<Value> = ["min", "max", "sum", "std"].iter().map(|stat| reduce_call(&api, stat)).collect();
+    calls_plugin(id, &[('f', &first), ('h', &more)]);
+    let answer = s.run_leaving_downloads(&format!("plugin:{id}/f"), &json!({})).unwrap();
+    assert_eq!(answer["reading"], json!(["cube.reduce"]), "{answer}");
+    // It lands; the command still waits for its download.
+    let started = web_time::Instant::now();
+    while !s.plugin_summaries().is_empty() && started.elapsed() < web_time::Duration::from_secs(60) {
+        assert!(s.poll_plugin_retries().is_empty());
+        std::thread::sleep(std::time::Duration::from_millis(10)); // test-wait: the read lands on its thread, polled as the frame loop polls it
+    }
+    assert!(s.plugin_summaries().is_empty() && s.plugin_retries_waiting());
+    // Four more would hold five.
+    let e = s.run_leaving_downloads(&format!("plugin:{id}/h"), &json!({})).unwrap_err();
+    assert!(e.contains("already being read"), "{e}");
+    assert!(s.plugin_summaries().is_empty(), "none of them started");
+    rustgis_plugins::unload(id);
+}
+
+/// A read asked for again by the next call, beside new ones, is counted once: with two under way,
+/// a call asking for one of them and two more holds four, and is let through.
+#[test]
+fn a_summary_asked_again_is_counted_once() {
+    let mut s = world();
+    fetch_mode(true, true);
+    let api = collection(3);
+    let id = "eng-summary-again";
+    let (a, b, c, d) = (reduce_call(&api, "mean"), reduce_call(&api, "min"), reduce_call(&api, "max"), reduce_call(&api, "sum"));
+    calls_plugin(id, &[('h', &[a.clone(), b]), ('f', &[a, c, d])]);
+    let turn = crate::cmd::plugins::summary::hold_turn();
+    s.run_leaving_downloads(&format!("plugin:{id}/h"), &json!({})).unwrap();
+    assert_eq!(s.plugin_summaries().len(), 2);
+    let answer = s.run_leaving_downloads(&format!("plugin:{id}/f"), &json!({})).unwrap();
+    assert_eq!(answer["reading"].as_array().map(Vec::len), Some(3), "{answer}");
+    assert_eq!(s.plugin_summaries().len(), 4);
+    drop(turn);
+    let ran = ran_again(&mut s);
+    assert!(!ran.is_empty(), "they land");
+    rustgis_plugins::unload(id);
+}
+
+/// A project replacing this one stops its summaries: a summary of the new project isn't held
+/// behind them.
+#[test]
+fn a_new_project_stops_the_summaries_of_the_old() {
+    let mut s = world();
+    plugin("eng-summary-new-project", &["edit", "files", "network"]);
+    fetch_mode(true, true);
+    let api = collection(3);
+    // A read of the old project that lasts until it is stopped.
+    s.start_test_summary("plugin:eng-summary-new-project/f");
+    s.run("project.sample", &Value::Null).unwrap();
+    assert!(s.plugin_summaries().is_empty(), "not the new project's");
+    s.run_leaving_downloads("plugin:eng-summary-new-project/f", &reduce_call(&api, "mean")).unwrap();
+    let ran = ran_again(&mut s);
+    assert_eq!(ran.len(), 1, "the new project's read lands: {ran:?}");
+    assert!(ran[0].1.is_ok(), "{ran:?}");
+    rustgis_plugins::unload("eng-summary-new-project");
+}

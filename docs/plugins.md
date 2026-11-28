@@ -716,8 +716,10 @@ Cancel. Once the read has landed the command runs again, and the same call, with
 parameters, adds the layers at once and answers them as it would have (`{"layers", "dates"}`):
 they are part of the command's own undo step. Cancelled, or failed, the read is that call's error.
 Several in one call are read one after another, and the command runs again once all have landed;
-up to 4 wait at a time, and asking for more fails. Their layers are held in memory until the
-command has run again. A cube of layers, bands or a Zarr store is read in the call, as before, and
+up to 4 wait at a time, read or landed, and asking for more fails. Their layers are made on the
+read's thread and held in memory until the command has run again, which adds those same layers; a
+read that would hold more than the memory there is room for is refused, saying to take a smaller
+area or a coarser cell size. A project opened meanwhile stops the reads of the one before. A cube of layers, bands or a Zarr store is read in the call, as before, and
 `rustgis-cli`, a script or a task waits for the read.
 
 While a command waits the window answers, so the user can work and the project can change. The

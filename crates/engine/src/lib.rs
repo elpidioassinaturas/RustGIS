@@ -2654,7 +2654,10 @@ impl Session {
         }
         // The command, and those it ran, are done: a replaced project stays replaced.
         if self.depth == 0 {
-            self.put_aside = None;
+            // Its summaries being read for plugin commands stop: their project won't come back.
+            if let Some(aside) = self.put_aside.take() {
+                aside.url_waits.stop_every_summary();
+            }
             self.published_syncs.clear();
             // Frame maintenance and some policy adapters run a guard without command dispatch.
             // Otherwise the command epilogue trims once, after any maintenance steps.
@@ -3785,7 +3788,8 @@ impl Session {
     /// Forgets undo/redo and extent history and marks the project clean (after new/open, or a
     /// front end setting up how the project starts): what [`PutAside`] holds, dropped.
     pub fn clear_history(&mut self) {
-        drop(self.take_project_state());
+        // Its summaries being read for plugin commands stop with it.
+        self.take_project_state().url_waits.stop_every_summary();
         self.undo_memory.clear();
         self.project_starts = self.project_starts.wrapping_add(1);
         // A state of its own: undo back past a replacement made within a command (a task's step)
