@@ -3237,7 +3237,7 @@ fn drape_terrain(
                 b,
                 &edges,
                 &block::runs(map, b, scale, env),
-                &block::band_runs(map, b, ground, env),
+                &block::band_runs(map, b, ground, scale, env),
                 &water,
                 fog,
                 far,
@@ -3260,7 +3260,7 @@ fn drape_terrain(
                     b,
                     &edges,
                     &block::runs(map, b, scale, env),
-                    &block::band_runs(map, b, ground, env),
+                    &block::band_runs(map, b, ground, scale, env),
                     &water,
                     fog,
                     far,
@@ -13167,6 +13167,63 @@ mod tests {
         let (blues, reds) = striped(&column(-500.0));
         assert!(blues >= 3 && reds >= 3, "west: {blues} blue, {reds} red");
         assert_eq!(striped(&column(500.0)).0, 0, "east");
+    }
+
+    #[test]
+    fn a_walls_top_band_takes_its_fill_at_the_drawing_scale_as_the_ground_does() {
+        // #2607: the soils both drape the ground and give the near wall's top band, 100 m deep,
+        // filled by an expression reading `@map_scale`: green at a drawing scale, red without
+        // one. The band shows the ground's green, not red.
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        use rustgis_data::{Dataset, Geometry, GeometryType};
+        use rustgis_map::symbol_by::SymbolBy;
+        let camera = Camera { center: Coord::new(0.0, 0.0), res: 20.0, bearing: 0.0, pitch: 60.0 };
+        let view = View { width: 400.0, height: 300.0, pixels_per_point: 1.0, camera, sky: false };
+        let gt = GeoTransform { origin_x: -5000.0, origin_y: 5000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let dem =
+            Raster::new("dem", 500, 500, vec![vec![500.0; 500 * 500]], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.add_raster("dem", rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
+        let deg = |x: f64, y: f64| rustgis_geom::merc_to_lonlat(Coord::new(x, y));
+        let all = vec![deg(-3000.0, -3000.0), deg(3000.0, -3000.0), deg(3000.0, 3000.0), deg(-3000.0, 3000.0), deg(-3000.0, -3000.0)];
+        let mut d = Dataset::new("solos", GeometryType::Polygon, Vec::new());
+        d.push(Some(Geometry::Polygon(vec![vec![all]])), Vec::new());
+        m.add_dataset(d);
+        if let Some(l) = m.layers.iter_mut().find(|l| l.name == "solos") {
+            l.symbol_by =
+                SymbolBy { fill: Some("CASE WHEN @map_scale IS NULL THEN '#ff0000' ELSE '#00ff00' END".into()), ..Default::default() };
+        }
+        m.view.terrain = Some(rustgis_map::view::Terrain {
+            source: rustgis_map::view::TerrainSource::Layer("dem".into()),
+            exaggeration: 1.0,
+            block: Some(rustgis_map::view::TerrainBlock {
+                extent: Some([-1000.0, -1000.0, 1000.0, 1000.0]),
+                depth: Some(1000.0),
+                walls: rustgis_map::view::BLOCK_WALLS,
+                walls_layer: None,
+                walls_top: Some(rustgis_map::view::WallsTop {
+                    layer: "solos".into(),
+                    thickness: rustgis_map::view::BandThickness::Metres(100.0),
+                }),
+                water: None,
+                shape: rustgis_map::view::BlockShape::Box,
+            }),
+            water: None,
+        });
+        let frame = render(&mut m, &view).expect("a frame");
+        let g = terrain::Ground::of(&m, &camera).expect("terrain");
+        let px = |x: f64, y: f64, metres: f64| {
+            let at = Coord::new(x, y);
+            let (u, v) = camera.ground_px(at);
+            let p = camera.project_raised(u, v, metres / g.per_unit(at) / camera.res, view.width, view.height).expect("in view");
+            let c = frame.pixmap.pixel(p.0 as u32, p.1 as u32).expect("in the frame").demultiply();
+            (c.red(), c.green(), c.blue())
+        };
+        let green = |c: (u8, u8, u8)| u16::from(c.1) > 2 * u16::from(c.0) && u16::from(c.1) > 2 * u16::from(c.2);
+        let (ground, band) = (px(0.0, -700.0, 500.0), px(0.0, -1000.0, 450.0));
+        assert!(green(ground), "the ground: {ground:?}");
+        assert!(green(band), "the band, halfway down: {band:?}");
     }
 
     #[test]

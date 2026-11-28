@@ -791,8 +791,9 @@ pub(crate) type Bands = Vec<Vec<BandRun>>;
 /// the base, said); off its polygons, no band, nor under one with no value over 0 in the field,
 /// said once with how many (and no band at all, said, when the layer has no such numeric field).
 /// Its hatches, markers, gradients and shapebursts are left off, said once with how many polygons.
+/// Styled at the drawing scale 1:`scale` (its fill's `@map_scale`), as the layer is on the ground.
 /// The pieces are cut, and kept, as the walls' are ([`layer_cut`]).
-pub(crate) fn band_runs(map: &Map, b: &Block, ground: &Ground, env: &rustgis_data::query::Env) -> Bands {
+pub(crate) fn band_runs(map: &Map, b: &Block, ground: &Ground, scale: f64, env: &rustgis_data::query::Env) -> Bands {
     use rustgis_map::view::BandThickness;
     let none = || vec![Vec::new(); b.sides()];
     let top = map.view.terrain.as_ref().and_then(|t| t.block.as_ref()).and_then(|t| t.walls_top.as_ref());
@@ -814,7 +815,7 @@ pub(crate) fn band_runs(map: &Map, b: &Block, ground: &Ground, env: &rustgis_dat
     };
     crate::note_held_read(layer);
     let cut = layer_cut(layer, b, false, None, env);
-    let styler = layer.styler_with(env.clone());
+    let styler = layer.styler_with(env.at_scale(Some(scale)));
     let (mut plain, mut thin) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
     let mut side_bands = |side: &Vec<(f64, f64, Option<usize>)>| {
         let mut out: Vec<BandRun> = Vec::new();
@@ -3149,7 +3150,7 @@ mod tests {
                 &b,
                 &edges,
                 &runs,
-                &band_runs(&m, &b, &g, &Default::default()),
+                &band_runs(&m, &b, &g, 1.0, &Default::default()),
                 &water,
                 Rgba::rgb(255, 255, 255),
                 rustgis_map::camera::FAR,
@@ -3206,7 +3207,7 @@ mod tests {
                 &b,
                 &edges,
                 &runs,
-                &band_runs(&m, &b, &g, &Default::default()),
+                &band_runs(&m, &b, &g, 1.0, &Default::default()),
                 water,
                 Rgba::rgb(255, 255, 255),
                 rustgis_map::camera::FAR,
@@ -3309,7 +3310,7 @@ mod tests {
             b,
             &edges,
             &runs,
-            &band_runs(m, b, g, &Default::default()),
+            &band_runs(m, b, g, 1.0, &Default::default()),
             water,
             Rgba::rgb(255, 255, 255),
             rustgis_map::camera::FAR,
@@ -3590,7 +3591,7 @@ mod tests {
         let (red, green) = (Rgba::rgb(220, 30, 30), Rgba::rgb(30, 170, 60));
         let soils = [([-3000.0, -1500.0, 0.0, 0.0], "argissolo", red), ([0.0, -1500.0, 500.0, 0.0], "latossolo", green)];
         let (m, b, g, res) = block_under_soils(&soils, 30.0);
-        let bands = band_runs(&m, &b, &g, &Default::default());
+        let bands = band_runs(&m, &b, &g, 1.0, &Default::default());
         let [w, e] = &bands[0][..] else { panic!("two classes along the south side: {:?}", bands[0]) };
         assert!((w.lo + 1000.0).abs() < 1e-6 && w.hi.abs() < 1e-6 && (e.hi - 500.0).abs() < 1e-6, "{w:?} {e:?}");
         assert!((w.thickness - 60.0).abs() < 1e-9 && (w.color, e.color) == (red, green));
@@ -3648,7 +3649,7 @@ mod tests {
         let by_field = BandThickness::Field { field: "espessura".into() };
         let (m, b, g, res) = block_under_soils_by(&soils, by_field);
         let before = crate::approximations::keep();
-        let bands = band_runs(&m, &b, &g, &Default::default());
+        let bands = band_runs(&m, &b, &g, 1.0, &Default::default());
         let said = crate::approximations::take();
         crate::approximations::restore(before);
         let [w, e] = &bands[0][..] else { panic!("two measured classes along the south side: {:?}", bands[0]) };
@@ -3676,7 +3677,7 @@ mod tests {
         for field in ["nada", "classe"] {
             let (m, b, g, _) = block_under_soils_by(&soils, BandThickness::Field { field: field.into() });
             let before = crate::approximations::keep();
-            let bands = band_runs(&m, &b, &g, &Default::default());
+            let bands = band_runs(&m, &b, &g, 1.0, &Default::default());
             let said = crate::approximations::take();
             crate::approximations::restore(before);
             assert!(bands.iter().all(Vec::is_empty), "{field}: {bands:?}");
@@ -3722,7 +3723,7 @@ mod tests {
         let by_field = || BandThickness::Field { field: "espessura".into() };
         let deep = [([-3000.0, -1500.0, 3000.0, 0.0], "argissolo", red, Some(25_000.0))];
         let (m, b, g, res) = block_under_soils_by(&deep, by_field());
-        let bands = band_runs(&m, &b, &g, &Default::default());
+        let bands = band_runs(&m, &b, &g, 1.0, &Default::default());
         assert!((bands[0][0].thickness - 50_000.0).abs() < 1e-6, "{:?}", bands[0]);
         let dry: WaterRuns = (0..b.sides()).map(|_| Vec::new()).collect();
         let said = |m: &Map| {
@@ -3812,7 +3813,7 @@ mod tests {
         );
         // No such layer, or no top: no band.
         m.view.terrain.as_mut().and_then(|t| t.block.as_mut()).unwrap().walls_top.as_mut().unwrap().layer = "none".into();
-        assert!(band_runs(&m, &b, &g, &Default::default()).iter().all(Vec::is_empty));
+        assert!(band_runs(&m, &b, &g, 1.0, &Default::default()).iter().all(Vec::is_empty));
         // And a 3D model's walls say they leave a band out.
         m.view.terrain.as_mut().and_then(|t| t.block.as_mut()).unwrap().walls_top.as_mut().unwrap().layer = "solos".into();
         let flat = flat_walls(&m, &g, &b, res, g.per_unit(Coord::new(0.0, 0.0)), [1000.0; 4]);
