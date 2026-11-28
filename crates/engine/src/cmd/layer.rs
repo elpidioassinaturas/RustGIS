@@ -7403,6 +7403,10 @@ fn references_follow_layer(s: &mut Session, old: &str, new: &str) {
     if let Some(walls) = s.map_mut().view.terrain.as_mut().and_then(|t| t.block.as_mut()).and_then(|b| b.walls_layer.as_mut()) {
         replace(walls);
     }
+    // And the layer of its walls' top band (#2607).
+    if let Some(top) = s.map_mut().view.terrain.as_mut().and_then(|t| t.block.as_mut()).and_then(|b| b.walls_top.as_mut()) {
+        replace(&mut top.layer);
+    }
     // And the raster its water's bed is read from (#2434).
     if let Some(bed) =
         s.map_mut().view.terrain.as_mut().and_then(|t| t.block.as_mut()).and_then(|b| b.water.as_mut()).and_then(|w| w.bed.as_mut())
@@ -7783,6 +7787,14 @@ fn terrain_follows_removal(s: &mut Session, names: &[String]) {
             format!(
                 "Terrain: the block's walls layer '{w}' was removed, so the walls are one colour until a layer of that name comes back"
             ),
+            false,
+        );
+    }
+    // And its walls' top band's (#2607): no band meanwhile.
+    let top = s.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).and_then(|b| b.walls_top.as_ref()).map(|t| t.layer.clone());
+    if let Some(l) = top.filter(|l| dem.is_none() && names.iter().any(|n| n.eq_ignore_ascii_case(l)) && named_layers(s, l) == 0) {
+        s.notify(
+            format!("Terrain: the block's walls' top layer '{l}' was removed, so the walls have no top band until a layer of that name comes back"),
             false,
         );
     }

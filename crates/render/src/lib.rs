@@ -3224,18 +3224,42 @@ fn drape_terrain(
     match walls {
         Some(b) if polygon => {
             let mut scratch = Vec::new();
-            block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale, env), &water, fog, far, |pm, key| {
-                let go_on = draw_to(pm, key, &mut scratch);
-                scratch.clear();
-                go_on
-            });
+            block::draw_walls(
+                pm,
+                view,
+                ground,
+                b,
+                &edges,
+                &block::runs(map, b, scale, env),
+                &block::band_runs(map, b, ground, env),
+                &water,
+                fog,
+                far,
+                |pm, key| {
+                    let go_on = draw_to(pm, key, &mut scratch);
+                    scratch.clear();
+                    go_on
+                },
+            );
             draw_to(pm, f64::NEG_INFINITY, &mut scratch);
         }
         _ => {
             draw_to(pm, f64::NEG_INFINITY, &mut edges);
             // A cancelled frame is thrown away: its walls aren't drawn.
             if let Some(b) = walls.filter(|_| !stopped) {
-                block::draw_walls(pm, view, ground, b, &edges, &block::runs(map, b, scale, env), &water, fog, far, |_, _| true);
+                block::draw_walls(
+                    pm,
+                    view,
+                    ground,
+                    b,
+                    &edges,
+                    &block::runs(map, b, scale, env),
+                    &block::band_runs(map, b, ground, env),
+                    &water,
+                    fog,
+                    far,
+                    |_, _| true,
+                );
             }
         }
     }
@@ -12730,6 +12754,7 @@ mod tests {
             depth: Some(1000.0),
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            walls_top: None,
             water: None,
             shape: rustgis_map::view::BlockShape::Box,
         };
@@ -12811,6 +12836,7 @@ mod tests {
                     depth: Some(1000.0),
                     walls: rustgis_map::view::BLOCK_WALLS,
                     walls_layer: None,
+                    walls_top: None,
                     water: None,
                     shape,
                 }),
@@ -12885,6 +12911,7 @@ mod tests {
                     depth: Some(1000.0),
                     walls: rustgis_map::view::BLOCK_WALLS,
                     walls_layer: None,
+                    walls_top: None,
                     water: None,
                     shape,
                 }),
@@ -12953,6 +12980,7 @@ mod tests {
                 depth: Some(1000.0),
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: None,
+                walls_top: None,
                 water: None,
                 shape,
             }),
@@ -13011,6 +13039,7 @@ mod tests {
                     depth: Some(1000.0),
                     walls: rustgis_map::view::BLOCK_WALLS,
                     walls_layer: None,
+                    walls_top: None,
                     shape,
                     water: None,
                 }),
@@ -13081,6 +13110,7 @@ mod tests {
                 depth: Some(1000.0),
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: Some("geo".into()),
+                walls_top: None,
                 water: None,
                 shape: rustgis_map::view::BlockShape::Box,
             }),
@@ -13165,6 +13195,7 @@ mod tests {
             depth: Some(1000.0),
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            walls_top: None,
             shape: rustgis_map::view::BlockShape::Box,
             water,
         };

@@ -11844,6 +11844,7 @@ fn terrain_block_is_checked_kept_and_taken_off() {
             depth: None,
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            walls_top: None,
             water: None,
             shape: rustgis_map::view::BlockShape::Box,
         }),
@@ -12064,6 +12065,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: None,
+                walls_top: None,
                 water: None,
                 shape: rustgis_map::view::BlockShape::Box,
             }),
@@ -12086,6 +12088,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: None,
+                walls_top: None,
                 water: None,
                 shape: rustgis_map::view::BlockShape::Box,
             }),
@@ -12112,6 +12115,7 @@ fn terrain_is_set_from_a_dem_or_tiles() {
                 depth: None,
                 walls: rustgis_map::view::BLOCK_WALLS,
                 walls_layer: None,
+                walls_top: None,
                 water: None,
                 shape: rustgis_map::view::BlockShape::Box,
             }),
@@ -18057,6 +18061,7 @@ fn terrain_block_is_read_back_from_a_saved_project() {
             depth: Some(150.0),
             walls: rustgis_map::view::BLOCK_WALLS,
             walls_layer: None,
+            walls_top: None,
             water: None,
             shape: rustgis_map::view::BlockShape::Box,
         })
@@ -18323,6 +18328,84 @@ fn terrain_block_walls_follow_a_polygon_layer() {
     assert!(s.map().view.terrain.is_none());
 }
 
+/// A band along the top of a block's walls from a second polygon layer (#2607): the layer and
+/// its thickness checked before anything changes, reported and saved with the walls, following
+/// its layer's renames, and said when it is removed or a saved project's is missing.
+#[test]
+fn terrain_block_walls_top_band_follows_its_layer() {
+    use base64::Engine;
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+    let soils = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"classe": "latossolo", "espessura": 2.5}, "geometry": {"type": "Polygon", "coordinates": [[[10.0, 45.0], [10.02, 45.0], [10.02, 45.04], [10.0, 45.04], [10.0, 45.0]]]}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(soils.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "solos.geojson", "data": data})).unwrap();
+    let solos = s.map().layers.iter().find(|l| !l.is_raster()).map(|l| l.name.clone()).unwrap();
+    let points = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [10.01, 45.01]}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(points.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "furos.geojson", "data": data})).unwrap();
+    for (top, said) in [
+        (json!({"layer": "Nowhere", "thickness": 150}), "no layer 'Nowhere'"),
+        (json!({"layer": "furos", "thickness": 150}), "'furos' isn't a polygon layer"),
+        (json!({"layer": dem, "thickness": 150}), "isn't a polygon layer"),
+        (json!({"layer": solos}), "\"thickness\": metres"),
+        (json!({"layer": solos, "thickness": "150"}), "\"thickness\": metres"),
+        (json!({"layer": solos, "thickness": 0}), "over 0 and up to 20000"),
+        (json!({"layer": solos, "thickness": 30000}), "over 0 and up to 20000"),
+        (json!({"layer": solos, "thickness": 150, "field": "x"}), "has no 'field' (layer, thickness)"),
+        (json!({"layer": solos, "thickness": {"field": "nada"}}), "has no field 'nada' (the band's thickness)"),
+        (json!({"layer": solos, "thickness": {"field": "classe"}}), "thickness field 'classe' isn't numeric"),
+        (json!({"layer": solos, "thickness": {"field": "espessura", "x": 1}}), "thickness has no 'x' (field)"),
+        (json!({"layer": solos, "thickness": {}}), "{\"field\": a numeric field"),
+        (json!("solos"), "or false"),
+    ] {
+        let e = s.run("map.terrain", &json!({"layer": dem, "block": {"walls": {"top": top}}})).unwrap_err();
+        assert!(e.contains(said), "{top}: {e}");
+        assert!(s.map().view.terrain.is_none(), "{top}: refused whole");
+    }
+    // Set: reported with the walls, saved with the project; the walls' other keys stay.
+    let v = s.run("map.terrain", &json!({"layer": dem, "block": {"walls": {"top": {"layer": solos, "thickness": 150}}}})).unwrap();
+    assert_eq!(v["block"]["walls"], json!({"color": "#C8B89A", "layer": null, "top": {"layer": solos, "thickness": 150.0}}));
+    let v = s.run("map.terrain", &json!({"block": {"walls": {"color": "#806040"}}})).unwrap();
+    assert_eq!(v["block"]["walls"]["top"]["layer"], json!(solos));
+    // Or its thickness from a numeric field of the layer, named as the layer has it.
+    let v = s.run("map.terrain", &json!({"block": {"walls": {"top": {"layer": solos, "thickness": {"field": "ESPESSURA"}}}}})).unwrap();
+    assert_eq!(v["block"]["walls"]["top"]["thickness"], json!({"field": "espessura"}));
+    let saved = serde_json::to_string(&s.map().view).unwrap_or_default();
+    let back: rustgis_map::view::ViewSettings = serde_json::from_str(&saved).unwrap_or_default();
+    assert_eq!(back.terrain, s.map().view.terrain);
+    let top = |s: &Session| {
+        s.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).and_then(|b| b.walls_top.as_ref()).map(|t| t.layer.clone())
+    };
+    // It follows its layer's renames.
+    let id = s.map().layer_by_name(&solos).map(|l| l.id).unwrap();
+    s.run("layer.rename", &json!({"layer": id, "name": "pedologia"})).unwrap();
+    assert_eq!(top(&s).as_deref(), Some("pedologia"));
+    // A saved project without it opens with no band, said; the name kept. A clean one says nothing.
+    let mut saved = s.project.clone();
+    saved.maps[0].layers.retain(|l| l.name != "pedologia");
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, saved);
+    assert!(opened.notices.iter().any(|n| n.text.contains("walls' top layer that is missing")), "{:?}", opened.notices);
+    assert_eq!(top(&opened).as_deref(), Some("pedologia"));
+    let mut clean = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut clean, s.project.clone());
+    assert!(!clean.notices.iter().any(|n| n.text.contains("top")), "{:?}", clean.notices);
+    // Removed: said, and the name kept.
+    let mark = s.notice_mark();
+    s.run("layer.remove", &json!({"layer": id})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.iter().any(|t| t.contains("walls' top layer 'pedologia' was removed")), "{said:?}");
+    assert_eq!(top(&s).as_deref(), Some("pedologia"));
+    // False takes it off, as a plain colour does.
+    s.run("map.terrain", &json!({"block": {"walls": {"top": false}}})).unwrap();
+    assert_eq!(top(&s), None);
+}
+
 /// #2605: `map.terrain`'s help names every key the block's parts and the water take, each in its
 /// own part of the text, as the parser lists them when it refuses one it doesn't know (the walls'
 /// object form of #2173 was missing); so do the errors for a block or water that isn't an object.
@@ -18344,6 +18427,7 @@ fn terrain_help_names_every_block_key() {
     for (params, from, to) in [
         (json!({"block": {"bogus": 1}}), r#""block"?:"#, ", or false to take it off"),
         (json!({"block": {"walls": {"bogus": 1}}}), r#""walls"?:"#, r#", "shape"?:"#),
+        (json!({"block": {"walls": {"top": {"bogus": 1}}}}), r#""top"?:"#, ", or false}"),
         (json!({"block": {"shape": {"bogus": 1}}}), r#""shape"?:"#, r#", "radius"?:"#),
         (json!({"block": {"water": {"bogus": 1}}}), r#""water"?: the terrain's water"#, ", or false}"),
         (json!({"water": {"bogus": 1}}), r#""water"?: water bodies"#, ", or false to take it off"),
