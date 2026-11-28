@@ -1851,12 +1851,20 @@ pub(crate) fn draw_walls(
                 if t1 <= t0 {
                     continue;
                 }
-                // The band's foot under the ground's edge at `t` along the stretch, never below the base.
+                // The stretch's ends raised to the ground: its top is the straight line between them.
+                let raised = |m: Coord| {
+                    let (u, v) = cam.ground_px(m);
+                    (u, v, ground.up_px(m, &cam))
+                };
+                let (ra, rz) = (raised(ends[0]), raised(ends[1]));
+                // The band's foot under that line at `t` along the stretch, never below the base:
+                // under the line, not under the ground read there, which can rise over the line by
+                // more than the band's thickness and stand the foot over the top (round 4).
                 let mut under = |t: f64| {
                     let m = Coord::new(ends[0].x + (ends[1].x - ends[0].x) * t, ends[0].y + (ends[1].y - ends[0].y) * t);
                     let (gu, gv) = cam.ground_px(m);
                     let per = ground.per_unit(m) * res;
-                    let (up, base) = (ground.up_px(m, &cam) - run.thickness / per, b.base / per);
+                    let (up, base) = (ra.2 + (rz.2 - ra.2) * t - run.thickness / per, b.base / per);
                     band_at_base |= up < base;
                     let up = up.max(base).clamp(-1e7, 1e7);
                     cam.project_raised(gu, gv, up, w, h).map(|(x, y)| (x * k, y * k)).filter(|p| p.0.is_finite() && p.1.is_finite())
@@ -1866,11 +1874,6 @@ pub(crate) fn draw_walls(
                 // to: in a turned view the stretch's ends lie at different depths, so the ground's
                 // point `t` along the stretch is not `t` along that line, and the band's contacts
                 // would lean away from their feet (round 2).
-                let raised = |m: Coord| {
-                    let (u, v) = cam.ground_px(m);
-                    (u, v, ground.up_px(m, &cam))
-                };
-                let (ra, rz) = (raised(ends[0]), raised(ends[1]));
                 let seen = |t: f64| {
                     let (u, v) = lerp((ra.0, ra.1), (rz.0, rz.1), t);
                     cam.project_raised(u, v, ra.2 + (rz.2 - ra.2) * t, w, h)
@@ -3761,6 +3764,54 @@ mod tests {
             let (west, east) = (hue(-60.0, metres), hue(60.0, metres));
             assert!(is_red(west) && is_green(east), "{metres}: {west:?} {east:?}");
         }
+    }
+
+    #[test]
+    fn a_band_over_a_rise_inside_a_stretch_stays_under_its_top() {
+        // #2607, round 4: the ground rises from 500 m at the south wall's ends to 700 m at x 0, but
+        // the wall is one stretch, whose top is the straight line between its ends (1000 m
+        // doubled). The band's foot is taken from that line too: at x 0, where the classes meet,
+        // it doesn't stand 1340 m up, over the top, and no band shows above the top line.
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let (red, green) = (Rgba::rgb(220, 30, 30), Rgba::rgb(30, 170, 60));
+        let soils = [([-3000.0, -1500.0, 0.0, 0.0], "argissolo", red), ([0.0, -1500.0, 3000.0, 0.0], "latossolo", green)];
+        let (mut m, _, _, res) = block_under_soils(&soils, 30.0);
+        let gt = GeoTransform { origin_x: -5000.0, origin_y: 5000.0, pixel_width: 20.0, pixel_height: -20.0 };
+        let rise = (0..500 * 500)
+            .map(|i| {
+                let x = -5000.0 + 20.0 * (f64::from(i % 500) + 0.5);
+                (500.0 + 200.0 * (1.0 - x.abs() / 500.0).max(0.0)) as f32
+            })
+            .collect();
+        let dem = Raster::new("dem", 500, 500, vec![rise], gt, Crs::WebMercator, None, ColorHint::Gray, "Float32").unwrap();
+        if let Some(l) = m.layers.iter_mut().find(|l| l.name == "dem") {
+            l.raster = Some(rustgis_map::RasterLayer::from_path(dem, "dem.tif"));
+        }
+        let camera = rustgis_map::Camera { center: Coord::new(0.0, 0.0), res, bearing: 0.0, pitch: 60.0 };
+        let g = Ground::of(&m, &camera).unwrap();
+        let b = g.block(&m).unwrap();
+        assert!((g.up_px(Coord::new(0.0, -1000.0), &camera) * res * g.per_unit(Coord::new(0.0, -1000.0)) - 1400.0).abs() < 25.0);
+        let dry: WaterRuns = (0..b.sides()).map(|_| Vec::new()).collect();
+        let (pm, at) = south_wall_seen(&m, &b, &g, res, &dry, 0.0, 1);
+        let band = |c: tiny_skia::ColorU8| {
+            let (r, g) = (u16::from(c.red()), u16::from(c.green()));
+            c.alpha() > 0 && (r > 2 * g || g > r + 60)
+        };
+        let above: Vec<_> = (-18..=18)
+            .flat_map(|i| (0..20).map(move |j| (50.0 * f64::from(i), 1030.0 + 20.0 * f64::from(j))))
+            .filter(|&(x, metres)| {
+                let (px, py) = at(x, metres);
+                pm.pixel(px, py).is_some_and(|c| band(c.demultiply()))
+            })
+            .collect();
+        assert!(above.is_empty(), "band over the top line at {above:?}");
+        // Under the top line, the band still shows each class.
+        let hue = |x: f64| {
+            let (px, py) = at(x, 970.0);
+            pm.pixel(px, py).expect("in the picture").demultiply()
+        };
+        let (w, e) = (hue(-500.0), hue(500.0));
+        assert!(u16::from(w.red()) > 2 * u16::from(w.green()) && u16::from(e.green()) > u16::from(e.red()) + 60, "{w:?} {e:?}");
     }
 
     /// The band's thickness reads and saves as a number, or as `{"field": name}` (#2607).
