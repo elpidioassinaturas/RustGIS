@@ -1242,6 +1242,7 @@
           "terrain-water",
           "terrain-water-shore",
           "terrain-block-water",
+          "terrain-block-water-bed",
           "terrain-block-walls-layer",
           "shaded-relief-effects",
           "normalized-legend-urls",
@@ -1290,6 +1291,7 @@
           "layout-page-color",
           "layout-text-statistics",
           "layout-publication-parts",
+          "layout-publication-legend",
           "shaded-relief-shadow-softness"
         ],
         "type": "string"
@@ -1361,6 +1363,7 @@
     "terrain-water",
     "terrain-water-shore",
     "terrain-block-water",
+    "terrain-block-water-bed",
     "terrain-block-walls-layer",
     "shaded-relief-effects",
     "normalized-legend-urls",
@@ -1409,6 +1412,7 @@
     "layout-page-color",
     "layout-text-statistics",
     "layout-publication-parts",
+    "layout-publication-legend",
     "shaded-relief-shadow-softness"
   ],
   "x-rustgis-reads-format": 2,

@@ -40,20 +40,33 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     datum under it, at 7 pt. A figure's title and sources belong in its caption, so they are
     left out, and the result says so.
   - **Step by step**: **Publication Layout Wizard…**, at the end of the same menu, asks for the size
-    (a sheet turned Auto, Portrait or Landscape, or a figure), the style (each beside an outline of
-    where its title, map and footer go, and its column or panel if it has one, with the accent
-    colour picked, or else its own, where the sheet takes it, which Classic's doesn't; a click on
-    the outline picks the style), the texts (title, the active map's name until one is typed;
-    subtitle, note and credit line, or none; an Editorial sheet's column heading), the sources and
-    reference (each one per line, with its heading; the reference can be left out) and the accent
-    colour, then shows what was picked; **Create** makes the layout as the menu does. **Insert
-    Statistic**, on the texts and sources steps, adds a layer figure of the active map to the field
-    the cursor was last in there (the note or the sources, where it was in none). A figure goes from
-    its size to the review, as it takes no style, texts or accent. A field left empty is left out
-    (for the credit line, the reference and the headings, the command's default applies); the title
-    is the exception: empty, it means no title. A layout the command refuses is said, and the wizard
-    stays open. The window can be resized. Its steps are listed on the left, and a click goes to
-    one; a narrow screen leaves the list out, and the heading still says which step this is.
+    (a sheet turned Auto, Portrait or Landscape, or a figure), the map extent and the layout's name,
+    the style (each beside an outline of where its title, map and footer go, and its column or panel
+    if it has one, with the accent colour picked, or else its own, where the sheet takes it, which
+    Classic's doesn't; a click on the outline picks the style), the placement, the texts (title, the
+    active map's name until one is typed; subtitle, note and credit line, or none; an Editorial
+    sheet's column heading), the sources and reference (each one per line, with its heading; the
+    reference can be left out) and the accent colour, then shows what was picked; **Create** makes
+    the layout as the menu does. **Insert Statistic**, on the texts and sources steps, adds a layer
+    figure of the active map to the field the cursor was last in there (the note or the sources,
+    where it was in none). The map extent is the view, the features one layer shows (hidden or not,
+    in their longitude/latitude box) or the selected features (a point or a straight line is widened
+    to 0.01°, and what lies past ±180° or ±90° is left out of the frame; an area with nothing to
+    frame, one gone by Create, or one picked before the map or the project was switched or the map
+    renamed, is said and nothing is made); without a name the layout is `Publication`; the review
+    says when a layout has that name, so the new one is numbered. The **placement** is the
+    arrangement (below): `best`, the favourite, one by name or one saved, or **Custom**, a corner
+    for each surround (a corner another has swaps the two; on Panel, Editorial and Modular only the
+    north arrow and scale bar take one, the locator and legend sitting in the column, and a figure
+    gives the locator none, as it draws none); a chosen one can be made the favourite, once the
+    layout is made. A saved one removed after it was picked is said at Create and nothing is made. A
+    figure goes from its size to its map, its placement, its reference (each line typed; with no
+    heading, and it can be left out) and the review, as it takes no style, accent or other text. A
+    field left empty is left out (for the credit line, the reference and the headings, the command's
+    default applies); the title is the exception: empty, it means no title. A layout the command
+    refuses is said, and the wizard stays open. The window can be resized. Its steps are listed on
+    the left, and a click goes to one; a narrow screen leaves the list out, and the heading still
+    says which step this is.
   - **The map**: the `extent` given (or the view) fitted north-up, without tilt, at a round scale,
     two significant figures, rounded up so it still fits within the strips the graticule's labels
     take inside the frame. A graticule's step follows the extent (2° for a state, 15′ for a city),
@@ -159,6 +172,12 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
     (`{"units": "miles", "style": "line"}`), its box growing with a larger `textSize`. A `textSize` or `labelSize` you give is in points
     as written: unlike the defaults, it isn't scaled with the sheet.
     `"northArrow"` also takes `{"show": "auto"|"always", "style", "fill", "outline"}`.
+  - **Legend**: `"legend": "none"` leaves it out, and a raster's colorbar keeps its box; the answer's
+    `legendColumns` is then `null`.
+    `{"title": "Key", "columns": 2, "exclude": ["Rivers"]}` gives it a title (its box grows to
+    hold it), a fixed number of columns (1 to 6; otherwise the placement picks 1 to 3) and layers
+    to leave out besides the context ones. A title wider than the box is said in a warning. An
+    unknown layer or key is refused.
   - **Legend box**: over the map, the legend's box is left clear where the map shows nothing under
     it but its light plain paper or water: no layer, label, context layer, basemap shape or graticule
     line, no web tiles, and no veil. Dark basemaps keep a white backing so the dark legend text
@@ -244,7 +263,7 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   from the whole world down to site plans at 1:20, finds at 1:1 and 2:1 (a scale of 1:0.5).
   A frame can be turned and tilted like the map view: a new frame, or one matched to the view,
   takes the view's bearing and pitch, and **Bearing** and **Pitch** in its properties (or
-  `layout.update` with `bearing` and `pitch`) set them. Its north arrows turn with it. **Grid** draws a labelled graticule over a frame; **Extent Indicator** outlines another frame's
+  `layout.update` with `bearing` and `pitch`) set them. Its north arrows turn with it. **Grid** draws a labelled graticule over a frame; **Section Lines** draws the traces of cross-sections; **Extent Indicator** outlines another frame's
   extent (an overview map).
 - **Frame borders**: the **Border** section of a frame's properties sets the line drawn round it,
   along its shape for a round or polygon frame: its **Color** and **Line width** (dark grey and
@@ -280,20 +299,23 @@ Layouts open as tabs next to the maps; while one is open, its groups lead the Pu
   `"grid": {…}` (`false` removes the grid). On a map on the globe the lines are drawn on the
   globe, and stop at its horizon. A frame that shows the whole globe has nothing beyond its rim,
   and so no labels along its edges.
-- **Section lines**: a frame can draw the traces of cross-sections over its map, up to 26 of them:
+- **Section lines**: the **Section Lines** section of a frame's properties draws the traces of
+  cross-sections over its map, up to 26 a frame. **Add Horizontal** and **Add Vertical** add one
+  across the whole frame, straight on the page, through the place at the frame's centre, its name in
+  a box at both ends (A and A'); its **Name**, **Direction**, place (**Longitude** and
+  **Latitude**), **Dash**, **Color** and **Line width** are below. With the frame selected, a line
+  can also be dragged across its map, up or down, or sideways for a vertical one. The place is what
+  is kept, so the line follows it when the frame is moved, turned or rescaled, and on each page of a
+  map series; the line runs to the frame's edge, or to the outline of a round or polygon frame. A
+  line whose place is outside the frame, or that the frame's map can't show, isn't drawn: its
+  properties, the layout view and exports say which and why (for a map series' PDF, on how many of
+  its pages). On a tilted frame or one on the globe, the line runs through the place as the grid
+  puts it there, only as far as there is ground along it; it is straight on the page there, and not
+  a straight section of the ground. From a command:
   `layout.addElement={"kind":"section","frame":1,"name":"A","direction":"horizontal","at":[-44.66,-22.38]}`
-  draws one across the whole frame, straight on the page (`"direction"` is `"horizontal"` or
-  `"vertical"`), through a place, with its name in a box at both ends (A and A'). The name defaults
-  to the first free letter and the place to the frame's centre; `color`, `width` and `dash` set its
-  look. `layout.update={"element":1,"section":{"name":"A","at":[-44.7,-22.4],"color":"#1F5C84"}}`
-  changes one by its name, the keys not given keeping theirs (`"newName"` renames it, and
-  `"remove": true` removes it). The place is what is kept, so the line follows it when the frame is
-  moved, turned or rescaled, and on each page of a map series; the line runs to the frame's
-  edge, or to the outline of a round or polygon frame. A line whose place is outside the frame, or
-  that the frame's map can't show, isn't drawn: these commands, the layout view and exports say which
-  and why (for a map series' PDF, on how many of its pages). On a tilted frame or one on the globe,
-  the line runs through the place as the grid puts it there, only as far as there is ground along
-  it; it is straight on the page there, and not a straight section of the ground.
+  (the name defaults to the first free letter, the place to the frame's centre), then
+  `layout.update={"element":1,"section":{"name":"A","at":[-44.7,-22.4],"color":"#1F5C84"}}`
+  (`"newName"` renames it, and `"remove": true` removes it).
 - **Measured grids**: a grid's **Type** is a **Graticule** (latitudes and longitudes, as above)
   or a **Measured grid**, as ArcGIS Pro has them: eastings and northings in a projected coordinate
   system, for maps read with UTM or national grid coordinates (a hiking map at 1:25,000 with a

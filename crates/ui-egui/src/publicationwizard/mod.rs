@@ -1,7 +1,9 @@
-//! Publication Layout Wizard: `layout.publication` asked step by step (size, style, texts, sources
-//! and reference, accent), then made at once, as the New Layout › Publication Layout menu makes it
-//! (#2850).
+//! Publication Layout Wizard: `layout.publication` asked step by step (size, map, style, placement,
+//! texts, sources and reference, accent), then made at once, as the New Layout › Publication Layout
+//! menu makes it (#2850).
 mod accent;
+mod arrange;
+mod map;
 mod review;
 mod size;
 mod sources;
@@ -11,17 +13,20 @@ mod texts;
 use crate::textform::StatLayer;
 use crate::{RustGisApp, i18n, theme::Tokens};
 use accent::accent_step;
+use arrange::{Arrangement, arrange_step};
+use map::{Area, area_extent, map_step};
 use review::review_step;
 use rustgis_engine::Session;
 use rustgis_engine::cmd::layout::{
     MAX_PUBLICATION_LINES, MAX_PUBLICATION_TEXT, PUBLICATION_DEFAULT_REFERENCE, PUBLICATION_HEADINGS, PUBLICATION_PROFILES,
     publication_style_accent,
 };
+use rustgis_engine::geom::Extent;
 use rustgis_engine::map::Map;
 use rustgis_engine::map::layout::PAGES;
 use serde_json::{Value, json};
 use size::size_step;
-use sources::sources_step;
+use sources::{reference_step, sources_step};
 use style::style_step;
 use texts::texts_step;
 
@@ -29,16 +34,21 @@ use texts::texts_step;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Step {
     Size,
+    Map,
     Style,
+    Placement,
     Texts,
     Sources,
+    /// A figure's cartographic reference, the one text it draws.
+    Reference,
     Accent,
     Review,
 }
 
 impl Step {
     /// Where [`Draft`] keeps what each of the two steps with text fields has of its own: the
-    /// texts step's at 0, the sources step's at 1.
+    /// texts step's at 0, the sources step's at 1. A figure's reference step has none: it reads as
+    /// 0, so [`limit_note`] leaves the refusal out there.
     fn slot(self) -> usize {
         usize::from(self == Step::Sources)
     }
@@ -65,7 +75,7 @@ enum Field {
 }
 
 impl Field {
-    /// The step that asks for it.
+    /// The sheet's step that asks for it.
     fn step(self) -> Step {
         match self {
             Field::Title | Field::Subtitle | Field::Note | Field::Author | Field::Heading(2) => Step::Texts,
@@ -88,6 +98,9 @@ pub struct Draft {
     /// A page size's id (`a4`, from [`PAGES`]) or a figure's profile id (`figure-1col`).
     pub size: String,
     pub orientation: Orientation,
+    pub area: Area,
+    /// The layout's name; empty leaves it to the command.
+    pub name: String,
     pub style: String,
     pub title: String,
     /// Whether the title was typed; until then it is the active map's name, as the menu's.
@@ -115,6 +128,10 @@ pub struct Draft {
     pub accent: Option<egui::Color32>,
     /// The colour last picked, which the swatch comes back with when the box is ticked again.
     picked: Option<egui::Color32>,
+    /// The corners the surrounds take.
+    pub arrangement: Arrangement,
+    /// Whether Create also sets a chosen arrangement as the favourite.
+    pub make_favourite: bool,
 }
 
 impl Draft {
@@ -126,6 +143,8 @@ impl Draft {
             step: Step::Size,
             size: "a4".into(),
             orientation: Orientation::Auto,
+            area: Area::View,
+            name: String::new(),
             style: "classic".into(),
             title: s.map().name.clone(),
             title_typed: false,
@@ -141,6 +160,8 @@ impl Draft {
             refused: [false; 2],
             accent: None,
             picked: None,
+            arrangement: Arrangement::Best,
+            make_favourite: false,
         }
     }
 
@@ -151,8 +172,9 @@ impl Draft {
         self.accent.filter(|&c| self.picked.is_some() || c != own)
     }
 
-    /// Whether the size is a figure, which takes no style, texts or accent: the command draws the
-    /// map edge to edge and leaves the rest to the caption.
+    /// Whether the size is a figure, which takes no style or accent and no text but its reference:
+    /// the command draws the map edge to edge, the reference under it, and leaves the rest to the
+    /// caption.
     fn figure(&self) -> bool {
         PUBLICATION_PROFILES.iter().any(|p| !p.sheet && p.id == self.size)
     }
@@ -160,9 +182,15 @@ impl Draft {
     /// The steps this draft goes through, in order.
     fn steps(&self) -> &'static [Step] {
         if self.figure() {
-            return &[Step::Size, Step::Review];
+            return &[Step::Size, Step::Map, Step::Placement, Step::Reference, Step::Review];
         }
-        &[Step::Size, Step::Style, Step::Texts, Step::Sources, Step::Accent, Step::Review]
+        &[Step::Size, Step::Map, Step::Style, Step::Placement, Step::Texts, Step::Sources, Step::Accent, Step::Review]
+    }
+
+    /// The favourite Create sets once the layout is made, if any: what the review says and what
+    /// Create does.
+    fn favourite_to_set(&self, s: &Session) -> Option<Value> {
+        self.arrangement.as_favourite(s).filter(|_| self.make_favourite)
     }
 
     /// The step `by` places from this one, if there is one.
@@ -181,6 +209,16 @@ impl Draft {
             (false, Orientation::Landscape) => format!("{}-landscape", self.size),
         };
         let mut p = json!({"profile": profile});
+        if let Some(arrangement) = self.arrangement.value() {
+            p["arrangement"] = arrangement;
+        }
+        if !self.name.trim().is_empty() {
+            p["name"] = json!(self.name.trim());
+        }
+        let reference: Vec<&str> = lines(&self.reference).collect();
+        if self.no_reference || !reference.is_empty() {
+            p["reference"] = json!(if self.no_reference { Vec::new() } else { reference });
+        }
         if self.figure() {
             return p;
         }
@@ -197,10 +235,6 @@ impl Draft {
         let sources: Vec<&str> = lines(&self.sources).collect();
         if !sources.is_empty() {
             p["sources"] = json!(sources);
-        }
-        let reference: Vec<&str> = lines(&self.reference).collect();
-        if self.no_reference || !reference.is_empty() {
-            p["reference"] = json!(if self.no_reference { Vec::new() } else { reference });
         }
         let headings = self.headings_sent();
         if !headings.is_empty() {
@@ -259,10 +293,11 @@ impl Draft {
         }
     }
 
-    /// Notes `field` as its step's last one while it has the focus, typed into or not, and ends
-    /// its step's refusal note when its text changes.
+    /// Notes `field` as its step's last one while it has the focus, typed into or not (but on a
+    /// figure's step, which adds no statistic), and ends its step's refusal note when its text
+    /// changes.
     fn edited(&mut self, r: &egui::Response, field: Field) {
-        if r.has_focus() {
+        if r.has_focus() && self.step != Step::Reference {
             self.targets[field.step().slot()] = Some(field);
         }
         if r.changed() {
@@ -306,7 +341,8 @@ fn statistic_menu(ui: &mut egui::Ui, d: &mut Draft, map: &Map, own: Field) {
 /// done unseen.
 fn limit_note(ui: &mut egui::Ui, d: &mut Draft, fields: &[Field]) {
     let limit = [("limit", &*MAX_PUBLICATION_TEXT.to_string())];
-    let note = if d.refused[d.step.slot()] {
+    // A figure's step adds no statistic, so no step's refusal is its own.
+    let note = if d.step != Step::Reference && d.refused[d.step.slot()] {
         i18n::fmt("The statistic wasn't added: each field takes at most {limit} characters.", &limit)
     } else if fields.iter().any(|&f| !d.off(f) && d.field_mut(f).chars().count() >= MAX_PUBLICATION_TEXT) {
         i18n::fmt("Each field takes at most {limit} characters.", &limit)
@@ -334,9 +370,12 @@ fn size_label(id: &str) -> String {
 fn step_name(step: Step) -> &'static str {
     match step {
         Step::Size => tl_raw!("Size"),
+        Step::Map => tl_raw!("Map"),
         Step::Style => tl_raw!("Style"),
+        Step::Placement => tl_raw!("Placement"),
         Step::Texts => tl_raw!("Texts"),
         Step::Sources => tl_raw!("Sources and reference"),
+        Step::Reference => tl_raw!("Reference"),
         Step::Accent => tl_raw!("Accent"),
         Step::Review => tl_raw!("Review"),
     }
@@ -346,9 +385,12 @@ fn step_name(step: Step) -> &'static str {
 fn step_label(step: Step) -> &'static str {
     match step {
         Step::Size => tl!("Size"),
+        Step::Map => tl!("Map"),
         Step::Style => tl!("Style"),
+        Step::Placement => tl!("Placement"),
         Step::Texts => tl!("Texts"),
         Step::Sources => tl!("Sources"),
+        Step::Reference => tl!("Reference"),
         Step::Accent => tl!("Accent"),
         Step::Review => tl!("Review"),
     }
@@ -469,11 +511,14 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
                         .auto_shrink([false, false])
                         .show(ui, |ui| match d.step {
                             Step::Size => size_step(ui, &mut d),
+                            Step::Map => map_step(ui, &app.session, &mut d),
                             Step::Style => style_step(ui, &mut d, t.accent),
+                            Step::Placement => arrange_step(ui, &app.session, &mut d),
                             Step::Texts => texts_step(ui, &mut d, app.session.map()),
                             Step::Sources => sources_step(ui, &mut d, app.session.map()),
+                            Step::Reference => reference_step(ui, &mut d),
                             Step::Accent => accent_step(ui, &mut d, t.accent),
-                            Step::Review => review_step(ui, &d),
+                            Step::Review => review_step(ui, &app.session, &d),
                         });
                 });
             });
@@ -499,8 +544,26 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             });
         });
     // A layout the command refuses is said (a map with no extent), and the wizard stays.
-    if create && crate::ribbon::make_publication(app, d.params()) {
-        close = true;
+    if create {
+        let held = d.arrangement.held(&app.session).map_err(String::from);
+        match held.and_then(|_| area_extent(&app.session, &d.area)) {
+            Ok(extent) => {
+                let mut params = d.params();
+                if let Some(extent) = extent {
+                    params["extent"] = json!(extent);
+                }
+                if crate::ribbon::make_publication(app, params) {
+                    close = true;
+                    // Only once the layout is made: a refused one changes no preference.
+                    if let Some(favourite) = d.favourite_to_set(&app.session)
+                        && let Err(e) = app.run("layout.arrangement", json!({"favourite": favourite}))
+                    {
+                        app.session.notify(e, true);
+                    }
+                }
+            }
+            Err(e) => app.session.notify(e, true),
+        }
     }
     if !open || close {
         app.dialogs.open = None;
@@ -581,6 +644,7 @@ mod tests {
         assert_eq!(d.title, name);
         assert!(d.subtitle.is_empty() && d.note.is_empty() && d.sources.is_empty() && d.author.is_empty());
         assert!(d.accent.is_none() && !d.no_author);
+        assert!(d.area == Area::View && d.name.is_empty());
         assert_eq!(app.dialogs.open, Some("publicationWizard"));
         app.dialogs.publication.as_mut().unwrap().subtitle = "Kept".into();
         open(&mut app);
@@ -618,31 +682,35 @@ mod tests {
         assert_eq!(d.params(), json!({"profile": "figure-1col"}));
     }
 
-    /// A sheet goes through the six steps; a figure goes from its size to the review, the steps
-    /// it takes nothing from skipped both ways. Back is off on the first step; Next becomes
-    /// Create on the last.
+    /// A sheet goes through the eight steps; a figure goes from its size to its map, its placement,
+    /// its reference and the review, the steps it takes nothing from skipped both ways. Back is off
+    /// on the first step; Next becomes Create on the last.
     #[test]
     fn a_sheet_takes_every_step_and_a_figure_skips_what_it_doesnt_draw() {
         let mut app = app();
         open(&mut app);
         let mut h = harness(app);
         assert!(h.get_by_role_and_label(Role::Button, "Back").accesskit_node().is_disabled(), "Back is off");
-        for want in [Step::Style, Step::Texts, Step::Sources, Step::Accent, Step::Review] {
+        for want in [Step::Map, Step::Style, Step::Placement, Step::Texts, Step::Sources, Step::Accent, Step::Review] {
             click(&mut h, "Next");
             assert_eq!(step(&h), want);
         }
         assert!(h.query_by_role_and_label(Role::Button, "Next").is_none());
         assert!(h.query_by_role_and_label(Role::Button, "Create").is_some());
-        for want in [Step::Accent, Step::Sources, Step::Texts, Step::Style, Step::Size] {
+        for want in [Step::Accent, Step::Sources, Step::Texts, Step::Placement, Step::Style, Step::Map, Step::Size] {
             click(&mut h, "Back");
             assert_eq!(step(&h), want);
         }
         h.state_mut().dialogs.publication.as_mut().unwrap().size = "figure-2col".into();
         h.run_steps(2);
-        click(&mut h, "Next");
-        assert_eq!(step(&h), Step::Review);
-        click(&mut h, "Back");
-        assert_eq!(step(&h), Step::Size);
+        for want in [Step::Map, Step::Placement, Step::Reference, Step::Review] {
+            click(&mut h, "Next");
+            assert_eq!(step(&h), want);
+        }
+        for want in [Step::Reference, Step::Placement, Step::Map, Step::Size] {
+            click(&mut h, "Back");
+            assert_eq!(step(&h), want);
+        }
     }
 
     /// Create makes the layout in one step, closes the wizard and opens the Publish tab, as the
@@ -700,7 +768,7 @@ mod tests {
     /// The names the step list holds, in order, and the one it marks as the current step.
     fn listed(h: &egui_kittest::Harness<'static, RustGisApp>) -> (Vec<&'static str>, Vec<&'static str>) {
         let (mut names, mut current) = (Vec::new(), Vec::new());
-        for name in ["Size", "Style", "Texts", "Sources", "Accent", "Review"] {
+        for name in ["Size", "Map", "Style", "Placement", "Texts", "Sources", "Reference", "Accent", "Review"] {
             if let Some(n) = h.query_by_role_and_label(Role::Button, name) {
                 names.push(name);
                 if n.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True) {
@@ -735,13 +803,13 @@ mod tests {
         let mut app = app();
         open(&mut app);
         let mut h = harness(app);
-        assert_eq!(listed(&h), (vec!["Size", "Style", "Texts", "Sources", "Accent", "Review"], vec!["Size"]));
+        assert_eq!(listed(&h), (vec!["Size", "Map", "Style", "Placement", "Texts", "Sources", "Accent", "Review"], vec!["Size"]));
         click(&mut h, "Next");
-        assert_eq!(listed(&h).1, ["Style"]);
+        assert_eq!(listed(&h).1, ["Map"]);
         click(&mut h, "Back");
         h.state_mut().dialogs.publication.as_mut().unwrap().size = "figure-1col".into();
         h.run_steps(2);
-        assert_eq!(listed(&h), (vec!["Size", "Review"], vec!["Size"]));
+        assert_eq!(listed(&h), (vec!["Size", "Map", "Placement", "Reference", "Review"], vec!["Size"]));
     }
 
     /// A step clicked in the list is the one shown, first, middle or last, keeping what was
@@ -772,13 +840,13 @@ mod tests {
         for _ in 0..30 {
             h.key_press(egui::Key::Tab);
             h.run_steps(2);
-            for name in ["Size", "Style", "Texts", "Sources", "Accent", "Review"] {
+            for name in ["Size", "Map", "Style", "Placement", "Texts", "Sources", "Accent", "Review"] {
                 if h.query_by_role_and_label(Role::Button, name).is_some_and(|n| n.accesskit_node().is_focused()) {
                     reached.push(name);
                 }
             }
         }
-        for name in ["Size", "Style", "Texts", "Sources", "Accent", "Review"] {
+        for name in ["Size", "Map", "Style", "Placement", "Texts", "Sources", "Accent", "Review"] {
             assert!(reached.contains(&name), "{name} not reached: {reached:?}");
         }
     }
@@ -799,9 +867,9 @@ mod tests {
         assert!((415.0..=460.0).contains(&small.width()) && (355.0..=420.0).contains(&small.height()), "smallest {small:?}");
         let next = h.get_by_role_and_label(Role::Button, "Next").rect();
         assert!(small.contains_rect(next), "Next at {next:?} outside {small:?}");
-        assert_eq!(listed(&h).0.len(), 6, "the list stays");
+        assert_eq!(listed(&h).0.len(), 8, "the list stays");
         // Each step wraps or scrolls inside that size: none makes the window wider or taller.
-        for _ in 0..5 {
+        for _ in 0..7 {
             click(&mut h, "Next");
             // Within the point a high-density screen's rounding of a wrapped line may add.
             let now = window(&h).size();
@@ -824,7 +892,7 @@ mod tests {
         let larger = at(&h);
         let moved = larger.right_bottom() - before.right_bottom();
         assert!(moved.y > 50.0, "Next moved by {moved:?}");
-        for _ in 0..4 {
+        for _ in 0..6 {
             click(&mut h, "Next");
             assert_eq!(at(&h), larger, "{:?}", step(&h));
         }
@@ -838,7 +906,7 @@ mod tests {
         let mut h = harness(app);
         let at = |h: &egui_kittest::Harness<'static, RustGisApp>| h.get_by_role_and_label(Role::Button, "Next").rect();
         let first = at(&h);
-        for _ in 0..4 {
+        for _ in 0..6 {
             click(&mut h, "Next");
             assert_eq!(at(&h), first, "{:?}", step(&h));
         }
@@ -859,7 +927,7 @@ mod tests {
             assert_ne!(next, "Next", "{code}: the language changed");
             let at = |h: &egui_kittest::Harness<'static, RustGisApp>| h.get_by_role_and_label(Role::Button, &next).rect();
             let first = at(&h);
-            for _ in 0..4 {
+            for _ in 0..6 {
                 h.get_by_role_and_label(Role::Button, &next).click();
                 h.run_steps(4);
                 assert_eq!(at(&h), first, "{code}: {:?}", step(&h));
@@ -890,7 +958,7 @@ mod tests {
         let text = h.get_by_label(about).rect();
         assert!(text.right() <= 320.0, "{text:?} runs off a screen 320 wide");
         assert_eq!(listed(&h).0, Vec::<&str>::new(), "the list is hidden");
-        assert!(h.query_by_label("Step 2 of 6: Style").is_some(), "the heading still says the step");
+        assert!(h.query_by_label("Step 3 of 8: Style").is_some(), "the heading still says the step");
     }
 
     /// A screen that narrows while the wizard is open (a phone turned, a browser resized) keeps

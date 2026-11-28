@@ -114,6 +114,9 @@ mod layout_edge;
 #[path = "tests/layout_publication_parts.rs"]
 mod layout_publication_parts;
 
+#[path = "tests/layout_typed_values.rs"]
+mod layout_typed_values;
+
 #[path = "tests/sde_connections.rs"]
 mod sde_connections;
 
@@ -15645,6 +15648,12 @@ fn a_publication_legend_leaves_out_context_layers() {
     assert_eq!(exclude, ["border"], "a name a data layer shares stays: {said:?}");
     let (exclude, said) = laid(json!({"contextInLegend": true})).unwrap();
     assert!(exclude.is_empty() && said.is_none(), "{exclude:?} {said:?}");
+    // One asked to be left out isn't named: "contextInLegend" wouldn't list it.
+    let (mut exclude, said) = laid(json!({"legend": {"exclude": ["Border"]}})).unwrap();
+    exclude.sort();
+    assert_eq!(exclude, ["around", "border"]);
+    let said = said.expect("said");
+    assert!(said.contains("1 context layer around the data (around)"), "{said}");
     let bad = laid(json!({"contextInLegend": "yes"})).unwrap_err();
     assert!(bad.contains("contextInLegend is true or false"), "{bad}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -18116,7 +18125,7 @@ fn terrain_block_is_read_back_from_a_saved_project() {
     // With the water in its walls (#2317, `terrain_block_water_v2.rgis`), which it requires.
     let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_block_water_v2.rgis")).unwrap();
     let block = saved.maps[0].view.terrain.as_ref().and_then(|t| t.block.clone()).unwrap();
-    assert_eq!(block.water, Some(rustgis_map::view::BlockWater { depth: Some(8.0), field: Some("prof".into()) }));
+    assert_eq!(block.water, Some(rustgis_map::view::BlockWater { depth: Some(8.0), field: Some("prof".into()), bed: None }));
     let again = serde_json::to_value(&saved).unwrap();
     assert_eq!(again["requires"], json!(["terrain-block", "terrain-water", "terrain-block-water"]));
     // One cut to polygons (`terrain_block_polygon.rgis`), its layer and query kept by name.
@@ -18422,7 +18431,7 @@ fn terrain_block_water_needs_the_terrains_water_and_a_depth() {
     for (water, terrain_water, said) in [
         (json!({}), json!({"layer": lagos}), "needs a depth"),
         (json!({"depth": -1}), json!({"layer": lagos}), "0 to 20000"),
-        (json!({"depth": 5, "bed": "x"}), json!({"layer": lagos}), "has no 'bed'"),
+        (json!({"depth": 5, "floor": "x"}), json!({"layer": lagos}), "has no 'floor'"),
         (json!({"field": "nome"}), json!({"layer": lagos}), "isn't numeric"),
         (json!({"field": "x"}), json!({"layer": lagos}), "has no field 'x'"),
         (json!({"depth": 5}), json!(null), "give the terrain a water layer"),
@@ -18482,6 +18491,144 @@ fn terrain_block_water_needs_the_terrains_water_and_a_depth() {
         let notes: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
         assert!(notes.iter().any(|t| t.contains(field) && t.contains(said)), "{notes:?}");
     }
+}
+
+/// A block's water floor read from a bed raster (#2434): `map.terrain` takes a raster layer over
+/// the block's box, alone or with a depth, refuses anything else before the terrain changes,
+/// saves it as a capability of its own, follows the layer's rename and says its removal.
+#[test]
+fn terrain_block_water_bed_is_a_raster_over_the_block() {
+    use base64::Engine;
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+    // Beds of 150 m: one over the DEM, one 10° east of it.
+    for (name, lon) in [("batimetria.tif", 10.0), ("longe.tif", 20.0)] {
+        let gt = GeoTransform { origin_x: lon, origin_y: 45.04, pixel_width: 0.001, pixel_height: -0.001 };
+        let r = Raster::new("bed", 40, 40, vec![vec![150.0; 1600]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(geotiff::write(&r, 0).unwrap());
+        s.run("layer.addDataBytes", &json!({"fileName": name, "data": data})).unwrap();
+    }
+    let named = |s: &Session, start: &str| s.map().layers.iter().find(|l| l.name.starts_with(start)).map(|l| l.name.clone()).unwrap();
+    let (bed, far) = (named(&s, "batimetria"), named(&s, "longe"));
+    let lake = json!([[[10.01, 45.01], [10.03, 45.01], [10.03, 45.03], [10.01, 45.03], [10.01, 45.01]]]);
+    let lakes = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"nome": "a"}, "geometry": {"type": "Polygon", "coordinates": lake}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(lakes.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "lagos.geojson", "data": data})).unwrap();
+    let lagos = named(&s, "lagos");
+    for (water, said) in [
+        (json!({"depth": 5, "bed": lagos}), "isn't a raster layer"),
+        (json!({"depth": 5, "bed": "nada"}), "no layer 'nada'"),
+        (json!({"depth": 5, "bed": 3}), "a raster layer of the bed's heights"),
+        (json!({"depth": 5, "bed": far}), "doesn't overlap the block's box"),
+    ] {
+        let e = s.run("map.terrain", &json!({"layer": dem, "water": {"layer": lagos}, "block": {"water": water}})).unwrap_err();
+        assert!(e.contains(said), "{water}: {e}");
+        assert!(s.map().view.terrain.is_none(), "{water}: refused whole");
+    }
+    // A bed alone is enough; reported and saved with the project, which requires it.
+    let v = s.run("map.terrain", &json!({"layer": dem, "water": {"layer": lagos}, "block": {"water": {"bed": bed}}})).unwrap();
+    assert_eq!(v["block"]["water"], json!({"bed": bed}));
+    let saved = serde_json::to_value(&s.project).unwrap();
+    assert!(saved["requires"].as_array().unwrap().contains(&json!("terrain-block-water-bed")), "{}", saved["requires"]);
+    // A block kept from before is checked again when set: a bed off its box is refused.
+    let before = s.map().view.terrain.clone();
+    let e = s.run("map.terrain", &json!({"block": {"water": {"bed": far}}})).unwrap_err();
+    assert!(e.contains("doesn't overlap") && e.contains("Terrain stays as it was"), "{e}");
+    assert_eq!(s.map().view.terrain, before);
+    // The bed is kept by name through a rename, and its removal is said.
+    s.run("layer.rename", &json!({"layer": bed, "name": "fundo"})).unwrap();
+    let kept = |s: &Session| s.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).and_then(|b| b.water.clone()).and_then(|w| w.bed);
+    assert_eq!(kept(&s).as_deref(), Some("fundo"));
+    let mark = s.notice_mark();
+    s.run("layer.remove", &json!({"layer": "fundo"})).unwrap();
+    let notes: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(notes.iter().any(|t| t.contains("water bed 'fundo' was removed") && t.contains("show no water")), "{notes:?}");
+    assert_eq!(kept(&s).as_deref(), Some("fundo"));
+}
+
+/// A block's water bed (#2434) that can't be read is said as a project opens; the notices for a
+/// lost depth field name the bed when there is one; a block moved off a kept bed is refused; and a
+/// rename giving another layer the bed's name is counted among the references it makes ambiguous.
+#[test]
+fn a_block_water_bed_is_said_where_it_cant_be_read() {
+    use base64::Engine;
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    // A project saved with a bed and no layers at all: its bed can't be read, said; the name kept.
+    let saved = Project::from_json(include_str!("../../../schema/fixtures/terrain_block_water_bed_v2.rgis")).unwrap();
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, saved);
+    assert!(opened.notices.iter().any(|n| n.text.contains("('batimetria'): the block's water bed is missing")), "{:?}", opened.notices);
+    let bed_of =
+        |s: &Session| s.map().view.terrain.as_ref().and_then(|t| t.block.as_ref()).and_then(|b| b.water.clone()).and_then(|w| w.bed);
+    assert_eq!(bed_of(&opened).as_deref(), Some("batimetria"));
+    let mut s = Session::new(Project::default());
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).map(|l| l.name.clone()).unwrap();
+    // Beds of 150 m: one over the whole DEM, one over its east quarter, one 10° east of it.
+    for (name, lon, cols) in [("batimetria.tif", 10.0, 40), ("leste.tif", 10.03, 10), ("longe.tif", 20.0, 40)] {
+        let gt = GeoTransform { origin_x: lon, origin_y: 45.04, pixel_width: 0.001, pixel_height: -0.001 };
+        let r =
+            Raster::new("bed", cols, 40, vec![vec![150.0; cols as usize * 40]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(geotiff::write(&r, 0).unwrap());
+        s.run("layer.addDataBytes", &json!({"fileName": name, "data": data})).unwrap();
+    }
+    let named = |s: &Session, start: &str| s.map().layers.iter().find(|l| l.name.starts_with(start)).map(|l| l.name.clone()).unwrap();
+    let (bed, east, far) = (named(&s, "batimetria"), named(&s, "leste"), named(&s, "longe"));
+    let lake = json!([[[10.01, 45.01], [10.03, 45.01], [10.03, 45.03], [10.01, 45.03], [10.01, 45.01]]]);
+    let lakes = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"nome": "a", "prof": 4.0}, "geometry": {"type": "Polygon", "coordinates": lake}},
+    ]});
+    let data = base64::engine::general_purpose::STANDARD.encode(lakes.to_string().as_bytes());
+    s.run("layer.addDataBytes", &json!({"fileName": "lagos.geojson", "data": data})).unwrap();
+    let lagos = named(&s, "lagos");
+    // The same project with its bed there opens without a word about it.
+    s.run("map.terrain", &json!({"layer": dem, "water": {"layer": lagos}, "block": {"water": {"bed": east}}})).unwrap();
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, s.project.clone());
+    assert!(!opened.notices.iter().any(|n| n.text.contains("water bed")), "{:?}", opened.notices);
+    // A block moved off a bed it keeps is refused, the terrain as it was.
+    let merc = |lon: f64, lat: f64| rustgis_geom::lonlat_to_merc(rustgis_geom::Coord::new(lon, lat));
+    let (a, z) = (merc(10.002, 45.002), merc(10.02, 45.02));
+    let before = s.map().view.terrain.clone();
+    let e = s.run("map.terrain", &json!({"block": {"extent": [a.x, a.y, z.x, z.y]}})).unwrap_err();
+    assert!(e.contains("doesn't overlap") && e.contains(&east) && e.contains("Terrain stays as it was"), "{e}");
+    assert_eq!(s.map().view.terrain, before);
+    // A depth field lost with a depth and a bed: the bed still gives the floor where it has heights.
+    s.run("map.terrain", &json!({"block": {"water": {"bed": bed, "depth": 5, "field": "prof"}}})).unwrap();
+    let mut wrong = s.project.clone();
+    if let Some(w) = wrong.maps[0].view.terrain.as_mut().and_then(|t| t.block.as_mut()).and_then(|b| b.water.as_mut()) {
+        w.field = Some("nome".into());
+    }
+    let mut opened = Session::new(Project::default());
+    crate::cmd::project::reset_to(&mut opened, wrong);
+    let said = |notes: &[String]| {
+        notes.iter().any(|t| t.contains("'nome'") && t.contains(&format!("bed '{bed}'")) && t.contains("5 m deep elsewhere"))
+    };
+    let notes: Vec<String> = opened.notices.iter().map(|n| n.text.clone()).collect();
+    assert!(said(&notes), "{notes:?}");
+    let mark = s.notice_mark();
+    s.run("edit.deleteField", &json!({"layer": lagos, "field": "prof"})).unwrap();
+    let notes: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(
+        notes.iter().any(|t| t.contains("prof") && t.contains(&format!("bed '{bed}'")) && t.contains("5 m deep elsewhere")),
+        "{notes:?}"
+    );
+    // Another layer renamed to the bed's name: the bed is among the references the rename makes ambiguous.
+    let id = s.map().layer_by_name(&far).map(|l| l.id).unwrap();
+    let mark = s.notice_mark();
+    s.run("layer.rename", &json!({"layer": id, "name": bed})).unwrap();
+    let notes: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(notes.iter().any(|t| t.contains(&format!("reference(s) already name '{bed}'"))), "{notes:?}");
+    // With two layers of that name the map draws no bed: a block update is refused, the terrain as
+    // it was, though the first of them is a raster over the block.
+    let before = s.map().view.terrain.clone();
+    let e = s.run("map.terrain", &json!({"block": {"extent": null}})).unwrap_err();
+    assert!(e.contains(&format!("more than one layer is called '{bed}'")) && e.contains("Terrain stays as it was"), "{e}");
+    assert_eq!(s.map().view.terrain, before);
 }
 
 /// A terrain's water on a layer read a view at a time (#2305), which `map.terrain` refuses: the
@@ -18544,7 +18691,7 @@ fn a_projects_water_fields_its_layer_lost_are_cleared_as_it_opens() {
     crate::cmd::project::reset_to(&mut opened, saved);
     let t = opened.map().view.terrain.clone().unwrap();
     assert!(t.water.as_ref().is_some_and(|w| w.level.is_none()), "{t:?}");
-    assert_eq!(t.block.and_then(|b| b.water), Some(BlockWater { depth: Some(8.0), field: None }));
+    assert_eq!(t.block.and_then(|b| b.water), Some(BlockWater { depth: Some(8.0), field: None, bed: None }));
     assert_eq!(said(&opened, "Map: the terrain's water level field 'nivel' isn't a numeric field of 'lagos'"), 1, "{:?}", opened.notices);
     let depth = "the block's water depth field 'prof' isn't a numeric field of 'lagos', so its walls show all the water 8 m deep";
     assert_eq!(said(&opened, depth), 1, "{:?}", opened.notices);
@@ -25884,6 +26031,33 @@ pub(crate) fn serve(body: &'static [u8], n: usize) -> String {
     format!("http://{addr}")
 }
 
+/// The `x` and `y` given to `layer.addUrl` reach the tables of a zip it answers with (#3062).
+#[test]
+fn add_url_of_a_zip_gives_its_tables_the_columns_given() {
+    let book = rustgis_data::sheets::xlsx(&[("ALL", &[&["id", "LongitudeOR", "LatitudeOR"], &["4", "13", "23"]])]);
+    let zip = rustgis_data::zip::write(&[
+        ("a.csv".into(), b"id,LongitudeOR,LatitudeOR\n1,10,20\n2,11,21\n".to_vec()),
+        ("book.xlsx".into(), book),
+        ("notes.csv".into(), b"id,name\n5,x\n".to_vec()),
+    ])
+    .unwrap();
+    let (base, _) = serve_files(vec![("/d/x.zip".into(), zip)]);
+    let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
+    s.run("layer.addUrl", &json!({"url": format!("{base}/d/x.zip"), "x": "LongitudeOR", "y": "LatitudeOR"})).unwrap();
+    let mut layers: Vec<(String, usize)> = s.map().layers.iter().map(|l| (l.dataset.name.clone(), l.dataset.features.len())).collect();
+    layers.sort();
+    assert_eq!(layers.iter().map(|(_, n)| *n).collect::<Vec<_>>(), [2, 1], "{layers:?}");
+    assert!(s.project.tables.iter().any(|t| t.dataset.name == "notes"));
+    let said = s.notices_since(mark);
+    assert!(
+        said.iter().any(|n| n.text.contains(
+            "used by 2 of 3 tables; the rest were read without them, lacking a column named: notes.csv (no x column 'LongitudeOR')"
+        )),
+        "{said:?}"
+    );
+}
+
 /// Serves each file by its exact path and query (others are 404) on a local port, keeping the
 /// paths asked for; returns the base address and them.
 fn serve_files(files: Vec<(String, Vec<u8>)>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
@@ -29211,8 +29385,100 @@ fn wcs_coverages_and_catalogue_records() {
         json!([{"url": "https://geo.example.org/wms", "kind": "wms", "name": null, "protocol": "OGC:WMS", "fromDocument": true}])
     );
     assert!(v["notes"][0].as_str().is_some_and(|n| n.contains("1 links")), "{v}");
-    assert!(v["request"].as_str().is_some_and(|r| r.contains("AnyText%20LIKE%20%27%25forest%25%27")), "{v}");
+    assert!(v["request"].as_str().is_some_and(|r| r.contains("csw:AnyText") && r.contains("%25forest%25")), "{v}");
     assert!(s.run("catalog.search", &json!({"url": "https://cat.example.org/csw", "text": "<html/>"})).is_err());
+}
+
+/// `catalog.search` names its area's coordinate system (CRS84), and asks again without only a
+/// catalogue that answers that with an exception, said and given with the next page (#2889).
+#[test]
+fn a_catalogue_refusing_crs84_is_asked_for_the_area_without_it() {
+    use std::io::Write;
+    const REFUSED: &str = "<ows:ExceptionReport xmlns:ows='o'><ows:Exception><ows:ExceptionText>WORDS</ows:ExceptionText></ows:Exception></ows:ExceptionReport>";
+    const PAGE: &str = r#"<csw:GetRecordsResponse xmlns:csw="http://www.opengis.net/cat/csw/2.0.2"><csw:SearchResults numberOfRecordsMatched="443" nextRecord="21"/></csw:GetRecordsResponse>"#;
+    // A catalogue answering an area with CRS84 named, and without, as given: its address, and
+    // whether each request named it.
+    let serve = |named: String, unnamed: String| {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/csw", listener.local_addr().unwrap());
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = asked.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let is_named = read_request(&mut s).contains("CRS84");
+                log.lock().unwrap().push(is_named);
+                let body = if is_named { &named } else { &unnamed };
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        (url, asked)
+    };
+    let refused = |words: &str| REFUSED.replace("WORDS", words);
+    let mut s = Session::new(Project::default());
+    let area = json!([-43, -21, -42, -20]);
+
+    // Read with CRS84: nothing said, asked once.
+    let (url, asked) = serve(PAGE.into(), refused("never asked"));
+    let v = s.run("catalog.search", &json!({"url": url, "query": "solos", "bbox": area})).unwrap();
+    assert_eq!((v["matched"].as_u64(), v["bboxCrs"].as_str(), v.get("notes")), (Some(443), Some("CRS84"), None), "{v}");
+    assert_eq!(asked.lock().unwrap().clone(), [true]);
+
+    // Refused, then read without it: said, and its next page is asked for without it at once.
+    let (url, asked) = serve(refused("CRS84?"), PAGE.into());
+    let v = s.run("catalog.search", &json!({"url": url, "query": "solos", "bbox": area})).unwrap();
+    assert_eq!((v["matched"].as_u64(), v["bboxCrs"].as_str()), (Some(443), Some("none")), "{v}");
+    assert_eq!(v["notes"], json!([crate::cmd::service::AREA_UNNAMED]));
+    assert!(v["request"].as_str().is_some_and(|r| r.contains("ows:BoundingBox") && !r.contains("CRS84")), "{v}");
+    let next = s.run("catalog.search", &json!({"url": url, "query": "solos", "bbox": area, "start": 21, "bboxCrs": "none"})).unwrap();
+    assert_eq!((next["bboxCrs"].as_str(), next.get("notes")), (Some("none"), None), "{next}");
+    // Named as told, it isn't asked again; nor are words alone.
+    let e = s.run("catalog.search", &json!({"url": url, "bbox": area, "bboxCrs": "CRS84"})).unwrap_err();
+    assert!(e.ends_with("the catalogue answered with an error: CRS84?"), "{e}");
+    let v = s.run("catalog.search", &json!({"url": url, "query": "solos"})).unwrap();
+    assert!(v.get("bboxCrs").is_none() && v.get("notes").is_none(), "{v}");
+    assert_eq!(asked.lock().unwrap().clone(), [true, false, false, true, false]);
+    assert!(s.run("catalog.search", &json!({"url": url, "bbox": area, "bboxCrs": "EPSG:4326"})).unwrap_err().contains("bboxCrs"));
+
+    // Refused both ways: the catalogue's words, the second's when they differ.
+    let (url, asked) = serve(refused("no areas"), refused("no areas"));
+    let e = s.run("catalog.search", &json!({"url": url, "bbox": area})).unwrap_err();
+    assert!(e.ends_with("the catalogue answered with an error: no areas"), "{e}");
+    assert_eq!(asked.lock().unwrap().clone(), [true, false]);
+    let (url, _) = serve(refused("no such system"), refused("no areas"));
+    let e = s.run("catalog.search", &json!({"url": url, "bbox": area})).unwrap_err();
+    assert!(e.ends_with("error: no such system (asked again without the area's coordinate system: no areas)"), "{e}");
+    // The note says what happened, not why: an exception may be about something else.
+    let (url, _) = serve(refused("the server is busy"), PAGE.into());
+    let v = s.run("catalog.search", &json!({"url": url, "bbox": area})).unwrap();
+    let note = v["notes"][0].as_str().unwrap_or_default();
+    assert!(note.contains("answered with an exception when") && !note.contains("refused"), "{note}");
+    // What isn't a catalogue's answer is no refusal.
+    let (url, asked) = serve("<html/>".into(), PAGE.into());
+    assert!(s.run("catalog.search", &json!({"url": url, "bbox": area})).is_err());
+    assert_eq!(asked.lock().unwrap().clone(), [true]);
+
+    // Words the catalogue isn't asked for are counted.
+    let p = json!({"url": "https://cat.example.org/csw", "query": format!("a\tb{}", "c".repeat(250)), "text": PAGE});
+    let v = s.run("catalog.search", &p).unwrap();
+    let said: Vec<&str> = v["notes"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    assert_eq!(said, ["control characters left out of the words searched for: 1", "the words are cut to 200 characters; left out: 52"]);
+}
+
+/// An area across the antimeridian isn't asked for, so the whole catalogue is searched, and the
+/// answer says so; an area on one side says nothing of it.
+#[test]
+fn a_catalogue_area_across_the_antimeridian_is_said_to_be_left_out() {
+    const PAGE: &str = r#"<csw:GetRecordsResponse xmlns:csw="http://www.opengis.net/cat/csw/2.0.2"><csw:SearchResults numberOfRecordsMatched="443" nextRecord="21"/></csw:GetRecordsResponse>"#;
+    let mut s = Session::new(Project::default());
+    let search = |s: &mut Session, area: Value| {
+        s.run("catalog.search", &json!({"url": "https://cat.example.org/csw", "query": "solos", "bbox": area, "text": PAGE})).unwrap()
+    };
+    let v = search(&mut s, json!([170, -20, -170, -10]));
+    assert!(!v["request"].as_str().unwrap_or_default().contains("BoundingBox"), "{v}");
+    assert_eq!((v.get("bboxCrs"), &v["notes"]), (None, &json!([crate::cmd::service::AREA_ACROSS_ANTIMERIDIAN])), "{v}");
+    let v = search(&mut s, json!([-43, -21, -42, -20]));
+    assert!(v["request"].as_str().unwrap_or_default().contains("BoundingBox") && v.get("notes").is_none(), "{v}");
 }
 
 /// A KMZ's ground overlays become raster layers kept in the project; a KML whose picture is a web
@@ -54407,6 +54673,99 @@ fn a_plugin_commands_grib_range_is_added_when_the_app_completes_it() {
     assert_eq!(layer.raster.as_ref().unwrap().data.as_ref().unwrap().bands[0].data, vec![3.0, 4.0]);
 }
 
+/// A GRIB1 message of a 60 × 40 grid of 1° cells from 60° N, 10° E, north to south: value `k` is
+/// `k`, 16 bits each (4,884 octets, more than the 4,096 read first).
+#[cfg(not(target_arch = "wasm32"))]
+fn grib1_grid_message() -> Vec<u8> {
+    let mut m = b"GRIB\0\x13\x14\x01".to_vec();
+    m.extend([0, 0, 28, 2, 7, 96, 255, 0x80, 11, 105, 0, 2, 26, 11, 18, 6, 0, 1, 0, 0, 0, 0, 0, 0, 21, 0, 0, 0]);
+    // Grid description: 60 × 40, 60° N 10° E to 21° N 69° E, 1°.
+    m.extend([0, 0, 32, 0, 255, 0, 0, 60, 0, 40, 0, 0xea, 0x60, 0, 0x27, 0x10, 0x80, 0, 0x52, 0x08, 0x01, 0x0d, 0x88]);
+    m.extend([0x03, 0xe8, 0x03, 0xe8, 0, 0, 0, 0, 0]);
+    // Binary data: 11 octets, 2,400 values and one octet of padding (4,812).
+    m.extend([0, 0x12, 0xcc, 8, 0, 0, 0, 0, 0, 0, 16]);
+    m.extend((0..2400u16).flat_map(u16::to_be_bytes));
+    m.push(0);
+    m.extend(b"7777");
+    assert_eq!(m.len(), 4884);
+    m
+}
+
+/// `layer.addUrl` with `"bytes"` and `"bbox"` (#3055) asks for the record's first 4,096 octets,
+/// then for the rows of the box only, and adds the cells the box touches, saying how much it
+/// read. A record that can't be read by rows is downloaded whole and cut to the box, and said;
+/// where rows aren't read yet (a plugin's command in the app, the app's own check) it is refused.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_rows_of_a_box_of_a_grib_record_are_asked_for_alone() {
+    let mut file = grib1_message(1, 2);
+    file.extend(grib1_grid_message());
+    let (base, sent) = serve_ranges(file.clone());
+    let count = || sent.load(std::sync::atomic::Ordering::Relaxed);
+    let mut s = Session::new(Project::default());
+    let url = format!("{base}/run/PREC.grb");
+    let cells = |s: &Session, r: &Value| {
+        let raster = s.map().layer(r["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+        (raster.width, raster.height, raster.transform.origin_x, raster.transform.origin_y, raster.bands[0].data.clone())
+    };
+    // Rows 35 to 37 of 40, columns 1 and 2: the record's first 4,096 octets and three rows of 120.
+    let mark = s.notice_mark();
+    let r = s.run("layer.addUrl", &json!({"url": url, "bytes": [88, 4971], "bbox": [10.6, 22.7, 12.4, 25.3], "name": "Rain"})).unwrap();
+    assert_eq!(cells(&s, &r), (2, 3, 10.5, 25.5, vec![2101.0, 2102.0, 2161.0, 2162.0, 2221.0, 2222.0]));
+    assert_eq!(count(), 4096 + 360);
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(said.contains(&"Rain: read 3 of 40 rows (5 kB of 5 kB)".to_string()), "{said:?}");
+    assert!(!said.iter().any(|n| n.contains("whole record")), "{said:?}");
+    // Rows the first read holds already, and a record no longer than it, are asked for once.
+    let r = s.run("layer.addUrl", &json!({"url": url, "bytes": [88, 4971], "bbox": [10.6, 56.7, 12.4, 59.3]})).unwrap();
+    assert_eq!(cells(&s, &r).4, vec![61.0, 62.0, 121.0, 122.0, 181.0, 182.0]);
+    let r = s.run("layer.addUrl", &json!({"url": url, "bytes": [0, 87], "bbox": [9.6, 59.6, 10.4, 60.4]})).unwrap();
+    assert_eq!(cells(&s, &r).4, vec![1.0]);
+    assert_eq!(count(), 4096 + 360 + 4096 + 88);
+    // `"bbox": false` is no box: the range is read as the file, as before boxes.
+    let r = s.run("layer.addUrl", &json!({"url": url, "bytes": [0, 87], "bbox": false})).unwrap();
+    assert_eq!(cells(&s, &r).4, vec![1.0, 2.0]);
+    assert_eq!(count(), 4096 + 360 + 4096 + 88 + 88);
+    // Two messages in the range: downloaded whole after the first read, cut to the box, and said.
+    let mark = s.notice_mark();
+    let r = s.run("layer.addUrl", &json!({"url": url, "bytes": [0, 4971], "bbox": [9.6, 59.6, 10.4, 60.4], "name": "Two"})).unwrap();
+    assert_eq!(cells(&s, &r).4, vec![1.0]);
+    assert_eq!(count(), 4096 + 360 + 4096 + 88 + 88 + 4096 + 4972);
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    let whole = "Two: a range that isn't one whole message of one field can't be read row by row: the whole record was downloaded (5 kB) and cut to the box";
+    assert!(said.contains(&whole.to_string()), "{said:?}");
+    // Refused before anything is fetched.
+    let before = count();
+    for (bbox, more, said) in [
+        (json!([170, 0, -170, 10]), json!(null), "a box across the antimeridian"),
+        (json!([10, 20, 5, 30]), json!(null), "a box across the antimeridian"),
+        (json!("here"), json!(null), "bbox is [west, south, east, north]"),
+        (json!([10.6, 56.7, 12.4, 59.3]), json!(1000), "doesn't go with \"cellSize\""),
+    ] {
+        let e = s.run("layer.addUrl", &json!({"url": url, "bytes": [88, 4971], "bbox": bbox, "cellSize": more})).unwrap_err();
+        assert!(e.contains(said), "{bbox}: {e}");
+    }
+    // Keys the rows of a box don't read are refused, never left out unsaid.
+    let asked = json!({"url": url, "bytes": [88, 4971], "bbox": [10.6, 56.7, 12.4, 59.3], "crs": "EPSG:4674", "layer": "2"});
+    let e = s.run("layer.addUrl", &asked).unwrap_err();
+    assert!(e.contains("the rows of a box (\"bbox\" with \"bytes\") don't read layer, crs: leave it out"), "{e}");
+    assert_eq!(count(), before);
+    // A box outside the record, known from its headers.
+    let e = s.run("layer.addUrl", &json!({"url": url, "bytes": [88, 4971], "bbox": [10, 70, 12, 80]})).unwrap_err();
+    assert!(e.contains("the box's latitudes (70° to 80°) are outside the record's grid (20.5° to 60.5°)"), "{e}");
+    assert_eq!(count(), before + 4096);
+    // The app's check of a range, and a plugin's command it runs: not read by rows yet, and said.
+    let asked = json!({"url": url, "bytes": [88, 4971], "bbox": [10.6, 56.7, 12.4, 59.3]});
+    let e = crate::cmd::layer::byte_range(&asked, &url).unwrap_err();
+    assert!(e.contains("is read on the command line for now, not in the app yet"), "{e}");
+    let mut s = world();
+    plugin("eng-grib-rows", &["edit", "network"]);
+    fetch_mode(true, true);
+    let e = s.run_leaving_downloads("plugin:eng-grib-rows/f", &json!({"op": "layer.addUrl", "params": asked})).unwrap_err();
+    assert!(e.contains("is read on the command line for now, not in the app yet"), "{e}");
+    assert!(s.take_url_requests().is_empty());
+}
+
 /// Each page of a map series is georeferenced with its own view, not the first page's (#1191).
 #[test]
 fn a_map_series_pdf_georeferences_each_page_with_its_view() {
@@ -64307,4 +64666,91 @@ fn an_unread_delimited_file_is_named_once() {
 fn a_transparency_reads_back_without_float_noise() {
     assert_eq!(crate::cmd::project::percent(33.3), json!(33.3));
     assert_eq!(crate::cmd::project::percent(0.0), json!(0.0));
+}
+
+/// Headless sessions emit the CJK font-folder scan notice once through `Session::run` when a
+/// fallback scan was lossy, stay silent when clean, and leave the summary untouched across every
+/// `Session::new` copy once a UI shell claims process-wide ownership for translation.
+#[test]
+fn headless_session_run_emits_cjk_scan_notice_only_when_lossy() {
+    use rustgis_render::fonts::CjkRootScanSummary;
+
+    struct SummaryGuard;
+    impl SummaryGuard {
+        fn set(summary: Option<CjkRootScanSummary>) -> Self {
+            crate::TEST_CJK_SCAN_SUMMARY.with_borrow_mut(|slot| *slot = Some(summary));
+            Self
+        }
+    }
+    impl Drop for SummaryGuard {
+        fn drop(&mut self) {
+            crate::TEST_CJK_SCAN_SUMMARY.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+
+    struct UiNoticeGuard;
+    impl UiNoticeGuard {
+        fn set(value: bool) -> Self {
+            crate::TEST_UI_OWNS_CJK_SCAN_NOTICE.set(Some(value));
+            Self
+        }
+    }
+    impl Drop for UiNoticeGuard {
+        fn drop(&mut self) {
+            crate::TEST_UI_OWNS_CJK_SCAN_NOTICE.set(None);
+        }
+    }
+
+    let lossy = CjkRootScanSummary {
+        truncated_dirs: 2,
+        unreadable_dirs: 1,
+        entry_errors: 0,
+        thread_spawn_failed: false,
+        sample_path: Some(std::path::PathBuf::from("/run/host/fonts")),
+    };
+
+    // Lossy summary on a headless session emits one English notice and consumes it; clean/absent stay silent.
+    {
+        let _ui_guard = UiNoticeGuard::set(false);
+        assert!(!crate::ui_owns_cjk_scan_notice());
+        let mut headless = Session::new(Project::default());
+        {
+            let _guard = SummaryGuard::set(Some(lossy.clone()));
+            let mark = headless.notice_mark();
+            headless.run("connection.list", &Value::Null).unwrap();
+            let notices = headless.notices_since(mark);
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(!notices[0].error);
+            assert!(notices[0].text.contains("CJK font folder search stopped early"), "{}", notices[0].text);
+            assert!(notices[0].text.contains("2 folder(s) reached the scan limit"), "{}", notices[0].text);
+            assert!(notices[0].text.contains("1 unreadable folder(s)"), "{}", notices[0].text);
+            assert!(notices[0].text.contains("/run/host/fonts"), "{}", notices[0].text);
+
+            // One-shot: a subsequent command emits nothing.
+            let mark2 = headless.notice_mark();
+            headless.run("connection.list", &Value::Null).unwrap();
+            assert!(headless.notices_since(mark2).is_empty(), "{:?}", headless.notices_since(mark2));
+        }
+
+        for clean in [Some(CjkRootScanSummary::default()), None] {
+            let _guard = SummaryGuard::set(clean);
+            let mark = headless.notice_mark();
+            headless.run("connection.list", &Value::Null).unwrap();
+            assert!(headless.notices_since(mark).is_empty(), "clean scan must stay silent: {:?}", headless.notices_since(mark));
+        }
+    }
+
+    // Once a UI front end claims process-wide ownership, even a separate temporary Session::new
+    // copy leaves the summary untouched inside Session::run so ui-egui can translate it.
+    crate::claim_ui_cjk_scan_notice();
+    assert!(crate::ui_owns_cjk_scan_notice());
+    let mut copy = Session::new(Project::default());
+    {
+        let _guard = SummaryGuard::set(Some(lossy));
+        let mark = copy.notice_mark();
+        copy.run("connection.list", &Value::Null).unwrap();
+        assert!(copy.notices_since(mark).is_empty(), "{:?}", copy.notices_since(mark));
+        let still_pending = crate::TEST_CJK_SCAN_SUMMARY.with_borrow(|slot| slot.as_ref().and_then(Option::as_ref).is_some());
+        assert!(still_pending, "copy session must not consume the CJK scan summary once UI owns it");
+    }
 }

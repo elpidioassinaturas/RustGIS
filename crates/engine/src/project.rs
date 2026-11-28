@@ -80,6 +80,7 @@ pub const CAPABILITIES: &[&str] = &[
     "terrain-water",
     "terrain-water-shore",
     "terrain-block-water",
+    "terrain-block-water-bed",
     "terrain-block-walls-layer",
     "shaded-relief-effects",
     "normalized-legend-urls",
@@ -128,6 +129,7 @@ pub const CAPABILITIES: &[&str] = &[
     "layout-page-color",
     "layout-text-statistics",
     "layout-publication-parts",
+    "layout-publication-legend",
     "shaded-relief-shadow-softness",
 ];
 /// An offline area keeping the versions that lost a sync or a Bring Back

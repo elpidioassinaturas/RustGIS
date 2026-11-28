@@ -1,8 +1,9 @@
 //! The wizard's review step.
+use super::map::{area_label, name_label};
 use super::*;
 
 /// The review step: what was picked, step by step.
-pub(super) fn review_step(ui: &mut egui::Ui, d: &Draft) {
+pub(super) fn review_step(ui: &mut egui::Ui, s: &Session, d: &Draft) {
     let none = tl!("(none)");
     let or_none = |t: &str| if t.trim().is_empty() { none.to_string() } else { t.trim().to_string() };
     egui::Grid::new("publication_wizard_review").num_columns(2).spacing(egui::vec2(12.0, 6.0)).show(ui, |ui| {
@@ -13,17 +14,11 @@ pub(super) fn review_step(ui: &mut egui::Ui, d: &Draft) {
             ui.end_row();
         };
         row(tl!("Size"), size_label(&d.size));
+        row(tl!("Map extent"), area_label(s, &d.area));
+        row(tl!("Name"), name_label(s, &d.name));
         if d.figure() {
-            // The figure note sends a sheet's texts to the caption. Its reference doesn't go there
-            // (the figure draws the default one), so it is said here.
-            let unused = if d.no_reference {
-                Some(tl!("\"No cartographic reference\" isn't used: a figure takes the default reference"))
-            } else {
-                lines(&d.reference).next().map(|_| tl!("The lines typed aren't used: a figure takes the default reference"))
-            };
-            if let Some(unused) = unused {
-                row(tl!("Reference"), unused.to_string());
-            }
+            placement_rows(&mut row, s, d);
+            row(tl!("Reference"), reference_value(d));
             return;
         }
         let turned = match d.orientation {
@@ -34,20 +29,14 @@ pub(super) fn review_step(ui: &mut egui::Ui, d: &Draft) {
         row(tl!("Orientation"), turned.to_string());
         let style = crate::ribbon::publication_style(&d.style).map(|s| s.0.to_string()).unwrap_or_else(|| d.style.clone());
         row(tl!("Style"), style);
+        placement_rows(&mut row, s, d);
         row(tl!("Title"), or_none(&d.title));
         row(tl!("Subtitle"), or_none(&d.subtitle));
         row(tl!("Note"), or_none(&d.note));
         let sources = lines(&d.sources).collect::<Vec<_>>().join("\n");
         row(tl!("Sources"), or_none(&sources));
         heading_row(&mut row, d, 0, tl!("Sources heading"), PUBLICATION_HEADINGS[0]);
-        let typed = lines(&d.reference).collect::<Vec<_>>().join("\n");
-        let reference = match d.left_out(Field::Reference) {
-            Some(_) if typed.is_empty() => none.to_string(),
-            Some(_) => tl!("(none; the lines typed aren't used)").to_string(),
-            None if typed.is_empty() => tl!("The default: projection, datum and graticule, filled in on the sheet").to_string(),
-            None => typed,
-        };
-        row(tl!("Reference"), reference);
+        row(tl!("Reference"), reference_value(d));
         heading_row(&mut row, d, 1, tl!("Reference heading"), PUBLICATION_HEADINGS[1]);
         heading_row(&mut row, d, 2, tl!("Column heading"), none);
         let credit = if d.no_author {
@@ -63,6 +52,26 @@ pub(super) fn review_step(ui: &mut egui::Ui, d: &Draft) {
     });
     if d.figure() {
         figure_note(ui);
+    }
+}
+
+/// The placement's row, and one more when Create also makes it the favourite.
+fn placement_rows(row: &mut impl FnMut(&str, String), s: &Session, d: &Draft) {
+    row(tl!("Placement"), d.arrangement.label(s));
+    if d.favourite_to_set(s).is_some() {
+        row(tl!("Favourite"), tl!("Create makes this arrangement the favourite").to_string());
+    }
+}
+
+/// The reference as it will be drawn: the lines typed, or the command's default; left out, none,
+/// but lines typed then are said not to be used.
+fn reference_value(d: &Draft) -> String {
+    let typed = lines(&d.reference).collect::<Vec<_>>().join("\n");
+    match d.left_out(Field::Reference) {
+        Some(_) if typed.is_empty() => tl!("(none)").to_string(),
+        Some(_) => tl!("(none; the lines typed aren't used)").to_string(),
+        None if typed.is_empty() => tl!("The default: projection, datum and graticule, filled in on the sheet").to_string(),
+        None => typed,
     }
 }
 

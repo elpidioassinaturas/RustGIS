@@ -112,13 +112,7 @@ impl Project {
         // A coordinate system whose PROJ definition, which an older reader reads, doesn't place
         // points as its WKT does (angles in grads, a datum transformation the definition can't
         // hold).
-        struct Payload<'a>(&'a Project);
-        impl Serialize for Payload<'_> {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                Project::serialize(self.0, serializer)
-            }
-        }
-        if rustgis_data::raster::crs::saves_wkt(&Payload(self)) {
+        if project_needs_wkt(self) {
             required.push("crs-wkt");
         }
         required
@@ -186,6 +180,7 @@ const COMMAND_CAPABILITIES: &[(&str, CommandCheck)] = &[
     ("layout-page-color", command_colours_the_page),
     ("layout-text-statistics", command_uses_text_statistics),
     ("layout-publication-parts", command_sets_publication_parts),
+    ("layout-publication-legend", command_sets_publication_legend),
 ];
 
 /// A saved `layout.publication` that leaves out or sets up its grid, scale bar or north arrow
@@ -200,6 +195,20 @@ fn command_sets_publication_parts(id: &str, params: &Value) -> bool {
                 || params.get("northArrow").is_some_and(Value::is_object)
         }
         "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_sets_publication_parts)),
+        _ => false,
+    }
+}
+
+/// A saved `layout.publication` that leaves out or sets up its legend (#3095): an older reader
+/// ignores `legend`, making the default one. `null` and an object giving nothing (each key
+/// `null`, a blank title or an empty list) ask for that default, so they require nothing.
+fn command_sets_publication_legend(id: &str, params: &Value) -> bool {
+    let nothing = |v: &Value| v.is_null() || v.as_str().is_some_and(|t| t.trim().is_empty()) || v.as_array().is_some_and(Vec::is_empty);
+    match id {
+        "layout.publication" => {
+            params.get("legend").is_some_and(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.values().all(nothing)))
+        }
+        "script.run" => params.get("script").and_then(Value::as_str).is_some_and(|s| script_uses(s, command_sets_publication_legend)),
         _ => false,
     }
 }
@@ -1032,7 +1041,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
     let (mut polygon, mut svg) = (false, false);
     let (mut offline_area_id, mut paper, mut native, mut guided, mut weighed, mut cleared, mut deduped) =
         (false, false, false, false, false, false, false);
-    let (mut crisp, mut soft) = (false, false);
+    let (mut crisp, mut bed, mut soft) = (false, false, false);
     for map in maps {
         offline_area_id |= map.offline_area_id.is_some();
         // A blank basemap's paper colour (#2532), which an older reader would draw and save white.
@@ -1060,6 +1069,8 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
             shore |= t.water.as_ref().is_some_and(|w| w.shore != rustgis_map::view::WATER_SHORE);
             // The water in a block's walls (#2317), which an older reader would save away.
             block_water |= t.block.as_ref().is_some_and(|b| b.water.is_some());
+            // Its bed read from a raster (#2434), which an older reader would save away.
+            bed |= t.block.as_ref().and_then(|b| b.water.as_ref()).is_some_and(|w| w.bed.is_some());
             // The layer a block's walls are coloured by (#2173), which an older reader would save away.
             walls_layer |= t.block.as_ref().is_some_and(|b| b.walls_layer.is_some());
         }
@@ -1082,6 +1093,7 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
         (water, "terrain-water"),
         (shore, "terrain-water-shore"),
         (block_water, "terrain-block-water"),
+        (bed, "terrain-block-water-bed"),
         (walls_layer, "terrain-block-walls-layer"),
         (relief, "shaded-relief-effects"),
         (light, "shaded-relief-light"),
@@ -1108,6 +1120,77 @@ fn map_capabilities<'a>(maps: impl IntoIterator<Item = &'a Map>) -> Vec<&'static
     .collect()
 }
 
+/// Whether saving `project` serializes any [`rustgis_data::raster::Crs`] requiring `crs-wkt`,
+/// inspected directly across all `Crs`-bearing fields without double-serializing the project.
+/// Every container struct is destructured exhaustively so adding a `Crs`-bearing field is a compile error.
+fn project_needs_wkt(project: &Project) -> bool {
+    let Project {
+        first_layer: _,
+        read_notices: _,
+        format: _,
+        name: _,
+        origin_id: _,
+        field_origin: _,
+        given: _,
+        maps,
+        active_map: _,
+        tables,
+        next_table_id: _,
+        gp_history: _,
+        layouts: _,
+        folders: _,
+        styles: _,
+        ramps: _,
+        tasks: _,
+        gp_env,
+        models: _,
+        workspaces,
+        link_views: _,
+        thumbnail: _,
+        jobs: _,
+        offline_areas,
+        reports: _,
+        presentations: _,
+        notebooks: _,
+        dl_models: _,
+        shared: _,
+        data_stores: _,
+        coordinate_system,
+        crs_from_first_layer: _,
+    } = project;
+    let super::GpEnvironment { extent: _, cell_size: _, projected } = gp_env;
+    coordinate_system.is_some_and(rustgis_data::raster::Crs::needs_wkt)
+        || projected.is_some_and(|p| {
+            let super::ProjectedCells { crs, cell_size: _ } = p;
+            crs.needs_wkt()
+        })
+        || workspaces.iter().any(|w| {
+            let crate::cmd::imagery::Workspace { name: _, kind: _, images: _, cell_size: _, crs, projected_cell_size: _, method: _ } = w;
+            crs.is_some_and(rustgis_data::raster::Crs::needs_wkt)
+        })
+        || tables.iter().any(|t| {
+            let super::Table { id: _, dataset, instance_id: _ } = t;
+            dataset.needs_wkt()
+        })
+        || maps.iter().any(Map::needs_wkt)
+        || offline_areas.iter().any(|a| {
+            let super::OfflineArea {
+                id: _,
+                name: _,
+                map: _,
+                extent: _,
+                created: _,
+                synced: _,
+                generation: _,
+                returned: _,
+                ids: _,
+                conflicts: _,
+                data,
+            } = a;
+            data.needs_wkt()
+        })
+}
+
 #[derive(Serialize)]
 struct Item<'a, T> {
     format: u32,
@@ -1120,7 +1203,7 @@ struct Item<'a, T> {
 /// A map file has its own header, independent of the project it came from.
 pub(crate) fn map_file_bytes(map: &Map) -> Result<Vec<u8>, String> {
     let mut requires = map_capabilities([map]);
-    if rustgis_data::raster::crs::saves_wkt(map) {
+    if map.needs_wkt() {
         requires.push("crs-wkt");
     }
     serde_json::to_vec(&Item { format: FORMAT, requires, value: map }).map_err(|e| e.to_string())
@@ -1165,7 +1248,7 @@ fn layout_capabilities(layouts: &[rustgis_map::layout::Layout]) -> Vec<&'static 
 /// A layer file keeps the same renderer capabilities as the layer saved inside a project.
 pub(crate) fn layer_file_bytes(layer: &Layer) -> Result<Vec<u8>, String> {
     let mut requires = layer_capabilities(layer);
-    if rustgis_data::raster::crs::saves_wkt(layer) {
+    if layer.needs_wkt() {
         requires.push("crs-wkt");
     }
     serde_json::to_vec(&Item { format: FORMAT, requires, value: layer }).map_err(|e| e.to_string())
@@ -1274,6 +1357,23 @@ mod tests {
             b.walls_layer = None;
         }
         assert_eq!(serde_json::to_value(&plain).unwrap()["requires"], json!(["terrain-block"]));
+    }
+
+    /// A block's water floor read from a bed raster (#2434) reads back by the raster's name, and
+    /// saving names it in `requires`; the same water without a bed doesn't.
+    #[test]
+    fn terrain_block_water_bed_fixture_requires_it() {
+        let fixture = Project::from_json(include_str!("../../../schema/fixtures/terrain_block_water_bed_v2.rgis")).unwrap();
+        let water = fixture.maps[0].view.terrain.as_ref().and_then(|t| t.block.as_ref()).and_then(|b| b.water.clone());
+        assert_eq!(water, Some(rustgis_map::view::BlockWater { depth: Some(8.0), field: None, bed: Some("batimetria".into()) }));
+        let saved = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(saved["requires"], json!(["terrain-block", "terrain-water", "terrain-block-water", "terrain-block-water-bed"]));
+        assert_eq!(saved["maps"][0]["view"]["terrain"]["block"]["water"], json!({"depth": 8.0, "bed": "batimetria"}));
+        let mut plain = fixture;
+        if let Some(w) = plain.maps[0].view.terrain.as_mut().and_then(|t| t.block.as_mut()).and_then(|b| b.water.as_mut()) {
+            w.bed = None;
+        }
+        assert_eq!(serde_json::to_value(&plain).unwrap()["requires"], json!(["terrain-block", "terrain-water", "terrain-block-water"]));
     }
 
     /// A saved image marker reads back as the image it was, and saving names it again.
@@ -1459,6 +1559,7 @@ mod tests {
             (&["layout-page-color"], "layout.page", json!({"color": "#0B1B2B"})),
             (&["layout-text-statistics"], "layout.addElement", json!({"kind": "text", "text": "{count:Cities}"})),
             (&["layout-publication-parts"], "layout.publication", json!({"grid": "none"})),
+            (&["layout-publication-legend"], "layout.publication", json!({"legend": "none"})),
             // An SVG image is a picture marker as well, in a node as in a saved command.
             (&["picture-markers", "svg-markers"], "layer.marker", json!({"image": svg})),
             (&[], "buffer", json!({"input": "Cities", "distance": 1})),
@@ -3149,5 +3250,123 @@ mod tests {
         let project = Project::from_json(&document.to_string()).unwrap();
         assert!(serde_json::to_value(project).unwrap().get("requires").is_none());
         assert!(rustgis_analysis::resolve_published("share.exportTable").is_none(), "models and web tools execute analysis tools only");
+    }
+
+    #[test]
+    fn crs_wkt_direct_walk_matches_saves_wkt_across_all_fields() {
+        use rustgis_data::raster::Crs;
+        use rustgis_data::{Dataset, GeometryType};
+
+        fn payload_saves_wkt(p: &Project) -> bool {
+            struct Payload<'a>(&'a Project);
+            impl Serialize for Payload<'_> {
+                fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                    Project::serialize(self.0, serializer)
+                }
+            }
+            rustgis_data::raster::crs::saves_wkt(&Payload(p))
+        }
+
+        fn populated_project() -> Project {
+            let mut p = Project::default();
+            let mut layer = Layer::new(1, Dataset::new("pts", GeometryType::Point, vec![]));
+            layer.source = Some(rustgis_map::source::SourceLayer::default());
+            let mut map = Map::new("Map");
+            map.layers.push(layer);
+            p.maps = vec![map.clone()];
+            p.tables.push(super::super::Table::new(1, Dataset::new("tbl", GeometryType::None, vec![])));
+            p.workspaces.push(crate::cmd::imagery::Workspace {
+                name: "ws".into(),
+                kind: "ortho".into(),
+                images: vec![],
+                cell_size: None,
+                crs: None,
+                projected_cell_size: None,
+                method: "first".into(),
+            });
+            p.offline_areas.push(super::super::OfflineArea {
+                id: String::new(),
+                name: "Field".into(),
+                map: "Map".into(),
+                extent: rustgis_geom::Extent::new(0.0, 0.0, 1.0, 1.0),
+                created: 0.0,
+                synced: 0.0,
+                generation: String::new(),
+                returned: Vec::new(),
+                ids: Default::default(),
+                conflicts: Default::default(),
+                data: map,
+            });
+            p
+        }
+
+        let grads = r#"GEOGCS["NTF (Paris)",DATUM["Nouvelle_Triangulation_Francaise_Paris",SPHEROID["Clarke 1880 (IGN)",6378249.2,293.466021293627,AUTHORITY["EPSG","7011"]],AUTHORITY["EPSG","6807"]],PRIMEM["Paris",2.33722917,AUTHORITY["EPSG","8903"]],UNIT["grad",0.0157079632679489,AUTHORITY["EPSG","9105"]]]"#;
+        let wkt_crs = rustgis_data::raster::wkt::crs_from_wkt(grads).unwrap();
+        let plain_custom = Crs::parse("+proj=robin +lon_0=0 +datum=WGS84 +units=m +no_defs").unwrap();
+        assert!(wkt_crs.needs_wkt());
+        assert!(!plain_custom.needs_wkt());
+
+        let base = populated_project();
+        assert!(!project_needs_wkt(&base));
+        assert_eq!(project_needs_wkt(&base), payload_saves_wkt(&base));
+
+        for (crs, expected) in [(wkt_crs, true), (plain_custom, false)] {
+            let cases: Vec<(&str, Box<dyn FnOnce(&mut Project)>)> = vec![
+                ("project.coordinate_system", Box::new(move |p| p.coordinate_system = Some(crs))),
+                (
+                    "project.gp_env.projected",
+                    Box::new(move |p| p.gp_env.projected = Some(super::super::ProjectedCells { crs, cell_size: None })),
+                ),
+                ("project.workspaces[0].crs", Box::new(move |p| p.workspaces[0].crs = Some(crs))),
+                ("project.tables[0].dataset.crs", Box::new(move |p| p.tables[0].dataset.crs = Some(crs))),
+                ("project.tables[0].dataset.held_in", Box::new(move |p| p.tables[0].dataset.held_in = crs)),
+                ("project.maps[0].layers[0].dataset.crs", Box::new(move |p| p.maps[0].layers[0].dataset.crs = Some(crs))),
+                ("project.maps[0].layers[0].dataset.held_in", Box::new(move |p| p.maps[0].layers[0].dataset.held_in = crs)),
+                (
+                    "project.maps[0].layers[0].source.shapefile_crs",
+                    Box::new(move |p| p.maps[0].layers[0].source.as_mut().unwrap().shapefile_crs = Some(crs)),
+                ),
+                (
+                    "project.offline_areas[0].data.layers[0].dataset.crs",
+                    Box::new(move |p| p.offline_areas[0].data.layers[0].dataset.crs = Some(crs)),
+                ),
+                (
+                    "project.offline_areas[0].data.layers[0].dataset.held_in",
+                    Box::new(move |p| p.offline_areas[0].data.layers[0].dataset.held_in = crs),
+                ),
+                (
+                    "project.offline_areas[0].data.layers[0].source.shapefile_crs",
+                    Box::new(move |p| p.offline_areas[0].data.layers[0].source.as_mut().unwrap().shapefile_crs = Some(crs)),
+                ),
+            ];
+            for (name, apply) in cases {
+                let mut p = populated_project();
+                apply(&mut p);
+                assert_eq!(project_needs_wkt(&p), expected, "{name}");
+                assert_eq!(project_needs_wkt(&p), payload_saves_wkt(&p), "{name}");
+                assert_eq!(p.required_capabilities().contains(&"crs-wkt"), expected, "{name}");
+            }
+
+            // Windowed layers omit held_in when serialized, so held_in alone must not trigger crs-wkt.
+            let mut p = populated_project();
+            p.maps[0].layers[0].dataset.windowed = true;
+            p.maps[0].layers[0].dataset.held_in = crs;
+            assert!(!project_needs_wkt(&p));
+            assert_eq!(project_needs_wkt(&p), payload_saves_wkt(&p));
+
+            // Standalone Map::needs_wkt / Layer::needs_wkt agree with saves_wkt and bytes helpers.
+            let mut p = populated_project();
+            p.maps[0].layers[0].dataset.crs = Some(crs);
+            let map = &p.maps[0];
+            let layer = &map.layers[0];
+            assert_eq!(map.needs_wkt(), expected);
+            assert_eq!(map.needs_wkt(), rustgis_data::raster::crs::saves_wkt(map));
+            assert_eq!(layer.needs_wkt(), expected);
+            assert_eq!(layer.needs_wkt(), rustgis_data::raster::crs::saves_wkt(layer));
+            let map_doc = json_bytes(&map_file_bytes(map).unwrap());
+            let layer_doc = json_bytes(&layer_file_bytes(layer).unwrap());
+            assert_eq!(map_doc.get("requires").and_then(|v| v.as_array()).is_some_and(|a| a.iter().any(|x| x == "crs-wkt")), expected);
+            assert_eq!(layer_doc.get("requires").and_then(|v| v.as_array()).is_some_and(|a| a.iter().any(|x| x == "crs-wkt")), expected);
+        }
     }
 }

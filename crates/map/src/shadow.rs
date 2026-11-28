@@ -3,9 +3,10 @@
 //! how much of the sky it sees over the terrain around it ([`sky`]).
 //!
 //! The sun is a disc some degrees either side of its altitude ([`SOFT_EDGE`] unless the layer sets
-//! its shadow softness), so a shadow has a soft edge. Each cell traces the terrain toward the sun's azimuth one column or row at a time,
-//! reading heights between cells (bilinear: reading the nearest cell instead over-shadows diagonal
-//! suns, franciscoparrao/surtgis#153), and keeps the steepest angle up to the terrain it passes.
+//! its shadow softness), so a shadow has a soft edge. Each cell traces the terrain toward the sun's
+//! azimuth one column or row at a time, reading heights between cells (bilinear: reading the
+//! nearest cell instead over-shadows diagonal suns, franciscoparrao/surtgis#153), and keeps the
+//! steepest angle up to the terrain it passes.
 //! The share of the disc above that angle is the light the cell keeps. The trace stops once
 //! nothing farther can change it: the terrain left can't rise above the angle kept (or the disc's
 //! lower edge), or the disc is already hidden. The sky is traced likewise, in [`SKY_DIRECTIONS`]
@@ -23,8 +24,11 @@ use crate::raster::RasterMask;
 /// replaces it (see [`soft_edge`]).
 pub const SOFT_EDGE: f64 = 5.0;
 
-/// The narrowest and the widest half disc a layer's shadow softness sets, in degrees (#3144).
+/// The narrowest half disc a layer's shadow softness sets, in degrees (#3144): a much smaller disc
+/// would step at the cell size.
 pub const SOFT_EDGE_MIN: f64 = 0.5;
+/// The widest half disc a layer's shadow softness sets, in degrees (#3144): a much larger one would
+/// blur the shadows away.
 pub const SOFT_EDGE_MAX: f64 = 15.0;
 
 /// The half disc a layer's shadow softness `setting` gives, in degrees: [`SOFT_EDGE`] with none
@@ -55,11 +59,12 @@ pub enum Unlit {
 /// The light left by cast shadows on each cell of `band` (`0` in shadow to `255` lit), row by row
 /// as the raster's pixels are, for a sun at `azimuth` (degrees clockwise from north) and `altitude`
 /// (degrees above the horizon), its disc `soft_edge` degrees either side of it (see [`soft_edge`]),
-/// heights scaled by `z_factor`. Cells that are no data or masked are lit and cast no shadow. Rows are split over up to `threads` threads, each the same as on one.
-/// Looks at `stop` between rows, and at the run's Cancel (see [`rustgis_data::progress`]) on a
-/// thread that has one (the browser, which works it out where it is asked). On the desktop the
-/// worker has none: a cancelled export that waited for it alone sets `stop`. A sun under about 5°
-/// traces far over gentle ground: the cost grows with the raster's width as well as its cells.
+/// heights scaled by `z_factor`. Cells that are no data or masked are lit and cast no shadow. Rows
+/// are split over up to `threads` threads, each the same as on one. Looks at `stop` between rows,
+/// and at the run's Cancel (see [`rustgis_data::progress`]) on a thread that has one (the browser,
+/// which works it out where it is asked). On the desktop the worker has none: a cancelled export
+/// that waited for it alone sets `stop`. A sun under about 5° traces far over gentle ground: the
+/// cost grows with the raster's width as well as its cells.
 pub fn light(
     r: &Raster,
     band: usize,

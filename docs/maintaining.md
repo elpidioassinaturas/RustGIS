@@ -113,6 +113,7 @@ diagram cut to a circle or to polygons), `terrain-block-polygon` (one cut to pol
 `terrain-water`,
 `terrain-water-shore` (a terrain water's shore band other than the default),
 `terrain-block-water` (water in a block diagram's walls),
+`terrain-block-water-bed` (that water's floor read from a bed raster),
 `terrain-block-walls-layer` (the layer a block diagram's walls are coloured by),
 `shaded-relief-effects` (cast shadows, sky visibility, fill light or rock colour),
 `shaded-relief-light` (a Shaded Relief's ambient or balanced light),
@@ -363,6 +364,11 @@ A saved `layout.publication` that leaves out or sets up a part of the sheet (`gr
 requires `layout-publication-parts`, so an older reader refuses it instead of making the default
 sheet or failing on the object. `null`, a `grid` or `scaleBar` of `{}`, and the north arrow given
 as the text `"auto"`, `"always"` or `"none"` need nothing.
+
+A saved `layout.publication` that leaves out or sets up its legend (`legend` as `"none"` or an
+object that gives something, #3095) requires `layout-publication-legend`, so an older reader
+refuses it instead of making the default legend. `null`, a `legend` of `{}`, a blank `title` and
+an empty `exclude` need nothing.
 
 ## New dependencies
 
