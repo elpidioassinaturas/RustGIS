@@ -361,7 +361,7 @@ fn terrain_block(
             let top = match w.get("top") {
                 None => kept_top,
                 Some(Value::Null | Value::Bool(false)) => None,
-                Some(Value::Object(t)) => Some(walls_top(s, t)?),
+                Some(Value::Object(t)) => Some(walls_top_band(s, t)?),
                 Some(_) => return Err(WALLS_TOP.into()),
             };
             (color(w.get("color"), kept_color)?, layer, top)
@@ -463,7 +463,7 @@ const WALLS_TOP: &str =
 /// The band along the top of a block's walls (#2607) from `"top": {"layer", "thickness"}`: a
 /// polygon layer as the walls' ([`polygon_layer`]) and its thickness, metres (checked by
 /// [`rustgis_map::view::TerrainBlock::check`]) or `{"field"}`, a numeric field of that layer.
-fn walls_top(s: &Session, t: &serde_json::Map<String, Value>) -> Result<rustgis_map::view::WallsTop, String> {
+fn walls_top_band(s: &Session, t: &serde_json::Map<String, Value>) -> Result<rustgis_map::view::WallsTop, String> {
     use rustgis_map::view::BandThickness;
     if let Some(k) = t.keys().find(|k| !matches!(k.as_str(), "layer" | "thickness")) {
         return Err(format!("block's walls' top has no '{k}' (layer, thickness)"));
@@ -479,7 +479,7 @@ fn walls_top(s: &Session, t: &serde_json::Map<String, Value>) -> Result<rustgis_
             let f = f.get("field").and_then(Value::as_str).ok_or(WALLS_TOP)?;
             let l = s.map().layer_by_name(&layer).ok_or_else(|| format!("no layer '{layer}'"))?;
             let i = l.dataset.field_index(f).ok_or_else(|| format!("'{layer}' has no field '{f}' (the band's thickness)"))?;
-            let field = &l.dataset.fields[i];
+            let field = l.dataset.fields.get(i).ok_or_else(|| format!("'{layer}' has no field '{f}' (the band's thickness)"))?;
             if !field.ty.is_numeric() {
                 return Err(format!("block's walls' top thickness field '{}' isn't numeric (metres)", field.name));
             }

@@ -1861,7 +1861,32 @@ pub(crate) fn draw_walls(
                     cam.project_raised(gu, gv, up, w, h).map(|(x, y)| (x * k, y * k)).filter(|p| p.0.is_finite() && p.1.is_finite())
                 };
                 let (Some(ba), Some(bz)) = (under(t0), under(t1)) else { continue };
-                let (ta2, tz2) = (lerp(*ta, *tz, t0), lerp(*ta, *tz, t1));
+                // The ground's edge over `t`, on the screen line from `ta` to `tz` the wall is drawn
+                // to: in a turned view the stretch's ends lie at different depths, so the ground's
+                // point `t` along the stretch is not `t` along that line, and the band's contacts
+                // would lean away from their feet (round 2).
+                let raised = |m: Coord| {
+                    let (u, v) = cam.ground_px(m);
+                    (u, v, ground.up_px(m, &cam))
+                };
+                let (ra, rz) = (raised(ends[0]), raised(ends[1]));
+                let seen = |t: f64| {
+                    let (u, v) = lerp((ra.0, ra.1), (rz.0, rz.1), t);
+                    cam.project_raised(u, v, ra.2 + (rz.2 - ra.2) * t, w, h)
+                };
+                let (sa, sz) = (seen(0.0), seen(1.0));
+                let top_at = |t: f64| {
+                    let along = match (sa, sz, seen(t)) {
+                        (Some(a), Some(z), Some(q)) => {
+                            let (dx, dy) = (z.0 - a.0, z.1 - a.1);
+                            let len = dx * dx + dy * dy;
+                            if len > 1e-18 { ((q.0 - a.0) * dx + (q.1 - a.1) * dy) / len } else { t }
+                        }
+                        _ => t,
+                    };
+                    lerp(*ta, *tz, along.clamp(0.0, 1.0))
+                };
+                let (ta2, tz2) = (top_at(t0), top_at(t1));
                 for (i, p) in [grow(ta2, tz2), grow(tz2, ta2), grow(bz, ba), grow(ba, bz)].iter().enumerate() {
                     if i == 0 { fill.move_to(p.0, p.1) } else { fill.line_to(p.0, p.1) }
                 }
@@ -3242,7 +3267,20 @@ mod tests {
     /// The south wall of `b` as stretches 100 m long, seen as [`a_wall_in_pieces_keeps_its_water_to_each_piece`]
     /// sees it, drawn with `water`, and where on screen `metres` (exaggerated) at `x` lands.
     fn south_wall(m: &Map, b: &Block, g: &Ground, res: f64, water: &WaterRuns) -> (Pixmap, impl Fn(f64, f64) -> (u32, u32)) {
-        let camera = rustgis_map::Camera { center: Coord::new(0.0, 0.0), res, bearing: 0.0, pitch: 60.0 };
+        south_wall_seen(m, b, g, res, water, 0.0, 20)
+    }
+
+    /// [`south_wall`] seen from `bearing`, its wall in `count` stretches of equal length.
+    fn south_wall_seen(
+        m: &Map,
+        b: &Block,
+        g: &Ground,
+        res: f64,
+        water: &WaterRuns,
+        bearing: f64,
+        count: u16,
+    ) -> (Pixmap, impl Fn(f64, f64) -> (u32, u32)) {
+        let camera = rustgis_map::Camera { center: Coord::new(0.0, 0.0), res, bearing, pitch: 60.0 };
         let view = View { width: 600.0, height: 500.0, pixels_per_point: 1.0, camera, sky: false };
         let (w, h) = (view.width, view.height);
         let raised = move |x: f64, up: f64| {
@@ -3250,9 +3288,10 @@ mod tests {
             camera.project_raised(u, v, up, w, h).expect("in view")
         };
         let top = |x: f64| raised(x, g.up_px(Coord::new(x, -1000.0), &camera));
-        let edges: Vec<Edge> = (0..20)
+        let step = 2000.0 / f64::from(count);
+        let edges: Vec<Edge> = (0..count)
             .map(|i| {
-                let (x0, x1) = (-1000.0 + 100.0 * f64::from(i), -900.0 + 100.0 * f64::from(i));
+                let (x0, x1) = (-1000.0 + step * f64::from(i), -1000.0 + step * f64::from(i + 1));
                 Edge {
                     side: u16::from(SOUTH),
                     ends: [Coord::new(x0, -1000.0), Coord::new(x1, -1000.0)],
@@ -3697,6 +3736,30 @@ mod tests {
         let thin = [([-3000.0, -1500.0, 3000.0, 0.0], "argissolo", red, Some(10.0))];
         let (m, ..) = block_under_soils_by(&thin, by_field());
         assert!(said(&m).is_empty(), "{:?}", said(&m));
+    }
+
+    #[test]
+    fn a_band_contact_stands_upright_in_a_turned_view() {
+        // #2607, round 2: seen from bearing 40°, the south wall recedes, so its ends lie at
+        // different depths. In one stretch, the contact at x 0 (red soil west, green east, 30 m,
+        // 60 doubled) runs straight down from the ground's edge there to the band's foot there:
+        // red just west of x 0 and green just east, near the ground as near the foot.
+        let (red, green) = (Rgba::rgb(220, 30, 30), Rgba::rgb(30, 170, 60));
+        let soils = [([-3000.0, -1500.0, 0.0, 0.0], "argissolo", red), ([0.0, -1500.0, 3000.0, 0.0], "latossolo", green)];
+        let (m, b, g, res) = block_under_soils(&soils, 30.0);
+        let dry: WaterRuns = (0..b.sides()).map(|_| Vec::new()).collect();
+        let (pm, at) = south_wall_seen(&m, &b, &g, res, &dry, 40.0, 1);
+        let hue = |x: f64, metres: f64| {
+            let (px, py) = at(x, metres);
+            let c = pm.pixel(px, py).expect("in the picture").demultiply();
+            (c.red(), c.green(), c.blue())
+        };
+        let is_red = |c: (u8, u8, u8)| c.0 > 2 * c.1 && c.0 > 2 * c.2;
+        let is_green = |c: (u8, u8, u8)| c.1 > 2 * c.0 && c.1 > c.2 + 40;
+        for metres in [992.0, 948.0] {
+            let (west, east) = (hue(-60.0, metres), hue(60.0, metres));
+            assert!(is_red(west) && is_green(east), "{metres}: {west:?} {east:?}");
+        }
     }
 
     /// The band's thickness reads and saves as a number, or as `{"field": name}` (#2607).
