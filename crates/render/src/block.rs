@@ -787,13 +787,11 @@ pub(crate) type Bands = Vec<Vec<BandRun>>;
 /// (`TerrainBlock::walls_top`, taken as [`crate::terrain::walls_layer`] takes the walls' layer):
 /// under each polygon of it the box's edge meets (the topmost, among the rows its definition
 /// query keeps), the solid fill [`unit_paint`] gives it, the top's thickness deep (metres all
-/// along, or the polygon's value of the top's numeric field, up to [`BLOCK_MAX_DEPTH`]); off its
-/// polygons, no band, nor under one with no value over 0 in the field, said once with how many
-/// (and no band at all, said, when the layer has no such numeric field). Its hatches, markers,
-/// gradients and shapebursts are left off, said once with how many polygons. The pieces are cut,
-/// and kept, as the walls' are ([`layer_cut`]).
-///
-/// [`BLOCK_MAX_DEPTH`]: rustgis_map::view::BLOCK_MAX_DEPTH
+/// along, or the polygon's value of the top's numeric field, as given: [`draw_walls`] stops it at
+/// the base, said); off its polygons, no band, nor under one with no value over 0 in the field,
+/// said once with how many (and no band at all, said, when the layer has no such numeric field).
+/// Its hatches, markers, gradients and shapebursts are left off, said once with how many polygons.
+/// The pieces are cut, and kept, as the walls' are ([`layer_cut`]).
 pub(crate) fn band_runs(map: &Map, b: &Block, ground: &Ground, env: &rustgis_data::query::Env) -> Bands {
     use rustgis_map::view::BandThickness;
     let none = || vec![Vec::new(); b.sides()];
@@ -827,7 +825,8 @@ pub(crate) fn band_runs(map: &Map, b: &Block, ground: &Ground, env: &rustgis_dat
                 thin.insert(r);
                 continue;
             };
-            let thickness = d.min(rustgis_map::view::BLOCK_MAX_DEPTH) * x;
+            // As given: one deeper than the ground stands over the base stops there, said.
+            let thickness = d * x;
             let (sym, _, fills) = styler.style_and_fills(r);
             let (color, patterns) = unit_paint(sym.fill, fills, b.walls);
             if !patterns.is_empty() || left_off(sym.fill, fills) {
@@ -1822,7 +1821,8 @@ pub(crate) fn draw_walls(
         // a quad a stretch as the wall's (a hair longer each way), outlined along the ground and
         // its foot, and across it at its ends: a contact with another class or the bare rock. At
         // the ends of a round or polygon block's side, only where its neighbour's band isn't there
-        // in its colour and thickness; a box's corners already run straight down.
+        // in its colour and thickness; at a box's, always: the band's fill would hide the corner's
+        // outline, drawn before it.
         let ((lo_end, hi_end), (prev, next)) = (side_ends(s), b.neighbours(s));
         let (before_band, after_band) = (bands.get(prev).and_then(|r| r.last()), bands.get(next).and_then(|r| r.first()));
         let goes_on = |o: Option<&BandRun>, run: &BandRun, at_end: bool| {
@@ -1835,8 +1835,8 @@ pub(crate) fn draw_walls(
         let mut lines = PathBuilder::new();
         for run in bands.get(s).into_iter().flatten() {
             let ends_across = [
-                (run.lo, (run.lo - lo_end).abs() >= SEAM || (closed && !goes_on(before_band, run, false))),
-                (run.hi, (run.hi - hi_end).abs() >= SEAM || (closed && !goes_on(after_band, run, true))),
+                (run.lo, (run.lo - lo_end).abs() >= SEAM || !closed || !goes_on(before_band, run, false)),
+                (run.hi, (run.hi - hi_end).abs() >= SEAM || !closed || !goes_on(after_band, run, true)),
             ];
             let mut fill = PathBuilder::new();
             for (ends, _, [ta, tz]) in &quads {
@@ -3643,6 +3643,60 @@ mod tests {
             assert!(bands.iter().all(Vec::is_empty), "{field}: {bands:?}");
             assert!(said.iter().any(|t| t.contains(&format!("field '{field}', which isn't a numeric field"))), "{field}: {said:?}");
         }
+    }
+
+    #[test]
+    fn a_band_reaching_a_box_corner_keeps_the_corners_outline() {
+        // #2607, round 1: the band runs to the south wall's west end, the box's corner: the
+        // outline down that corner shows across the band as it does below it, not under its fill.
+        let red = Rgba::rgb(220, 30, 30);
+        let (m, b, g, res) = block_under_soils(&[([-3000.0, -1500.0, 3000.0, 0.0], "argissolo", red)], 30.0);
+        let dry: WaterRuns = (0..b.sides()).map(|_| Vec::new()).collect();
+        let (pm, at) = south_wall(&m, &b, &g, res, &dry);
+        let line = b.walls.shade(0.45);
+        // How near the outline's colour the pixels round the corner come, at `metres` up.
+        let near_line = |metres: f64| {
+            let (px, py) = at(-1000.0, metres);
+            let apart = |c: tiny_skia::ColorU8| {
+                c.red().abs_diff(line.r()) as u16 + c.green().abs_diff(line.g()) as u16 + c.blue().abs_diff(line.b()) as u16
+            };
+            (px.saturating_sub(1)..=px + 1).filter_map(|x| pm.pixel(x, py)).filter(|c| c.alpha() > 0).map(|c| apart(c.demultiply())).min()
+        };
+        // Halfway down the band, the corner's line (anti-aliased at the wall's edge): far nearer
+        // the line's colour than the band's fill 100 m in from the corner is.
+        let fill = {
+            let (px, py) = at(-900.0, 970.0);
+            let c = pm.pixel(px, py).expect("in the picture").demultiply();
+            c.red().abs_diff(line.r()) as u16 + c.green().abs_diff(line.g()) as u16 + c.blue().abs_diff(line.b()) as u16
+        };
+        assert!(fill > 120, "{fill}");
+        assert!(near_line(970.0).is_some_and(|d| d < 60), "{:?}", near_line(970.0));
+    }
+
+    #[test]
+    fn a_field_thickness_past_the_blocks_depth_is_kept_and_stops_at_the_base() {
+        // #2607, round 1: a polygon's 25 000 m (more than any block is deep) is its thickness as
+        // given, not cut to 20 000 unsaid; the band stops at the base, said once. A thickness
+        // within the wall says nothing of the base.
+        use rustgis_map::view::BandThickness;
+        let red = Rgba::rgb(220, 30, 30);
+        let by_field = || BandThickness::Field { field: "espessura".into() };
+        let deep = [([-3000.0, -1500.0, 3000.0, 0.0], "argissolo", red, Some(25_000.0))];
+        let (m, b, g, res) = block_under_soils_by(&deep, by_field());
+        let bands = band_runs(&m, &b, &g, &Default::default());
+        assert!((bands[0][0].thickness - 50_000.0).abs() < 1e-6, "{:?}", bands[0]);
+        let dry: WaterRuns = (0..b.sides()).map(|_| Vec::new()).collect();
+        let said = |m: &Map| {
+            let before = crate::approximations::keep();
+            let _ = south_wall(m, &b, &g, res, &dry);
+            let said = crate::approximations::take();
+            crate::approximations::restore(before);
+            said
+        };
+        assert_eq!(said(&m).iter().filter(|t| t.contains("stops at the base")).count(), 1, "{:?}", said(&m));
+        let thin = [([-3000.0, -1500.0, 3000.0, 0.0], "argissolo", red, Some(10.0))];
+        let (m, ..) = block_under_soils_by(&thin, by_field());
+        assert!(said(&m).is_empty(), "{:?}", said(&m));
     }
 
     /// The band's thickness reads and saves as a number, or as `{"field": name}` (#2607).
