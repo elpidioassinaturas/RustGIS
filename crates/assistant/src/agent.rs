@@ -755,6 +755,8 @@ impl Agent {
         self.guard(|a| a.receive_unguarded(generation, resp, s))
     }
 
+    /// Discards stale generations, applies provider recovery and records privacy-policy refusals.
+    /// Content notices reach the transcript for both normal replies and compaction summaries.
     fn receive_unguarded(&mut self, generation: u64, resp: Result<HttpResponse, crate::Error>, s: &mut Session) -> Step {
         if generation != self.generation || !self.waiting() {
             return Step::Done;
@@ -766,6 +768,16 @@ impl Agent {
         }
         self.preview = None;
         let parsed = resp.as_ref().map_err(Clone::clone).and_then(|r| provider::parse_reply(self.config.api(), r));
+        if self.config.provider == "openrouter"
+            && matches!(&parsed, Err(e) if e.status == Some(404) && {
+                let detail = e.detail.to_ascii_lowercase();
+                detail.contains("data policy") || detail.contains("data collection") || detail.contains("privacy")
+            })
+        {
+            self.transcript.push(Entry::Note(Note::new(
+                "OpenRouter found no endpoint matching your data policy. Check Private routing in the Assistant settings or your OpenRouter privacy settings.",
+            )));
+        }
         // A model that doesn't read images refuses them every time (some servers with a 500):
         // asked again at once without them, not retried as an outage.
         let images_refused = matches!(&parsed, Err(e) if self.sent_images_to.as_ref().is_some_and(|to| !self.no_images.contains(to))
@@ -791,6 +803,9 @@ impl Agent {
             return Step::Retry(after);
         }
         self.retries = 0;
+        if let Ok(reply) = &parsed {
+            self.transcript.extend(reply.notes.iter().cloned().map(Entry::Note));
+        }
         if let State::Compacting { upto, resume } = self.state {
             return self.summarised(upto, resume, parsed);
         }
