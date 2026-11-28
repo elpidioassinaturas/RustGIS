@@ -1289,7 +1289,8 @@
           "tile-resampling",
           "layout-page-color",
           "layout-text-statistics",
-          "layout-publication-parts"
+          "layout-publication-parts",
+          "shaded-relief-shadow-softness"
         ],
         "type": "string"
       },
@@ -1407,7 +1408,8 @@
     "tile-resampling",
     "layout-page-color",
     "layout-text-statistics",
-    "layout-publication-parts"
+    "layout-publication-parts",
+    "shaded-relief-shadow-softness"
   ],
   "x-rustgis-reads-format": 2,
   "x-rustgis-writes-format": 2
